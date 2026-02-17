@@ -1,0 +1,16 @@
+[package]
+name = "rkf-render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Compute-shader rendering pipeline for the RKIField SDF engine"
+
+[dependencies]
+rkf-core = { workspace = true }
+wgpu = { workspace = true }
+glam = { workspace = true }
+bytemuck = { workspace = true }
+encase = { workspace = true }
+log = { workspace = true }
+thiserror = { workspace = true }
+image = { workspace = true }

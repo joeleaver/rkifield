@@ -1,0 +1,14 @@
+[package]
+name = "rkf-import"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Mesh-to-SDF conversion library for the RKIField engine"
+
+[dependencies]
+rkf-core = { workspace = true }
+glam = { workspace = true }
+bytemuck = { workspace = true }
+log = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }

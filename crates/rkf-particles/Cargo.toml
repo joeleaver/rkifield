@@ -1,0 +1,13 @@
+[package]
+name = "rkf-particles"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "GPU particle system for the RKIField SDF engine"
+
+[dependencies]
+rkf-core = { workspace = true }
+glam = { workspace = true }
+bytemuck = { workspace = true }
+log = { workspace = true }
+thiserror = { workspace = true }

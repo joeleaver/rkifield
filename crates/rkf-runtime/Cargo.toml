@@ -1,0 +1,24 @@
+[package]
+name = "rkf-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Engine runtime: frame scheduling, ECS, streaming, and asset management"
+
+[dependencies]
+rkf-core = { workspace = true }
+rkf-render = { workspace = true }
+rkf-animation = { workspace = true }
+rkf-edit = { workspace = true }
+rkf-physics = { workspace = true }
+rkf-particles = { workspace = true }
+wgpu = { workspace = true }
+winit = { workspace = true }
+glam = { workspace = true }
+hecs = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+ron = { workspace = true }
+serde = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }

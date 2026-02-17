@@ -1,0 +1,14 @@
+[package]
+name = "rkf-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Core data structures for the RKIField SDF engine: WorldPosition, brick pool, spatial index, voxel types"
+
+[dependencies]
+glam = { workspace = true }
+bytemuck = { workspace = true }
+half = { workspace = true }
+serde = { workspace = true }
+log = { workspace = true }
+thiserror = { workspace = true }
