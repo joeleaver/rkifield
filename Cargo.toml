@@ -9,6 +9,7 @@ members = [
     "crates/rkf-physics",
     "crates/rkf-particles",
     "crates/rkf-runtime",
+    "crates/rkf-mcp",
     "crates/rkf-editor",
     "crates/rkf-convert",
     "crates/rkf-game",
@@ -40,6 +41,7 @@ half = { version = "2", features = ["bytemuck"] }
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 image = "0.25"
+clap = { version = "4", features = ["derive"] }
 
 # Internal crate cross-references
 rkf-core = { path = "crates/rkf-core" }
@@ -50,3 +52,4 @@ rkf-import = { path = "crates/rkf-import" }
 rkf-physics = { path = "crates/rkf-physics" }
 rkf-particles = { path = "crates/rkf-particles" }
 rkf-runtime = { path = "crates/rkf-runtime" }
+rkf-mcp = { path = "crates/rkf-mcp" }

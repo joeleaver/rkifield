@@ -1,0 +1,21 @@
+[package]
+name = "rkf-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "MCP server for agent-driven interaction with the RKIField SDF engine"
+
+[[bin]]
+name = "rkf-mcp"
+path = "src/main.rs"
+
+[dependencies]
+rkf-core = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+clap = { version = "4", features = ["derive"] }
