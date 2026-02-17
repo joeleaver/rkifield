@@ -16,6 +16,8 @@ pub mod aabb;
 pub mod automation;
 /// 8×8×8 voxel brick — the fundamental unit of SDF storage.
 pub mod brick;
+/// CPU-side brick pool with free-list allocation.
+pub mod brick_pool;
 pub mod cell_state;
 /// Companion brick types: bone, volumetric, and color data pools.
 pub mod companion;
@@ -28,6 +30,7 @@ pub mod world_position;
 
 pub use aabb::{Aabb, WorldAabb};
 pub use brick::Brick;
+pub use brick_pool::{BonePool, BrickPool, ColorPool, Pool, VolumetricPool};
 pub use cell_state::CellState;
 pub use companion::{BoneBrick, BoneVoxel, ColorBrick, ColorVoxel, VolumetricBrick, VolumetricVoxel};
 pub use material::Material;
