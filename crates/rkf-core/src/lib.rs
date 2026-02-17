@@ -15,5 +15,7 @@
 pub mod automation;
 pub mod cell_state;
 pub mod constants;
+pub mod world_position;
 
 pub use cell_state::CellState;
+pub use world_position::WorldPosition;
