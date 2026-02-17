@@ -1,0 +1,21 @@
+[package]
+name = "rkf-game"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Example game / playground for the RKIField SDF engine"
+
+[[bin]]
+name = "rkf-game"
+path = "src/main.rs"
+
+[dependencies]
+rkf-core = { workspace = true }
+rkf-runtime = { workspace = true }
+rkf-render = { workspace = true }
+wgpu = { workspace = true }
+winit = { workspace = true }
+glam = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+anyhow = { workspace = true }

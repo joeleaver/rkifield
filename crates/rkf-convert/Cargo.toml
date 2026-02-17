@@ -1,0 +1,18 @@
+[package]
+name = "rkf-convert"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "CLI tool for converting mesh assets to .rkf format"
+
+[[bin]]
+name = "rkf-convert"
+path = "src/main.rs"
+
+[dependencies]
+rkf-core = { workspace = true }
+rkf-import = { workspace = true }
+glam = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+anyhow = { workspace = true }
