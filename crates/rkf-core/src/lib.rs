@@ -13,3 +13,7 @@
 #![warn(missing_docs)]
 
 pub mod automation;
+pub mod cell_state;
+pub mod constants;
+
+pub use cell_state::CellState;
