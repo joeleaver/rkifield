@@ -12,6 +12,7 @@
 
 #![warn(missing_docs)]
 
+pub mod aabb;
 pub mod automation;
 pub mod cell_state;
 /// Companion brick types: bone, volumetric, and color data pools.
@@ -23,6 +24,7 @@ pub mod material;
 pub mod voxel;
 pub mod world_position;
 
+pub use aabb::{Aabb, WorldAabb};
 pub use cell_state::CellState;
 pub use companion::{BoneBrick, BoneVoxel, ColorBrick, ColorVoxel, VolumetricBrick, VolumetricVoxel};
 pub use material::Material;
