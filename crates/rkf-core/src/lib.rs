@@ -24,6 +24,8 @@ pub mod companion;
 pub mod constants;
 /// Material properties for the global GPU material table.
 pub mod material;
+/// Single-LOD sparse grid for voxel occupancy and brick indexing.
+pub mod sparse_grid;
 /// Voxel sample type and flag constants for GPU-packed voxel data.
 pub mod voxel;
 pub mod world_position;
@@ -32,6 +34,7 @@ pub use aabb::{Aabb, WorldAabb};
 pub use brick::Brick;
 pub use brick_pool::{BonePool, BrickPool, ColorPool, Pool, VolumetricPool};
 pub use cell_state::CellState;
+pub use sparse_grid::{SparseGrid, EMPTY_SLOT};
 pub use companion::{BoneBrick, BoneVoxel, ColorBrick, ColorVoxel, VolumetricBrick, VolumetricVoxel};
 pub use material::Material;
 pub use voxel::VoxelSample;
