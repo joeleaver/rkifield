@@ -328,6 +328,129 @@ pub fn handle_request(
     }
 }
 
+/// Type alias for the swappable API slot used by the stdio server.
+///
+/// The inner `Arc<dyn AutomationApi>` allows callers to clone the API handle
+/// and release the `RwLock` before dispatching tool calls. This prevents
+/// deadlocks when meta tools (connect, disconnect) need to acquire a write
+/// lock on the same slot from within their handler.
+pub type ApiSlot = std::sync::Arc<std::sync::RwLock<std::sync::Arc<dyn rkf_core::automation::AutomationApi>>>;
+
+/// Handle an incoming JSON-RPC request using a lock-guarded API slot.
+///
+/// Unlike [`handle_request`], this variant accepts an [`ApiSlot`] and clones
+/// the inner `Arc<dyn AutomationApi>` so the lock is released before tool
+/// dispatch. This prevents deadlocks when meta tools need write access.
+///
+/// Use this in the stdio server main loop instead of [`handle_request`].
+pub fn handle_request_locked(
+    request: &JsonRpcRequest,
+    registry: &crate::registry::ToolRegistry,
+    mode: crate::registry::ToolMode,
+    api_slot: &ApiSlot,
+) -> Option<JsonRpcResponse> {
+    match request.method.as_str() {
+        "initialize" => {
+            let result = InitializeResult {
+                protocol_version: "2024-11-05".to_string(),
+                capabilities: ServerCapabilities {
+                    tools: ToolsCapability {
+                        list_changed: false,
+                    },
+                },
+                server_info: ServerInfo {
+                    name: "rkf-mcp".to_string(),
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                },
+            };
+            Some(JsonRpcResponse::success(
+                request.id.clone(),
+                serde_json::to_value(result).unwrap(),
+            ))
+        }
+
+        "notifications/initialized" => None,
+
+        "tools/list" => {
+            let tool_defs: Vec<McpToolDef> = registry
+                .list_tools(mode)
+                .into_iter()
+                .map(tool_def_to_mcp)
+                .collect();
+
+            let result = ToolsListResult { tools: tool_defs };
+            Some(JsonRpcResponse::success(
+                request.id.clone(),
+                serde_json::to_value(result).unwrap(),
+            ))
+        }
+
+        "tools/call" => {
+            let params = match &request.params {
+                Some(p) => p.clone(),
+                None => {
+                    return Some(JsonRpcResponse::error(
+                        request.id.clone(),
+                        INVALID_PARAMS,
+                        "missing params for tools/call",
+                    ));
+                }
+            };
+
+            let call_params: ToolsCallParams = match serde_json::from_value(params) {
+                Ok(p) => p,
+                Err(e) => {
+                    return Some(JsonRpcResponse::error(
+                        request.id.clone(),
+                        INVALID_PARAMS,
+                        format!("invalid tools/call params: {e}"),
+                    ));
+                }
+            };
+
+            let tool_args = call_params.arguments.unwrap_or(Value::Null);
+
+            // Clone the inner Arc so we can drop the read lock before dispatch.
+            // This allows meta tool handlers to acquire a write lock on api_slot
+            // without deadlocking.
+            let api: std::sync::Arc<dyn rkf_core::automation::AutomationApi> =
+                api_slot.read().unwrap().clone();
+
+            match registry.call(&call_params.name, mode, &*api, tool_args) {
+                Ok(value) => {
+                    let text = serde_json::to_string_pretty(&value).unwrap_or_default();
+                    let result = ToolsCallResult {
+                        content: vec![ContentBlock::Text { text }],
+                        is_error: None,
+                    };
+                    Some(JsonRpcResponse::success(
+                        request.id.clone(),
+                        serde_json::to_value(result).unwrap(),
+                    ))
+                }
+                Err(e) => {
+                    let result = ToolsCallResult {
+                        content: vec![ContentBlock::Text {
+                            text: format!("Error: {e}"),
+                        }],
+                        is_error: Some(true),
+                    };
+                    Some(JsonRpcResponse::success(
+                        request.id.clone(),
+                        serde_json::to_value(result).unwrap(),
+                    ))
+                }
+            }
+        }
+
+        _ => Some(JsonRpcResponse::error(
+            request.id.clone(),
+            METHOD_NOT_FOUND,
+            format!("method not found: {}", request.method),
+        )),
+    }
+}
+
 /// Parse a raw JSON string into a [`JsonRpcRequest`].
 pub fn parse_request(input: &str) -> Result<JsonRpcRequest, JsonRpcResponse> {
     serde_json::from_str::<JsonRpcRequest>(input).map_err(|e| {

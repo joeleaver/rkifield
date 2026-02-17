@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "rkf-mcp": {
+      "command": "cargo",
+      "args": ["run", "-p", "rkf-mcp", "--"],
+      "cwd": "/home/joe/dev/rkifield"
+    }
+  }
+}
