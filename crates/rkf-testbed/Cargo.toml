@@ -1,0 +1,21 @@
+[package]
+name = "rkf-testbed"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Visual test harness for the RKIField SDF engine"
+
+[[bin]]
+name = "rkf-testbed"
+path = "src/main.rs"
+
+[dependencies]
+rkf-core = { workspace = true }
+rkf-runtime = { workspace = true }
+rkf-render = { workspace = true }
+wgpu = { workspace = true }
+winit = { workspace = true }
+glam = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+anyhow = { workspace = true }
