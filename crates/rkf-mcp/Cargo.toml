@@ -19,3 +19,4 @@ env_logger = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 clap = { version = "4", features = ["derive"] }
+base64 = { workspace = true }
