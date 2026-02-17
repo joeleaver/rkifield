@@ -11,3 +11,5 @@
 //! - Resolution tier definitions and chunk geometry
 
 #![warn(missing_docs)]
+
+pub mod automation;
