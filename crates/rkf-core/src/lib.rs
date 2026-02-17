@@ -24,6 +24,8 @@ pub mod companion;
 pub mod constants;
 /// Material properties for the global GPU material table.
 pub mod material;
+/// SDF generation utilities for testing and offline voxelization.
+pub mod sdf;
 /// Single-LOD sparse grid for voxel occupancy and brick indexing.
 pub mod sparse_grid;
 /// Voxel sample type and flag constants for GPU-packed voxel data.
