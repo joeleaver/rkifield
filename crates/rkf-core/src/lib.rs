@@ -15,7 +15,10 @@
 pub mod automation;
 pub mod cell_state;
 pub mod constants;
+/// Voxel sample type and flag constants for GPU-packed voxel data.
+pub mod voxel;
 pub mod world_position;
 
 pub use cell_state::CellState;
+pub use voxel::VoxelSample;
 pub use world_position::WorldPosition;
