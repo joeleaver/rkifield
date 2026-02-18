@@ -79,7 +79,7 @@ struct Light {
 @group(0) @binding(0) var gbuf_position: texture_2d<f32>;
 @group(0) @binding(1) var gbuf_normal:   texture_2d<f32>;
 @group(0) @binding(2) var gbuf_material: texture_2d<u32>;    // r32uint: packed material data
-@group(0) @binding(3) var gbuf_motion:   texture_2d<f32>;   // rg32float: motion vectors
+@group(0) @binding(3) var gbuf_motion:   texture_2d<f32>;   // rgba32float: motion.xy + grad_magnitude.z
 
 // Group 1: material table
 @group(1) @binding(0) var<storage, read> materials: array<Material>;
@@ -480,14 +480,24 @@ fn sample_radiance(pos: vec3<f32>, level: i32) -> vec4<f32> {
         return vec4<f32>(0.0);
     }
 
+    // Edge fade: smoothstep from 0 at boundary → 1 at 15% inward, per axis.
+    // Eliminates hard rectangular GI cutoff at level boundaries.
+    let FADE = 0.15;
+    let fade_x = smoothstep(0.0, FADE, uv.x) * smoothstep(1.0, 1.0 - FADE, uv.x);
+    let fade_y = smoothstep(0.0, FADE, uv.y) * smoothstep(1.0, 1.0 - FADE, uv.y);
+    let fade_z = smoothstep(0.0, FADE, uv.z) * smoothstep(1.0, 1.0 - FADE, uv.z);
+    let edge_fade = fade_x * fade_y * fade_z;
+
     // Sample the appropriate level with trilinear filtering
+    var s: vec4<f32>;
     switch level {
-        case 0: { return textureSampleLevel(radiance_L0, radiance_sampler, uv, 0.0); }
-        case 1: { return textureSampleLevel(radiance_L1, radiance_sampler, uv, 0.0); }
-        case 2: { return textureSampleLevel(radiance_L2, radiance_sampler, uv, 0.0); }
-        case 3: { return textureSampleLevel(radiance_L3, radiance_sampler, uv, 0.0); }
-        default: { return vec4<f32>(0.0); }
+        case 0: { s = textureSampleLevel(radiance_L0, radiance_sampler, uv, 0.0); }
+        case 1: { s = textureSampleLevel(radiance_L1, radiance_sampler, uv, 0.0); }
+        case 2: { s = textureSampleLevel(radiance_L2, radiance_sampler, uv, 0.0); }
+        case 3: { s = textureSampleLevel(radiance_L3, radiance_sampler, uv, 0.0); }
+        default: { s = vec4<f32>(0.0); }
     }
+    return s * edge_fade;
 }
 
 /// Trace a single GI cone through the radiance volume.
@@ -925,9 +935,19 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
     let ambient_specular = sky_reflect * ambient_fresnel * ao * SKY_REFLECT_STRENGTH;
     let ambient = ambient_diffuse + ambient_specular;
 
+    // SDF junction contact shadow: the gradient magnitude from the ray marcher
+    // detects min()-union fillets. Clean surfaces have grad_mag ≈ 1.0, while
+    // perpendicular junctions have grad_mag ≈ 0.707. Darken direct lighting
+    // at junctions to simulate contact shadows / micro-AO.
+    // Wide range (0.8–0.99) ensures the entire fillet transition zone is darkened,
+    // not just the crease center.
+    let grad_mag = textureLoad(gbuf_motion, coord, 0).z;
+    let contact = smoothstep(0.8, 0.99, grad_mag);
+
     // Final color = direct + indirect GI (diffuse + specular) + SSS + ambient + emission
-    let direct = total_diffuse + total_specular;
-    var color = direct + gi_diffuse * ao + specular_gi * ao + sss_total + ambient + emission;
+    // contact shadow applied to all lighting terms at SDF junction fillets
+    let direct = (total_diffuse + total_specular) * contact;
+    var color = direct + gi_diffuse * ao * contact + specular_gi * ao * contact + sss_total + ambient * contact + emission;
 
     // Debug visualization modes
     switch shade_uniforms.debug_mode {
@@ -950,7 +970,7 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
         }
         case 4u: {
             // Diffuse only (no specular, no emission)
-            color = total_diffuse + ambient;
+            color = (total_diffuse + ambient) * contact;
         }
         case 5u: {
             // Specular only (direct + indirect specular + ambient specular)

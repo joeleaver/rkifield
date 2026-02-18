@@ -8,7 +8,7 @@
 //! | 0      | Rgba32Float | position.xyz + hit_distance                   |
 //! | 1      | Rgba16Float | normal.xyz + material_blend_weight            |
 //! | 2      | R32Uint     | packed: material_id(lo16) + sec_id_flags(hi16)|
-//! | 3      | Rg32Float   | motion_vector.xy (zeros for now)              |
+//! | 3      | Rgba32Float | motion_vector.xy + grad_magnitude.z           |
 
 /// G-buffer: 4 render targets at internal resolution for deferred shading.
 pub struct GBuffer {
@@ -55,7 +55,7 @@ pub const GBUFFER_NORMAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba
 /// Texture format for G-buffer target 2 (packed material IDs).
 pub const GBUFFER_MATERIAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Uint;
 /// Texture format for G-buffer target 3 (motion vectors).
-pub const GBUFFER_MOTION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg32Float;
+pub const GBUFFER_MOTION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
 
 impl GBuffer {
     /// Create the G-buffer with 4 render targets at the given resolution.
@@ -326,6 +326,6 @@ mod tests {
         assert_eq!(GBUFFER_POSITION_FORMAT, wgpu::TextureFormat::Rgba32Float);
         assert_eq!(GBUFFER_NORMAL_FORMAT, wgpu::TextureFormat::Rgba16Float);
         assert_eq!(GBUFFER_MATERIAL_FORMAT, wgpu::TextureFormat::R32Uint);
-        assert_eq!(GBUFFER_MOTION_FORMAT, wgpu::TextureFormat::Rg32Float);
+        assert_eq!(GBUFFER_MOTION_FORMAT, wgpu::TextureFormat::Rgba32Float);
     }
 }

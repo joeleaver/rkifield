@@ -70,7 +70,7 @@ struct ClipmapUniforms {
 @group(1) @binding(0) var gbuf_position: texture_storage_2d<rgba32float, write>;
 @group(1) @binding(1) var gbuf_normal:   texture_storage_2d<rgba16float, write>;
 @group(1) @binding(2) var gbuf_material: texture_storage_2d<r32uint, write>;
-@group(1) @binding(3) var gbuf_motion:   texture_storage_2d<rg32float, write>;
+@group(1) @binding(3) var gbuf_motion:   texture_storage_2d<rgba32float, write>;
 
 // Group 2: Clipmap data
 @group(2) @binding(0) var<storage, read> cm_occupancy: array<u32>;
@@ -741,7 +741,11 @@ fn sample_sdf_finest(pos: vec3<f32>) -> f32 {
 ///
 /// The central difference epsilon is based on the hit level's voxel size,
 /// but each SDF sample uses the finest level with data at that position.
-fn compute_normal_finest(pos: vec3<f32>, hit_level: u32) -> vec3<f32> {
+/// Returns vec4(normal.xyz, grad_magnitude).
+/// grad_magnitude is the SDF gradient length normalized by the expected value (2*eps).
+/// Clean surfaces have grad_magnitude ≈ 1.0.
+/// SDF min() union fillets have grad_magnitude ≈ 0.707 (perpendicular junction).
+fn compute_normal_finest(pos: vec3<f32>, hit_level: u32) -> vec4<f32> {
     let e = cm_voxel_size(hit_level) * 1.5;
     let nx = sample_sdf_finest(pos + vec3<f32>(e, 0.0, 0.0))
            - sample_sdf_finest(pos - vec3<f32>(e, 0.0, 0.0));
@@ -749,7 +753,9 @@ fn compute_normal_finest(pos: vec3<f32>, hit_level: u32) -> vec3<f32> {
            - sample_sdf_finest(pos - vec3<f32>(0.0, e, 0.0));
     let nz = sample_sdf_finest(pos + vec3<f32>(0.0, 0.0, e))
            - sample_sdf_finest(pos - vec3<f32>(0.0, 0.0, e));
-    return normalize(vec3<f32>(nx, ny, nz));
+    let grad = vec3<f32>(nx, ny, nz);
+    let mag = length(grad);
+    return vec4<f32>(grad / max(mag, 1e-6), mag / (2.0 * e));
 }
 
 /// Compute normal with LOD transition blending near level boundaries.
@@ -758,12 +764,16 @@ fn compute_normal_finest(pos: vec3<f32>, hit_level: u32) -> vec3<f32> {
 /// blends between the finest-available normal and the next coarser level's
 /// normal. This smooths visual discontinuities at LOD transitions.
 /// Outside the transition band, returns the finest-available normal.
-fn compute_normal_blended(pos: vec3<f32>, hit_level: u32, t: f32) -> vec3<f32> {
-    let n_fine = compute_normal_finest(pos, hit_level);
+/// Returns vec4(normal.xyz, grad_magnitude) with LOD blending.
+/// The grad_magnitude comes from the finest level (not blended).
+fn compute_normal_blended(pos: vec3<f32>, hit_level: u32, t: f32) -> vec4<f32> {
+    let fine4 = compute_normal_finest(pos, hit_level);
+    let n_fine = fine4.xyz;
+    let grad_mag = fine4.w;
 
     // No blending possible if we're at the coarsest level.
     if hit_level + 1u >= clipmap.num_levels {
-        return n_fine;
+        return vec4<f32>(n_fine, grad_mag);
     }
 
     let radius = cm_radius(hit_level);
@@ -772,13 +782,13 @@ fn compute_normal_blended(pos: vec3<f32>, hit_level: u32, t: f32) -> vec3<f32> {
 
     // Outside transition band — use fine normal only.
     if dist_to_boundary > blend_width || dist_to_boundary < 0.0 {
-        return n_fine;
+        return vec4<f32>(n_fine, grad_mag);
     }
 
     // In transition zone: blend=1 at inner edge (fine), blend=0 at boundary (coarse).
     let blend = clamp(dist_to_boundary / blend_width, 0.0, 1.0);
     let n_coarse = compute_normal_cm(pos, hit_level + 1u);
-    return normalize(mix(n_coarse, n_fine, blend));
+    return vec4<f32>(normalize(mix(n_coarse, n_fine, blend)), grad_mag);
 }
 
 // ---------- Entry point ----------
@@ -819,8 +829,11 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
         // near level boundaries. Falls back to compute_normal_finest away from
         // boundaries, which checks all levels for the finest data.
         var normal: vec3<f32>;
+        var grad_mag = 1.0;
         if clipmap.num_levels > 0u {
-            normal = compute_normal_blended(hit_pos, result.level, result.t);
+            let nm = compute_normal_blended(hit_pos, result.level, result.t);
+            normal = nm.xyz;
+            grad_mag = nm.w;
         } else {
             normal = compute_normal(hit_pos);
         }
@@ -831,7 +844,7 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
         // Pack material_id (lower 16) + secondary_id_and_flags (upper 16) into R32Uint
         let packed_mat = result.material_id | (result.secondary_id_and_flags << 16u);
         textureStore(gbuf_material, coord, vec4<u32>(packed_mat, 0u, 0u, 0u));
-        // Motion vector: reproject hit position through previous VP
+        // Motion vector + gradient magnitude for fillet detection
         let prev_clip = camera.prev_vp * vec4<f32>(hit_pos, 1.0);
         var motion = vec2<f32>(0.0, 0.0);
         if prev_clip.w > 0.0 {
@@ -841,7 +854,7 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
             let curr_uv = (vec2<f32>(pixel.xy) + 0.5) / vec2<f32>(dims);
             motion = curr_uv - prev_uv;
         }
-        textureStore(gbuf_motion, coord, vec4<f32>(motion, 0.0, 0.0));
+        textureStore(gbuf_motion, coord, vec4<f32>(motion, grad_mag, 0.0));
     } else {
         // Sky / miss — encode as MAX_FLOAT hit distance
         textureStore(gbuf_position, coord, vec4<f32>(0.0, 0.0, 0.0, MAX_FLOAT));

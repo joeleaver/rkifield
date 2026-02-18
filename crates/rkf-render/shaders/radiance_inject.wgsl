@@ -273,6 +273,19 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // --- Near surface: compute direct lighting ---
 
     let normal = sdf_normal(pos);
+
+    // Concavity probe: step along normal, check if we hit another surface quickly.
+    // At clean surfaces, probe_d ≈ probe_step (moving away from surface into open space).
+    // At min() junctions/fillets, the normal points ~45° outward and quickly encounters
+    // the adjacent surface → probe_d << probe_step → concavity detected → attenuate.
+    // Two probes at different distances for broader coverage of the fillet zone.
+    let vs = sdf_voxel_size();
+    let probe_d1 = sample_sdf(pos + normal * vs * 2.0);
+    let probe_d2 = sample_sdf(pos + normal * vs * 5.0);
+    let c1 = smoothstep(0.0, vs * 1.0, probe_d1);
+    let c2 = smoothstep(0.0, vs * 2.0, probe_d2);
+    let concavity = min(c1, c2);
+
     let mat_id = sample_material_id(pos);
     let mat = materials[mat_id];
     let albedo = vec3<f32>(mat.albedo_r, mat.albedo_g, mat.albedo_b);
@@ -341,8 +354,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Add emission
     radiance += emission;
 
-    // Opacity: smooth falloff at the surface band boundary
+    // Opacity: smooth falloff at surface band boundary.
     let opacity = clamp(1.0 - abs(d) / threshold, 0.0, 1.0);
 
-    textureStore(radiance_out, vec3<i32>(gid), vec4<f32>(radiance, opacity));
+    // Apply concavity attenuation: darken radiance at min() junctions to prevent bright halos.
+    // Opacity stays full so junction voxels still occlude (dark + opaque = correct AO).
+    textureStore(radiance_out, vec3<i32>(gid), vec4<f32>(radiance * concavity, opacity));
 }

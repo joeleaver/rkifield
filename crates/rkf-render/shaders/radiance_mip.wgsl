@@ -26,16 +26,23 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let ratio = 4.0;                        // clipmap level ratio
     let src_f = (vec3<f32>(gid) + 0.5 - center) * ratio + center;
 
-    // Out of L(N) range → zero (this texel is beyond L(N) coverage)
-    if any(src_f < vec3<f32>(0.5)) || any(src_f >= vec3<f32>(f32(dim) - 0.5)) {
+    // Smooth fade at L(N) projection boundary instead of hard zero.
+    // norm is [0,1] in L(N) texel space; fade over 15% margin at each edge.
+    let norm = src_f / f32(dim);
+    let FADE = 0.15;
+    let fx = smoothstep(0.0, FADE, norm.x) * smoothstep(1.0, 1.0 - FADE, norm.x);
+    let fy = smoothstep(0.0, FADE, norm.y) * smoothstep(1.0, 1.0 - FADE, norm.y);
+    let fz = smoothstep(0.0, FADE, norm.z) * smoothstep(1.0, 1.0 - FADE, norm.z);
+    let mip_fade = fx * fy * fz;
+
+    if mip_fade < 0.001 {
         textureStore(dst_level, vec3<i32>(gid), vec4<f32>(0.0));
         return;
     }
 
-    // Sample a 2×2×2 neighborhood — standard box-filter average for both
-    // radiance and opacity. This correctly pre-integrates the volume:
-    // thin bright surfaces become dim spread-out glow at coarser levels.
-    let base = vec3<i32>(floor(src_f - 0.5));
+    // Clamp src_f to valid range — edge texels extend outward via ClampToEdge
+    let clamped = clamp(src_f, vec3<f32>(0.5), vec3<f32>(f32(dim) - 0.5));
+    let base = vec3<i32>(floor(clamped - 0.5));
     let max_c = vec3<i32>(i32(dim) - 1);
 
     var sum = vec4<f32>(0.0);
@@ -49,5 +56,5 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
 
-    textureStore(dst_level, vec3<i32>(gid), sum / 8.0);
+    textureStore(dst_level, vec3<i32>(gid), sum / 8.0 * mip_fade);
 }
