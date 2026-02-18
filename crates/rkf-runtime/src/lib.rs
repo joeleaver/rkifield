@@ -23,6 +23,8 @@ pub mod components;
 pub mod double_buffer;
 /// Frame scheduling and render pass ordering.
 pub mod frame;
+/// LRU eviction for the brick pool.
+pub mod lru_eviction;
 /// Scene management via hecs ECS.
 pub mod scene;
 /// Chunk streaming system — camera-distance-based load/evict management.
@@ -42,5 +44,6 @@ pub use components::{
 pub use frame::{execute_frame, FrameContext, FrameSettings};
 pub use async_io::{AsyncIoPipeline, ChunkLoadResult};
 pub use scene::Scene;
+pub use lru_eviction::{EvictionPolicy, EvictionResult, LruEntry, LruTracker};
 pub use streaming::{ChunkEntry, ChunkState, StreamingConfig, StreamingSystem};
 pub use transform_system::update_transforms;
