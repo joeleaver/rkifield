@@ -15,6 +15,8 @@
 
 /// ECS component types for the scene graph.
 pub mod components;
+/// Double-buffered GPU uniform buffers.
+pub mod double_buffer;
 /// Frame scheduling and render pass ordering.
 pub mod frame;
 /// Scene management via hecs ECS.
@@ -22,6 +24,7 @@ pub mod scene;
 /// Transform hierarchy update system.
 pub mod transform_system;
 
+pub use double_buffer::{DoubleBuffer, DoubleBufferSet};
 pub use components::{
     AnimatedCharacter, CameraComponent, ChunkRef, EditorMetadata, FogVolumeComponent, Parent,
     SdfObject, Transform, WorldTransform,
