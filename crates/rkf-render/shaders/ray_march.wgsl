@@ -1,8 +1,9 @@
-// Ray march compute shader — Phase 4 (basic sphere tracing, no DDA).
+// Ray march compute shader — Phase 5 (DDA traversal through sparse grid).
 //
 // One thread per pixel at internal resolution. Generates a camera ray,
-// marches through the sparse grid sampling SDF bricks, and writes
-// white on hit / black on miss to the output texture.
+// marches through the sparse grid via Amanatides & Woo 3D DDA,
+// sphere-traces within occupied bricks, and writes the shaded result
+// to the output texture.
 
 // ---------- Types ----------
 
@@ -26,6 +27,11 @@ struct SceneUniforms {
     params:       vec4<f32>,   // x = voxel_size, yzw = unused
 }
 
+struct MarchResult {
+    t: f32,
+    hit: bool,
+}
+
 // ---------- Bindings ----------
 
 // Group 0: scene data
@@ -40,7 +46,8 @@ struct SceneUniforms {
 
 // ---------- Constants ----------
 
-const MAX_STEPS: u32 = 256u;
+const MAX_DDA_STEPS: u32 = 256u;
+const MAX_BRICK_STEPS: u32 = 64u;
 const MAX_DISTANCE: f32 = 100.0;
 const HIT_EPSILON: f32 = 0.001;
 const MIN_STEP: f32 = 0.0005;
@@ -89,14 +96,166 @@ fn cell_flat_index(cell: vec3<u32>) -> u32 {
     return cell.x + cell.y * d.x + cell.z * d.x * d.y;
 }
 
-/// Sample the SDF at a world-space position using the sparse grid + brick pool.
-/// Returns a large positive distance if outside the grid or in empty space.
-fn sample_sdf(pos: vec3<f32>) -> f32 {
-    let cell_i = world_to_cell(pos);
+// ---------- DDA Ray March ----------
+
+/// Ray-AABB intersection using the slab method.
+/// Takes precomputed inv_dir = 1.0 / direction.
+/// Returns vec2(t_near, t_far). Miss when t_near > t_far or t_far < 0.
+fn ray_aabb_intersect(origin: vec3<f32>, inv_dir: vec3<f32>,
+                      box_min: vec3<f32>, box_max: vec3<f32>) -> vec2<f32> {
+    let t1 = (box_min - origin) * inv_dir;
+    let t2 = (box_max - origin) * inv_dir;
+    let t_lo = min(t1, t2);
+    let t_hi = max(t1, t2);
+    let t_near = max(t_lo.x, max(t_lo.y, t_lo.z));
+    let t_far  = min(t_hi.x, min(t_hi.y, t_hi.z));
+    return vec2<f32>(t_near, t_far);
+}
+
+/// Read SDF distance from a specific brick slot at a world position.
+fn sample_brick(pos: vec3<f32>, brick_min: vec3<f32>, slot: u32) -> f32 {
+    let brick_local = (pos - brick_min) / voxel_size();
+    let voxel = clamp(vec3<u32>(floor(brick_local)), vec3<u32>(0u), vec3<u32>(7u));
+    let voxel_idx = voxel.x + voxel.y * 8u + voxel.z * 64u;
+    let sample_idx = slot * 512u + voxel_idx;
+    return extract_distance(brick_pool[sample_idx].word0);
+}
+
+/// Sphere trace within a single brick.
+/// Returns MarchResult — hit=true with distance, or hit=false.
+fn sphere_trace_brick(origin: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
+                      t_enter: f32, cell: vec3<u32>, flat: u32) -> MarchResult {
+    let slot = slots[flat];
+    if slot == EMPTY_SLOT {
+        return MarchResult(-1.0, false);
+    }
 
     let be = brick_extent();
+    let brick_min = grid_origin() + vec3<f32>(cell) * be;
+    let brick_max = brick_min + vec3<f32>(be);
 
-    // Outside grid bounds — return large distance
+    // Clip to brick AABB for precise entry/exit
+    let aabb_t = ray_aabb_intersect(origin, inv_dir, brick_min, brick_max);
+    let t_start = max(t_enter, max(aabb_t.x, 0.0));
+    let t_end = aabb_t.y;
+
+    if t_start > t_end {
+        return MarchResult(-1.0, false);
+    }
+
+    var t = t_start;
+    for (var i = 0u; i < MAX_BRICK_STEPS; i++) {
+        let pos = origin + dir * t;
+        let d = sample_brick(pos, brick_min, slot);
+
+        if d < HIT_EPSILON {
+            return MarchResult(t, true);
+        }
+
+        t += max(abs(d), MIN_STEP);
+
+        if t > t_end {
+            break;
+        }
+    }
+
+    // Miss — return brick exit t so DDA can continue from there
+    return MarchResult(t_end, false);
+}
+
+/// DDA ray march through the sparse grid.
+/// Amanatides & Woo traversal: skips empty cells, sphere-traces in surface bricks.
+/// Returns distance to hit or -1.0 on miss.
+fn ray_march_dda(origin: vec3<f32>, dir: vec3<f32>) -> f32 {
+    let be = brick_extent();
+    let dims_f = vec3<f32>(grid_dims());
+    let g_origin = grid_origin();
+    let grid_max = g_origin + dims_f * be;
+
+    // Guard against near-zero direction components to avoid NaN from 0/0
+    let safe_dir = select(dir, vec3<f32>(1e-10), abs(dir) < vec3<f32>(1e-10));
+    let inv_dir = 1.0 / safe_dir;
+
+    // Clip ray to grid AABB
+    let aabb_t = ray_aabb_intersect(origin, inv_dir, g_origin, grid_max);
+    var t_near = max(aabb_t.x, 0.0);
+    let t_far = aabb_t.y;
+
+    if t_near > t_far || t_far < 0.0 {
+        return -1.0;  // ray misses grid entirely
+    }
+
+    // Nudge slightly inside to land cleanly in the first cell
+    t_near += HIT_EPSILON;
+
+    // Entry point and starting cell
+    let entry = origin + safe_dir * t_near;
+    let dims_i = vec3<i32>(grid_dims());
+    var cell = vec3<i32>(floor((entry - g_origin) / be));
+    cell = clamp(cell, vec3<i32>(0), dims_i - vec3<i32>(1));
+
+    // DDA per-axis setup
+    let step = vec3<i32>(
+        select(-1, 1, safe_dir.x >= 0.0),
+        select(-1, 1, safe_dir.y >= 0.0),
+        select(-1, 1, safe_dir.z >= 0.0)
+    );
+
+    let t_delta = abs(vec3<f32>(be) * inv_dir);
+
+    // t_max: parametric distance to the next cell boundary on each axis
+    let cell_min = g_origin + vec3<f32>(cell) * be;
+    let cell_max = cell_min + vec3<f32>(be);
+    let next_boundary = select(cell_min, cell_max, safe_dir >= vec3<f32>(0.0));
+    var t_max = (next_boundary - origin) * inv_dir;
+
+    var t = t_near;
+
+    for (var i = 0u; i < MAX_DDA_STEPS; i++) {
+        if !cell_in_bounds(cell) || t > MAX_DISTANCE {
+            break;
+        }
+
+        let ucell = vec3<u32>(cell);
+        let flat = cell_flat_index(ucell);
+        let state = get_cell_state(flat);
+
+        if state == CELL_SURFACE {
+            let result = sphere_trace_brick(origin, safe_dir, inv_dir, t, ucell, flat);
+            if result.hit {
+                return result.t;
+            }
+        }
+        // CELL_EMPTY and CELL_INTERIOR: skip — advance DDA to next cell
+
+        // Step to the axis with the smallest t_max (next cell boundary)
+        if t_max.x < t_max.y && t_max.x < t_max.z {
+            t = t_max.x;
+            t_max.x += t_delta.x;
+            cell.x += step.x;
+        } else if t_max.y < t_max.z {
+            t = t_max.y;
+            t_max.y += t_delta.y;
+            cell.y += step.y;
+        } else {
+            t = t_max.z;
+            t_max.z += t_delta.z;
+            cell.z += step.z;
+        }
+    }
+
+    return -1.0;
+}
+
+// ---------- Normal computation ----------
+
+/// Sample the SDF at a world-space position using the sparse grid + brick pool.
+/// Returns a large positive distance if outside the grid or in empty space.
+/// Used for normal computation via central differences.
+fn sample_sdf(pos: vec3<f32>) -> f32 {
+    let cell_i = world_to_cell(pos);
+    let be = brick_extent();
+
     if !cell_in_bounds(cell_i) {
         return be;
     }
@@ -108,55 +267,18 @@ fn sample_sdf(pos: vec3<f32>) -> f32 {
     if state == CELL_EMPTY {
         return be * 0.5;
     }
-
     if state == CELL_INTERIOR {
         return -be * 0.5;
     }
-
     if state == CELL_SURFACE {
         let slot = slots[flat];
         if slot == EMPTY_SLOT {
             return be * 0.5;
         }
-
-        // Convert to voxel coordinates within this brick
         let brick_min = grid_origin() + vec3<f32>(cell) * be;
-        let brick_local = (pos - brick_min) / voxel_size();
-        let voxel = clamp(vec3<u32>(floor(brick_local)), vec3<u32>(0u), vec3<u32>(7u));
-
-        // Read the voxel sample from the brick pool
-        let voxel_idx = voxel.x + voxel.y * 8u + voxel.z * 64u;
-        let sample_idx = slot * 512u + voxel_idx;
-        let sample = brick_pool[sample_idx];
-
-        return extract_distance(sample.word0);
+        return sample_brick(pos, brick_min, slot);
     }
-
-    // Volumetric or unknown — skip
     return be * 0.5;
-}
-
-/// March a ray through the scene, returning distance to hit or -1.0 on miss.
-fn ray_march(origin: vec3<f32>, direction: vec3<f32>) -> f32 {
-    var t = 0.0;
-
-    for (var i = 0u; i < MAX_STEPS; i++) {
-        let pos = origin + direction * t;
-        let d = sample_sdf(pos);
-
-        if d < HIT_EPSILON {
-            return t;
-        }
-
-        // Step by SDF distance, but never less than MIN_STEP
-        t += max(abs(d), MIN_STEP);
-
-        if t > MAX_DISTANCE {
-            return -1.0;
-        }
-    }
-
-    return -1.0;
 }
 
 /// Compute a cheap normal via central differences.
@@ -187,8 +309,8 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
         camera.forward.xyz + ndc.x * camera.right.xyz + ndc.y * camera.up.xyz
     );
 
-    // March
-    let t = ray_march(ray_origin, ray_dir);
+    // March via DDA
+    let t = ray_march_dda(ray_origin, ray_dir);
 
     var color: vec3<f32>;
     if t >= 0.0 {
