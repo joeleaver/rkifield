@@ -116,6 +116,11 @@ const SHADOW_BIAS: f32 = 0.02; // Normal-direction bias to avoid self-shadowing
 const AO_STEP_SIZE: f32 = 0.03; // Distance between AO samples along normal
 const AO_STRENGTH: f32 = 1.5;   // AO intensity multiplier
 
+// Subsurface scattering parameters
+const SSS_MAX_THICKNESS: f32 = 0.3;  // Maximum probed thickness
+const SSS_SIGMA: f32 = 8.0;          // Extinction coefficient for Beer's law
+const SSS_WRAP: f32 = 0.3;           // Light wrapping past terminator
+
 // ---------- SDF Sampling (duplicated from ray_march.wgsl) ----------
 
 fn extract_distance(word0: u32) -> f32 {
@@ -224,6 +229,31 @@ fn sdf_ao(pos: vec3<f32>, normal: vec3<f32>) -> f32 {
     return clamp(1.0 - AO_STRENGTH * ao, 0.0, 1.0);
 }
 
+// ---------- Subsurface Scattering ----------
+
+/// SDF thickness-based subsurface scattering contribution.
+/// Probes the SDF interior to estimate thickness, applies Beer's law
+/// attenuation, and wraps light past the terminator for translucency.
+/// Only evaluates for materials with subsurface > 0.
+fn sss_contribution(pos: vec3<f32>, normal: vec3<f32>, light_dir: vec3<f32>,
+                    subsurface: f32, subsurface_color: vec3<f32>) -> vec3<f32> {
+    if subsurface <= 0.0 {
+        return vec3<f32>(0.0);
+    }
+
+    // Estimate thickness by sampling SDF in the interior
+    let interior_pos = pos - normal * SSS_MAX_THICKNESS;
+    let thickness = clamp(-sample_sdf(interior_pos), 0.0, SSS_MAX_THICKNESS);
+
+    // Beer's law attenuation through the material
+    let attenuation = exp(-thickness * SSS_SIGMA);
+
+    // Light wrapping — illumination continues past the terminator
+    let wrap = max(0.0, dot(normal, light_dir) + SSS_WRAP) / (1.0 + SSS_WRAP);
+
+    return subsurface_color * attenuation * wrap * subsurface;
+}
+
 // ---------- PBR Functions ----------
 
 /// GGX/Trowbridge-Reitz normal distribution function (D term).
@@ -329,14 +359,18 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
     let radiance = SUN_COLOR * SUN_INTENSITY;
     let direct = (diffuse + specular) * radiance * n_dot_l * shadow;
 
+    // Subsurface scattering contribution (only for materials with subsurface > 0)
+    let sss_color = vec3<f32>(mat.subsurface_r, mat.subsurface_g, mat.subsurface_b);
+    let sss = sss_contribution(world_pos, normal, light_dir, mat.subsurface, sss_color) * radiance * shadow;
+
     // SDF ambient occlusion
     let ao = sdf_ao(world_pos + normal * SHADOW_BIAS, normal);
 
     // Ambient approximation (hemisphere) — modulated by AO
     let ambient = AMBIENT_COLOR * albedo * ao;
 
-    // Final color = direct + ambient + emission
-    var color = direct + ambient + emission;
+    // Final color = direct + SSS + ambient + emission
+    var color = direct + sss + ambient + emission;
 
     // Debug visualization modes
     switch shade_uniforms.debug_mode {
