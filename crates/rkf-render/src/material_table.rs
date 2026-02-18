@@ -61,16 +61,20 @@ impl MaterialTable {
     }
 }
 
-/// Create a set of 5 test materials for the Phase 6 materials showcase.
+/// Create a set of test materials for the Phase 6 materials showcase and Cornell box GI scene.
 ///
-/// | Index | Name     | Description                        |
-/// |------:|----------|------------------------------------|
-/// |     0 | Default  | Medium gray, fallback              |
-/// |     1 | Stone    | Gray, rough, dielectric            |
-/// |     2 | Metal    | Silver, low roughness, metallic    |
-/// |     3 | Wood     | Warm brown, moderate roughness     |
-/// |     4 | Emissive | Bright cyan glow                   |
-/// |     5 | Skin     | Warm tone, subsurface scattering   |
+/// | Index | Name           | Description                                    |
+/// |------:|----------------|------------------------------------------------|
+/// |     0 | Default        | Medium gray, fallback                          |
+/// |     1 | Stone          | Gray, rough, dielectric                        |
+/// |     2 | Metal          | Silver, low roughness, metallic                |
+/// |     3 | Wood           | Warm brown, moderate roughness                 |
+/// |     4 | Emissive       | Bright cyan glow                               |
+/// |     5 | Skin           | Warm tone, subsurface scattering               |
+/// |     6 | White Diffuse  | High albedo for good GI bouncing               |
+/// |     7 | Red Diffuse    | Cornell box left wall                          |
+/// |     8 | Green Diffuse  | Cornell box right wall                         |
+/// |     9 | Ceiling Light  | Warm white emissive ceiling panel              |
 pub fn create_test_materials() -> Vec<Material> {
     vec![
         // 0: Default (fallback)
@@ -114,6 +118,36 @@ pub fn create_test_materials() -> Vec<Material> {
             subsurface_color: [1.0, 0.4, 0.25],
             ..Default::default()
         },
+        // 6: White diffuse — high albedo for good GI bouncing
+        Material {
+            albedo: [0.85, 0.85, 0.85],
+            roughness: 0.9,
+            metallic: 0.0,
+            ..Default::default()
+        },
+        // 7: Red diffuse — Cornell box left wall
+        Material {
+            albedo: [0.75, 0.1, 0.1],
+            roughness: 0.9,
+            metallic: 0.0,
+            ..Default::default()
+        },
+        // 8: Green diffuse — Cornell box right wall
+        Material {
+            albedo: [0.1, 0.75, 0.1],
+            roughness: 0.9,
+            metallic: 0.0,
+            ..Default::default()
+        },
+        // 9: Ceiling light emissive — warm white
+        Material {
+            albedo: [0.1, 0.1, 0.1],
+            roughness: 0.5,
+            metallic: 0.0,
+            emission_color: [1.0, 0.95, 0.85],
+            emission_strength: 8.0,
+            ..Default::default()
+        },
     ]
 }
 
@@ -124,14 +158,14 @@ mod tests {
     #[test]
     fn test_materials_count() {
         let mats = create_test_materials();
-        assert_eq!(mats.len(), 6);
+        assert_eq!(mats.len(), 10);
     }
 
     #[test]
     fn test_materials_sizes() {
         let mats = create_test_materials();
         let bytes: &[u8] = bytemuck::cast_slice(&mats);
-        assert_eq!(bytes.len(), 6 * 96);
+        assert_eq!(bytes.len(), 10 * 96);
     }
 
     #[test]

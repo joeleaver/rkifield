@@ -136,6 +136,115 @@ fn create_test_scene() -> (BrickPool, SparseGrid, Aabb) {
     (pool, grid, aabb)
 }
 
+/// Create a Cornell box scene for GI validation.
+///
+/// Classic Cornell box with colored walls to demonstrate color bleeding:
+/// - Red left wall, green right wall, white floor/ceiling/back
+/// - Emissive ceiling panel (material 9)
+/// - Tall white box (left side) and short white box (right side)
+/// - Small emissive sphere for secondary indirect illumination
+///
+/// Returns `(BrickPool, SparseGrid, Aabb)`.
+fn create_cornell_box() -> (BrickPool, SparseGrid, Aabb) {
+    // Cornell box AABB — 2m cube centered at origin
+    let aabb = Aabb::new(Vec3::new(-1.2, -1.2, -1.2), Vec3::new(1.2, 1.2, 1.2));
+
+    let res = &RESOLUTION_TIERS[TEST_TIER];
+    let size = aabb.size();
+    let dims = UVec3::new(
+        ((size.x / res.brick_extent).ceil() as u32).max(1),
+        ((size.y / res.brick_extent).ceil() as u32).max(1),
+        ((size.z / res.brick_extent).ceil() as u32).max(1),
+    );
+
+    let mut pool: BrickPool = Pool::new(16384);
+    let mut grid = SparseGrid::new(dims);
+
+    let mut total = 0u32;
+
+    // --- Interior objects first (first-writer-wins) ---
+
+    // Tall box (left side) — white (mat 6)
+    let tall_center = Vec3::new(-0.35, -0.35, -0.2);
+    total += populate_grid_with_material(
+        &mut pool, &mut grid,
+        |p| box_sdf(Vec3::new(0.17, 0.35, 0.17), p - tall_center),
+        TEST_TIER, &aabb, 6,
+    ).expect("tall box");
+
+    // Short box (right side) — white (mat 6)
+    let short_center = Vec3::new(0.35, -0.55, 0.15);
+    total += populate_grid_with_material(
+        &mut pool, &mut grid,
+        |p| box_sdf(Vec3::new(0.17, 0.17, 0.17), p - short_center),
+        TEST_TIER, &aabb, 6,
+    ).expect("short box");
+
+    // Small emissive sphere — cyan glow (mat 4)
+    total += populate_grid_with_material(
+        &mut pool, &mut grid,
+        |p| sphere_sdf(Vec3::new(0.35, -0.28, 0.15), 0.1, p),
+        TEST_TIER, &aabb, 4,
+    ).expect("emissive sphere");
+
+    // Ceiling light panel — emissive (mat 9)
+    let light_center = Vec3::new(0.0, 0.95, 0.0);
+    total += populate_grid_with_material(
+        &mut pool, &mut grid,
+        |p| box_sdf(Vec3::new(0.25, 0.03, 0.25), p - light_center),
+        TEST_TIER, &aabb, 9,
+    ).expect("ceiling light");
+
+    // --- Walls (populated last so objects take priority) ---
+
+    // Floor — white (mat 6)
+    let floor_center = Vec3::new(0.0, -0.95, 0.0);
+    total += populate_grid_with_material(
+        &mut pool, &mut grid,
+        |p| box_sdf(Vec3::new(1.0, 0.05, 1.0), p - floor_center),
+        TEST_TIER, &aabb, 6,
+    ).expect("floor");
+
+    // Ceiling — white (mat 6)
+    let ceiling_center = Vec3::new(0.0, 0.95, 0.0);
+    total += populate_grid_with_material(
+        &mut pool, &mut grid,
+        |p| box_sdf(Vec3::new(1.0, 0.05, 1.0), p - ceiling_center),
+        TEST_TIER, &aabb, 6,
+    ).expect("ceiling");
+
+    // Back wall — white (mat 6)
+    let back_center = Vec3::new(0.0, 0.0, -0.95);
+    total += populate_grid_with_material(
+        &mut pool, &mut grid,
+        |p| box_sdf(Vec3::new(1.0, 1.0, 0.05), p - back_center),
+        TEST_TIER, &aabb, 6,
+    ).expect("back wall");
+
+    // Left wall — red (mat 7)
+    let left_center = Vec3::new(-0.95, 0.0, 0.0);
+    total += populate_grid_with_material(
+        &mut pool, &mut grid,
+        |p| box_sdf(Vec3::new(0.05, 1.0, 1.0), p - left_center),
+        TEST_TIER, &aabb, 7,
+    ).expect("left wall (red)");
+
+    // Right wall — green (mat 8)
+    let right_center = Vec3::new(0.95, 0.0, 0.0);
+    total += populate_grid_with_material(
+        &mut pool, &mut grid,
+        |p| box_sdf(Vec3::new(0.05, 1.0, 1.0), p - right_center),
+        TEST_TIER, &aabb, 8,
+    ).expect("right wall (green)");
+
+    log::info!(
+        "Cornell box: {total} bricks, grid {}x{}x{}, tier {TEST_TIER}",
+        dims.x, dims.y, dims.z
+    );
+
+    (pool, grid, aabb)
+}
+
 /// Create the lighting showcase light set (20+ lights).
 ///
 /// Mix of directional, point, and spot lights at various positions and colors.
@@ -218,6 +327,19 @@ fn create_showcase_lights() -> Vec<Light> {
     ]
 }
 
+/// Create lights for the Cornell box scene.
+///
+/// A single overhead point light matching the ceiling emissive panel position,
+/// plus a dim fill to avoid completely black areas before GI converges.
+fn create_cornell_box_lights() -> Vec<Light> {
+    vec![
+        // Ceiling area light approximated as point light
+        Light::point([0.0, 0.85, 0.0], [1.0, 0.95, 0.85], 2.0, 4.0, true),
+        // Dim fill from front (no shadows) — prevents pitch black areas
+        Light::directional([0.0, 0.3, 1.0], [0.5, 0.5, 0.6], 0.05, false),
+    ]
+}
+
 // ---------------------------------------------------------------------------
 // GPU state
 // ---------------------------------------------------------------------------
@@ -260,8 +382,8 @@ impl GpuState {
         let surface_format =
             context.configure_surface(&surface, size.width.max(1), size.height.max(1));
 
-        // Create test scene on CPU
-        let (pool, grid, aabb) = create_test_scene();
+        // Create Cornell box scene for GI validation
+        let (pool, grid, aabb) = create_cornell_box();
 
         // Update shared state with pool info
         {
@@ -270,8 +392,8 @@ impl GpuState {
             state.pool_allocated = pool.allocated_count() as u64;
         }
 
-        // Camera positioned to see the full lighting showcase
-        let mut camera = Camera::new(Vec3::new(0.0, 0.8, 3.5));
+        // Camera positioned to look into the Cornell box
+        let mut camera = Camera::new(Vec3::new(0.0, 0.0, 1.8));
         camera.fov_degrees = 60.0;
 
         let camera_uniforms = camera.uniforms(INTERNAL_WIDTH, INTERNAL_HEIGHT);
@@ -301,9 +423,9 @@ impl GpuState {
         // Create G-buffer
         let gbuffer = GBuffer::new(&context.device, INTERNAL_WIDTH, INTERNAL_HEIGHT);
 
-        // Create lighting showcase — 22 lights (2 directional + 12 point + 8 spot)
-        let lights = create_showcase_lights();
-        log::info!("Lighting showcase: {} lights", lights.len());
+        // Create Cornell box lights — simple overhead + dim fill
+        let lights = create_cornell_box_lights();
+        log::info!("Cornell box: {} lights", lights.len());
         let light_buffer = LightBuffer::upload(&context.device, &lights);
 
         // Create tile cull pass
