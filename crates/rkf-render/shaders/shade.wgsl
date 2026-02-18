@@ -92,7 +92,7 @@ struct ShadeUniforms {
     debug_mode: u32, // 0=normal, 1=normals, 2=positions, 3=material IDs, 4=diffuse only, 5=specular only
     num_lights: u32,
     num_tiles_x: u32,
-    _pad0: u32,
+    shadow_budget_k: u32, // max shadow-casting lights per pixel (0 = unlimited)
     camera_pos: vec4<f32>, // xyz = world-space camera position, w = unused
 }
 @group(3) @binding(0) var<uniform> shade_uniforms: ShadeUniforms;
@@ -382,6 +382,8 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
     var total_diffuse = vec3<f32>(0.0);
     var total_specular = vec3<f32>(0.0);
     var sss_total = vec3<f32>(0.0);
+    var shadow_count = 0u;
+    let shadow_budget = shade_uniforms.shadow_budget_k;
 
     for (var li = 0u; li < tile_count; li++) {
         let light_idx = tile_light_indices[tile_base + li];
@@ -411,11 +413,12 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
             let kd = (vec3<f32>(1.0) - ks) * (1.0 - metallic);
             let diffuse_brdf = kd * albedo / PI;
 
-            // SDF soft shadow (if light casts shadows)
+            // SDF soft shadow (if light casts shadows and budget allows)
             var shadow = 1.0;
-            if light.shadow_caster == 1u {
+            if light.shadow_caster == 1u && (shadow_budget == 0u || shadow_count < shadow_budget) {
                 let shadow_origin = world_pos + normal * SHADOW_BIAS;
                 shadow = soft_shadow(shadow_origin, light_dir, SHADOW_MAX_DIST, SHADOW_K);
+                shadow_count += 1u;
             }
 
             total_diffuse += diffuse_brdf * radiance * n_dot_l * shadow;
@@ -452,11 +455,12 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
                 let kd = (vec3<f32>(1.0) - ks) * (1.0 - metallic);
                 let diffuse_brdf = kd * albedo / PI;
 
-                // SDF soft shadow (if light casts shadows)
+                // SDF soft shadow (if light casts shadows and budget allows)
                 var shadow = 1.0;
-                if light.shadow_caster == 1u {
+                if light.shadow_caster == 1u && (shadow_budget == 0u || shadow_count < shadow_budget) {
                     let shadow_origin = world_pos + normal * SHADOW_BIAS;
                     shadow = soft_shadow(shadow_origin, light_dir, min(dist, SHADOW_MAX_DIST), SHADOW_K);
+                    shadow_count += 1u;
                 }
 
                 let attenuated_radiance = radiance * atten;
@@ -502,11 +506,12 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
                 let kd = (vec3<f32>(1.0) - ks) * (1.0 - metallic);
                 let diffuse_brdf = kd * albedo / PI;
 
-                // SDF soft shadow (if light casts shadows)
+                // SDF soft shadow (if light casts shadows and budget allows)
                 var shadow = 1.0;
-                if light.shadow_caster == 1u {
+                if light.shadow_caster == 1u && (shadow_budget == 0u || shadow_count < shadow_budget) {
                     let shadow_origin = world_pos + normal * SHADOW_BIAS;
                     shadow = soft_shadow(shadow_origin, light_dir, min(dist, SHADOW_MAX_DIST), SHADOW_K);
+                    shadow_count += 1u;
                 }
 
                 let attenuated_radiance = radiance * atten;

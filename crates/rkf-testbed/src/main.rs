@@ -330,6 +330,7 @@ impl GpuState {
             &self.context.queue,
             self.light_buffer.count,
             self.tile_cull.num_tiles_x,
+            4, // shadow_budget_k: max 4 shadow rays per pixel
         );
 
         let frame = match self.surface.get_current_texture() {
