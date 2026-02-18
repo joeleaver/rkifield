@@ -44,6 +44,8 @@ pub mod radiance_inject;
 pub mod radiance_mip;
 /// History buffers for temporal upscaling (ping-pong at display resolution).
 pub mod history;
+/// Custom temporal upscaler compute pass.
+pub mod upscale;
 
 pub use camera::{Camera, CameraUniforms};
 pub use context::RenderContext;
@@ -60,3 +62,4 @@ pub use radiance_volume::{RadianceVolume, RadianceVolumeUniforms, RADIANCE_DIM, 
 pub use radiance_inject::{InjectUniforms, RadianceInjectPass};
 pub use radiance_mip::RadianceMipPass;
 pub use history::{HistoryBuffers, HistoryUniforms, HISTORY_COLOR_FORMAT, HISTORY_METADATA_FORMAT};
+pub use upscale::{UpscalePass, UpscaleUniforms};
