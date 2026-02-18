@@ -513,12 +513,9 @@ impl GpuState {
     }
 
     fn update_camera(&mut self) {
-        let mut uniforms =
+        let uniforms =
             self.camera
                 .uniforms(INTERNAL_WIDTH, INTERNAL_HEIGHT, self.frame_index, self.prev_vp);
-        // Disable sub-pixel jitter until temporal resolve is fully tuned.
-        // The upscaler still works as bilinear + temporal stability without it.
-        uniforms.jitter = [0.0, 0.0];
         // Store current VP as prev for next frame
         let vp = self.camera.view_projection(INTERNAL_WIDTH, INTERNAL_HEIGHT);
         self.prev_vp = vp.to_cols_array_2d();
@@ -629,8 +626,7 @@ impl GpuState {
             &self.color_pool,
         );
 
-        // Phase 9: temporal upscale + edge-aware sharpen
-        // Jitter disabled — pass zeros so the unjitter in the shader is a no-op.
+        // Phase 9: spatial upscale + edge-aware sharpen (no jitter — spatial only)
         self.upscale.update_jitter(&self.context.queue, [0.0, 0.0]);
         let history_read_idx = self.history.read_index();
         self.upscale.dispatch(&mut encoder, history_read_idx);
@@ -887,7 +883,7 @@ impl ApplicationHandler for App {
         log::info!("IPC server listening on {socket_path}");
         self.socket_path = Some(socket_path);
 
-        log::info!("Phase 9 validation — temporal upscaling (jitter, history, sharpen)");
+        log::info!("Phase 9 validation — spatial upscaling + sharpen");
         log::info!("Click to capture mouse, WASD to move, mouse to look, Esc to exit");
     }
 

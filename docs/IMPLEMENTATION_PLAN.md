@@ -534,53 +534,49 @@ is misdirected. The stone sphere's diffuse shading is correct. No G-buffer data 
 
 ## Phase 9: Upscaling
 
-**Milestone:** Engine renders at low internal resolution and upscales to display resolution with temporal accumulation.
+**Milestone:** Engine renders at low internal resolution and upscales to display resolution.
 
 **Crate:** `rkf-render`
 
+> **Design note:** Temporal super-resolution (TAA with jitter + history accumulation) was prototyped and deferred. The SDF ray marcher's per-frame variation from jitter is fundamentally larger than rasterized pipelines — jitter shifts the entire hit point, causing shadows, GI, AO, and normals to vary frame-to-frame. Simple variance-clip TAA cannot absorb this without visible wobble. A production-quality temporal upscaler for SDF content requires FSR2-style per-signal filtering or Lanczos upsampling with a lock mechanism — a future upgrade. The current implementation uses spatial-only bilinear upscaling with zero temporal artifacts.
+
 ### Tasks
 
-9.1. **Sub-pixel jitter**
-  - Halton 2,3 sequence (16-frame cycle)
-  - Apply jitter offset to camera ray generation
-  - Pass jitter as uniform alongside camera data
+9.1. **Sub-pixel jitter infrastructure** (DEFERRED — temporal upscale prerequisite)
+  - Halton 2,3 sequence (16-frame cycle) — implemented in `camera.rs`
+  - Jitter uniform plumbed to ray march shader — infrastructure exists
+  - Currently disabled (jitter = 0,0) — re-enable when temporal upscaler is upgraded
 
 9.2. **Motion vectors in G-buffer**
   - Per-pixel: reproject hit position through previous frame's VP matrix
   - Compute screen-space motion vector (current pixel - reprojected pixel)
-  - Write to G-buffer target 3 (Rg16Float)
+  - Write to G-buffer target 3 (Rg32Float)
   - Store previous frame's VP matrix
 
-9.3. **History buffers**
+9.3. **History buffers** (infrastructure for future temporal upscaler)
   - `history_color: Rgba16Float` at display resolution
   - `history_metadata: Rg32Uint` at display resolution (packed depth + material)
   - Ping-pong: current frame writes to history for next frame
+  - Currently written but not read by spatial upscaler
 
-9.4. **Custom temporal upscaler**
+9.4. **Spatial upscaler**
   - Compute shader at display resolution
   - Bilinear sample current frame from internal resolution
-  - Reproject into history using motion vectors
-  - Multi-signal rejection:
-    - Material ID mismatch → reject
-    - Depth discontinuity → reject
-    - Normal discontinuity → reject
-    - Neighborhood color clipping (3×3 AABB in YCoCg) → clamp
-    - Motion magnitude → reduce trust
-  - Blend: `mix(current, clipped_history, blend_factor)`
-  - Write result to output + history
+  - No temporal accumulation, no history blending
+  - Bind group layout compatible with future temporal upgrade (history groups exist but unused)
 
 9.5. **Edge-aware sharpening**
   - 5×5 cross kernel weighted by material + depth similarity
   - Unsharp mask: `center + (center - blur) * strength`
   - Material ID boundaries create hard sharpening edges
 
-9.6. **DLSS integration**
+9.6. **DLSS integration** (DEFERRED — requires NVIDIA hardware for testing)
   - Add `dlss_wgpu` dependency
   - Detect DLSS availability at startup
   - Provide DLSS inputs: color, depth, motion vectors, exposure, jitter
   - Fall back to custom if unavailable
 
-9.7. **Upscale backend selection**
+9.7. **Upscale backend selection** (DEFERRED — only custom backend exists)
   - `UpscaleBackend::DLSS` vs `UpscaleBackend::Custom`
   - Auto-select at startup, overridable in config
   - Both produce same output format (display-res HDR)
@@ -591,11 +587,10 @@ is misdirected. The stone sphere's diffuse shading is correct. No G-buffer data 
   - Resize all internal-resolution textures on change
 
 ### Done when
-- Render at 1/2 resolution, upscale to 1080p with minimal quality loss
-- Temporal accumulation shows effective super-sampling over 16 frames
-- Material edges are sharp (no haloing)
-- Moving camera shows no significant ghosting
-- DLSS works on NVIDIA hardware (if available for testing)
+- Render at internal resolution, upscale to display resolution with acceptable quality
+- Spatial upscale shows no temporal wobble or flickering
+- Edge-aware sharpening preserves material boundaries
+- Infrastructure (jitter, motion vectors, history buffers) exists for future temporal upgrade
 
 ---
 
@@ -1581,7 +1576,7 @@ Shows which architecture decisions are implemented in each phase.
 | Point/spot lights + tiled culling | 7 |
 | Cookie textures | 7 |
 | Voxel cone tracing GI | 8 |
-| Temporal upscaling + DLSS | 9 |
+| Spatial upscaling (temporal deferred) | 9 |
 | Post-processing stack | 10 |
 | Volumetric fog + god rays | 11 |
 | Procedural clouds | 11 |

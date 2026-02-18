@@ -4,7 +4,9 @@
 
 ### Decision: Dual Upscaler Backend — DLSS (Preferred) + Custom (Fallback)
 
-**DLSS** is the preferred upscaler on NVIDIA hardware via the `dlss_wgpu` crate (proven wgpu integration). **Custom temporal upscaler** serves as the cross-platform fallback for AMD/Intel/other hardware, leveraging SDF-specific data (material IDs, SDF normals) that DLSS cannot use.
+**DLSS** is the preferred upscaler on NVIDIA hardware via the `dlss_wgpu` crate (proven wgpu integration). **Custom upscaler** serves as the cross-platform fallback for AMD/Intel/other hardware.
+
+> **Current status (Phase 9):** The custom upscaler uses **spatial-only bilinear upscaling** (no temporal accumulation, no jitter). Temporal super-resolution was prototyped (variance-clip TAA with Karis/Salvi/Playdead techniques) but deferred because the SDF ray marcher's per-frame variation is fundamentally larger than rasterized games — jitter shifts the entire hit point each frame, causing shadows, GI, AO, and normals to vary, which simple TAA cannot absorb without visible wobble. A production-quality temporal upscaler for SDF content requires FSR2-style per-signal filtering (separate temporal filters for shadows/GI/AO before compositing) or Lanczos upsampling with a lock mechanism. This is a future upgrade path, not a Phase 9 requirement. The spatial bilinear upscaler at 1.33x (960x540 → 1280x720) provides acceptable quality with zero temporal artifacts.
 
 ```rust
 enum UpscaleBackend {
