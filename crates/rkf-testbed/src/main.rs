@@ -12,6 +12,7 @@ use winit::window::{CursorGrabMode, Window, WindowAttributes, WindowId};
 
 use rkf_core::aabb::Aabb;
 use rkf_core::brick_pool::Pool;
+use rkf_core::clipmap::{ClipmapConfig, ClipmapGridSet, ClipmapLevel};
 use rkf_core::constants::RESOLUTION_TIERS;
 use rkf_core::populate::populate_grid_with_material;
 use rkf_core::sdf::{box_sdf, capsule_sdf, sphere_sdf};
@@ -62,7 +63,8 @@ use automation::{SharedState, TestbedAutomationApi};
 // Test scene creation
 // ---------------------------------------------------------------------------
 
-/// Resolution tier for the test scene (Tier 1 = 2cm voxels).
+/// Resolution tier for single-grid test scenes (Tier 1 = 2cm voxels).
+#[allow(dead_code)]
 const TEST_TIER: usize = 1;
 
 /// Create a lighting showcase scene with multiple objects and materials.
@@ -77,6 +79,7 @@ const TEST_TIER: usize = 1;
 /// - Front-center sphere:  material 1 (stone)
 ///
 /// Returns `(BrickPool, SparseGrid, Aabb)`.
+#[allow(dead_code)]
 fn create_test_scene() -> (BrickPool, SparseGrid, Aabb) {
     // Scene AABB — larger to accommodate ground plane and multiple objects
     let aabb = Aabb::new(Vec3::new(-3.0, -0.6, -3.0), Vec3::new(3.0, 1.5, 3.0));
@@ -167,6 +170,7 @@ fn create_test_scene() -> (BrickPool, SparseGrid, Aabb) {
 /// - Small emissive sphere for secondary indirect illumination
 ///
 /// Returns `(BrickPool, SparseGrid, Aabb)`.
+#[allow(dead_code)]
 fn create_cornell_box() -> (BrickPool, SparseGrid, Aabb) {
     // Cornell box AABB — 2m cube centered at origin
     let aabb = Aabb::new(Vec3::new(-1.2, -1.2, -1.2), Vec3::new(1.2, 1.2, 1.2));
@@ -271,6 +275,7 @@ fn create_cornell_box() -> (BrickPool, SparseGrid, Aabb) {
 ///
 /// Mix of directional, point, and spot lights at various positions and colors.
 /// Some cast shadows, some don't, to exercise the shadow budget system.
+#[allow(dead_code)]
 fn create_showcase_lights() -> Vec<Light> {
     vec![
         // --- Directional lights (2) ---
@@ -362,6 +367,139 @@ fn create_cornell_box_lights() -> Vec<Light> {
     ]
 }
 
+/// Create a multi-LOD scene demonstrating clipmap rendering.
+///
+/// Two LOD levels:
+/// - Level 0: 2cm voxels (tier 1), radius 2m — near-detail objects + ground
+/// - Level 1: 8cm voxels (tier 2), radius 8m — coarse terrain extending further
+///
+/// Camera at origin sees detailed objects nearby and coarser ground at distance.
+/// Distant pillars at the coarser level demonstrate LOD transition.
+///
+/// Returns `(BrickPool, ClipmapGridSet)`.
+fn create_multi_lod_scene() -> (BrickPool, ClipmapGridSet) {
+    let config = ClipmapConfig::new(vec![
+        ClipmapLevel { voxel_size: 0.02, radius: 2.0 },
+        ClipmapLevel { voxel_size: 0.08, radius: 8.0 },
+    ]);
+    let max_dim = 64;
+    let mut grid_set = ClipmapGridSet::from_config(config.clone(), max_dim);
+    let mut pool: BrickPool = Pool::new(32768);
+
+    let mut total_bricks = 0u32;
+
+    // Tier-to-level mapping: level 0 → tier 1 (2cm), level 1 → tier 2 (8cm)
+    let tiers = [1usize, 2usize];
+
+    for level_idx in 0..config.num_levels() {
+        let level = config.level(level_idx);
+        let tier = tiers[level_idx];
+        let brick_ext = RESOLUTION_TIERS[tier].brick_extent;
+        let dims = grid_set.grid(level_idx).dimensions();
+        let half = level.radius;
+
+        // AABB aligned to grid origin (centered on camera at origin)
+        let aabb = Aabb::new(
+            Vec3::splat(-half),
+            Vec3::new(
+                -half + dims.x as f32 * brick_ext,
+                -half + dims.y as f32 * brick_ext,
+                -half + dims.z as f32 * brick_ext,
+            ),
+        );
+
+        let grid = grid_set.grid_mut(level_idx);
+
+        // Ground plane at y = -0.5, scaled to level extent
+        let ground_extent = half * 0.9;
+        let ground_half = Vec3::new(ground_extent, 0.15, ground_extent);
+        total_bricks += populate_grid_with_material(
+            &mut pool,
+            grid,
+            |p| box_sdf(ground_half, p - Vec3::new(0.0, -0.5, 0.0)),
+            tier,
+            &aabb,
+            1,
+        )
+        .unwrap_or_else(|e| panic!("ground level {level_idx}: {e}"));
+
+        if level_idx == 0 {
+            // Near-detail objects only at finest level
+
+            // Center metal sphere
+            total_bricks += populate_grid_with_material(
+                &mut pool,
+                grid,
+                |p| sphere_sdf(Vec3::ZERO, 0.35, p),
+                tier,
+                &aabb,
+                2,
+            )
+            .expect("center sphere");
+
+            // Left emissive capsule
+            total_bricks += populate_grid_with_material(
+                &mut pool,
+                grid,
+                |p| {
+                    capsule_sdf(
+                        Vec3::new(-0.7, -0.2, 0.0),
+                        Vec3::new(-0.7, 0.3, 0.0),
+                        0.12,
+                        p,
+                    )
+                },
+                tier,
+                &aabb,
+                4,
+            )
+            .expect("left capsule");
+
+            // Right wooden box
+            total_bricks += populate_grid_with_material(
+                &mut pool,
+                grid,
+                |p| box_sdf(Vec3::splat(0.22), p - Vec3::new(0.7, 0.0, 0.0)),
+                tier,
+                &aabb,
+                3,
+            )
+            .expect("right box");
+        }
+
+        if level_idx == 1 {
+            // Distant pillars only at coarser level
+            for &x in &[-5.0f32, 5.0] {
+                for &z in &[-5.0f32, 5.0] {
+                    total_bricks += populate_grid_with_material(
+                        &mut pool,
+                        grid,
+                        |p| {
+                            capsule_sdf(
+                                Vec3::new(x, -0.5, z),
+                                Vec3::new(x, 1.0, z),
+                                0.3,
+                                p,
+                            )
+                        },
+                        tier,
+                        &aabb,
+                        1,
+                    )
+                    .expect("distant pillar");
+                }
+            }
+        }
+    }
+
+    log::info!(
+        "Multi-LOD scene: {total_bricks} bricks across {} levels",
+        config.num_levels(),
+    );
+
+    (pool, grid_set)
+}
+
 // ---------------------------------------------------------------------------
 // GPU state
 // ---------------------------------------------------------------------------
@@ -446,8 +584,8 @@ impl GpuState {
             resolution_config.internal_width(), resolution_config.internal_height(),
             resolution_config.quality.name());
 
-        // Create Cornell box scene for GI validation
-        let (pool, grid, aabb) = create_cornell_box();
+        // Create multi-LOD scene for clipmap validation
+        let (pool, grid_set) = create_multi_lod_scene();
 
         // Update shared state with pool info
         {
@@ -456,27 +594,29 @@ impl GpuState {
             state.pool_allocated = pool.allocated_count() as u64;
         }
 
-        // Camera positioned to look into the Cornell box
-        let mut camera = Camera::new(Vec3::new(0.0, 0.0, 1.8));
+        // Camera positioned to overlook the multi-LOD terrain
+        let mut camera = Camera::new(Vec3::new(0.0, 0.5, 3.0));
         camera.fov_degrees = 60.0;
 
         let prev_vp = camera.view_projection(INTERNAL_WIDTH, INTERNAL_HEIGHT).to_cols_array_2d();
         let camera_uniforms = camera.uniforms(INTERNAL_WIDTH, INTERNAL_HEIGHT, 0, prev_vp);
         let camera_bytes = bytemuck::bytes_of(&camera_uniforms);
 
-        let dims = grid.dimensions();
-        let res = &RESOLUTION_TIERS[TEST_TIER];
+        // Use level 0's grid for GpuScene (single-grid occupancy/slot; ignored when clipmap active)
+        let level0 = grid_set.config().level(0);
+        let level0_grid = grid_set.grid(0);
+        let level0_dims = level0_grid.dimensions();
         let scene_uniforms = SceneUniforms {
-            grid_dims: [dims.x, dims.y, dims.z, 0],
-            grid_origin: [aabb.min.x, aabb.min.y, aabb.min.z, res.brick_extent],
-            params: [res.voxel_size, 0.0, 0.0, 0.0],
+            grid_dims: [level0_dims.x, level0_dims.y, level0_dims.z, 0],
+            grid_origin: [-level0.radius, -level0.radius, -level0.radius, level0.brick_extent()],
+            params: [level0.voxel_size, 0.0, 0.0, 0.0],
         };
 
-        // Upload scene to GPU
+        // Upload scene to GPU (brick pool shared; single-grid data used as fallback)
         let scene = GpuScene::upload(
             &context.device,
             &pool,
-            &grid,
+            level0_grid,
             camera_bytes,
             &scene_uniforms,
         );
@@ -488,9 +628,9 @@ impl GpuState {
         // Create G-buffer
         let gbuffer = GBuffer::new(&context.device, INTERNAL_WIDTH, INTERNAL_HEIGHT);
 
-        // Create Cornell box lights — simple overhead + dim fill
+        // Lights for the multi-LOD scene — overhead + fill
         let lights = create_cornell_box_lights();
-        log::info!("Cornell box: {} lights", lights.len());
+        log::info!("Multi-LOD scene: {} lights", lights.len());
         let light_buffer = LightBuffer::upload(&context.device, &lights);
 
         // Create tile cull pass
@@ -522,8 +662,8 @@ impl GpuState {
             INTERNAL_HEIGHT,
         );
 
-        // Create empty clipmap (no LOD levels — single-grid fallback)
-        let clipmap = ClipmapGpuData::empty(&context.device);
+        // Upload clipmap LOD data (enables multi-level ray marching)
+        let clipmap = ClipmapGpuData::upload(&context.device, &grid_set, [0.0, 0.0, 0.0]);
 
         // Create core render passes
         let ray_march = RayMarchPass::new(&context.device, &scene, &gbuffer, &clipmap);
@@ -681,9 +821,10 @@ impl GpuState {
         }
 
         log::info!(
-            "ECS scene: {} entities (1 camera + {} lights)",
+            "ECS: {} entities (1 camera + {} lights), clipmap {} levels",
             scene_ecs.entity_count(),
-            lights.len()
+            lights.len(),
+            grid_set.config().num_levels(),
         );
 
         // ── Engine configuration ──────────────────────────────────────────────

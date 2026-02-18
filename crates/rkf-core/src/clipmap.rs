@@ -385,4 +385,67 @@ mod tests {
         grid.set_cell_state(0, 0, 0, crate::cell_state::CellState::Surface);
         assert_eq!(set.grid(0).cell_state(0, 0, 0), crate::cell_state::CellState::Surface);
     }
+
+    #[test]
+    fn multi_level_population() {
+        use crate::aabb::Aabb;
+        use crate::brick_pool::Pool;
+        use crate::constants::RESOLUTION_TIERS;
+        use crate::populate::populate_grid_with_material;
+        use crate::sdf::sphere_sdf;
+        use glam::Vec3;
+
+        // 2-level clipmap: level 0 → tier 1 (2cm), level 1 → tier 2 (8cm)
+        let config = ClipmapConfig::new(vec![
+            ClipmapLevel { voxel_size: 0.02, radius: 2.0 },
+            ClipmapLevel { voxel_size: 0.08, radius: 8.0 },
+        ]);
+        let mut grid_set = ClipmapGridSet::from_config(config.clone(), 64);
+        let mut pool: crate::brick_pool::BrickPool = Pool::new(32768);
+
+        let tiers = [1usize, 2usize];
+        let mut level_bricks = vec![];
+
+        for level_idx in 0..config.num_levels() {
+            let level = config.level(level_idx);
+            let tier = tiers[level_idx];
+            let brick_ext = RESOLUTION_TIERS[tier].brick_extent;
+            let dims = grid_set.grid(level_idx).dimensions();
+            let half = level.radius;
+            let aabb = Aabb::new(
+                Vec3::splat(-half),
+                Vec3::new(
+                    -half + dims.x as f32 * brick_ext,
+                    -half + dims.y as f32 * brick_ext,
+                    -half + dims.z as f32 * brick_ext,
+                ),
+            );
+
+            let grid = grid_set.grid_mut(level_idx);
+            let count = populate_grid_with_material(
+                &mut pool,
+                grid,
+                |p| sphere_sdf(Vec3::ZERO, 0.5, p),
+                tier,
+                &aabb,
+                1,
+            )
+            .unwrap();
+            level_bricks.push(count);
+        }
+
+        // Both levels should have bricks
+        assert!(level_bricks[0] > 0, "level 0 should have bricks");
+        assert!(level_bricks[1] > 0, "level 1 should have bricks");
+        // Finer level should have more bricks for the same object
+        assert!(
+            level_bricks[0] > level_bricks[1],
+            "finer level should have more bricks: {} vs {}",
+            level_bricks[0],
+            level_bricks[1]
+        );
+        // All bricks came from the shared pool
+        let total: u32 = level_bricks.iter().sum();
+        assert_eq!(pool.allocated_count(), total);
+    }
 }
