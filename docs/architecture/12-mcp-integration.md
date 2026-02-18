@@ -10,23 +10,40 @@ RKIField is designed to be operated by LLMs and AI agents as a first-class use c
 
 A standalone binary (`rkf-mcp`) implements an MCP server that connects to any running RKIField process (editor, game, or testbed). Tools are registered dynamically via a discovery system — adding a new tool requires implementing a trait and registering it, not modifying the MCP server itself.
 
+**Two-hop architecture:** The AI agent (e.g. Claude Code) spawns `rkf-mcp` as a child process and talks to it over **stdio** (MCP protocol). `rkf-mcp` then connects to the engine over a **Unix socket** (JSON-RPC). These are two separate links — the agent never talks directly to the engine.
+
 ```
-┌─────────────────┐       IPC (Unix socket / named pipe)       ┌──────────────────┐
-│  AI Agent        │◄─────────────────────────────────────────►│  rkf-mcp server   │
-│  (Claude, etc.)  │          MCP Protocol (JSON-RPC)          │                    │
-└─────────────────┘                                            │  ┌──────────────┐ │
-                                                               │  │ Tool Registry │ │
-                                                               │  └──────┬───────┘ │
-                                                               │         │         │
-                                                               └─────────┼─────────┘
-                                                                         │ Automation API
-                                                                         ▼
-                                                               ┌──────────────────┐
-                                                               │  RKIField Engine  │
-                                                               │  (editor / game / │
-                                                               │   testbed)        │
-                                                               └──────────────────┘
+┌─────────────────┐     stdio (MCP JSON-RPC)     ┌──────────────────┐
+│  AI Agent        │◄───────────────────────────►│  rkf-mcp server   │
+│  (Claude Code)   │   spawned as child process   │                    │
+└─────────────────┘                               │  ┌──────────────┐ │
+                                                  │  │ Tool Registry │ │
+        .mcp.json configures this ───────────►    │  └──────┬───────┘ │
+        (cargo run -p rkf-mcp)                    │         │         │
+                                                  └─────────┼─────────┘
+                                                            │ IPC bridge
+                                                            │ (Unix socket: /tmp/rkifield-{pid}.sock)
+                                                            │ JSON-RPC "tools/call" requests
+                                                            ▼
+                                                  ┌──────────────────┐
+                                                  │  RKIField Engine  │
+                                                  │  (editor / game / │
+                                                  │   testbed)        │
+                                                  │                    │
+                                                  │  IPC server thread │
+                                                  │  + ToolRegistry    │
+                                                  │  + AutomationApi   │
+                                                  └──────────────────┘
 ```
+
+**Connection lifecycle:**
+1. Agent spawns `rkf-mcp` via `.mcp.json` — starts with `StubAutomationApi` (all tools return placeholder data)
+2. Engine starts separately — opens IPC listener at `/tmp/rkifield-{pid}.sock`
+3. Agent calls the `connect` tool — `rkf-mcp` discovers the socket, creates a `BridgeAutomationApi`, swaps it in
+4. Tool calls now proxy through the bridge: `rkf-mcp` tool handler → `BridgeAutomationApi` → IPC → engine's tool handler → `AutomationApi` → real data
+5. Agent calls `disconnect` — swaps back to `StubAutomationApi`
+
+**Both processes have a `ToolRegistry`:** `rkf-mcp` registers observation tools + meta tools (connect/disconnect/status). The engine also registers observation tools backed by its `AutomationApi` implementation. The `BridgeAutomationApi` bridges them by sending `tools/call` JSON-RPC requests over IPC.
 
 **Two deployment modes:**
 
@@ -154,14 +171,7 @@ The MCP server's `tools/list` response is generated from the registry. No MCP se
 
 ### Decision: Communication — Local IPC with JSON-RPC
 
-```
-Connection lifecycle:
-  1. Engine starts → opens IPC listener (Unix socket: /tmp/rkifield-{pid}.sock)
-  2. rkf-mcp connects to the socket
-  3. MCP protocol over JSON-RPC 2.0
-  4. Engine exposes the AutomationApi through the IPC channel
-  5. rkf-mcp translates MCP tool calls → AutomationApi calls → MCP responses
-```
+The engine-to-MCP link uses Unix domain sockets with newline-delimited JSON-RPC 2.0. The agent-to-MCP link uses stdio with the same JSON-RPC protocol.
 
 **Why IPC, not HTTP:**
 - Lower latency (no TCP overhead for local communication)
@@ -192,18 +202,18 @@ struct AutomationBridge {
 
 ### Decision: Testbed and CI Integration
 
-The `rkf-testbed` binary starts with MCP enabled by default. This allows agents to:
-1. Launch testbed with a specific scene/test configuration
-2. Connect via MCP
+The `rkf-testbed` binary spawns an IPC server on startup (background thread with its own tokio runtime). The socket appears at `/tmp/rkifield-{pid}.sock` and is cleaned up on exit. This allows agents to:
+1. Launch testbed — IPC server starts automatically
+2. Call the `connect` tool in `rkf-mcp` — auto-discovers the socket
 3. Take screenshots for visual regression
 4. Query render stats for performance regression
 5. Inspect scene graph for correctness validation
 
 ```bash
 # Agent-driven testing workflow
-rkf-testbed --scene test_scene.rkscene --mcp &
-sleep 1
-rkf-mcp --mode debug --connect /tmp/rkifield-$(pgrep rkf-testbed).sock
+cargo run -p rkf-testbed &     # starts engine + IPC server
+# In Claude Code, rkf-mcp is already running (spawned via .mcp.json)
+# Agent calls: connect → screenshot → render_stats → camera_get → etc.
 ```
 
 **CI pipeline integration:**
