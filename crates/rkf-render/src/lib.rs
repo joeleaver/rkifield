@@ -80,6 +80,8 @@ pub mod vol_temporal;
 pub mod vol_upscale;
 /// Volumetric compositing compute pass.
 pub mod vol_composite;
+/// God ray configuration and parameter tuning.
+pub mod god_rays;
 
 pub use camera::{Camera, CameraUniforms};
 pub use context::RenderContext;
@@ -114,3 +116,4 @@ pub use fog_volume::{GpuFogVolume, FogVolumeHeader, FogVolumeBuffer, MAX_FOG_VOL
 pub use vol_temporal::{VolTemporalPass, VolTemporalParams, DEFAULT_VOL_TEMPORAL_BLEND, DEFAULT_VOL_DEPTH_THRESHOLD};
 pub use vol_upscale::{VolUpscalePass, VolUpscaleParams, DEFAULT_DEPTH_SIGMA, VOL_UPSCALE_FORMAT};
 pub use vol_composite::{VolCompositePass, VolCompositeParams, VOL_COMPOSITE_FORMAT};
+pub use god_rays::{GodRaySettings, DEFAULT_GOD_RAY_DUST, DEFAULT_GOD_RAY_G, MIN_GOD_RAY_DUST, MAX_GOD_RAY_DUST};
