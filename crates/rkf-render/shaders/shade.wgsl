@@ -449,6 +449,62 @@ fn compute_indirect(pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
     return result * GI_STRENGTH / total_weight;
 }
 
+// ---------- Material Blending ----------
+
+struct ResolvedMaterial {
+    albedo: vec3<f32>,
+    roughness: f32,
+    metallic: f32,
+    emission: vec3<f32>,
+    emission_strength: f32,
+    subsurface: f32,
+    subsurface_color: vec3<f32>,
+    opacity: f32,
+    ior: f32,
+    noise_scale: f32,
+    noise_strength: f32,
+    noise_channels: u32,
+}
+
+fn resolve_material_from(m: Material) -> ResolvedMaterial {
+    return ResolvedMaterial(
+        vec3<f32>(m.albedo_r, m.albedo_g, m.albedo_b),
+        m.roughness,
+        m.metallic,
+        vec3<f32>(m.emission_r, m.emission_g, m.emission_b),
+        m.emission_strength,
+        m.subsurface,
+        vec3<f32>(m.subsurface_r, m.subsurface_g, m.subsurface_b),
+        m.opacity,
+        m.ior,
+        m.noise_scale,
+        m.noise_strength,
+        m.noise_channels,
+    );
+}
+
+fn blend_materials(primary_id: u32, secondary_id: u32, weight: f32) -> ResolvedMaterial {
+    let a = resolve_material_from(materials[primary_id]);
+    if weight <= 0.0 {
+        return a;
+    }
+    let b = resolve_material_from(materials[secondary_id]);
+    return ResolvedMaterial(
+        mix(a.albedo, b.albedo, weight),
+        mix(a.roughness, b.roughness, weight),
+        mix(a.metallic, b.metallic, weight),
+        mix(a.emission, b.emission, weight),
+        mix(a.emission_strength, b.emission_strength, weight),
+        mix(a.subsurface, b.subsurface, weight),
+        mix(a.subsurface_color, b.subsurface_color, weight),
+        mix(a.opacity, b.opacity, weight),
+        mix(a.ior, b.ior, weight),
+        mix(a.noise_scale, b.noise_scale, weight),
+        mix(a.noise_strength, b.noise_strength, weight),
+        select(a.noise_channels, b.noise_channels, weight > 0.5),
+    );
+}
+
 // ---------- Entry point ----------
 
 @compute @workgroup_size(8, 8, 1)
@@ -480,13 +536,15 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
 
     let packed_mat = textureLoad(gbuf_material, coord, 0).r;
     let material_id = packed_mat & 0xFFFFu;
+    let secondary_id = (packed_mat >> 16u) & 0xFFu;
+    let voxel_flags = (packed_mat >> 24u) & 0xFFu;
 
-    // Look up material
-    let mat = materials[material_id];
-    let albedo = vec3<f32>(mat.albedo_r, mat.albedo_g, mat.albedo_b);
-    let roughness = clamp(mat.roughness, 0.04, 1.0);
-    let metallic = mat.metallic;
-    let emission = vec3<f32>(mat.emission_r, mat.emission_g, mat.emission_b) * mat.emission_strength;
+    // Resolve material with blending
+    let resolved = blend_materials(material_id, secondary_id, blend_weight);
+    let albedo = resolved.albedo;
+    let roughness = clamp(resolved.roughness, 0.04, 1.0);
+    let metallic = resolved.metallic;
+    let emission = resolved.emission * resolved.emission_strength;
 
     // F0: reflectance at normal incidence
     // Dielectric: 0.04, Metal: albedo color
@@ -497,7 +555,7 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
     let n_dot_v = max(dot(normal, view_dir), 0.001);
 
     // SSS color lookup
-    let sss_color = vec3<f32>(mat.subsurface_r, mat.subsurface_g, mat.subsurface_b);
+    let sss_color = resolved.subsurface_color;
 
     // Tile-based light iteration
     let tile_x = pixel.x / 16u;
@@ -552,7 +610,7 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
             total_specular += specular_brdf * radiance * n_dot_l * shadow;
 
             // SSS for this light
-            sss_total += sss_contribution(world_pos, normal, light_dir, mat.subsurface, sss_color)
+            sss_total += sss_contribution(world_pos, normal, light_dir, resolved.subsurface, sss_color)
                          * radiance * shadow;
         } else if light.light_type == LIGHT_TYPE_POINT {
             let light_pos = vec3<f32>(light.pos_x, light.pos_y, light.pos_z);
@@ -594,7 +652,7 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
                 total_specular += specular_brdf * attenuated_radiance * n_dot_l * shadow;
 
                 // SSS for this light
-                sss_total += sss_contribution(world_pos, normal, light_dir, mat.subsurface, sss_color)
+                sss_total += sss_contribution(world_pos, normal, light_dir, resolved.subsurface, sss_color)
                              * attenuated_radiance * shadow;
             }
         } else if light.light_type == LIGHT_TYPE_SPOT {
@@ -644,7 +702,7 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
                 total_specular += specular_brdf * attenuated_radiance * n_dot_l * shadow;
 
                 // SSS for this light
-                sss_total += sss_contribution(world_pos, normal, light_dir, mat.subsurface, sss_color)
+                sss_total += sss_contribution(world_pos, normal, light_dir, resolved.subsurface, sss_color)
                              * attenuated_radiance * shadow;
             }
         }

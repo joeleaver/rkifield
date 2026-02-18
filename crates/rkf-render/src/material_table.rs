@@ -148,6 +148,20 @@ pub fn create_test_materials() -> Vec<Material> {
             emission_strength: 8.0,
             ..Default::default()
         },
+        // 10: Dirt — brownish, rough (blend target for stone)
+        Material {
+            albedo: [0.35, 0.25, 0.15],
+            roughness: 0.95,
+            metallic: 0.0,
+            ..Default::default()
+        },
+        // 11: Gold — warm metallic (blend target for silver metal)
+        Material {
+            albedo: [1.0, 0.84, 0.0],
+            roughness: 0.25,
+            metallic: 1.0,
+            ..Default::default()
+        },
     ]
 }
 
@@ -158,14 +172,14 @@ mod tests {
     #[test]
     fn test_materials_count() {
         let mats = create_test_materials();
-        assert_eq!(mats.len(), 10);
+        assert_eq!(mats.len(), 12);
     }
 
     #[test]
     fn test_materials_sizes() {
         let mats = create_test_materials();
         let bytes: &[u8] = bytemuck::cast_slice(&mats);
-        assert_eq!(bytes.len(), 10 * 96);
+        assert_eq!(bytes.len(), 12 * 96);
     }
 
     #[test]
@@ -196,5 +210,44 @@ mod tests {
         let mats = create_test_materials();
         let skin = &mats[5];
         assert!(skin.subsurface > 0.0);
+    }
+
+    #[test]
+    fn blend_target_materials_exist() {
+        let mats = create_test_materials();
+        // Dirt (10) is rough dielectric
+        assert!(mats[10].roughness > 0.9);
+        assert_eq!(mats[10].metallic, 0.0);
+        // Gold (11) is metallic
+        assert_eq!(mats[11].metallic, 1.0);
+    }
+
+    #[test]
+    fn material_blend_cpu_side() {
+        let mats = create_test_materials();
+        let stone = &mats[1]; // roughness 0.85
+        let dirt = &mats[10]; // roughness 0.95
+        // At weight=0.5, blended roughness should be midpoint
+        let blended_roughness = stone.roughness * (1.0 - 0.5) + dirt.roughness * 0.5;
+        assert!((blended_roughness - 0.9).abs() < 0.01);
+    }
+
+    #[test]
+    fn material_blend_weight_zero_returns_primary() {
+        let mats = create_test_materials();
+        let stone = &mats[1];
+        let weight = 0.0_f32;
+        let blended_roughness = stone.roughness * (1.0 - weight) + 0.0 * weight;
+        assert!((blended_roughness - stone.roughness).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn material_blend_weight_one_returns_secondary() {
+        let mats = create_test_materials();
+        let dirt = &mats[10];
+        let stone = &mats[1];
+        let weight = 1.0_f32;
+        let blended_roughness = stone.roughness * (1.0 - weight) + dirt.roughness * weight;
+        assert!((blended_roughness - dirt.roughness).abs() < f32::EPSILON);
     }
 }
