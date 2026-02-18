@@ -87,6 +87,10 @@ const HIT_EPSILON: f32 = 0.001;
 const MIN_STEP: f32 = 0.0005;
 const EMPTY_SLOT: u32 = 0xFFFFFFFFu;
 
+// LOD transition blending: fraction of level radius used as transition band.
+// Normals are blended between adjacent levels within this band.
+const LOD_BLEND_FRACTION: f32 = 0.1;
+
 // CellState values (2-bit, matching Rust CellState enum)
 const CELL_EMPTY: u32      = 0u;
 const CELL_SURFACE: u32    = 1u;
@@ -702,6 +706,35 @@ fn compute_normal_finest(pos: vec3<f32>, hit_level: u32) -> vec3<f32> {
     return normalize(vec3<f32>(nx, ny, nz));
 }
 
+/// Compute normal with LOD transition blending near level boundaries.
+///
+/// Near a clipmap level boundary (within LOD_BLEND_FRACTION of the radius),
+/// blends between the finest-available normal and the next coarser level's
+/// normal. This smooths visual discontinuities at LOD transitions.
+/// Outside the transition band, returns the finest-available normal.
+fn compute_normal_blended(pos: vec3<f32>, hit_level: u32, t: f32) -> vec3<f32> {
+    let n_fine = compute_normal_finest(pos, hit_level);
+
+    // No blending possible if we're at the coarsest level.
+    if hit_level + 1u >= clipmap.num_levels {
+        return n_fine;
+    }
+
+    let radius = cm_radius(hit_level);
+    let blend_width = radius * LOD_BLEND_FRACTION;
+    let dist_to_boundary = radius - t;
+
+    // Outside transition band — use fine normal only.
+    if dist_to_boundary > blend_width || dist_to_boundary < 0.0 {
+        return n_fine;
+    }
+
+    // In transition zone: blend=1 at inner edge (fine), blend=0 at boundary (coarse).
+    let blend = clamp(dist_to_boundary / blend_width, 0.0, 1.0);
+    let n_coarse = compute_normal_cm(pos, hit_level + 1u);
+    return normalize(mix(n_coarse, n_fine, blend));
+}
+
 // ---------- Entry point ----------
 
 @compute @workgroup_size(8, 8, 1)
@@ -736,12 +769,12 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
         let hit_pos = ray_origin + ray_dir * result.t;
 
         // Compute normal using the appropriate path.
-        // compute_normal_finest checks all levels for the finest data at each
-        // sample point, producing accurate normals even when the hit came from
-        // a coarser fallback level.
+        // compute_normal_blended smooths LOD transitions by blending normals
+        // near level boundaries. Falls back to compute_normal_finest away from
+        // boundaries, which checks all levels for the finest data.
         var normal: vec3<f32>;
         if clipmap.num_levels > 0u {
-            normal = compute_normal_finest(hit_pos, result.level);
+            normal = compute_normal_blended(hit_pos, result.level, result.t);
         } else {
             normal = compute_normal(hit_pos);
         }
