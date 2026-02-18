@@ -24,12 +24,21 @@ pub mod gpu_scene;
 pub mod blit;
 /// G-buffer textures for deferred shading.
 pub mod gbuffer;
+/// GPU material table for PBR shading.
+pub mod material_table;
 /// Ray march compute pass.
 pub mod ray_march;
+/// PBR shading compute pass.
+pub mod shading;
+/// Tone mapping compute pass (HDR → LDR).
+pub mod tone_map;
 
 pub use camera::{Camera, CameraUniforms};
 pub use context::RenderContext;
 pub use gbuffer::GBuffer;
 pub use gpu_scene::{GpuScene, SceneUniforms};
+pub use material_table::MaterialTable;
 pub use blit::BlitPass;
 pub use ray_march::RayMarchPass;
+pub use shading::ShadingPass;
+pub use tone_map::ToneMapPass;

@@ -13,15 +13,19 @@ use winit::window::{CursorGrabMode, Window, WindowAttributes, WindowId};
 use rkf_core::aabb::Aabb;
 use rkf_core::brick_pool::Pool;
 use rkf_core::constants::RESOLUTION_TIERS;
-use rkf_core::populate::populate_grid;
+use rkf_core::populate::populate_grid_with_material;
 use rkf_core::sdf::{box_sdf, capsule_sdf, sphere_sdf};
 use rkf_core::sparse_grid::SparseGrid;
 use rkf_core::BrickPool;
 
 use rkf_render::blit::BlitPass;
 use rkf_render::camera::Camera;
+use rkf_render::gbuffer::GBuffer;
 use rkf_render::gpu_scene::{GpuScene, SceneUniforms};
+use rkf_render::material_table::{self, MaterialTable};
 use rkf_render::ray_march::{RayMarchPass, INTERNAL_HEIGHT, INTERNAL_WIDTH};
+use rkf_render::shading::ShadingPass;
+use rkf_render::tone_map::ToneMapPass;
 use rkf_render::RenderContext;
 
 mod automation;
@@ -34,7 +38,12 @@ use automation::{SharedState, TestbedAutomationApi};
 /// Resolution tier for the test scene (Tier 1 = 2cm voxels).
 const TEST_TIER: usize = 1;
 
-/// Create a multi-object test scene: sphere + box + capsule.
+/// Create a multi-object test scene with per-object materials.
+///
+/// Objects and their material IDs:
+/// - Sphere (center):  material 1 (stone)
+/// - Box (right):      material 2 (metal)
+/// - Capsule (left):   material 4 (emissive)
 ///
 /// Returns `(BrickPool, SparseGrid, Aabb)`.
 fn create_test_scene() -> (BrickPool, SparseGrid, Aabb) {
@@ -63,23 +72,56 @@ fn create_test_scene() -> (BrickPool, SparseGrid, Aabb) {
     let mut pool: BrickPool = Pool::new(4096);
     let mut grid = SparseGrid::new(dims);
 
-    // SDF union of all three objects
-    let count = populate_grid(
+    // Populate each object with its own material ID.
+    // We use the union SDF for cell classification but assign per-object materials
+    // by populating each object separately. Since objects don't overlap, this works.
+    // Note: populate_grid_with_material will overwrite cells, so we do it once with
+    // the full union SDF but per-object material assignment.
+
+    // Actually, the simplest correct approach: populate with the union SDF but use
+    // a closure that returns (distance, material_id). Since populate_grid takes
+    // a single SDF function and material_id, we need a different approach.
+    //
+    // Best approach: populate each object individually. Since the grid cells won't
+    // overlap (objects are spatially separated), each populate call fills different cells.
+
+    // Sphere → material 1 (stone)
+    let count1 = populate_grid_with_material(
         &mut pool,
         &mut grid,
-        |p| {
-            let s = sphere_sdf(sphere_center, sphere_radius, p);
-            let b = box_sdf(box_half, p - box_center);
-            let c = capsule_sdf(capsule_a, capsule_b, capsule_radius, p);
-            s.min(b).min(c)
-        },
+        |p| sphere_sdf(sphere_center, sphere_radius, p),
         TEST_TIER,
         &aabb,
+        1,
     )
-    .expect("failed to populate grid");
+    .expect("failed to populate sphere");
 
+    // Box → material 2 (metal)
+    let count2 = populate_grid_with_material(
+        &mut pool,
+        &mut grid,
+        |p| box_sdf(box_half, p - box_center),
+        TEST_TIER,
+        &aabb,
+        2,
+    )
+    .expect("failed to populate box");
+
+    // Capsule → material 4 (emissive)
+    let count3 = populate_grid_with_material(
+        &mut pool,
+        &mut grid,
+        |p| capsule_sdf(capsule_a, capsule_b, capsule_radius, p),
+        TEST_TIER,
+        &aabb,
+        4,
+    )
+    .expect("failed to populate capsule");
+
+    let total = count1 + count2 + count3;
     log::info!(
-        "Test scene: {count} bricks, grid {}x{}x{}, tier {TEST_TIER}",
+        "Test scene: {total} bricks ({count1} sphere + {count2} box + {count3} capsule), \
+         grid {}x{}x{}, tier {TEST_TIER}",
         dims.x,
         dims.y,
         dims.z
@@ -100,7 +142,11 @@ struct GpuState {
     width: u32,
     height: u32,
     scene: GpuScene,
+    gbuffer: GBuffer,
+    material_table: MaterialTable,
     ray_march: RayMarchPass,
+    shading: ShadingPass,
+    tone_map: ToneMapPass,
     blit: BlitPass,
     camera: Camera,
     staging_buffer: wgpu::Buffer,
@@ -146,7 +192,7 @@ impl GpuState {
             params: [res.voxel_size, 0.0, 0.0, 0.0],
         };
 
-        // Upload to GPU
+        // Upload scene to GPU
         let scene = GpuScene::upload(
             &context.device,
             &pool,
@@ -155,13 +201,31 @@ impl GpuState {
             &scene_uniforms,
         );
 
+        // Upload material table
+        let materials = material_table::create_test_materials();
+        let material_table = MaterialTable::upload(&context.device, &materials);
+
+        // Create G-buffer
+        let gbuffer = GBuffer::new(&context.device, INTERNAL_WIDTH, INTERNAL_HEIGHT);
+
         // Create render passes
-        let ray_march =
-            RayMarchPass::new(&context.device, &scene, INTERNAL_WIDTH, INTERNAL_HEIGHT);
-        let blit = BlitPass::new(&context.device, &ray_march.output_view, surface_format);
+        let ray_march = RayMarchPass::new(&context.device, &scene, &gbuffer);
+        let shading = ShadingPass::new(
+            &context.device,
+            &gbuffer,
+            &material_table,
+            INTERNAL_WIDTH,
+            INTERNAL_HEIGHT,
+        );
+        let tone_map = ToneMapPass::new(
+            &context.device,
+            &shading.hdr_view,
+            INTERNAL_WIDTH,
+            INTERNAL_HEIGHT,
+        );
+        let blit = BlitPass::new(&context.device, &tone_map.ldr_view, surface_format);
 
         // Staging buffer for CPU readback of rendered frames (screenshot support).
-        // 960 * 4 = 3840 bytes per row, which is already 256-byte aligned.
         let staging_buffer = context.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("screenshot staging"),
             size: (INTERNAL_WIDTH * INTERNAL_HEIGHT * 4) as u64,
@@ -176,7 +240,11 @@ impl GpuState {
             width: size.width.max(1),
             height: size.height.max(1),
             scene,
+            gbuffer,
+            material_table,
             ray_march,
+            shading,
+            tone_map,
             blit,
             camera,
             staging_buffer,
@@ -226,16 +294,22 @@ impl GpuState {
                 label: Some("frame encoder"),
             });
 
-        // Pass 1: Ray march (compute) → output texture
-        self.ray_march.dispatch(&mut encoder, &self.scene);
+        // Pass 1: Ray march (compute) → G-buffer
+        self.ray_march.dispatch(&mut encoder, &self.scene, &self.gbuffer);
 
-        // Pass 2: Blit output texture → swapchain
+        // Pass 2: Shading (compute) — G-buffer + materials → HDR
+        self.shading.dispatch(&mut encoder, &self.gbuffer, &self.material_table);
+
+        // Pass 3: Tone map (compute) — HDR → LDR
+        self.tone_map.dispatch(&mut encoder);
+
+        // Pass 4: Blit LDR → swapchain
         self.blit.draw(&mut encoder, &view);
 
-        // Pass 3: Copy output texture → staging buffer for screenshot readback
+        // Pass 5: Copy LDR texture → staging buffer for screenshot readback
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: self.ray_march.output_texture(),
+                texture: self.tone_map.ldr_texture(),
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
