@@ -26,6 +26,8 @@ pub mod constants;
 pub mod material;
 /// BrickPool + SparseGrid integration: populate a grid from an SDF.
 pub mod populate;
+/// CPU reference trilinear sampling within a brick.
+pub mod sampling;
 /// SDF generation utilities for testing and offline voxelization.
 pub mod sdf;
 /// Single-LOD sparse grid for voxel occupancy and brick indexing.
