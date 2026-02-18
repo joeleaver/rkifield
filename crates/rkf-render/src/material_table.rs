@@ -162,6 +162,27 @@ pub fn create_test_materials() -> Vec<Material> {
             metallic: 1.0,
             ..Default::default()
         },
+        // 12: Noisy Stone — stone with albedo+roughness noise
+        Material {
+            albedo: [0.45, 0.43, 0.40],
+            roughness: 0.85,
+            metallic: 0.0,
+            noise_scale: 5.0,
+            noise_strength: 0.3,
+            noise_channels: rkf_core::material::NOISE_CHANNEL_ALBEDO
+                | rkf_core::material::NOISE_CHANNEL_ROUGHNESS,
+            ..Default::default()
+        },
+        // 13: Bumpy Metal — metal with normal perturbation
+        Material {
+            albedo: [0.8, 0.75, 0.7],
+            roughness: 0.3,
+            metallic: 1.0,
+            noise_scale: 10.0,
+            noise_strength: 0.15,
+            noise_channels: rkf_core::material::NOISE_CHANNEL_NORMAL,
+            ..Default::default()
+        },
     ]
 }
 
@@ -172,14 +193,14 @@ mod tests {
     #[test]
     fn test_materials_count() {
         let mats = create_test_materials();
-        assert_eq!(mats.len(), 12);
+        assert_eq!(mats.len(), 14);
     }
 
     #[test]
     fn test_materials_sizes() {
         let mats = create_test_materials();
         let bytes: &[u8] = bytemuck::cast_slice(&mats);
-        assert_eq!(bytes.len(), 12 * 96);
+        assert_eq!(bytes.len(), 14 * 96);
     }
 
     #[test]
@@ -249,5 +270,33 @@ mod tests {
         let weight = 1.0_f32;
         let blended_roughness = stone.roughness * (1.0 - weight) + dirt.roughness * weight;
         assert!((blended_roughness - dirt.roughness).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn noisy_stone_has_noise_channels() {
+        let mats = create_test_materials();
+        let noisy = &mats[12];
+        assert!(noisy.noise_scale > 0.0);
+        assert!(noisy.noise_strength > 0.0);
+        assert!(noisy.noise_channels & rkf_core::material::NOISE_CHANNEL_ALBEDO != 0);
+        assert!(noisy.noise_channels & rkf_core::material::NOISE_CHANNEL_ROUGHNESS != 0);
+        assert!(noisy.noise_channels & rkf_core::material::NOISE_CHANNEL_NORMAL == 0);
+    }
+
+    #[test]
+    fn bumpy_metal_has_normal_noise() {
+        let mats = create_test_materials();
+        let bumpy = &mats[13];
+        assert!(bumpy.noise_channels & rkf_core::material::NOISE_CHANNEL_NORMAL != 0);
+        assert!(bumpy.noise_channels & rkf_core::material::NOISE_CHANNEL_ALBEDO == 0);
+    }
+
+    #[test]
+    fn non_noisy_materials_have_zero_noise() {
+        let mats = create_test_materials();
+        // Materials 0-9 should all have noise_channels = 0
+        for i in 0..10 {
+            assert_eq!(mats[i].noise_channels, 0, "material {i} should have no noise");
+        }
     }
 }
