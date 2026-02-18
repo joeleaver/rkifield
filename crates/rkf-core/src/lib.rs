@@ -16,6 +16,8 @@ pub mod aabb;
 pub mod automation;
 /// 8×8×8 voxel brick — the fundamental unit of SDF storage.
 pub mod brick;
+/// Clipmap LOD system — multi-level sparse grids for camera-relative detail.
+pub mod clipmap;
 /// CPU-side brick pool with free-list allocation.
 pub mod brick_pool;
 pub mod cell_state;
@@ -37,6 +39,7 @@ pub mod voxel;
 pub mod world_position;
 
 pub use aabb::{Aabb, WorldAabb};
+pub use clipmap::{ClipmapConfig, ClipmapGridSet, ClipmapLevel, MAX_CLIPMAP_LEVELS, DEFAULT_CLIPMAP_LEVELS};
 pub use brick::Brick;
 pub use brick_pool::{BonePool, BrickPool, ColorPool, Pool, VolumetricPool};
 pub use cell_state::CellState;
