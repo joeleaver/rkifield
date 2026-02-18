@@ -38,7 +38,7 @@ impl SparseGrid {
             * (dimensions.y as usize)
             * (dimensions.z as usize);
         // Each u32 holds 16 cells (2 bits each). Round up.
-        let occupancy_words = (total_cells + 15) / 16;
+        let occupancy_words = total_cells.div_ceil(16);
         Self {
             dimensions,
             occupancy: vec![0u32; occupancy_words],
