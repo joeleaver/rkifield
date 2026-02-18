@@ -25,6 +25,8 @@ use rkf_render::gpu_scene::{GpuScene, SceneUniforms};
 use rkf_render::light::{Light, LightBuffer};
 use rkf_render::material_table::{self, MaterialTable};
 use rkf_render::ray_march::{RayMarchPass, INTERNAL_HEIGHT, INTERNAL_WIDTH};
+use rkf_render::radiance_inject::RadianceInjectPass;
+use rkf_render::radiance_mip::RadianceMipPass;
 use rkf_render::radiance_volume::RadianceVolume;
 use rkf_render::shading::ShadingPass;
 use rkf_render::tile_cull::TileCullPass;
@@ -237,6 +239,8 @@ struct GpuState {
     tone_map: ToneMapPass,
     blit: BlitPass,
     radiance_volume: RadianceVolume,
+    radiance_inject: RadianceInjectPass,
+    radiance_mip: RadianceMipPass,
     camera: Camera,
     staging_buffer: wgpu::Buffer,
     shared_state: Arc<Mutex<SharedState>>,
@@ -311,8 +315,16 @@ impl GpuState {
             INTERNAL_HEIGHT,
         );
 
-        // Create radiance volume for GI
+        // Create radiance volume + GI passes
         let radiance_volume = RadianceVolume::new(&context.device);
+        let radiance_inject = RadianceInjectPass::new(
+            &context.device,
+            &scene,
+            &material_table,
+            &light_buffer,
+            &radiance_volume,
+        );
+        let radiance_mip = RadianceMipPass::new(&context.device, &radiance_volume);
 
         // Create render passes
         let ray_march = RayMarchPass::new(&context.device, &scene, &gbuffer);
@@ -358,6 +370,8 @@ impl GpuState {
             tone_map,
             blit,
             radiance_volume,
+            radiance_inject,
+            radiance_mip,
             camera,
             staging_buffer,
             shared_state,
@@ -436,13 +450,28 @@ impl GpuState {
                 label: Some("frame encoder"),
             });
 
+        // Update radiance volume centre to camera position
+        let cam_pos_arr = [cam_pos.x, cam_pos.y, cam_pos.z];
+        self.radiance_volume.update_center(&self.context.queue, cam_pos_arr);
+        self.radiance_inject.update_inject_uniforms(
+            &self.context.queue,
+            self.light_buffer.count,
+            1, // max 1 shadow-casting light in injection
+        );
+
         // Pass 1: Ray march (compute) → G-buffer
         self.ray_march.dispatch(&mut encoder, &self.scene, &self.gbuffer);
 
         // Pass 2: Tile light cull
         self.tile_cull.dispatch(&mut encoder, &self.gbuffer);
 
-        // Pass 3: Shading (compute) — G-buffer + materials + SDF + lights + GI → HDR
+        // Pass 3: Radiance injection → Level 0
+        self.radiance_inject.dispatch(&mut encoder, &self.scene, &self.material_table);
+
+        // Pass 4: Radiance mip generation → L0→L1→L2→L3
+        self.radiance_mip.dispatch(&mut encoder);
+
+        // Pass 5: Shading (compute) — G-buffer + materials + SDF + lights + GI → HDR
         self.shading.dispatch(
             &mut encoder,
             &self.gbuffer,
