@@ -14,6 +14,8 @@ pub struct RenderContext {
     pub queue: wgpu::Queue,
     /// The adapter that was selected.
     pub adapter: wgpu::Adapter,
+    /// Adapter information (name, vendor ID, etc.) for capability queries.
+    pub adapter_info: wgpu::AdapterInfo,
 }
 
 impl RenderContext {
@@ -32,7 +34,8 @@ impl RenderContext {
         }))
         .expect("failed to find a compatible GPU adapter");
 
-        log::info!("GPU adapter: {:?}", adapter.get_info().name);
+        let adapter_info = adapter.get_info();
+        log::info!("GPU adapter: {:?}", adapter_info.name);
 
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
@@ -52,6 +55,7 @@ impl RenderContext {
             device,
             queue,
             adapter,
+            adapter_info,
         }
     }
 

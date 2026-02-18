@@ -48,6 +48,8 @@ pub mod history;
 pub mod upscale;
 /// Edge-aware sharpening compute pass.
 pub mod sharpen;
+/// DLSS integration layer (stub — falls back to custom upscaler).
+pub mod dlss;
 
 pub use camera::{Camera, CameraUniforms};
 pub use context::RenderContext;
@@ -66,3 +68,4 @@ pub use radiance_mip::RadianceMipPass;
 pub use history::{HistoryBuffers, HistoryUniforms, HISTORY_COLOR_FORMAT, HISTORY_METADATA_FORMAT};
 pub use upscale::{UpscalePass, UpscaleUniforms};
 pub use sharpen::{SharpenPass, SharpenUniforms, DEFAULT_SHARPEN_STRENGTH};
+pub use dlss::{DlssContext, DlssQuality};
