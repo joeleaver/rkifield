@@ -110,6 +110,20 @@ struct ShadeUniforms {
 @group(5) @binding(1) var<storage, read> tile_light_indices: array<u32>;
 @group(5) @binding(2) var<storage, read> tile_light_counts: array<u32>;
 
+// Group 6: Radiance volume for voxel cone tracing GI
+struct RadianceVolumeUniforms {
+    center:      vec4<f32>,   // xyz = volume centre, w = unused
+    voxel_sizes: vec4<f32>,   // per-level voxel sizes [L0, L1, L2, L3]
+    inv_extents: vec4<f32>,   // 1/(voxel_size * dim) per level
+    params:      vec4<u32>,   // x = dim, y = num_levels
+}
+@group(6) @binding(0) var radiance_L0: texture_3d<f32>;
+@group(6) @binding(1) var radiance_L1: texture_3d<f32>;
+@group(6) @binding(2) var radiance_L2: texture_3d<f32>;
+@group(6) @binding(3) var radiance_L3: texture_3d<f32>;
+@group(6) @binding(4) var radiance_sampler: sampler;
+@group(6) @binding(5) var<uniform> vol: RadianceVolumeUniforms;
+
 // ---------- Constants ----------
 
 const PI: f32 = 3.14159265359;
@@ -322,6 +336,119 @@ fn geometry_smith(n_dot_v: f32, n_dot_l: f32, roughness: f32) -> f32 {
     return ggx_v * ggx_l;
 }
 
+// ---------- Voxel Cone Tracing GI ----------
+
+// Cone tracing parameters
+const GI_CONE_STEPS: u32 = 16u;
+const GI_CONE_HALF_ANGLE: f32 = 0.5236; // ~30 degrees
+const GI_STEP_MULT: f32 = 1.0;          // Step by cone diameter
+const GI_OCCLUSION_CUTOFF: f32 = 0.95;
+const GI_STRENGTH: f32 = 1.0;
+
+/// Sample the radiance volume at a world-space position and mip level.
+/// Returns vec4(radiance.rgb, opacity).
+fn sample_radiance(pos: vec3<f32>, level: i32) -> vec4<f32> {
+    let dim = f32(vol.params.x);
+    // Convert world position to [0, 1] UV for the given level
+    let inv_ext = vol.inv_extents[level];
+    let uv = (pos - vol.center.xyz) * inv_ext + 0.5;
+
+    // Out-of-bounds check
+    if any(uv < vec3<f32>(0.0)) || any(uv > vec3<f32>(1.0)) {
+        return vec4<f32>(0.0);
+    }
+
+    // Sample the appropriate level with trilinear filtering
+    switch level {
+        case 0: { return textureSampleLevel(radiance_L0, radiance_sampler, uv, 0.0); }
+        case 1: { return textureSampleLevel(radiance_L1, radiance_sampler, uv, 0.0); }
+        case 2: { return textureSampleLevel(radiance_L2, radiance_sampler, uv, 0.0); }
+        case 3: { return textureSampleLevel(radiance_L3, radiance_sampler, uv, 0.0); }
+        default: { return vec4<f32>(0.0); }
+    }
+}
+
+/// Trace a single GI cone through the radiance volume.
+/// Front-to-back alpha compositing, automatic mip selection from cone radius.
+fn trace_gi_cone(origin: vec3<f32>, dir: vec3<f32>, half_angle: f32) -> vec4<f32> {
+    let tan_half = tan(half_angle);
+    let finest_voxel = vol.voxel_sizes.x;
+
+    var color = vec3<f32>(0.0);
+    var alpha = 0.0;
+    // Start a few voxels out to avoid self-intersection
+    var t = finest_voxel * 3.0;
+
+    for (var i = 0u; i < GI_CONE_STEPS; i++) {
+        let sample_pos = origin + dir * t;
+        let cone_radius = t * tan_half;
+
+        // Select mip level based on cone radius vs finest voxel size
+        let mip_f = log2(max(cone_radius / finest_voxel, 1.0));
+        let level = clamp(i32(mip_f), 0, 3);
+
+        let s = sample_radiance(sample_pos, level);
+
+        // Front-to-back compositing
+        let a = s.a * (1.0 - alpha);
+        color += s.rgb * a;
+        alpha += a;
+
+        if alpha >= GI_OCCLUSION_CUTOFF {
+            break;
+        }
+
+        // Advance by cone diameter (or at least one finest voxel)
+        t += max(cone_radius * 2.0 * GI_STEP_MULT, finest_voxel);
+    }
+
+    return vec4<f32>(color, alpha);
+}
+
+/// Build an orthonormal basis (tangent, bitangent) from a normal vector.
+fn build_tangent_frame(n: vec3<f32>) -> mat3x3<f32> {
+    // Pick a non-parallel reference vector
+    let ref_vec = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(n.y) > 0.9);
+    let t = normalize(cross(n, ref_vec));
+    let b = cross(n, t);
+    return mat3x3<f32>(t, b, n);
+}
+
+/// Compute indirect illumination via 6-cone hemisphere trace.
+/// Returns indirect radiance (RGB).
+fn compute_indirect(pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    let frame = build_tangent_frame(normal);
+
+    // 6 cosine-weighted cones: 1 centre + 5 side cones
+    // Centre cone: along normal
+    // Side cones: ~57° from normal (cos(57°) ≈ 0.545), evenly spaced azimuthally
+
+    let center_weight = 1.0;
+    let side_weight = 0.545; // cos(~57°)
+    let total_weight = center_weight + 5.0 * side_weight;
+
+    // Side cone directions in tangent space (57° from Z, 72° apart in azimuth)
+    let sin_a = 0.8387; // sin(57°)
+    let cos_a = 0.5446; // cos(57°)
+
+    var result = vec3<f32>(0.0);
+
+    // Centre cone (along normal)
+    let c0 = trace_gi_cone(pos, normal, GI_CONE_HALF_ANGLE);
+    result += c0.rgb * center_weight;
+
+    // 5 side cones
+    for (var i = 0u; i < 5u; i++) {
+        let angle = f32(i) * 1.2566371; // 2π/5 = 72° in radians
+        let local_dir = vec3<f32>(sin_a * cos(angle), sin_a * sin(angle), cos_a);
+        let world_dir = frame * local_dir;
+        let c = trace_gi_cone(pos, world_dir, GI_CONE_HALF_ANGLE);
+        result += c.rgb * side_weight;
+    }
+
+    return result * GI_STRENGTH / total_weight;
+}
+
 // ---------- Entry point ----------
 
 @compute @workgroup_size(8, 8, 1)
@@ -526,12 +653,17 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
     // SDF ambient occlusion
     let ao = sdf_ao(world_pos + normal * SHADOW_BIAS, normal);
 
-    // Ambient approximation (hemisphere) — modulated by AO
-    let ambient = AMBIENT_COLOR * albedo * ao;
+    // Voxel cone tracing indirect illumination
+    let indirect = compute_indirect(world_pos + normal * SHADOW_BIAS, normal);
+    let gi_contribution = indirect * albedo * (1.0 - metallic);
 
-    // Final color = direct diffuse + direct specular + SSS + ambient + emission
+    // Ambient approximation (hemisphere) — modulated by AO, reduced by GI
+    // When GI is active, reduce ambient to avoid double-counting
+    let ambient = AMBIENT_COLOR * albedo * ao * 0.3;
+
+    // Final color = direct + indirect GI + SSS + ambient + emission
     let direct = total_diffuse + total_specular;
-    var color = direct + sss_total + ambient + emission;
+    var color = direct + gi_contribution * ao + sss_total + ambient + emission;
 
     // Debug visualization modes
     switch shade_uniforms.debug_mode {

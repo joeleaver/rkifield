@@ -25,6 +25,7 @@ use rkf_render::gpu_scene::{GpuScene, SceneUniforms};
 use rkf_render::light::{Light, LightBuffer};
 use rkf_render::material_table::{self, MaterialTable};
 use rkf_render::ray_march::{RayMarchPass, INTERNAL_HEIGHT, INTERNAL_WIDTH};
+use rkf_render::radiance_volume::RadianceVolume;
 use rkf_render::shading::ShadingPass;
 use rkf_render::tile_cull::TileCullPass;
 use rkf_render::tone_map::ToneMapPass;
@@ -235,6 +236,7 @@ struct GpuState {
     shading: ShadingPass,
     tone_map: ToneMapPass,
     blit: BlitPass,
+    radiance_volume: RadianceVolume,
     camera: Camera,
     staging_buffer: wgpu::Buffer,
     shared_state: Arc<Mutex<SharedState>>,
@@ -309,6 +311,9 @@ impl GpuState {
             INTERNAL_HEIGHT,
         );
 
+        // Create radiance volume for GI
+        let radiance_volume = RadianceVolume::new(&context.device);
+
         // Create render passes
         let ray_march = RayMarchPass::new(&context.device, &scene, &gbuffer);
         let shading = ShadingPass::new(
@@ -317,6 +322,7 @@ impl GpuState {
             &material_table,
             &scene,
             &tile_cull.shade_light_bind_group_layout,
+            &radiance_volume,
             INTERNAL_WIDTH,
             INTERNAL_HEIGHT,
         );
@@ -351,6 +357,7 @@ impl GpuState {
             shading,
             tone_map,
             blit,
+            radiance_volume,
             camera,
             staging_buffer,
             shared_state,
@@ -435,13 +442,14 @@ impl GpuState {
         // Pass 2: Tile light cull
         self.tile_cull.dispatch(&mut encoder, &self.gbuffer);
 
-        // Pass 3: Shading (compute) — G-buffer + materials + SDF + lights → HDR
+        // Pass 3: Shading (compute) — G-buffer + materials + SDF + lights + GI → HDR
         self.shading.dispatch(
             &mut encoder,
             &self.gbuffer,
             &self.material_table,
             &self.scene,
             &self.tile_cull.shade_light_bind_group,
+            &self.radiance_volume,
         );
 
         // Pass 4: Tone map (compute) — HDR → LDR
