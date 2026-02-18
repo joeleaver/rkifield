@@ -13,6 +13,8 @@
 
 #![warn(missing_docs)]
 
+/// Async I/O pipeline for background chunk loading.
+pub mod async_io;
 /// Engine configuration system with quality presets and RON serialization.
 pub mod config;
 /// ECS component types for the scene graph.
@@ -38,6 +40,7 @@ pub use components::{
     SdfObject, Transform, WorldTransform,
 };
 pub use frame::{execute_frame, FrameContext, FrameSettings};
+pub use async_io::{AsyncIoPipeline, ChunkLoadResult};
 pub use scene::Scene;
 pub use streaming::{ChunkEntry, ChunkState, StreamingConfig, StreamingSystem};
 pub use transform_system::update_transforms;
