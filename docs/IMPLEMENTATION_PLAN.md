@@ -656,6 +656,12 @@ is misdirected. The stone sphere's diffuse shading is correct. No G-buffer data 
 - DoF and motion blur work when enabled
 - Can load and apply color grading LUT
 
+### Status: Needs validation
+- Testbed integration done (bloom, bloom composite, auto-exposure, tone map, color grade, cosmetics)
+- Known bug: `color_grade.rs` `upload_lut()` missing binding 0 in rebuilt bind_group
+- DoF and motion blur modules exist but not wired into testbed render loop
+- Auto-exposure runs but output not wired to tone_map exposure uniform
+
 ---
 
 ## Phase 11: Volumetrics
