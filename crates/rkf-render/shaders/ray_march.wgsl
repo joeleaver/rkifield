@@ -209,6 +209,13 @@ fn ray_march_dda(origin: vec3<f32>, dir: vec3<f32>) -> f32 {
     // Nudge slightly inside to land cleanly in the first cell
     t_near += HIT_EPSILON;
 
+    // LOD level — currently always 0 (finest tier).
+    // TODO(Phase 13): when `t` crosses a clipmap boundary, switch to a coarser
+    // grid level. Each LOD has its own grid_dims/grid_origin/brick_extent and
+    // the DDA re-initializes for the new level.
+    var current_lod: u32 = 0u;
+    _ = current_lod;
+
     // Entry point and starting cell
     let entry = origin + safe_dir * t_near;
     let dims_i = vec3<i32>(grid_dims());
