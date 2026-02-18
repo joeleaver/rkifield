@@ -17,9 +17,12 @@
 pub mod components;
 /// Scene management via hecs ECS.
 pub mod scene;
+/// Transform hierarchy update system.
+pub mod transform_system;
 
 pub use components::{
     AnimatedCharacter, CameraComponent, ChunkRef, EditorMetadata, FogVolumeComponent, Parent,
     SdfObject, Transform, WorldTransform,
 };
 pub use scene::Scene;
+pub use transform_system::update_transforms;
