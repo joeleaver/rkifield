@@ -140,7 +140,7 @@ impl ResolutionConfig {
     }
 }
 
-/// GPU-uploadable upscale uniforms (16 bytes).
+/// GPU-uploadable upscale uniforms (32 bytes).
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Pod, Zeroable)]
 pub struct UpscaleUniforms {
@@ -152,6 +152,12 @@ pub struct UpscaleUniforms {
     pub internal_width: u32,
     /// Internal resolution height.
     pub internal_height: u32,
+    /// Current frame sub-pixel jitter X (pixel units).
+    pub jitter_x: f32,
+    /// Current frame sub-pixel jitter Y (pixel units).
+    pub jitter_y: f32,
+    /// Padding to 32 bytes.
+    pub _pad: [u32; 2],
 }
 
 /// Custom temporal upscaler pass.
@@ -484,11 +490,14 @@ impl UpscalePass {
             display_height,
             internal_width,
             internal_height,
+            jitter_x: 0.0,
+            jitter_y: 0.0,
+            _pad: [0; 2],
         };
         let uniforms_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("upscale uniforms"),
             contents: bytemuck::bytes_of(&uniforms),
-            usage: wgpu::BufferUsages::UNIFORM,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
         let uniforms_layout =
@@ -574,6 +583,15 @@ impl UpscalePass {
         let wg_y = self.display_height.div_ceil(8);
         pass.dispatch_workgroups(wg_x, wg_y, 1);
     }
+
+    /// Update the per-frame jitter values in the uniforms buffer.
+    ///
+    /// Call this each frame before `dispatch()` with the current frame's
+    /// sub-pixel jitter (in pixel units, from `jitter_for_frame()`).
+    pub fn update_jitter(&self, queue: &wgpu::Queue, jitter: [f32; 2]) {
+        // jitter_x is at byte offset 16, jitter_y at 20
+        queue.write_buffer(&self.uniforms_buffer, 16, bytemuck::bytes_of(&jitter));
+    }
 }
 
 #[cfg(test)]
@@ -581,8 +599,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn upscale_uniforms_size_is_16() {
-        assert_eq!(std::mem::size_of::<UpscaleUniforms>(), 16);
+    fn upscale_uniforms_size_is_32() {
+        assert_eq!(std::mem::size_of::<UpscaleUniforms>(), 32);
     }
 
     #[test]
@@ -592,12 +610,22 @@ mod tests {
             display_height: 1080,
             internal_width: 960,
             internal_height: 540,
+            jitter_x: 0.25,
+            jitter_y: -0.125,
+            _pad: [0; 2],
         };
         let bytes = bytemuck::bytes_of(&u);
-        assert_eq!(bytes.len(), 16);
+        assert_eq!(bytes.len(), 32);
         let u2: &UpscaleUniforms = bytemuck::from_bytes(bytes);
         assert_eq!(u.display_width, u2.display_width);
         assert_eq!(u.internal_height, u2.internal_height);
+        assert!((u.jitter_x - u2.jitter_x).abs() < 1e-6);
+    }
+
+    #[test]
+    fn jitter_offset_is_16() {
+        assert_eq!(std::mem::offset_of!(UpscaleUniforms, jitter_x), 16);
+        assert_eq!(std::mem::offset_of!(UpscaleUniforms, jitter_y), 20);
     }
 
     #[test]

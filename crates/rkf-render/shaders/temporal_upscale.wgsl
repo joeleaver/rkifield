@@ -11,6 +11,10 @@ struct UpscaleUniforms {
     display_height: u32,
     internal_width: u32,
     internal_height: u32,
+    jitter_x: f32,
+    jitter_y: f32,
+    _pad0: u32,
+    _pad1: u32,
 }
 
 // ---------- Bindings ----------
@@ -92,8 +96,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let uv = (vec2<f32>(gid.xy) + 0.5) / display_dims_f;
 
     // ----- Sample current frame at internal resolution -----
-    // Use bilinear sampling for smooth upscale from internal to display res
-    let current_hdr = textureSampleLevel(hdr_color, bilinear_sampler, uv, 0.0).rgb;
+    // Unjitter: the internal frame was rendered with sub-pixel jitter applied
+    // to ray generation. Compensate by shifting the sample position so the
+    // output is stable across frames (jitter accumulates via history instead).
+    let jitter_uv = vec2<f32>(params.jitter_x, params.jitter_y) / internal_dims;
+    let current_hdr = textureSampleLevel(hdr_color, bilinear_sampler, uv - jitter_uv, 0.0).rgb;
 
     // Sample G-buffer at nearest internal-res pixel
     let internal_coord = vec2<i32>(vec2<f32>(uv * internal_dims));
