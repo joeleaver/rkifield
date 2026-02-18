@@ -70,6 +70,8 @@ pub mod color_grade;
 pub mod cosmetics;
 /// DLSS integration layer (stub — falls back to custom upscaler).
 pub mod dlss;
+/// Analytic fog settings for height fog and distance fog.
+pub mod fog;
 
 pub use camera::{Camera, CameraUniforms};
 pub use context::RenderContext;
@@ -87,6 +89,7 @@ pub use radiance_inject::{InjectUniforms, RadianceInjectPass};
 pub use radiance_mip::RadianceMipPass;
 pub use vol_shadow::{VolShadowPass, VolShadowParams, VOL_SHADOW_DIM_X, VOL_SHADOW_DIM_Y, VOL_SHADOW_DIM_Z, VOL_SHADOW_FORMAT, DEFAULT_VOL_SHADOW_RANGE, DEFAULT_VOL_SHADOW_HEIGHT};
 pub use vol_march::{VolMarchPass, VolMarchParams, VOL_MARCH_FORMAT, DEFAULT_VOL_STEP_SIZE, DEFAULT_VOL_MAX_STEPS, DEFAULT_VOL_NEAR, DEFAULT_VOL_FAR, DEFAULT_AMBIENT_DUST, DEFAULT_AMBIENT_DUST_G};
+pub use fog::{FogSettings, FogParams, DEFAULT_FOG_BASE_DENSITY, DEFAULT_FOG_BASE_HEIGHT, DEFAULT_FOG_HEIGHT_FALLOFF, DEFAULT_FOG_COLOR, DEFAULT_DISTANCE_FOG_DENSITY, DEFAULT_DISTANCE_FOG_FALLOFF};
 pub use history::{HistoryBuffers, HistoryUniforms, HISTORY_COLOR_FORMAT, HISTORY_METADATA_FORMAT};
 pub use upscale::{QualityMode, ResolutionConfig, UpscaleBackend, UpscalePass, UpscaleUniforms};
 pub use sharpen::{SharpenPass, SharpenUniforms, DEFAULT_SHARPEN_STRENGTH};

@@ -1,7 +1,10 @@
-// Volumetric march compute shader (half resolution) — Phase 11 task 11.2.
+// Volumetric march compute shader (half resolution) — Phase 11 task 11.2 / 11.4.
 //
 // Front-to-back fixed-step compositing through participating media.
 // Jittered step offset (interleaved gradient noise) for temporal accumulation.
+//
+// Task 11.4 adds analytic height fog and distance fog density functions.
+// Fog parameters are packed into three vec4 fields in VolMarchParams.
 //
 // Output: Rgba16Float texture (scattering_rgb, transmittance).
 
@@ -23,11 +26,19 @@ struct VolMarchParams {
     step_size:   f32,        // world-space step size (metres)
     near:        f32,        // near plane distance
     far:         f32,        // max march distance
-    // Fog / dust settings (placeholder — expanded in tasks 11.4, 11.5)
-    ambient_dust_density: f32,
-    ambient_dust_g:       f32,  // Henyey-Greenstein asymmetry for dust
-    frame_index:          u32,
-    _pad0:                u32,
+    // Fog settings (task 11.4)
+    // fog_color:    xyz = scattering RGB, w = height_fog_enable (0.0 / 1.0)
+    // fog_height:   x = base_density, y = base_height, z = height_falloff,
+    //               w = distance_fog_enable (0.0 / 1.0)
+    // fog_distance: x = distance_density, y = distance_falloff,
+    //               z = ambient_dust_density, w = ambient_dust_g
+    fog_color:    vec4<f32>,
+    fog_height:   vec4<f32>,
+    fog_distance: vec4<f32>,
+    frame_index:  u32,
+    _pad0:        u32,
+    _pad1:        u32,
+    _pad2:        u32,
     // Volumetric shadow map volume bounds (world space)
     vol_shadow_min: vec4<f32>,  // xyz = min corner, w = unused
     vol_shadow_max: vec4<f32>,  // xyz = max corner, w = unused
@@ -98,13 +109,54 @@ fn sample_vol_shadow(pos: vec3<f32>) -> f32 {
 }
 
 // ---------------------------------------------------------------------------
-// Sample total extinction density at a world position.
-// Placeholder: returns only the uniform ambient dust density.
-// Individual density sources (height fog, cloud SDF) are added in tasks 11.4+.
+// Height fog: exponential density falloff above the base height.
+//
+// fog_height.x = base_density
+// fog_height.y = base_height  (world-space Y, metres)
+// fog_height.z = height_falloff exponent
 // ---------------------------------------------------------------------------
-fn sample_density(pos: vec3<f32>) -> f32 {
-    let _ = pos;
-    return params.ambient_dust_density;
+fn height_fog_density(pos: vec3<f32>) -> f32 {
+    let base_density = params.fog_height.x;
+    let base_height  = params.fog_height.y;
+    let falloff      = params.fog_height.z;
+    return base_density * exp(-falloff * max(pos.y - base_height, 0.0));
+}
+
+// ---------------------------------------------------------------------------
+// Distance fog: density increases monotonically with camera distance t.
+//
+// fog_distance.x = distance_density scale
+// fog_distance.y = distance_falloff exponent
+// ---------------------------------------------------------------------------
+fn distance_fog_density(t: f32) -> f32 {
+    let density = params.fog_distance.x;
+    let falloff  = params.fog_distance.y;
+    return density * (1.0 - exp(-falloff * t));
+}
+
+// ---------------------------------------------------------------------------
+// Sample total extinction density at a world position and ray distance t.
+//
+// Accumulates:
+//   - Uniform ambient dust (fog_distance.z)
+//   - Height fog if enabled (fog_color.w > 0.5)
+//   - Distance fog if enabled (fog_height.w > 0.5)
+// ---------------------------------------------------------------------------
+fn sample_density(pos: vec3<f32>, t: f32) -> f32 {
+    // Ambient dust is always accumulated (zero by default = no contribution).
+    var density = params.fog_distance.z;
+
+    // Height fog (exponential above base height).
+    if (params.fog_color.w > 0.5) {
+        density += height_fog_density(pos);
+    }
+
+    // Distance fog (increases with camera distance).
+    if (params.fog_height.w > 0.5) {
+        density += distance_fog_density(t);
+    }
+
+    return density;
 }
 
 // ---------------------------------------------------------------------------
@@ -146,6 +198,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // sun_dir points *toward* the sun, ray_dir points *away* from camera.
     let cos_sun = dot(-ray_dir, params.sun_dir.xyz);
 
+    // Fog scattering color acts as the single-scattering albedo.
+    let scatter_albedo = params.fog_color.xyz;
+
+    // Henyey-Greenstein asymmetry for ambient dust (fog_distance.w).
+    let dust_g = params.fog_distance.w;
+
     var scatter:      vec3<f32> = vec3<f32>(0.0);
     var transmittance: f32      = 1.0;
 
@@ -155,16 +213,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         let pos = params.cam_pos.xyz + ray_dir * t;
 
-        let density = sample_density(pos);
+        let density = sample_density(pos, t);
         if (density <= 0.001) { continue; }
 
         // Beer-Lambert extinction over this step.
         let step_transmittance = exp(-density * params.step_size);
 
-        // In-scattering from the sun: visibility × phase × sun radiance.
-        let sun_vis   = sample_vol_shadow(pos);
-        let sun_phase = henyey_greenstein(cos_sun, params.ambient_dust_g);
-        let in_scatter = density * sun_vis * sun_phase * params.sun_color.xyz;
+        // In-scattering from the sun: visibility × phase × sun radiance × fog albedo.
+        let sun_vis    = sample_vol_shadow(pos);
+        let sun_phase  = henyey_greenstein(cos_sun, dust_g);
+        let in_scatter = density * sun_vis * sun_phase * params.sun_color.xyz * scatter_albedo;
 
         // Front-to-back accumulation.
         scatter      += in_scatter * transmittance * params.step_size;

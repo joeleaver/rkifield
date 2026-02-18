@@ -1,4 +1,4 @@
-//! Volumetric ray march compute pass — Phase 11 task 11.2.
+//! Volumetric ray march compute pass — Phase 11 task 11.2 / 11.4.
 //!
 //! Performs front-to-back fixed-step compositing through participating media
 //! (fog, dust, clouds) at half the internal render resolution.
@@ -11,6 +11,11 @@
 //! It writes a half-res [`VOL_MARCH_FORMAT`] (`Rgba16Float`) texture where
 //! RGB = accumulated in-scattering and A = remaining transmittance. This is
 //! composited over the shaded frame in a later pass.
+//!
+//! Task 11.4 expands fog support: the two legacy `ambient_dust_*` scalars are
+//! replaced by three packed `vec4` fields (`fog_color`, `fog_height`,
+//! `fog_distance`) that carry all fog configuration. Use [`VolMarchPass::set_fog_params`]
+//! to push updated [`crate::fog::FogParams`] into the params buffer.
 
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
@@ -33,16 +38,22 @@ pub const DEFAULT_VOL_NEAR: f32 = 0.5;
 pub const DEFAULT_VOL_FAR: f32 = 200.0;
 
 /// Default ambient dust density — `0.0` keeps volumetrics off by default.
+///
+/// This constant is retained for compatibility. Ambient dust density is now
+/// stored in `fog_distance[2]` inside [`VolMarchParams`].
 pub const DEFAULT_AMBIENT_DUST: f32 = 0.0;
 
 /// Default Henyey-Greenstein asymmetry for ambient dust (0 = isotropic).
+///
+/// This constant is retained for compatibility. The asymmetry is now stored
+/// in `fog_distance[3]` inside [`VolMarchParams`].
 pub const DEFAULT_AMBIENT_DUST_G: f32 = 0.3;
 
 // ---------- GPU struct ----------
 
 /// GPU-uploadable volumetric march parameters.
 ///
-/// Memory layout (176 bytes, fully 16-byte aligned):
+/// Memory layout (224 bytes, fully 16-byte aligned):
 ///
 /// ```text
 /// offset   0 — cam_pos          [f32; 4]  (16 bytes)
@@ -59,13 +70,18 @@ pub const DEFAULT_AMBIENT_DUST_G: f32 = 0.3;
 /// offset 116 — step_size                   (4 bytes)
 /// offset 120 — near                        (4 bytes)
 /// offset 124 — far                         (4 bytes)
-/// offset 128 — ambient_dust_density        (4 bytes)
-/// offset 132 — ambient_dust_g              (4 bytes)
-/// offset 136 — frame_index                 (4 bytes)
-/// offset 140 — _pad0                       (4 bytes)
-/// offset 144 — vol_shadow_min   [f32; 4]  (16 bytes)
-/// offset 160 — vol_shadow_max   [f32; 4]  (16 bytes)
-/// total: 176 bytes
+/// offset 128 — fog_color        [f32; 4]  xyz=RGB, w=height_fog_enable   (16 bytes)
+/// offset 144 — fog_height       [f32; 4]  x=base_density, y=base_height,
+///                                          z=height_falloff, w=dist_fog_enable (16 bytes)
+/// offset 160 — fog_distance     [f32; 4]  x=distance_density, y=distance_falloff,
+///                                          z=ambient_dust_density, w=ambient_dust_g (16 bytes)
+/// offset 176 — frame_index                 (4 bytes)
+/// offset 180 — _pad0                       (4 bytes)
+/// offset 184 — _pad1                       (4 bytes)
+/// offset 188 — _pad2                       (4 bytes)
+/// offset 192 — vol_shadow_min   [f32; 4]  (16 bytes)
+/// offset 208 — vol_shadow_max   [f32; 4]  (16 bytes)
+/// total: 224 bytes
 /// ```
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Pod, Zeroable)]
@@ -98,14 +114,33 @@ pub struct VolMarchParams {
     pub near: f32,
     /// Maximum march distance / far-plane fallback (metres).
     pub far: f32,
-    /// Uniform ambient dust density (extinction coefficient, 0 = off).
-    pub ambient_dust_density: f32,
-    /// Henyey-Greenstein asymmetry parameter for ambient dust.
-    pub ambient_dust_g: f32,
+    /// Fog scattering color (RGB) and height-fog enable flag.
+    ///
+    /// `xyz` = linear-RGB scattering albedo.
+    /// `w` = height fog enable: `0.0` = off, `1.0` = on.
+    pub fog_color: [f32; 4],
+    /// Height fog parameters and distance-fog enable flag.
+    ///
+    /// `x` = base density (peak extinction at/below `y`).
+    /// `y` = base height (world-space metres, fog peaks at or below this).
+    /// `z` = height falloff exponent.
+    /// `w` = distance fog enable: `0.0` = off, `1.0` = on.
+    pub fog_height: [f32; 4],
+    /// Distance fog and ambient dust parameters.
+    ///
+    /// `x` = distance fog density coefficient.
+    /// `y` = distance fog falloff exponent.
+    /// `z` = ambient dust density (uniform extinction, 0 = off).
+    /// `w` = Henyey-Greenstein asymmetry for ambient dust.
+    pub fog_distance: [f32; 4],
     /// Current frame index for jitter temporal variation.
     pub frame_index: u32,
     #[doc(hidden)]
     pub _pad0: u32,
+    #[doc(hidden)]
+    pub _pad1: u32,
+    #[doc(hidden)]
+    pub _pad2: u32,
     /// World-space minimum corner of the volumetric shadow volume (w unused).
     pub vol_shadow_min: [f32; 4],
     /// World-space maximum corner of the volumetric shadow volume (w unused).
@@ -208,10 +243,14 @@ impl VolMarchPass {
             step_size: DEFAULT_VOL_STEP_SIZE,
             near: DEFAULT_VOL_NEAR,
             far: DEFAULT_VOL_FAR,
-            ambient_dust_density: DEFAULT_AMBIENT_DUST,
-            ambient_dust_g: DEFAULT_AMBIENT_DUST_G,
+            // Fog defaults: all disabled, sensible falloff values.
+            fog_color: [0.7, 0.8, 0.9, 0.0],     // height fog off (w=0)
+            fog_height: [0.0, 0.0, 0.1, 0.0],     // distance fog off (w=0)
+            fog_distance: [0.0, 0.01, 0.0, 0.3],  // no dust; g=0.3
             frame_index: 0,
             _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
             // Match VolShadowPass default bounds: 128×64×128 m volume centred at origin.
             vol_shadow_min: [-64.0, -32.0, -64.0, 0.0],
             vol_shadow_max: [64.0, 32.0, 64.0, 0.0],
@@ -373,8 +412,8 @@ impl VolMarchPass {
     ///
     /// Call this after updating the [`VolShadowPass`] bounds to keep them in
     /// sync. The offsets match the [`VolMarchParams`] layout:
-    /// - `vol_shadow_min` at offset 144
-    /// - `vol_shadow_max` at offset 160
+    /// - `vol_shadow_min` at offset 192
+    /// - `vol_shadow_max` at offset 208
     pub fn set_shadow_bounds(
         &self,
         queue: &wgpu::Queue,
@@ -383,8 +422,25 @@ impl VolMarchPass {
     ) {
         let min_vec4: [f32; 4] = [vol_min[0], vol_min[1], vol_min[2], 0.0];
         let max_vec4: [f32; 4] = [vol_max[0], vol_max[1], vol_max[2], 0.0];
-        queue.write_buffer(&self.params_buffer, 144, bytemuck::bytes_of(&min_vec4));
-        queue.write_buffer(&self.params_buffer, 160, bytemuck::bytes_of(&max_vec4));
+        queue.write_buffer(&self.params_buffer, 192, bytemuck::bytes_of(&min_vec4));
+        queue.write_buffer(&self.params_buffer, 208, bytemuck::bytes_of(&max_vec4));
+    }
+
+    /// Update fog parameters from CPU-side [`crate::fog::FogParams`].
+    ///
+    /// Writes the three packed fog vec4 fields (`fog_color`, `fog_height`,
+    /// `fog_distance`) at offsets 128–176 in the params buffer.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let fog = FogSettings { height_fog_enabled: true, fog_base_density: 0.05, .. Default::default() };
+    /// vol_march_pass.set_fog_params(queue, &FogParams::from_settings(&fog));
+    /// ```
+    pub fn set_fog_params(&self, queue: &wgpu::Queue, fog: &crate::fog::FogParams) {
+        // Write all three fog vec4s (48 bytes) starting at offset 128.
+        // FogParams is 64 bytes total; we only upload the first 48 (skip _pad).
+        let fog_bytes = bytemuck::bytes_of(fog);
+        queue.write_buffer(&self.params_buffer, 128, &fog_bytes[..48]);
     }
 }
 
@@ -396,8 +452,8 @@ mod tests {
 
     #[test]
     fn vol_march_params_size() {
-        // 6 vec4s (96 bytes) + 12 u32/f32 fields (48 bytes) + 2 vec4s (32 bytes) = 176 bytes
-        assert_eq!(std::mem::size_of::<VolMarchParams>(), 176);
+        // 6 vec4s (96) + 8 scalars (32) + 3 fog vec4s (48) + 4 scalars (16) + 2 vec4s (32) = 224
+        assert_eq!(std::mem::size_of::<VolMarchParams>(), 224);
     }
 
     #[test]
@@ -417,18 +473,23 @@ mod tests {
             step_size: 2.0,
             near: 0.5,
             far: 200.0,
-            ambient_dust_density: 0.005,
-            ambient_dust_g: 0.3,
+            fog_color: [0.7, 0.8, 0.9, 1.0],
+            fog_height: [0.05, 5.0, 0.1, 0.0],
+            fog_distance: [0.01, 0.005, 0.003, 0.3],
             frame_index: 0,
             _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
             vol_shadow_min: [-64.0, -32.0, -64.0, 0.0],
             vol_shadow_max: [64.0, 32.0, 64.0, 0.0],
         };
         let bytes = bytemuck::bytes_of(&p);
-        assert_eq!(bytes.len(), 176);
+        assert_eq!(bytes.len(), 224);
         let p2: &VolMarchParams = bytemuck::from_bytes(bytes);
         assert_eq!(p.width, p2.width);
-        assert_eq!(p.ambient_dust_density, p2.ambient_dust_density);
+        assert_eq!(p.fog_color, p2.fog_color);
+        assert_eq!(p.fog_height, p2.fog_height);
+        assert_eq!(p.fog_distance, p2.fog_distance);
         assert_eq!(p.cam_pos, p2.cam_pos);
         assert_eq!(p.sun_color, p2.sun_color);
         assert_eq!(p.vol_shadow_min, p2.vol_shadow_min);
@@ -451,12 +512,15 @@ mod tests {
         assert_eq!(std::mem::offset_of!(VolMarchParams, step_size), 116);
         assert_eq!(std::mem::offset_of!(VolMarchParams, near), 120);
         assert_eq!(std::mem::offset_of!(VolMarchParams, far), 124);
-        assert_eq!(std::mem::offset_of!(VolMarchParams, ambient_dust_density), 128);
-        assert_eq!(std::mem::offset_of!(VolMarchParams, ambient_dust_g), 132);
-        assert_eq!(std::mem::offset_of!(VolMarchParams, frame_index), 136);
-        assert_eq!(std::mem::offset_of!(VolMarchParams, _pad0), 140);
-        assert_eq!(std::mem::offset_of!(VolMarchParams, vol_shadow_min), 144);
-        assert_eq!(std::mem::offset_of!(VolMarchParams, vol_shadow_max), 160);
+        assert_eq!(std::mem::offset_of!(VolMarchParams, fog_color), 128);
+        assert_eq!(std::mem::offset_of!(VolMarchParams, fog_height), 144);
+        assert_eq!(std::mem::offset_of!(VolMarchParams, fog_distance), 160);
+        assert_eq!(std::mem::offset_of!(VolMarchParams, frame_index), 176);
+        assert_eq!(std::mem::offset_of!(VolMarchParams, _pad0), 180);
+        assert_eq!(std::mem::offset_of!(VolMarchParams, _pad1), 184);
+        assert_eq!(std::mem::offset_of!(VolMarchParams, _pad2), 188);
+        assert_eq!(std::mem::offset_of!(VolMarchParams, vol_shadow_min), 192);
+        assert_eq!(std::mem::offset_of!(VolMarchParams, vol_shadow_max), 208);
     }
 
     #[test]
@@ -466,7 +530,6 @@ mod tests {
         let expected_min = [-64.0f32, -32.0, -64.0, 0.0];
         let expected_max = [64.0f32, 32.0, 64.0, 0.0];
 
-        // Construct a params with default shadow bounds and verify.
         let p = VolMarchParams {
             cam_pos: [0.0; 4],
             cam_forward: [0.0, 0.0, 1.0, 0.0],
@@ -482,10 +545,13 @@ mod tests {
             step_size: DEFAULT_VOL_STEP_SIZE,
             near: DEFAULT_VOL_NEAR,
             far: DEFAULT_VOL_FAR,
-            ambient_dust_density: DEFAULT_AMBIENT_DUST,
-            ambient_dust_g: DEFAULT_AMBIENT_DUST_G,
+            fog_color: [0.7, 0.8, 0.9, 0.0],
+            fog_height: [0.0, 0.0, 0.1, 0.0],
+            fog_distance: [0.0, 0.01, DEFAULT_AMBIENT_DUST, DEFAULT_AMBIENT_DUST_G],
             frame_index: 0,
             _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
             vol_shadow_min: expected_min,
             vol_shadow_max: expected_max,
         };
@@ -499,6 +565,39 @@ mod tests {
         assert!((size_x - 128.0).abs() < 1e-5);
         assert!((size_y - 64.0).abs() < 1e-5);
         assert!((size_z - 128.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn fog_fields_default_disabled() {
+        // With default construction the enable flags (w channels) must be 0.
+        let p = VolMarchParams {
+            cam_pos: [0.0; 4],
+            cam_forward: [0.0, 0.0, 1.0, 0.0],
+            cam_right: [1.0, 0.0, 0.0, 0.0],
+            cam_up: [0.0, 1.0, 0.0, 0.0],
+            sun_dir: [0.0, 1.0, 0.0, 0.0],
+            sun_color: [1.0, 0.95, 0.8, 0.0],
+            width: 480,
+            height: 270,
+            full_width: 960,
+            full_height: 540,
+            max_steps: DEFAULT_VOL_MAX_STEPS,
+            step_size: DEFAULT_VOL_STEP_SIZE,
+            near: DEFAULT_VOL_NEAR,
+            far: DEFAULT_VOL_FAR,
+            fog_color: [0.7, 0.8, 0.9, 0.0],   // w=0 → height fog off
+            fog_height: [0.0, 0.0, 0.1, 0.0],   // w=0 → distance fog off
+            fog_distance: [0.0, 0.01, 0.0, 0.3],
+            frame_index: 0,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
+            vol_shadow_min: [-64.0, -32.0, -64.0, 0.0],
+            vol_shadow_max: [64.0, 32.0, 64.0, 0.0],
+        };
+        assert_eq!(p.fog_color[3], 0.0);   // height fog disabled
+        assert_eq!(p.fog_height[3], 0.0);  // distance fog disabled
+        assert_eq!(p.fog_distance[2], 0.0); // no ambient dust
     }
 
     #[test]
@@ -533,5 +632,19 @@ mod tests {
         let height = 270u32;
         assert_eq!(width.div_ceil(8), 60);
         assert_eq!(height.div_ceil(8), 34); // ceil(270/8) = 34
+    }
+
+    #[test]
+    fn shadow_bounds_offsets_match_layout() {
+        // vol_shadow_min must be at offset 192, vol_shadow_max at 208.
+        // These match the write_buffer calls in set_shadow_bounds.
+        assert_eq!(std::mem::offset_of!(VolMarchParams, vol_shadow_min), 192);
+        assert_eq!(std::mem::offset_of!(VolMarchParams, vol_shadow_max), 208);
+    }
+
+    #[test]
+    fn fog_params_offset_matches_set_fog_params() {
+        // set_fog_params writes at offset 128. fog_color must start there.
+        assert_eq!(std::mem::offset_of!(VolMarchParams, fog_color), 128);
     }
 }
