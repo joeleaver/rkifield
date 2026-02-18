@@ -7,10 +7,11 @@
 
 use rkf_render::{
     AutoExposurePass, BlitPass, BloomCompositePass, BloomPass, ClipmapGpuData, CloudShadowPass,
-    ColorGradePass, CosmeticsPass, DofPass, GBuffer, GpuScene, MaterialTable, LightBuffer,
-    MotionBlurPass, RadianceInjectPass, RadianceMipPass, RadianceVolume, RayMarchPass,
-    ShadingPass, SharpenPass, TileCullPass, ToneMapPass, UpscalePass, VolCompositePass,
-    VolMarchParams, VolMarchPass, VolShadowPass, VolTemporalPass, VolUpscalePass,
+    ColorGradePass, CosmeticsPass, DofPass, GBuffer, GpuColorPool, GpuScene, MaterialTable,
+    LightBuffer, MotionBlurPass, RadianceInjectPass, RadianceMipPass, RadianceVolume,
+    RayMarchPass, ShadingPass, SharpenPass, TileCullPass, ToneMapPass, UpscalePass,
+    VolCompositePass, VolMarchParams, VolMarchPass, VolShadowPass, VolTemporalPass,
+    VolUpscalePass,
 };
 
 /// Controls which optional render passes are enabled for a frame.
@@ -114,6 +115,10 @@ pub struct FrameContext<'a> {
     pub radiance_inject: &'a RadianceInjectPass,
     /// Radiance mip-chain generation pass (L0 → L1-L3).
     pub radiance_mip: &'a RadianceMipPass,
+
+    // ── Color pool ────────────────────────────────────────────────────────────
+    /// GPU color pool for per-voxel color companion data.
+    pub color_pool: &'a GpuColorPool,
 
     // ── Volumetrics ───────────────────────────────────────────────────────────
     /// Volumetric shadow map pass.
@@ -234,6 +239,7 @@ pub fn execute_frame(ctx: &mut FrameContext) {
         ctx.scene,
         ctx.shade_light_bind_group,
         ctx.radiance_volume,
+        ctx.color_pool,
     );
 
     // ── 7-10. Volumetrics ─────────────────────────────────────────────────────

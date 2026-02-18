@@ -40,6 +40,7 @@ use rkf_render::radiance_mip::RadianceMipPass;
 use rkf_render::radiance_volume::RadianceVolume;
 use rkf_render::ray_march::{RayMarchPass, INTERNAL_HEIGHT, INTERNAL_WIDTH};
 use rkf_render::sharpen::SharpenPass;
+use rkf_render::gpu_color_pool::GpuColorPool;
 use rkf_render::shading::ShadingPass;
 use rkf_render::tile_cull::TileCullPass;
 use rkf_render::tone_map::ToneMapPass;
@@ -524,6 +525,7 @@ struct GpuState {
     radiance_volume: RadianceVolume,
     radiance_inject: RadianceInjectPass,
     radiance_mip: RadianceMipPass,
+    color_pool: GpuColorPool,
     history: HistoryBuffers,
     upscale: UpscalePass,
     sharpen: SharpenPass,
@@ -665,6 +667,9 @@ impl GpuState {
         // Upload clipmap LOD data (enables multi-level ray marching)
         let clipmap = ClipmapGpuData::upload(&context.device, &grid_set, [0.0, 0.0, 0.0]);
 
+        // Create empty color pool (placeholder — no objects use per-voxel color yet)
+        let color_pool = GpuColorPool::empty(&context.device);
+
         // Create core render passes
         let ray_march = RayMarchPass::new(&context.device, &scene, &gbuffer, &clipmap);
         let shading = ShadingPass::new(
@@ -674,6 +679,7 @@ impl GpuState {
             &scene,
             &tile_cull.shade_light_bind_group_layout,
             &radiance_volume,
+            &color_pool,
             INTERNAL_WIDTH,
             INTERNAL_HEIGHT,
         );
@@ -873,6 +879,7 @@ impl GpuState {
             radiance_volume,
             radiance_inject,
             radiance_mip,
+            color_pool,
             history,
             upscale,
             sharpen,
@@ -1034,6 +1041,7 @@ impl GpuState {
                 radiance_volume: &self.radiance_volume,
                 radiance_inject: &self.radiance_inject,
                 radiance_mip: &self.radiance_mip,
+                color_pool: &self.color_pool,
                 vol_shadow: &self.vol_shadow,
                 vol_march: &self.vol_march,
                 vol_march_params: &vol_march_params,

@@ -26,6 +26,8 @@ pub mod blit;
 pub mod gbuffer;
 /// GPU material table for PBR shading.
 pub mod material_table;
+/// GPU color pool for per-voxel color companion data.
+pub mod gpu_color_pool;
 /// Ray march compute pass.
 pub mod ray_march;
 /// Light types and GPU light buffer.
@@ -96,6 +98,7 @@ pub use context::RenderContext;
 pub use gbuffer::GBuffer;
 pub use gpu_scene::{GpuScene, SceneUniforms};
 pub use material_table::MaterialTable;
+pub use gpu_color_pool::GpuColorPool;
 pub use blit::BlitPass;
 pub use ray_march::RayMarchPass;
 pub use light::{Light, LightBuffer, MAX_LIGHTS, MAX_LIGHTS_PER_TILE, TILE_SIZE};

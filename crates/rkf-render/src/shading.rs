@@ -4,6 +4,7 @@
 //! directional sun light, and writes HDR color to an `Rgba16Float` texture.
 
 use crate::gbuffer::GBuffer;
+use crate::gpu_color_pool::GpuColorPool;
 use crate::gpu_scene::GpuScene;
 use crate::material_table::MaterialTable;
 use crate::radiance_volume::RadianceVolume;
@@ -65,6 +66,7 @@ impl ShadingPass {
         scene: &GpuScene,
         light_bind_group_layout: &wgpu::BindGroupLayout,
         radiance_volume: &RadianceVolume,
+        color_pool: &GpuColorPool,
         width: u32,
         height: u32,
     ) -> Self {
@@ -156,7 +158,7 @@ impl ShadingPass {
 
         // Pipeline layout: group 0 = G-buffer, group 1 = materials, group 2 = HDR output,
         // group 3 = shade uniforms, group 4 = scene SDF data, group 5 = light/tile data,
-        // group 6 = radiance volume (GI cone tracing)
+        // group 6 = radiance volume (GI cone tracing), group 7 = color pool
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("shading pipeline layout"),
             bind_group_layouts: &[
@@ -167,6 +169,7 @@ impl ShadingPass {
                 &scene.bind_group_layout,
                 light_bind_group_layout,
                 &radiance_volume.read_bind_group_layout,
+                &color_pool.bind_group_layout,
             ],
             push_constant_ranges: &[],
         });
@@ -203,6 +206,7 @@ impl ShadingPass {
         scene: &GpuScene,
         light_bind_group: &wgpu::BindGroup,
         radiance_volume: &RadianceVolume,
+        color_pool: &GpuColorPool,
     ) {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("shading"),
@@ -216,6 +220,7 @@ impl ShadingPass {
         pass.set_bind_group(4, &scene.bind_group, &[]);
         pass.set_bind_group(5, light_bind_group, &[]);
         pass.set_bind_group(6, &radiance_volume.read_bind_group, &[]);
+        pass.set_bind_group(7, &color_pool.bind_group, &[]);
 
         let wg_x = self.width.div_ceil(8);
         let wg_y = self.height.div_ceil(8);

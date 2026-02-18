@@ -124,11 +124,18 @@ struct RadianceVolumeUniforms {
 @group(6) @binding(4) var radiance_sampler: sampler;
 @group(6) @binding(5) var<uniform> vol: RadianceVolumeUniforms;
 
+// Group 7: Color pool (per-voxel color companion data)
+@group(7) @binding(0) var<storage, read> color_pool: array<u32>;
+@group(7) @binding(1) var<storage, read> color_companion: array<u32>;
+
 // ---------- Constants ----------
 
 const PI: f32 = 3.14159265359;
 const MAX_FLOAT: f32 = 3.402823e+38;
 const EMPTY_SLOT: u32 = 0xFFFFFFFFu;
+
+// Voxel flags
+const FLAG_HAS_COLOR_DATA: u32 = 4u; // bit 2
 
 // CellState values (2-bit, matching Rust CellState enum)
 const CELL_EMPTY: u32      = 0u;
@@ -541,10 +548,38 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
 
     // Resolve material with blending
     let resolved = blend_materials(material_id, secondary_id, blend_weight);
-    let albedo = resolved.albedo;
+    var albedo = resolved.albedo;
     let roughness = clamp(resolved.roughness, 0.04, 1.0);
     let metallic = resolved.metallic;
     let emission = resolved.emission * resolved.emission_strength;
+
+    // Per-voxel color modulation (companion color pool)
+    if (voxel_flags & FLAG_HAS_COLOR_DATA) != 0u {
+        let cell_i = sdf_world_to_cell(world_pos);
+        if sdf_cell_in_bounds(cell_i) {
+            let cell = vec3<u32>(cell_i);
+            let flat = sdf_cell_flat_index(cell);
+            let sdf_slot = slots[flat];
+            if sdf_slot != EMPTY_SLOT {
+                let color_slot = color_companion[sdf_slot];
+                if color_slot != EMPTY_SLOT {
+                    let be = sdf_brick_extent();
+                    let brick_min = sdf_grid_origin() + vec3<f32>(cell) * be;
+                    let brick_local = (world_pos - brick_min) / sdf_voxel_size();
+                    let voxel = clamp(vec3<u32>(floor(brick_local)), vec3<u32>(0u), vec3<u32>(7u));
+                    let voxel_idx = voxel.x + voxel.y * 8u + voxel.z * 64u;
+                    let packed_color = color_pool[color_slot * 512u + voxel_idx];
+                    let cr = f32(packed_color & 0xFFu) / 255.0;
+                    let cg = f32((packed_color >> 8u) & 0xFFu) / 255.0;
+                    let cb = f32((packed_color >> 16u) & 0xFFu) / 255.0;
+                    let ci = f32((packed_color >> 24u) & 0xFFu) / 255.0;
+                    // Multiply mode: tint albedo, weighted by intensity
+                    let voxel_color = vec3<f32>(cr, cg, cb);
+                    albedo = mix(albedo, albedo * voxel_color, ci);
+                }
+            }
+        }
+    }
 
     // F0: reflectance at normal incidence
     // Dielectric: 0.04, Metal: albedo color
