@@ -19,6 +19,7 @@ struct CameraUniforms {
     up:       vec4<f32>,   // xyz + pad  (scaled by fov)
     resolution: vec2<f32>, // width, height
     jitter: vec2<f32>,     // sub-pixel jitter in pixel units
+    prev_vp: mat4x4<f32>, // previous frame view-projection
 }
 
 struct SceneUniforms {
@@ -353,7 +354,17 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
         // Pack material_id (lower 16) + secondary_id_and_flags (upper 16) into R32Uint
         let packed_mat = result.material_id | (result.secondary_id_and_flags << 16u);
         textureStore(gbuf_material, coord, vec4<u32>(packed_mat, 0u, 0u, 0u));
-        textureStore(gbuf_motion, coord, vec4<f32>(0.0, 0.0, 0.0, 0.0));
+        // Motion vector: reproject hit position through previous VP
+        let prev_clip = camera.prev_vp * vec4<f32>(hit_pos, 1.0);
+        var motion = vec2<f32>(0.0, 0.0);
+        if prev_clip.w > 0.0 {
+            let prev_ndc = prev_clip.xy / prev_clip.w;
+            // NDC [-1,1] → UV [0,1], Y flipped (screen top = y=0, NDC top = y=+1)
+            let prev_uv = vec2<f32>(prev_ndc.x * 0.5 + 0.5, 0.5 - prev_ndc.y * 0.5);
+            let curr_uv = (vec2<f32>(pixel.xy) + 0.5) / vec2<f32>(dims);
+            motion = curr_uv - prev_uv;
+        }
+        textureStore(gbuf_motion, coord, vec4<f32>(motion, 0.0, 0.0));
     } else {
         // Sky / miss — encode as MAX_FLOAT hit distance
         textureStore(gbuf_position, coord, vec4<f32>(0.0, 0.0, 0.0, MAX_FLOAT));

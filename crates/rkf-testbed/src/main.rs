@@ -367,6 +367,7 @@ struct GpuState {
     staging_buffer: wgpu::Buffer,
     shared_state: Arc<Mutex<SharedState>>,
     frame_index: u32,
+    prev_vp: [[f32; 4]; 4],
 }
 
 impl GpuState {
@@ -397,7 +398,8 @@ impl GpuState {
         let mut camera = Camera::new(Vec3::new(0.0, 0.0, 1.8));
         camera.fov_degrees = 60.0;
 
-        let camera_uniforms = camera.uniforms(INTERNAL_WIDTH, INTERNAL_HEIGHT, 0);
+        let prev_vp = camera.view_projection(INTERNAL_WIDTH, INTERNAL_HEIGHT).to_cols_array_2d();
+        let camera_uniforms = camera.uniforms(INTERNAL_WIDTH, INTERNAL_HEIGHT, 0, prev_vp);
         let camera_bytes = bytemuck::bytes_of(&camera_uniforms);
 
         let dims = grid.dimensions();
@@ -499,6 +501,7 @@ impl GpuState {
             staging_buffer,
             shared_state,
             frame_index: 0,
+            prev_vp,
         }
     }
 
@@ -513,7 +516,7 @@ impl GpuState {
     }
 
     fn update_camera(&mut self) {
-        let uniforms = self.camera.uniforms(INTERNAL_WIDTH, INTERNAL_HEIGHT, self.frame_index);
+        let uniforms = self.camera.uniforms(INTERNAL_WIDTH, INTERNAL_HEIGHT, self.frame_index, self.prev_vp);
         self.context.queue.write_buffer(
             &self.scene.camera_buffer,
             0,
@@ -635,6 +638,9 @@ impl GpuState {
                 depth_or_array_layers: 1,
             },
         );
+
+        // Store current VP as previous for next frame's motion vectors
+        self.prev_vp = self.camera.view_projection(INTERNAL_WIDTH, INTERNAL_HEIGHT).to_cols_array_2d();
 
         self.context.queue.submit(std::iter::once(encoder.finish()));
         frame.present();

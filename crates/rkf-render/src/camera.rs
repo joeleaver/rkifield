@@ -92,6 +92,38 @@ impl Camera {
         self.right().cross(self.forward()).normalize()
     }
 
+    /// Construct the view matrix (world → camera space).
+    ///
+    /// Uses a right-handed coordinate system with -Z forward.
+    pub fn view_matrix(&self) -> glam::Mat4 {
+        let f = self.forward();
+        let r = self.right();
+        let u = self.up();
+        let p = self.position;
+        // Column-major: columns are [right, up, -forward] transposed, with translation
+        glam::Mat4::from_cols_array(&[
+            r.x,       u.x,      -f.x,      0.0,
+            r.y,       u.y,      -f.y,      0.0,
+            r.z,       u.z,      -f.z,      0.0,
+            -r.dot(p), -u.dot(p), f.dot(p), 1.0,
+        ])
+    }
+
+    /// Construct the projection matrix (camera → clip space).
+    ///
+    /// Right-handed perspective with reverse-Z is NOT used here;
+    /// standard perspective matches the ray-gen approach.
+    pub fn projection_matrix(&self, width: u32, height: u32) -> glam::Mat4 {
+        let fov = self.fov_degrees.to_radians();
+        let aspect = width as f32 / height as f32;
+        glam::Mat4::perspective_rh(fov, aspect, 0.01, 1000.0)
+    }
+
+    /// Construct the view-projection matrix (world → clip space).
+    pub fn view_projection(&self, width: u32, height: u32) -> glam::Mat4 {
+        self.projection_matrix(width, height) * self.view_matrix()
+    }
+
     /// Move the camera along its forward axis.
     pub fn translate_forward(&mut self, amount: f32) {
         self.position += self.forward() * amount;
@@ -126,7 +158,7 @@ impl Camera {
     /// ndc = uv * 2.0 - 1.0;
     /// ray_dir = normalize(forward + ndc.x * right + ndc.y * up);
     /// ```
-    pub fn uniforms(&self, width: u32, height: u32, frame_index: u32) -> CameraUniforms {
+    pub fn uniforms(&self, width: u32, height: u32, frame_index: u32, prev_vp: [[f32; 4]; 4]) -> CameraUniforms {
         let fov_rad = self.fov_degrees.to_radians();
         let half_fov_tan = (fov_rad * 0.5).tan();
         let aspect = width as f32 / height as f32;
@@ -142,16 +174,18 @@ impl Camera {
             up: [u.x, u.y, u.z, 0.0],
             resolution: [width as f32, height as f32],
             jitter: jitter_for_frame(frame_index),
+            prev_vp,
         }
     }
 }
 
-/// GPU-uploadable camera uniforms (96 bytes, 16-byte aligned).
+/// GPU-uploadable camera uniforms (144 bytes, 16-byte aligned).
 ///
 /// Direction vectors are pre-scaled so the shader only needs:
 /// ```text
 /// ray_dir = normalize(forward + ndc.x * right + ndc.y * up);
 /// ```
+/// The previous frame's VP matrix enables motion vector computation.
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Pod, Zeroable)]
 pub struct CameraUniforms {
@@ -168,6 +202,9 @@ pub struct CameraUniforms {
     /// Sub-pixel jitter offset in pixel units `[jitter_x, jitter_y]`.
     /// Applied to pixel center before ray generation for temporal super-sampling.
     pub jitter: [f32; 2],
+    /// Previous frame's view-projection matrix (column-major, 4 columns of vec4).
+    /// Used for motion vector computation via reprojection.
+    pub prev_vp: [[f32; 4]; 4],
 }
 
 // ---------------------------------------------------------------------------
@@ -310,21 +347,21 @@ mod tests {
     // ------ CameraUniforms ------
 
     #[test]
-    fn uniforms_size_is_80_bytes() {
-        assert_eq!(std::mem::size_of::<CameraUniforms>(), 80);
+    fn uniforms_size_is_144_bytes() {
+        assert_eq!(std::mem::size_of::<CameraUniforms>(), 144);
     }
 
     #[test]
     fn uniforms_resolution_matches() {
         let cam = Camera::new(Vec3::ZERO);
-        let u = cam.uniforms(960, 540, 0);
+        let u = cam.uniforms(960, 540, 0, [[0.0; 4]; 4]);
         assert_eq!(u.resolution, [960.0, 540.0]);
     }
 
     #[test]
     fn uniforms_position_matches() {
         let cam = Camera::new(Vec3::new(1.0, 2.0, 3.0));
-        let u = cam.uniforms(960, 540, 0);
+        let u = cam.uniforms(960, 540, 0, [[0.0; 4]; 4]);
         assert_eq!(u.position[0], 1.0);
         assert_eq!(u.position[1], 2.0);
         assert_eq!(u.position[2], 3.0);
@@ -333,7 +370,7 @@ mod tests {
     #[test]
     fn uniforms_right_is_scaled_by_fov_and_aspect() {
         let cam = Camera::new(Vec3::ZERO);
-        let u = cam.uniforms(960, 540, 0);
+        let u = cam.uniforms(960, 540, 0, [[0.0; 4]; 4]);
         let fov_rad = DEFAULT_FOV_DEGREES.to_radians();
         let half_fov_tan = (fov_rad * 0.5).tan();
         let aspect = 960.0 / 540.0;
@@ -349,7 +386,7 @@ mod tests {
     #[test]
     fn uniforms_up_is_scaled_by_fov() {
         let cam = Camera::new(Vec3::ZERO);
-        let u = cam.uniforms(960, 540, 0);
+        let u = cam.uniforms(960, 540, 0, [[0.0; 4]; 4]);
         let fov_rad = DEFAULT_FOV_DEGREES.to_radians();
         let half_fov_tan = (fov_rad * 0.5).tan();
         let up_len = (u.up[0] * u.up[0] + u.up[1] * u.up[1] + u.up[2] * u.up[2]).sqrt();
@@ -362,12 +399,45 @@ mod tests {
     #[test]
     fn uniforms_pod_roundtrip() {
         let cam = Camera::new(Vec3::new(1.0, 2.0, 3.0));
-        let u = cam.uniforms(1920, 1080, 0);
+        let u = cam.uniforms(1920, 1080, 0, [[0.0; 4]; 4]);
         let bytes = bytemuck::bytes_of(&u);
-        assert_eq!(bytes.len(), 80);
+        assert_eq!(bytes.len(), 144);
         let u2: &CameraUniforms = bytemuck::from_bytes(bytes);
         assert_eq!(u.position, u2.position);
         assert_eq!(u.resolution, u2.resolution);
+    }
+
+    #[test]
+    fn view_matrix_at_origin_looking_neg_z() {
+        let cam = Camera::new(Vec3::ZERO);
+        let v = cam.view_matrix();
+        // Should be approximately identity (camera at origin, looking -Z, up +Y)
+        let expected = glam::Mat4::IDENTITY;
+        for i in 0..16 {
+            assert!(
+                (v.to_cols_array()[i] - expected.to_cols_array()[i]).abs() < 1e-5,
+                "view_matrix element {i} mismatch: {} vs {}",
+                v.to_cols_array()[i], expected.to_cols_array()[i]
+            );
+        }
+    }
+
+    #[test]
+    fn view_projection_invertible() {
+        let mut cam = Camera::new(Vec3::new(1.0, 2.0, 3.0));
+        cam.yaw = 0.5;
+        cam.pitch = 0.2;
+        let vp = cam.view_projection(960, 540);
+        assert!(vp.determinant().abs() > 1e-6, "VP matrix should be invertible");
+    }
+
+    #[test]
+    fn prev_vp_stored_in_uniforms() {
+        let cam = Camera::new(Vec3::ZERO);
+        let vp = cam.view_projection(960, 540);
+        let prev_vp = vp.to_cols_array_2d();
+        let u = cam.uniforms(960, 540, 0, prev_vp);
+        assert_eq!(u.prev_vp, prev_vp);
     }
 
     // ------ Halton sequence ------
@@ -414,7 +484,7 @@ mod tests {
     #[test]
     fn uniforms_jitter_at_frame_zero() {
         let cam = Camera::new(Vec3::ZERO);
-        let u = cam.uniforms(960, 540, 0);
+        let u = cam.uniforms(960, 540, 0, [[0.0; 4]; 4]);
         let expected = jitter_for_frame(0);
         assert_eq!(u.jitter, expected);
     }
