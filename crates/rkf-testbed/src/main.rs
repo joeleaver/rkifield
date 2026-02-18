@@ -26,12 +26,14 @@ use rkf_render::camera::Camera;
 use rkf_render::clipmap_gpu::ClipmapGpuData;
 use rkf_render::color_grade::ColorGradePass;
 use rkf_render::cosmetics::CosmeticsPass;
+use rkf_render::dof::DofPass;
 use rkf_render::gbuffer::GBuffer;
 use rkf_render::gpu_color_pool::GpuColorPool;
 use rkf_render::gpu_scene::{GpuScene, SceneUniforms};
 use rkf_render::history::HistoryBuffers;
 use rkf_render::light::{Light, LightBuffer};
 use rkf_render::material_table::{self, MaterialTable};
+use rkf_render::motion_blur::MotionBlurPass;
 use rkf_render::radiance_inject::RadianceInjectPass;
 use rkf_render::radiance_mip::RadianceMipPass;
 use rkf_render::radiance_volume::RadianceVolume;
@@ -463,6 +465,8 @@ struct GpuState {
     vol_upscale: VolUpscalePass,
     vol_composite: VolCompositePass,
     fog_settings: FogSettings,
+    dof: DofPass,
+    motion_blur: MotionBlurPass,
     history: HistoryBuffers,
     upscale: UpscalePass,
     sharpen: SharpenPass,
@@ -636,9 +640,23 @@ impl GpuState {
             DISPLAY_WIDTH, DISPLAY_HEIGHT,
         );
 
-        // Phase 10: Bloom (pre-upscale) — extract bright pixels from composited HDR
+        // Phase 10: DoF (pre-upscale) — reads composited HDR + gbuffer depth
+        let dof = DofPass::new(
+            &context.device, &vol_composite.output_view, &gbuffer.position_view,
+            INTERNAL_WIDTH, INTERNAL_HEIGHT,
+        );
+        // Gentle DoF: focus at 5m, wide range for subtle background softening
+        dof.update_focus(&context.queue, 5.0, 8.0, 6.0);
+
+        // Phase 10: Motion blur (pre-upscale) — reads DoF output + gbuffer motion vectors
+        let motion_blur = MotionBlurPass::new(
+            &context.device, &dof.output_view, &gbuffer.motion_view,
+            INTERNAL_WIDTH, INTERNAL_HEIGHT,
+        );
+
+        // Phase 10: Bloom (pre-upscale) — extract bright pixels from motion-blurred HDR
         let bloom = BloomPass::new(
-            &context.device, &vol_composite.output_view,
+            &context.device, &motion_blur.output_view,
             INTERNAL_WIDTH, INTERNAL_HEIGHT,
         );
 
@@ -655,12 +673,13 @@ impl GpuState {
             DISPLAY_WIDTH, DISPLAY_HEIGHT,
         );
 
-        // Tone map now reads from bloom composite output (HDR with bloom applied)
-        let tone_map = ToneMapPass::new(
+        // Tone map reads from bloom composite output, with auto-exposure buffer bound
+        let tone_map = ToneMapPass::new_with_exposure(
             &context.device,
             &bloom_composite.output_view,
             DISPLAY_WIDTH,
             DISPLAY_HEIGHT,
+            Some(auto_exposure.get_exposure_buffer()),
         );
 
         // Phase 10: Color grading (identity LUT by default — passthrough)
@@ -717,6 +736,8 @@ impl GpuState {
             vol_upscale: vol_upscale_pass,
             vol_composite,
             fog_settings,
+            dof,
+            motion_blur,
             history,
             upscale,
             sharpen,
@@ -934,7 +955,13 @@ impl GpuState {
         // Volumetric compositing (shaded + scatter)
         self.vol_composite.dispatch(&mut encoder);
 
-        // Phase 10: Bloom extract/downsample/blur (pre-upscale, reads composited HDR)
+        // Phase 10: DoF (pre-upscale, reads composited HDR + gbuffer depth)
+        self.dof.dispatch(&mut encoder);
+
+        // Phase 10: Motion blur (pre-upscale, reads DoF output + gbuffer motion vectors)
+        self.motion_blur.dispatch(&mut encoder);
+
+        // Phase 10: Bloom extract/downsample/blur (pre-upscale, reads motion-blurred HDR)
         self.bloom.dispatch(&mut encoder);
 
         // Phase 10: spatial upscale + edge-aware sharpen (no jitter — spatial only)

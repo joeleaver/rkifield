@@ -59,6 +59,8 @@ pub struct ColorGradePass {
     sampler: wgpu::Sampler,
     lut_texture: wgpu::Texture,
     lut_view: wgpu::TextureView,
+    /// Stored reference to the input LDR texture view (needed for bind group rebuild).
+    input_ldr_view: wgpu::TextureView,
     /// Color-graded LDR output texture (Rgba8Unorm, display resolution).
     pub output_texture: wgpu::Texture,
     /// View of the color-graded LDR output texture.
@@ -255,6 +257,7 @@ impl ColorGradePass {
             sampler,
             lut_texture,
             lut_view,
+            input_ldr_view: input_ldr_view.clone(),
             output_texture,
             output_view,
             width,
@@ -309,11 +312,15 @@ impl ColorGradePass {
         // Update lut_size in params buffer (byte offset 8).
         queue.write_buffer(&self.params_buffer, 8, bytemuck::bytes_of(&size));
 
-        // Rebuild bind group to use new LUT view.
+        // Rebuild bind group to use new LUT view (all 5 bindings required).
         self.bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("color grade bind group"),
             layout: &self.bind_group_layout,
             entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self.input_ldr_view),
+                },
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::TextureView(&self.lut_view),

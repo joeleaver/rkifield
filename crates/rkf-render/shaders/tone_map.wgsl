@@ -10,11 +10,12 @@
 
 struct ToneMapParams {
     mode: u32,       // 0 = ACES, 1 = AgX
-    exposure: f32,   // exposure multiplier (2^EV)
+    exposure: f32,   // manual exposure multiplier (default 1.0)
     _pad0: u32,
     _pad1: u32,
 }
 @group(2) @binding(0) var<uniform> params: ToneMapParams;
+@group(2) @binding(1) var<storage, read> exposure_data: array<f32, 2>;  // [0]=current_ev, [1]=target_ev
 
 // ---------- ACES Tone Mapping ----------
 
@@ -96,8 +97,10 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
     let coord = vec2<i32>(pixel.xy);
     var hdr = textureLoad(hdr_input, coord, 0).rgb;
 
-    // Apply exposure
-    hdr = hdr * params.exposure;
+    // Apply auto-exposure (adapted EV → multiplier) and manual exposure override
+    let auto_ev = exposure_data[0];
+    let auto_multiplier = pow(2.0, auto_ev);
+    hdr = hdr * params.exposure * auto_multiplier;
 
     // Tone map based on selected mode
     var mapped: vec3<f32>;

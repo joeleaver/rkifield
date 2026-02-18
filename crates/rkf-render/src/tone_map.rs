@@ -69,11 +69,24 @@ impl ToneMapPass {
     /// Create the tone mapping pass.
     ///
     /// `hdr_view` is the HDR texture view from the shading pass.
+    /// `exposure_buffer` is the auto-exposure GPU buffer ([current_ev, target_ev]).
+    /// If provided, the shader reads adapted EV and applies `2^EV` as exposure.
     pub fn new(
         device: &wgpu::Device,
         hdr_view: &wgpu::TextureView,
         width: u32,
         height: u32,
+    ) -> Self {
+        Self::new_with_exposure(device, hdr_view, width, height, None)
+    }
+
+    /// Create the tone mapping pass with an auto-exposure buffer binding.
+    pub fn new_with_exposure(
+        device: &wgpu::Device,
+        hdr_view: &wgpu::TextureView,
+        width: u32,
+        height: u32,
+        exposure_buffer: Option<&wgpu::Buffer>,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("tone_map.wgsl"),
@@ -149,7 +162,7 @@ impl ToneMapPass {
             }],
         });
 
-        // Group 2: Tone map params (mode + exposure)
+        // Group 2: Tone map params (mode + exposure) + auto-exposure buffer
         let tone_params = ToneMapParams {
             mode: ToneMapMode::Aces as u32,
             exposure: DEFAULT_EXPOSURE,
@@ -162,28 +175,60 @@ impl ToneMapPass {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
+        // If no auto-exposure buffer provided, create a dummy with EV=0 (multiplier=1.0).
+        let dummy_exposure_buf;
+        let exposure_buf = match exposure_buffer {
+            Some(buf) => buf,
+            None => {
+                dummy_exposure_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("tone map dummy exposure"),
+                    contents: bytemuck::cast_slice(&[0.0f32, 0.0f32]),
+                    usage: wgpu::BufferUsages::STORAGE,
+                });
+                &dummy_exposure_buf
+            }
+        };
+
         let params_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("tone map params layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                }],
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
             });
 
         let params_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("tone map params bind group"),
             layout: &params_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: params_buffer.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: exposure_buf.as_entire_binding(),
+                },
+            ],
         });
 
         // Pipeline layout
