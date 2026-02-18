@@ -62,6 +62,8 @@ pub mod bloom_composite;
 pub mod auto_exposure;
 /// Color grading compute pass (post-upscale).
 pub mod color_grade;
+/// Cosmetic post-processing effects (vignette, grain, chromatic aberration).
+pub mod cosmetics;
 /// DLSS integration layer (stub — falls back to custom upscaler).
 pub mod dlss;
 
@@ -89,4 +91,5 @@ pub use motion_blur::{MotionBlurPass, MotionBlurParams, DEFAULT_MOTION_BLUR_INTE
 pub use bloom_composite::{BloomCompositePass, BloomCompositeParams, DEFAULT_BLOOM_INTENSITY};
 pub use auto_exposure::{AutoExposurePass, ExposureParams, HISTOGRAM_BINS, DEFAULT_MIN_EV, DEFAULT_MAX_EV, DEFAULT_ADAPT_SPEED};
 pub use color_grade::{ColorGradePass, ColorGradeParams, DEFAULT_LUT_SIZE, DEFAULT_COLOR_GRADE_INTENSITY};
+pub use cosmetics::{CosmeticsPass, CosmeticsParams, DEFAULT_VIGNETTE_INTENSITY, DEFAULT_GRAIN_INTENSITY, DEFAULT_CHROMATIC_ABERRATION};
 pub use dlss::{DlssContext, DlssQuality};
