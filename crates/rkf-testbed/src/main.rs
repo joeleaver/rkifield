@@ -14,7 +14,7 @@ use rkf_core::aabb::Aabb;
 use rkf_core::brick_pool::Pool;
 use rkf_core::constants::RESOLUTION_TIERS;
 use rkf_core::populate::populate_grid_with_material;
-use rkf_core::sdf::sphere_sdf;
+use rkf_core::sdf::{box_sdf, capsule_sdf, sphere_sdf};
 use rkf_core::sparse_grid::SparseGrid;
 use rkf_core::BrickPool;
 
@@ -37,34 +37,68 @@ mod automation;
 use automation::{SharedState, TestbedAutomationApi};
 
 // ---------------------------------------------------------------------------
-// Phase 4 scene — single sphere
+// Phase 5 scene — multiple objects (sphere + box + capsule)
 // ---------------------------------------------------------------------------
 
-fn create_phase4_scene() -> (BrickPool, SparseGrid, Aabb) {
-    let aabb = Aabb::new(Vec3::splat(-1.5), Vec3::splat(1.5));
-    let res = &RESOLUTION_TIERS[1]; // Tier 1 = 2cm
+fn create_phase5_scene() -> (BrickPool, SparseGrid, Aabb) {
+    // AABB large enough to encompass all three objects with margin
+    let aabb = Aabb::new(Vec3::new(-2.0, -1.5, -1.5), Vec3::new(2.0, 1.5, 1.5));
+    let res = &RESOLUTION_TIERS[1]; // Tier 1 = 2cm voxels, 0.16m brick extent
     let size = aabb.size();
     let dims = UVec3::new(
         ((size.x / res.brick_extent).ceil() as u32).max(1),
         ((size.y / res.brick_extent).ceil() as u32).max(1),
         ((size.z / res.brick_extent).ceil() as u32).max(1),
     );
-    let mut pool: BrickPool = Pool::new(4096);
+    let mut pool: BrickPool = Pool::new(16384);
     let mut grid = SparseGrid::new(dims);
-    let count = populate_grid_with_material(
+
+    // Object 1: Sphere at (-1.0, 0.0, 0.0), radius 0.4, material 1
+    let sphere_center = Vec3::new(-1.0, 0.0, 0.0);
+    let c1 = populate_grid_with_material(
         &mut pool,
         &mut grid,
-        |p| sphere_sdf(Vec3::ZERO, 0.5, p),
+        |p| sphere_sdf(sphere_center, 0.4, p),
         1,
         &aabb,
         1,
     )
     .expect("sphere");
+    log::info!("  Sphere: {c1} bricks");
+
+    // Object 2: Box at (0.0, 0.0, 0.0), half-extents 0.3, material 2
+    let box_center = Vec3::ZERO;
+    let c2 = populate_grid_with_material(
+        &mut pool,
+        &mut grid,
+        |p| box_sdf(Vec3::splat(0.3), p - box_center),
+        1,
+        &aabb,
+        2,
+    )
+    .expect("box");
+    log::info!("  Box: {c2} bricks");
+
+    // Object 3: Capsule at (1.0, 0.0, 0.0), vertical, radius 0.2, material 3
+    let cap_a = Vec3::new(1.0, -0.4, 0.0);
+    let cap_b = Vec3::new(1.0, 0.4, 0.0);
+    let c3 = populate_grid_with_material(
+        &mut pool,
+        &mut grid,
+        |p| capsule_sdf(cap_a, cap_b, 0.2, p),
+        1,
+        &aabb,
+        3,
+    )
+    .expect("capsule");
+    log::info!("  Capsule: {c3} bricks");
+
+    let total = c1 + c2 + c3;
     log::info!(
-        "Phase 4 scene: {count} bricks, grid {}x{}x{}",
+        "Phase 5 scene: {total} bricks total, grid {}x{}x{}",
         dims.x,
         dims.y,
-        dims.z
+        dims.z,
     );
     (pool, grid, aabb)
 }
@@ -115,7 +149,7 @@ impl GpuState {
             context.configure_surface(&surface, display_width, display_height);
 
         // Scene
-        let (pool, grid, aabb) = create_phase4_scene();
+        let (pool, grid, aabb) = create_phase5_scene();
 
         // Update shared state with pool info
         {
@@ -125,7 +159,7 @@ impl GpuState {
         }
 
         // Camera
-        let mut camera = Camera::new(Vec3::new(0.0, 0.0, 2.0));
+        let mut camera = Camera::new(Vec3::new(0.0, 0.5, 3.5));
         camera.fov_degrees = 60.0;
 
         let camera_uniforms = camera.uniforms(INTERNAL_WIDTH, INTERNAL_HEIGHT, 0, [[0.0; 4]; 4]);
@@ -307,7 +341,7 @@ impl GpuState {
                 label: Some("frame encoder"),
             });
 
-        // Phase 4 pipeline: ray march -> tile cull -> shade -> tone map -> blit
+        // Phase 5 pipeline: ray march -> tile cull -> shade -> tone map -> blit
         self.ray_march
             .dispatch(&mut encoder, &self.scene, &self.gbuffer, &self.clipmap);
         self.tile_cull.dispatch(&mut encoder, &self.gbuffer);
@@ -540,7 +574,7 @@ impl ApplicationHandler for App {
             return;
         }
         let attrs = WindowAttributes::default()
-            .with_title("RKIField Testbed [Phase 4]")
+            .with_title("RKIField Testbed [Phase 5]")
             .with_inner_size(PhysicalSize::new(1280u32, 720u32));
         let window = Arc::new(
             event_loop
@@ -567,7 +601,7 @@ impl ApplicationHandler for App {
         log::info!("IPC server listening on {socket_path}");
         self.socket_path = Some(socket_path);
 
-        log::info!("Phase 4 validation — single sphere, basic shading");
+        log::info!("Phase 5 validation — sphere + box + capsule, DDA traversal");
         log::info!("Click to capture mouse, WASD to move, mouse to look, Esc to exit");
     }
 
@@ -631,7 +665,7 @@ impl ApplicationHandler for App {
                         let elapsed = now.duration_since(self.last_title_update).as_secs_f64();
                         let fps = self.frame_count as f64 / elapsed;
                         window.set_title(&format!(
-                            "RKIField Testbed [Phase 4] — {fps:.0} fps ({:.2} ms)",
+                            "RKIField Testbed [Phase 5] — {fps:.0} fps ({:.2} ms)",
                             1000.0 / fps
                         ));
                         self.frame_count = 0;
