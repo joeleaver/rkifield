@@ -72,6 +72,105 @@ pub struct ClipmapGpuData {
 }
 
 impl ClipmapGpuData {
+    /// Create an empty clipmap (num_levels=0) for backward compatibility.
+    ///
+    /// Produces valid GPU buffers and a bind group with `num_levels = 0`,
+    /// which causes the ray march shader to fall back to the single-grid path.
+    pub fn empty(device: &wgpu::Device) -> Self {
+        let uniforms = GpuClipmapUniforms {
+            num_levels: 0,
+            _pad: [0; 3],
+            levels: [GpuClipmapLevel::zeroed(); GPU_MAX_CLIPMAP_LEVELS],
+        };
+
+        // Minimal 4-byte buffers to satisfy wgpu validation (zero-size is invalid).
+        let occupancy_buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("clipmap occupancy (empty)"),
+                contents: bytemuck::bytes_of(&0u32),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            });
+
+        let slot_buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("clipmap slots (empty)"),
+                contents: bytemuck::bytes_of(&0xFFFF_FFFFu32),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            });
+
+        let uniform_buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("clipmap uniforms (empty)"),
+                contents: bytemuck::bytes_of(&uniforms),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+
+        let bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("clipmap bind group layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("clipmap bind group (empty)"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: occupancy_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: slot_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        Self {
+            occupancy_buffer,
+            slot_buffer,
+            uniform_buffer,
+            bind_group_layout,
+            bind_group,
+            uniforms,
+        }
+    }
+
     /// Upload clipmap grid data to the GPU.
     ///
     /// Concatenates all levels' occupancy and slot data into combined buffers.
@@ -300,5 +399,20 @@ mod tests {
     #[test]
     fn gpu_max_clipmap_levels_matches_core() {
         assert_eq!(GPU_MAX_CLIPMAP_LEVELS, rkf_core::clipmap::MAX_CLIPMAP_LEVELS);
+    }
+
+    #[test]
+    fn gpu_clipmap_empty_has_zero_levels() {
+        let uniforms = GpuClipmapUniforms {
+            num_levels: 0,
+            _pad: [0; 3],
+            levels: [GpuClipmapLevel::zeroed(); GPU_MAX_CLIPMAP_LEVELS],
+        };
+        assert_eq!(uniforms.num_levels, 0);
+        // All level params should be zeroed
+        for level in &uniforms.levels {
+            assert_eq!(level.params, [0.0; 4]);
+            assert_eq!(level.grid_dims, [0; 4]);
+        }
     }
 }

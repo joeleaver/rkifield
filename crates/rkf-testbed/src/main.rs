@@ -23,6 +23,7 @@ use rkf_render::blit::BlitPass;
 use rkf_render::bloom::BloomPass;
 use rkf_render::bloom_composite::BloomCompositePass;
 use rkf_render::camera::Camera;
+use rkf_render::clipmap_gpu::ClipmapGpuData;
 use rkf_render::cloud_shadow::CloudShadowPass;
 use rkf_render::color_grade::ColorGradePass;
 use rkf_render::cosmetics::CosmeticsPass;
@@ -373,6 +374,7 @@ struct GpuState {
     width: u32,
     height: u32,
     scene: GpuScene,
+    clipmap: ClipmapGpuData,
     gbuffer: GBuffer,
     material_table: MaterialTable,
     light_buffer: LightBuffer,
@@ -520,8 +522,11 @@ impl GpuState {
             INTERNAL_HEIGHT,
         );
 
+        // Create empty clipmap (no LOD levels — single-grid fallback)
+        let clipmap = ClipmapGpuData::empty(&context.device);
+
         // Create core render passes
-        let ray_march = RayMarchPass::new(&context.device, &scene, &gbuffer);
+        let ray_march = RayMarchPass::new(&context.device, &scene, &gbuffer, &clipmap);
         let shading = ShadingPass::new(
             &context.device,
             &gbuffer,
@@ -715,6 +720,7 @@ impl GpuState {
             width: display_width,
             height: display_height,
             scene,
+            clipmap,
             gbuffer,
             material_table,
             light_buffer,
@@ -874,6 +880,7 @@ impl GpuState {
                 queue: &self.context.queue,
                 settings: &self.frame_settings,
                 scene: &self.scene,
+                clipmap: &self.clipmap,
                 gbuffer: &self.gbuffer,
                 material_table: &self.material_table,
                 light_buffer: &self.light_buffer,

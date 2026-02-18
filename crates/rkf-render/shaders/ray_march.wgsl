@@ -1,9 +1,12 @@
-// Ray march compute shader — Phase 6 (G-buffer output).
+// Ray march compute shader — Phase 6+ (G-buffer output, clipmap LOD).
 //
 // One thread per pixel at internal resolution. Generates a camera ray,
 // marches through the sparse grid via Amanatides & Woo 3D DDA,
 // sphere-traces within occupied bricks, and writes G-buffer data
 // (position, normal, material ID, motion vectors) to 4 output textures.
+//
+// When clipmap.num_levels > 0, uses multi-level LOD traversal instead
+// of the single-grid path.
 
 // ---------- Types ----------
 
@@ -34,6 +37,24 @@ struct MarchResult {
     material_id: u32,
     secondary_id_and_flags: u32,
     blend_weight: f32,
+    level: u32,
+}
+
+// ---------- Clipmap types ----------
+
+struct ClipmapLevel {
+    params: vec4<f32>,      // voxel_size, brick_extent, radius, 0
+    grid_dims: vec4<u32>,   // dim_x, dim_y, dim_z, total_cells
+    grid_origin: vec4<f32>, // origin_x, origin_y, origin_z, 0
+    offsets: vec4<u32>,     // occupancy_offset, slot_offset, 0, 0
+}
+
+struct ClipmapUniforms {
+    num_levels: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+    levels: array<ClipmapLevel, 5>,
 }
 
 // ---------- Bindings ----------
@@ -50,6 +71,11 @@ struct MarchResult {
 @group(1) @binding(1) var gbuf_normal:   texture_storage_2d<rgba16float, write>;
 @group(1) @binding(2) var gbuf_material: texture_storage_2d<r32uint, write>;
 @group(1) @binding(3) var gbuf_motion:   texture_storage_2d<rg32float, write>;
+
+// Group 2: Clipmap data
+@group(2) @binding(0) var<storage, read> cm_occupancy: array<u32>;
+@group(2) @binding(1) var<storage, read> cm_slots:     array<u32>;
+@group(2) @binding(2) var<uniform>       clipmap:      ClipmapUniforms;
 
 // ---------- Constants ----------
 
@@ -94,7 +120,7 @@ fn extract_flags(word1: u32) -> u32 {
     return (word1 >> 16u) & 0xFFu;
 }
 
-// Accessor helpers for packed SceneUniforms.
+// Accessor helpers for packed SceneUniforms (single-grid path).
 fn grid_dims() -> vec3<u32>  { return scene.grid_dims.xyz; }
 fn grid_origin() -> vec3<f32> { return scene.grid_origin.xyz; }
 fn brick_extent() -> f32     { return scene.grid_origin.w; }
@@ -124,6 +150,58 @@ fn cell_flat_index(cell: vec3<u32>) -> u32 {
     return cell.x + cell.y * d.x + cell.z * d.x * d.y;
 }
 
+// ---------- Clipmap accessor helpers ----------
+
+/// Grid dimensions for a clipmap level.
+fn cm_grid_dims(level: u32) -> vec3<u32> {
+    return clipmap.levels[level].grid_dims.xyz;
+}
+
+/// Grid origin for a clipmap level.
+fn cm_grid_origin(level: u32) -> vec3<f32> {
+    return clipmap.levels[level].grid_origin.xyz;
+}
+
+/// Brick extent (world-space size of one brick) for a clipmap level.
+fn cm_brick_extent(level: u32) -> f32 {
+    return clipmap.levels[level].params.y;
+}
+
+/// Voxel size for a clipmap level.
+fn cm_voxel_size(level: u32) -> f32 {
+    return clipmap.levels[level].params.x;
+}
+
+/// Radius (half-extent of the level's coverage) for a clipmap level.
+fn cm_radius(level: u32) -> f32 {
+    return clipmap.levels[level].params.z;
+}
+
+/// Check if cell coordinates are within bounds for a clipmap level.
+fn cm_cell_in_bounds(cell: vec3<i32>, level: u32) -> bool {
+    return all(cell >= vec3<i32>(0)) && all(vec3<u32>(cell) < cm_grid_dims(level));
+}
+
+/// Flat index from cell coordinates for a clipmap level.
+fn cm_cell_flat_index(cell: vec3<u32>, level: u32) -> u32 {
+    let d = cm_grid_dims(level);
+    return cell.x + cell.y * d.x + cell.z * d.x * d.y;
+}
+
+/// Get cell state from the combined clipmap occupancy buffer.
+fn cm_get_cell_state(flat: u32, level: u32) -> u32 {
+    let base = clipmap.levels[level].offsets.x;
+    let word_idx = (base + flat) / 16u;
+    let bit_offset = ((base + flat) % 16u) * 2u;
+    return (cm_occupancy[word_idx] >> bit_offset) & 3u;
+}
+
+/// Get slot index from the combined clipmap slot buffer.
+fn cm_get_slot(flat: u32, level: u32) -> u32 {
+    let base = clipmap.levels[level].offsets.y;
+    return cm_slots[base + flat];
+}
+
 // ---------- DDA Ray March ----------
 
 /// Ray-AABB intersection using the slab method.
@@ -139,8 +217,7 @@ fn ray_aabb_intersect(origin: vec3<f32>, inv_dir: vec3<f32>,
 }
 
 /// Read the full VoxelSample at a world position within a brick.
-/// Returns (distance, sample_index) where sample_index can be used
-/// to read material data.
+/// Returns the flat index into brick_pool for the sample.
 fn sample_brick_full(pos: vec3<f32>, brick_min: vec3<f32>, slot: u32) -> u32 {
     let brick_local = (pos - brick_min) / voxel_size();
     let voxel = clamp(vec3<u32>(floor(brick_local)), vec3<u32>(0u), vec3<u32>(7u));
@@ -154,12 +231,26 @@ fn sample_brick(pos: vec3<f32>, brick_min: vec3<f32>, slot: u32) -> f32 {
     return extract_distance(brick_pool[idx].word0);
 }
 
+/// Level-parameterized version of sample_brick_full for clipmap levels.
+fn sample_brick_full_cm(pos: vec3<f32>, brick_min: vec3<f32>, slot: u32, level: u32) -> u32 {
+    let brick_local = (pos - brick_min) / cm_voxel_size(level);
+    let voxel = clamp(vec3<u32>(floor(brick_local)), vec3<u32>(0u), vec3<u32>(7u));
+    let voxel_idx = voxel.x + voxel.y * 8u + voxel.z * 64u;
+    return slot * 512u + voxel_idx;
+}
+
+/// Level-parameterized version of sample_brick for clipmap levels.
+fn sample_brick_cm(pos: vec3<f32>, brick_min: vec3<f32>, slot: u32, level: u32) -> f32 {
+    let idx = sample_brick_full_cm(pos, brick_min, slot, level);
+    return extract_distance(brick_pool[idx].word0);
+}
+
 /// Sphere trace within a single brick, returning full material info on hit.
 fn sphere_trace_brick(origin: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
                       t_enter: f32, cell: vec3<u32>, flat: u32) -> MarchResult {
     let slot = slots[flat];
     if slot == EMPTY_SLOT {
-        return MarchResult(-1.0, false, 0u, 0u, 0.0);
+        return MarchResult(-1.0, false, 0u, 0u, 0.0, 0u);
     }
 
     let be = brick_extent();
@@ -171,7 +262,7 @@ fn sphere_trace_brick(origin: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     let t_end = aabb_t.y;
 
     if t_start > t_end {
-        return MarchResult(-1.0, false, 0u, 0u, 0.0);
+        return MarchResult(-1.0, false, 0u, 0u, 0.0, 0u);
     }
 
     var t = t_start;
@@ -191,7 +282,7 @@ fn sphere_trace_brick(origin: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
             let flags = extract_flags(sample.word1);
             // Pack secondary_id in lower 8 bits, flags in upper 8 bits
             let sec_and_flags = sec_id | (flags << 8u);
-            return MarchResult(t, true, mat_id, sec_and_flags, blend);
+            return MarchResult(t, true, mat_id, sec_and_flags, blend, 0u);
         }
 
         t += max(abs(d), MIN_STEP);
@@ -201,7 +292,57 @@ fn sphere_trace_brick(origin: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
         }
     }
 
-    return MarchResult(t_end, false, 0u, 0u, 0.0);
+    return MarchResult(t_end, false, 0u, 0u, 0.0, 0u);
+}
+
+/// Sphere trace within a single brick using clipmap-level parameters.
+fn sphere_trace_brick_cm(origin: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
+                         t_enter: f32, cell: vec3<u32>, flat: u32,
+                         level: u32) -> MarchResult {
+    let slot = cm_get_slot(flat, level);
+    if slot == EMPTY_SLOT {
+        return MarchResult(-1.0, false, 0u, 0u, 0.0, level);
+    }
+
+    let be = cm_brick_extent(level);
+    let brick_min = cm_grid_origin(level) + vec3<f32>(cell) * be;
+    let brick_max = brick_min + vec3<f32>(be);
+
+    let aabb_t = ray_aabb_intersect(origin, inv_dir, brick_min, brick_max);
+    let t_start = max(t_enter, max(aabb_t.x, 0.0));
+    let t_end = aabb_t.y;
+
+    if t_start > t_end {
+        return MarchResult(-1.0, false, 0u, 0u, 0.0, level);
+    }
+
+    var t = t_start;
+    for (var i = 0u; i < MAX_BRICK_STEPS; i++) {
+        let pos = origin + dir * t;
+        let clamped = clamp(pos, brick_min + vec3<f32>(MIN_STEP),
+                                 brick_max - vec3<f32>(MIN_STEP));
+
+        let sample_idx = sample_brick_full_cm(clamped, brick_min, slot, level);
+        let sample = brick_pool[sample_idx];
+        let d = extract_distance(sample.word0);
+
+        if d < HIT_EPSILON {
+            let mat_id = extract_material_id(sample.word0);
+            let blend = extract_blend_weight(sample.word1);
+            let sec_id = extract_secondary_id(sample.word1);
+            let flags = extract_flags(sample.word1);
+            let sec_and_flags = sec_id | (flags << 8u);
+            return MarchResult(t, true, mat_id, sec_and_flags, blend, level);
+        }
+
+        t += max(abs(d), MIN_STEP);
+
+        if t > t_end {
+            break;
+        }
+    }
+
+    return MarchResult(t_end, false, 0u, 0u, 0.0, level);
 }
 
 /// DDA ray march through the sparse grid. Returns full MarchResult with material info.
@@ -219,7 +360,7 @@ fn ray_march_dda(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
     let t_far = aabb_t.y;
 
     if t_near > t_far || t_far < 0.0 {
-        return MarchResult(-1.0, false, 0u, 0u, 0.0);
+        return MarchResult(-1.0, false, 0u, 0u, 0.0, 0u);
     }
 
     t_near += HIT_EPSILON;
@@ -275,7 +416,114 @@ fn ray_march_dda(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
         }
     }
 
-    return MarchResult(-1.0, false, 0u, 0u, 0.0);
+    return MarchResult(-1.0, false, 0u, 0u, 0.0, 0u);
+}
+
+// ---------- Clipmap DDA Ray March ----------
+
+/// DDA ray march through a single clipmap level's grid.
+///
+/// Uses the clipmap accessor functions to read occupancy and slots from the
+/// combined buffers at the correct offsets for the given level. The brick pool
+/// (group 0) is shared across all levels.
+fn ray_march_dda_level(origin: vec3<f32>, dir: vec3<f32>,
+                       level: u32, t_start: f32, t_end: f32) -> MarchResult {
+    let be = cm_brick_extent(level);
+    let dims = cm_grid_dims(level);
+    let dims_f = vec3<f32>(dims);
+    let g_origin = cm_grid_origin(level);
+    let grid_max = g_origin + dims_f * be;
+
+    let safe_dir = select(dir, vec3<f32>(1e-10), abs(dir) < vec3<f32>(1e-10));
+    let inv_dir = 1.0 / safe_dir;
+
+    // Intersect ray with this level's grid AABB.
+    let aabb_t = ray_aabb_intersect(origin, inv_dir, g_origin, grid_max);
+    var t_near = max(max(aabb_t.x, 0.0), t_start);
+    let t_far = min(aabb_t.y, t_end);
+
+    if t_near > t_far || t_far < 0.0 {
+        return MarchResult(-1.0, false, 0u, 0u, 0.0, level);
+    }
+
+    t_near += HIT_EPSILON;
+
+    let entry = origin + safe_dir * t_near;
+    let dims_i = vec3<i32>(dims);
+    var cell = vec3<i32>(floor((entry - g_origin) / be));
+    cell = clamp(cell, vec3<i32>(0), dims_i - vec3<i32>(1));
+
+    let step = vec3<i32>(
+        select(-1, 1, safe_dir.x >= 0.0),
+        select(-1, 1, safe_dir.y >= 0.0),
+        select(-1, 1, safe_dir.z >= 0.0)
+    );
+
+    let t_delta = abs(vec3<f32>(be) * inv_dir);
+
+    let cell_min_pos = g_origin + vec3<f32>(cell) * be;
+    let cell_max_pos = cell_min_pos + vec3<f32>(be);
+    let next_boundary = select(cell_min_pos, cell_max_pos, safe_dir >= vec3<f32>(0.0));
+    var t_max_axis = (next_boundary - origin) * inv_dir;
+
+    var t = t_near;
+
+    for (var i = 0u; i < MAX_DDA_STEPS; i++) {
+        if !cm_cell_in_bounds(cell, level) || t > t_far {
+            break;
+        }
+
+        let ucell = vec3<u32>(cell);
+        let flat = cm_cell_flat_index(ucell, level);
+        let state = cm_get_cell_state(flat, level);
+
+        if state == CELL_SURFACE {
+            let result = sphere_trace_brick_cm(origin, safe_dir, inv_dir, t, ucell, flat, level);
+            if result.hit {
+                return result;
+            }
+        }
+
+        if t_max_axis.x < t_max_axis.y && t_max_axis.x < t_max_axis.z {
+            t = t_max_axis.x;
+            t_max_axis.x += t_delta.x;
+            cell.x += step.x;
+        } else if t_max_axis.y < t_max_axis.z {
+            t = t_max_axis.y;
+            t_max_axis.y += t_delta.y;
+            cell.y += step.y;
+        } else {
+            t = t_max_axis.z;
+            t_max_axis.z += t_delta.z;
+            cell.z += step.z;
+        }
+    }
+
+    return MarchResult(-1.0, false, 0u, 0u, 0.0, level);
+}
+
+/// Multi-level clipmap ray march.
+///
+/// Iterates LOD levels from finest (0) to coarsest. Each level covers
+/// a distance band from the previous level's radius to its own radius.
+/// Level 0 starts at t=0. Returns on the first hit.
+fn ray_march_clipmap(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
+    var t_start = 0.0;
+
+    for (var lvl = 0u; lvl < clipmap.num_levels; lvl++) {
+        let t_end = cm_radius(lvl);
+
+        if t_start < t_end {
+            let result = ray_march_dda_level(origin, dir, lvl, t_start, t_end);
+            if result.hit {
+                return result;
+            }
+        }
+
+        t_start = t_end;
+    }
+
+    return MarchResult(-1.0, false, 0u, 0u, 0.0, 0u);
 }
 
 // ---------- Normal computation ----------
@@ -310,12 +558,56 @@ fn sample_sdf(pos: vec3<f32>) -> f32 {
     return be * 0.5;
 }
 
+/// Sample the SDF at a world-space position using a specific clipmap level.
+fn sample_sdf_cm(pos: vec3<f32>, level: u32) -> f32 {
+    let be = cm_brick_extent(level);
+    let g_origin = cm_grid_origin(level);
+    let local = pos - g_origin;
+    let cell_i = vec3<i32>(floor(local / be));
+
+    if !cm_cell_in_bounds(cell_i, level) {
+        return be;
+    }
+
+    let cell = vec3<u32>(cell_i);
+    let flat = cm_cell_flat_index(cell, level);
+    let state = cm_get_cell_state(flat, level);
+
+    if state == CELL_EMPTY {
+        return be * 0.5;
+    }
+    if state == CELL_INTERIOR {
+        return -be * 0.5;
+    }
+    if state == CELL_SURFACE {
+        let slot = cm_get_slot(flat, level);
+        if slot == EMPTY_SLOT {
+            return be * 0.5;
+        }
+        let brick_min = g_origin + vec3<f32>(cell) * be;
+        return sample_brick_cm(pos, brick_min, slot, level);
+    }
+    return be * 0.5;
+}
+
 /// Compute surface normal via central differences (6 SDF evaluations).
 fn compute_normal(pos: vec3<f32>) -> vec3<f32> {
     let e = voxel_size() * 1.5;
     let nx = sample_sdf(pos + vec3<f32>(e, 0.0, 0.0)) - sample_sdf(pos - vec3<f32>(e, 0.0, 0.0));
     let ny = sample_sdf(pos + vec3<f32>(0.0, e, 0.0)) - sample_sdf(pos - vec3<f32>(0.0, e, 0.0));
     let nz = sample_sdf(pos + vec3<f32>(0.0, 0.0, e)) - sample_sdf(pos - vec3<f32>(0.0, 0.0, e));
+    return normalize(vec3<f32>(nx, ny, nz));
+}
+
+/// Compute surface normal via central differences using a specific clipmap level.
+fn compute_normal_cm(pos: vec3<f32>, level: u32) -> vec3<f32> {
+    let e = cm_voxel_size(level) * 1.5;
+    let nx = sample_sdf_cm(pos + vec3<f32>(e, 0.0, 0.0), level)
+           - sample_sdf_cm(pos - vec3<f32>(e, 0.0, 0.0), level);
+    let ny = sample_sdf_cm(pos + vec3<f32>(0.0, e, 0.0), level)
+           - sample_sdf_cm(pos - vec3<f32>(0.0, e, 0.0), level);
+    let nz = sample_sdf_cm(pos + vec3<f32>(0.0, 0.0, e), level)
+           - sample_sdf_cm(pos - vec3<f32>(0.0, 0.0, e), level);
     return normalize(vec3<f32>(nx, ny, nz));
 }
 
@@ -331,7 +623,7 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
     let coord = vec2<i32>(pixel.xy);
 
     // Generate UV in [0, 1], then NDC in [-1, 1].
-    // Y is flipped: pixel.y=0 is screen top → ndc.y=+1 (camera up).
+    // Y is flipped: pixel.y=0 is screen top -> ndc.y=+1 (camera up).
     let uv = (vec2<f32>(pixel.xy) + 0.5 + camera.jitter) / vec2<f32>(dims);
     let ndc = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
 
@@ -341,12 +633,24 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
         camera.forward.xyz + ndc.x * camera.right.xyz + ndc.y * camera.up.xyz
     );
 
-    // March via DDA
-    let result = ray_march_dda(ray_origin, ray_dir);
+    // Choose march strategy based on clipmap availability.
+    var result: MarchResult;
+    if clipmap.num_levels > 0u {
+        result = ray_march_clipmap(ray_origin, ray_dir);
+    } else {
+        result = ray_march_dda(ray_origin, ray_dir);
+    }
 
     if result.hit {
         let hit_pos = ray_origin + ray_dir * result.t;
-        let normal = compute_normal(hit_pos);
+
+        // Compute normal using the appropriate path.
+        var normal: vec3<f32>;
+        if clipmap.num_levels > 0u {
+            normal = compute_normal_cm(hit_pos, result.level);
+        } else {
+            normal = compute_normal(hit_pos);
+        }
 
         // Write G-buffer
         textureStore(gbuf_position, coord, vec4<f32>(hit_pos, result.t));
@@ -359,7 +663,7 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
         var motion = vec2<f32>(0.0, 0.0);
         if prev_clip.w > 0.0 {
             let prev_ndc = prev_clip.xy / prev_clip.w;
-            // NDC [-1,1] → UV [0,1], Y flipped (screen top = y=0, NDC top = y=+1)
+            // NDC [-1,1] -> UV [0,1], Y flipped (screen top = y=0, NDC top = y=+1)
             let prev_uv = vec2<f32>(prev_ndc.x * 0.5 + 0.5, 0.5 - prev_ndc.y * 0.5);
             let curr_uv = (vec2<f32>(pixel.xy) + 0.5) / vec2<f32>(dims);
             motion = curr_uv - prev_uv;

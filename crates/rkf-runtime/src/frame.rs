@@ -6,11 +6,11 @@
 //! correct dependency order.
 
 use rkf_render::{
-    AutoExposurePass, BlitPass, BloomCompositePass, BloomPass, CloudShadowPass, ColorGradePass,
-    CosmeticsPass, DofPass, GBuffer, GpuScene, MaterialTable, LightBuffer, MotionBlurPass,
-    RadianceInjectPass, RadianceMipPass, RadianceVolume, RayMarchPass, ShadingPass, SharpenPass,
-    TileCullPass, ToneMapPass, UpscalePass, VolCompositePass, VolMarchParams, VolMarchPass,
-    VolShadowPass, VolTemporalPass, VolUpscalePass,
+    AutoExposurePass, BlitPass, BloomCompositePass, BloomPass, ClipmapGpuData, CloudShadowPass,
+    ColorGradePass, CosmeticsPass, DofPass, GBuffer, GpuScene, MaterialTable, LightBuffer,
+    MotionBlurPass, RadianceInjectPass, RadianceMipPass, RadianceVolume, RayMarchPass,
+    ShadingPass, SharpenPass, TileCullPass, ToneMapPass, UpscalePass, VolCompositePass,
+    VolMarchParams, VolMarchPass, VolShadowPass, VolTemporalPass, VolUpscalePass,
 };
 
 /// Controls which optional render passes are enabled for a frame.
@@ -84,6 +84,10 @@ pub struct FrameContext<'a> {
     pub material_table: &'a MaterialTable,
     /// GPU light buffer (not used directly in `execute_frame`, held for callers).
     pub light_buffer: &'a LightBuffer,
+
+    // ── Clipmap LOD ────────────────────────────────────────────────────────────
+    /// Clipmap GPU data for multi-level LOD traversal.
+    pub clipmap: &'a ClipmapGpuData,
 
     // ── Core passes ───────────────────────────────────────────────────────────
     /// Ray march pass — produces the G-buffer.
@@ -198,7 +202,7 @@ pub struct FrameContext<'a> {
 pub fn execute_frame(ctx: &mut FrameContext) {
     // ── 1. Ray march → G-buffer ───────────────────────────────────────────────
     ctx.ray_march
-        .dispatch(ctx.encoder, ctx.scene, ctx.gbuffer);
+        .dispatch(ctx.encoder, ctx.scene, ctx.gbuffer, ctx.clipmap);
 
     // ── 2. Tile light cull (independent of GI) ───────────────────────────────
     ctx.tile_cull.dispatch(ctx.encoder, ctx.gbuffer);
