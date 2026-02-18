@@ -13,6 +13,8 @@
 
 #![warn(missing_docs)]
 
+/// Engine configuration system with quality presets and RON serialization.
+pub mod config;
 /// ECS component types for the scene graph.
 pub mod components;
 /// Double-buffered GPU uniform buffers.
@@ -24,6 +26,10 @@ pub mod scene;
 /// Transform hierarchy update system.
 pub mod transform_system;
 
+pub use config::{
+    ConfigError, EngineConfig, GiSettings, PostProcessSettings, QualityPreset, RayMarchSettings,
+    ShadingSettings, UpscaleSettings, VolumetricSettings,
+};
 pub use double_buffer::{DoubleBuffer, DoubleBufferSet};
 pub use components::{
     AnimatedCharacter, CameraComponent, ChunkRef, EditorMetadata, FogVolumeComponent, Parent,
