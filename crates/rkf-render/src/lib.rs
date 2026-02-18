@@ -54,6 +54,8 @@ pub mod post_process;
 pub mod bloom;
 /// Depth of field compute pass (pre-upscale).
 pub mod dof;
+/// Motion blur compute pass (pre-upscale).
+pub mod motion_blur;
 /// DLSS integration layer (stub — falls back to custom upscaler).
 pub mod dlss;
 
@@ -77,4 +79,5 @@ pub use sharpen::{SharpenPass, SharpenUniforms, DEFAULT_SHARPEN_STRENGTH};
 pub use post_process::{PostProcessPassId, PostProcessConfig, PostProcessContext, PingPongBuffers, PP_FORMAT};
 pub use bloom::{BloomPass, BloomParams, BLOOM_MIP_LEVELS, DEFAULT_BLOOM_THRESHOLD, DEFAULT_BLOOM_KNEE};
 pub use dof::{DofPass, DofParams, DEFAULT_FOCUS_DISTANCE, DEFAULT_FOCUS_RANGE, DEFAULT_MAX_COC, COC_FORMAT};
+pub use motion_blur::{MotionBlurPass, MotionBlurParams, DEFAULT_MOTION_BLUR_INTENSITY, DEFAULT_MAX_MOTION_SAMPLES};
 pub use dlss::{DlssContext, DlssQuality};
