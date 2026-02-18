@@ -23,6 +23,8 @@ pub mod double_buffer;
 pub mod frame;
 /// Scene management via hecs ECS.
 pub mod scene;
+/// Chunk streaming system — camera-distance-based load/evict management.
+pub mod streaming;
 /// Transform hierarchy update system.
 pub mod transform_system;
 
@@ -37,4 +39,5 @@ pub use components::{
 };
 pub use frame::{execute_frame, FrameContext, FrameSettings};
 pub use scene::Scene;
+pub use streaming::{ChunkEntry, ChunkState, StreamingConfig, StreamingSystem};
 pub use transform_system::update_transforms;
