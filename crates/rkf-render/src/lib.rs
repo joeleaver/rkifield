@@ -72,6 +72,8 @@ pub mod cosmetics;
 pub mod dlss;
 /// Analytic fog settings for height fog and distance fog.
 pub mod fog;
+/// Local fog volume types and GPU buffer.
+pub mod fog_volume;
 
 pub use camera::{Camera, CameraUniforms};
 pub use context::RenderContext;
@@ -102,3 +104,4 @@ pub use auto_exposure::{AutoExposurePass, ExposureParams, HISTOGRAM_BINS, DEFAUL
 pub use color_grade::{ColorGradePass, ColorGradeParams, DEFAULT_LUT_SIZE, DEFAULT_COLOR_GRADE_INTENSITY};
 pub use cosmetics::{CosmeticsPass, CosmeticsParams, DEFAULT_VIGNETTE_INTENSITY, DEFAULT_GRAIN_INTENSITY, DEFAULT_CHROMATIC_ABERRATION};
 pub use dlss::{DlssContext, DlssQuality};
+pub use fog_volume::{GpuFogVolume, FogVolumeHeader, FogVolumeBuffer, MAX_FOG_VOLUMES};
