@@ -366,6 +366,7 @@ struct GpuState {
     camera: Camera,
     staging_buffer: wgpu::Buffer,
     shared_state: Arc<Mutex<SharedState>>,
+    frame_index: u32,
 }
 
 impl GpuState {
@@ -396,7 +397,7 @@ impl GpuState {
         let mut camera = Camera::new(Vec3::new(0.0, 0.0, 1.8));
         camera.fov_degrees = 60.0;
 
-        let camera_uniforms = camera.uniforms(INTERNAL_WIDTH, INTERNAL_HEIGHT);
+        let camera_uniforms = camera.uniforms(INTERNAL_WIDTH, INTERNAL_HEIGHT, 0);
         let camera_bytes = bytemuck::bytes_of(&camera_uniforms);
 
         let dims = grid.dimensions();
@@ -497,6 +498,7 @@ impl GpuState {
             camera,
             staging_buffer,
             shared_state,
+            frame_index: 0,
         }
     }
 
@@ -511,7 +513,7 @@ impl GpuState {
     }
 
     fn update_camera(&mut self) {
-        let uniforms = self.camera.uniforms(INTERNAL_WIDTH, INTERNAL_HEIGHT);
+        let uniforms = self.camera.uniforms(INTERNAL_WIDTH, INTERNAL_HEIGHT, self.frame_index);
         self.context.queue.write_buffer(
             &self.scene.camera_buffer,
             0,
@@ -527,6 +529,8 @@ impl GpuState {
                 log::info!("Debug mode set via MCP: {mode}");
             }
         }
+
+        self.frame_index = self.frame_index.wrapping_add(1);
 
         // Update camera uniforms on GPU
         self.update_camera();

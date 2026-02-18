@@ -7,6 +7,31 @@
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
 
+/// Compute the n-th element of the Halton sequence for the given base.
+///
+/// Returns a value in [0, 1) that is quasi-random and low-discrepancy,
+/// providing good coverage of the unit interval over many samples.
+pub fn halton(mut index: u32, base: u32) -> f32 {
+    let mut f = 1.0f32;
+    let mut r = 0.0f32;
+    let inv_base = 1.0 / base as f32;
+    while index > 0 {
+        f *= inv_base;
+        r += f * (index % base) as f32;
+        index /= base;
+    }
+    r
+}
+
+/// Compute sub-pixel jitter offset for a given frame index.
+///
+/// Uses Halton bases 2 and 3 with a 16-frame cycle. Returns offsets
+/// in [-0.5, 0.5) pixel units suitable for adding to pixel center coordinates.
+pub fn jitter_for_frame(frame_index: u32) -> [f32; 2] {
+    let i = frame_index % 16;
+    [halton(i + 1, 2) - 0.5, halton(i + 1, 3) - 0.5]
+}
+
 /// Default vertical field of view in degrees.
 pub const DEFAULT_FOV_DEGREES: f32 = 60.0;
 
@@ -101,7 +126,7 @@ impl Camera {
     /// ndc = uv * 2.0 - 1.0;
     /// ray_dir = normalize(forward + ndc.x * right + ndc.y * up);
     /// ```
-    pub fn uniforms(&self, width: u32, height: u32) -> CameraUniforms {
+    pub fn uniforms(&self, width: u32, height: u32, frame_index: u32) -> CameraUniforms {
         let fov_rad = self.fov_degrees.to_radians();
         let half_fov_tan = (fov_rad * 0.5).tan();
         let aspect = width as f32 / height as f32;
@@ -116,7 +141,7 @@ impl Camera {
             right: [r.x, r.y, r.z, 0.0],
             up: [u.x, u.y, u.z, 0.0],
             resolution: [width as f32, height as f32],
-            _padding: [0.0; 2],
+            jitter: jitter_for_frame(frame_index),
         }
     }
 }
@@ -140,8 +165,9 @@ pub struct CameraUniforms {
     pub up: [f32; 4],
     /// Output resolution in pixels `[width, height]`.
     pub resolution: [f32; 2],
-    /// Padding to 16-byte alignment.
-    pub _padding: [f32; 2],
+    /// Sub-pixel jitter offset in pixel units `[jitter_x, jitter_y]`.
+    /// Applied to pixel center before ray generation for temporal super-sampling.
+    pub jitter: [f32; 2],
 }
 
 // ---------------------------------------------------------------------------
@@ -291,14 +317,14 @@ mod tests {
     #[test]
     fn uniforms_resolution_matches() {
         let cam = Camera::new(Vec3::ZERO);
-        let u = cam.uniforms(960, 540);
+        let u = cam.uniforms(960, 540, 0);
         assert_eq!(u.resolution, [960.0, 540.0]);
     }
 
     #[test]
     fn uniforms_position_matches() {
         let cam = Camera::new(Vec3::new(1.0, 2.0, 3.0));
-        let u = cam.uniforms(960, 540);
+        let u = cam.uniforms(960, 540, 0);
         assert_eq!(u.position[0], 1.0);
         assert_eq!(u.position[1], 2.0);
         assert_eq!(u.position[2], 3.0);
@@ -307,7 +333,7 @@ mod tests {
     #[test]
     fn uniforms_right_is_scaled_by_fov_and_aspect() {
         let cam = Camera::new(Vec3::ZERO);
-        let u = cam.uniforms(960, 540);
+        let u = cam.uniforms(960, 540, 0);
         let fov_rad = DEFAULT_FOV_DEGREES.to_radians();
         let half_fov_tan = (fov_rad * 0.5).tan();
         let aspect = 960.0 / 540.0;
@@ -323,7 +349,7 @@ mod tests {
     #[test]
     fn uniforms_up_is_scaled_by_fov() {
         let cam = Camera::new(Vec3::ZERO);
-        let u = cam.uniforms(960, 540);
+        let u = cam.uniforms(960, 540, 0);
         let fov_rad = DEFAULT_FOV_DEGREES.to_radians();
         let half_fov_tan = (fov_rad * 0.5).tan();
         let up_len = (u.up[0] * u.up[0] + u.up[1] * u.up[1] + u.up[2] * u.up[2]).sqrt();
@@ -336,12 +362,61 @@ mod tests {
     #[test]
     fn uniforms_pod_roundtrip() {
         let cam = Camera::new(Vec3::new(1.0, 2.0, 3.0));
-        let u = cam.uniforms(1920, 1080);
+        let u = cam.uniforms(1920, 1080, 0);
         let bytes = bytemuck::bytes_of(&u);
         assert_eq!(bytes.len(), 80);
         let u2: &CameraUniforms = bytemuck::from_bytes(bytes);
         assert_eq!(u.position, u2.position);
         assert_eq!(u.resolution, u2.resolution);
+    }
+
+    // ------ Halton sequence ------
+
+    #[test]
+    fn halton_base2_first_values() {
+        // Halton(1,2)=0.5, Halton(2,2)=0.25, Halton(3,2)=0.75, Halton(4,2)=0.125
+        assert!((halton(1, 2) - 0.5).abs() < 1e-6);
+        assert!((halton(2, 2) - 0.25).abs() < 1e-6);
+        assert!((halton(3, 2) - 0.75).abs() < 1e-6);
+        assert!((halton(4, 2) - 0.125).abs() < 1e-6);
+    }
+
+    #[test]
+    fn halton_base3_first_values() {
+        // Halton(1,3)=1/3, Halton(2,3)=2/3, Halton(3,3)=1/9
+        assert!((halton(1, 3) - 1.0/3.0).abs() < 1e-6);
+        assert!((halton(2, 3) - 2.0/3.0).abs() < 1e-6);
+        assert!((halton(3, 3) - 1.0/9.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn halton_index_zero_is_zero() {
+        assert_eq!(halton(0, 2), 0.0);
+        assert_eq!(halton(0, 3), 0.0);
+    }
+
+    #[test]
+    fn jitter_range_is_half_pixel() {
+        for i in 0..16 {
+            let j = jitter_for_frame(i);
+            assert!(j[0] >= -0.5 && j[0] < 0.5, "jitter_x out of range at frame {i}: {}", j[0]);
+            assert!(j[1] >= -0.5 && j[1] < 0.5, "jitter_y out of range at frame {i}: {}", j[1]);
+        }
+    }
+
+    #[test]
+    fn jitter_16_frame_cycle() {
+        let j0 = jitter_for_frame(0);
+        let j16 = jitter_for_frame(16);
+        assert_eq!(j0, j16, "jitter should repeat after 16 frames");
+    }
+
+    #[test]
+    fn uniforms_jitter_at_frame_zero() {
+        let cam = Camera::new(Vec3::ZERO);
+        let u = cam.uniforms(960, 540, 0);
+        let expected = jitter_for_frame(0);
+        assert_eq!(u.jitter, expected);
     }
 
     // ------ Full yaw sweep ------

@@ -18,7 +18,7 @@ struct CameraUniforms {
     right:    vec4<f32>,   // xyz + pad  (scaled by fov * aspect)
     up:       vec4<f32>,   // xyz + pad  (scaled by fov)
     resolution: vec2<f32>, // width, height
-    _pad: vec2<f32>,
+    jitter: vec2<f32>,     // sub-pixel jitter in pixel units
 }
 
 struct SceneUniforms {
@@ -331,7 +331,7 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
 
     // Generate UV in [0, 1], then NDC in [-1, 1].
     // Y is flipped: pixel.y=0 is screen top → ndc.y=+1 (camera up).
-    let uv = (vec2<f32>(pixel.xy) + 0.5) / vec2<f32>(dims);
+    let uv = (vec2<f32>(pixel.xy) + 0.5 + camera.jitter) / vec2<f32>(dims);
     let ndc = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
 
     // Camera ray
