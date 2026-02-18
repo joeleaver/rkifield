@@ -40,5 +40,5 @@ pub use gpu_scene::{GpuScene, SceneUniforms};
 pub use material_table::MaterialTable;
 pub use blit::BlitPass;
 pub use ray_march::RayMarchPass;
-pub use shading::ShadingPass;
+pub use shading::{ShadeUniforms, ShadingPass};
 pub use tone_map::ToneMapPass;

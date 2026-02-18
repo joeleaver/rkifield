@@ -53,14 +53,15 @@ struct Material {
 // Group 2: HDR output
 @group(2) @binding(0) var hdr_output: texture_storage_2d<rgba16float, write>;
 
-// Group 3: Debug uniforms
-struct DebugUniforms {
-    mode: u32, // 0=normal, 1=normals, 2=positions, 3=material IDs, 4=diffuse only, 5=specular only
+// Group 3: Shade uniforms (debug mode + camera position)
+struct ShadeUniforms {
+    debug_mode: u32, // 0=normal, 1=normals, 2=positions, 3=material IDs, 4=diffuse only, 5=specular only
     _pad0: u32,
     _pad1: u32,
     _pad2: u32,
+    camera_pos: vec4<f32>, // xyz = world-space camera position, w = unused
 }
-@group(3) @binding(0) var<uniform> debug: DebugUniforms;
+@group(3) @binding(0) var<uniform> shade_uniforms: ShadeUniforms;
 
 // ---------- Constants ----------
 
@@ -147,19 +148,7 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
     let f0 = mix(vec3<f32>(0.04), albedo, metallic);
 
     // View direction (from surface toward camera)
-    // We stored camera position in the camera uniforms but don't have it here.
-    // Approximate: for now assume camera is far away, use -ray_dir approximation.
-    // Actually we can derive it: view_dir = normalize(camera_pos - world_pos)
-    // But we don't bind camera uniforms to shade pass. Use position to derive direction.
-    // The G-buffer stores world position, and we know the ray started from camera.
-    // For now, approximate V from the stored position's direction from origin.
-    // TODO: bind camera position uniform to shade pass.
-    // Workaround: store camera pos in scene uniforms or pass it separately.
-    // For Phase 6 basic shading, we compute V from world_pos directly.
-    // Since we don't have camera pos, use the hit position to back-compute.
-    // Actually, the simplest approach: normalize(-world_pos) works if camera is near origin.
-    // Let's just use a fixed approximation — this will be properly wired in Phase 7.
-    let view_dir = normalize(-world_pos);
+    let view_dir = normalize(shade_uniforms.camera_pos.xyz - world_pos);
 
     // Lighting
     let light_dir = normalize(SUN_DIR);
@@ -197,7 +186,7 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
     var color = direct + ambient + emission;
 
     // Debug visualization modes
-    switch debug.mode {
+    switch shade_uniforms.debug_mode {
         case 1u: {
             // Normals: remap [-1,1] → [0,1] for visualization
             color = normal * 0.5 + 0.5;

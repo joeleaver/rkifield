@@ -283,6 +283,11 @@ impl GpuState {
         // Update camera uniforms on GPU
         self.update_camera();
 
+        // Update camera position for shading pass (correct view direction)
+        let cam_pos = self.camera.position;
+        self.shading
+            .update_camera_pos(&self.context.queue, [cam_pos.x, cam_pos.y, cam_pos.z]);
+
         let frame = match self.surface.get_current_texture() {
             Ok(f) => f,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
