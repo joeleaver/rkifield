@@ -223,8 +223,10 @@ impl AutomationApi for BridgeAutomationApi {
         _local: [f32; 3],
         _rotation: [f32; 4],
     ) -> AutomationResult<()> {
+        // camera_set is routed via execute_command("camera_set ...") instead,
+        // which the bridge already forwards over IPC. See observation.rs handler.
         Err(AutomationError::NotImplemented(
-            "camera_set (bridge is observation-only)",
+            "camera_set (use execute_command route)",
         ))
     }
 
@@ -244,6 +246,31 @@ impl AutomationApi for BridgeAutomationApi {
                 })?;
                 let result =
                     self.call_tool("debug_mode", serde_json::json!({"mode": mode}))?;
+                Ok(result["message"]
+                    .as_str()
+                    .unwrap_or("ok")
+                    .to_string())
+            }
+            ["camera_set", x_s, y_s, z_s, yaw_s, pitch_s] => {
+                let x: f64 = x_s.parse().map_err(|_| {
+                    AutomationError::InvalidParameter(format!("invalid x: {x_s}"))
+                })?;
+                let y: f64 = y_s.parse().map_err(|_| {
+                    AutomationError::InvalidParameter(format!("invalid y: {y_s}"))
+                })?;
+                let z: f64 = z_s.parse().map_err(|_| {
+                    AutomationError::InvalidParameter(format!("invalid z: {z_s}"))
+                })?;
+                let yaw: f64 = yaw_s.parse().map_err(|_| {
+                    AutomationError::InvalidParameter(format!("invalid yaw: {yaw_s}"))
+                })?;
+                let pitch: f64 = pitch_s.parse().map_err(|_| {
+                    AutomationError::InvalidParameter(format!("invalid pitch: {pitch_s}"))
+                })?;
+                let result = self.call_tool("camera_set", serde_json::json!({
+                    "x": x, "y": y, "z": z,
+                    "yaw": yaw, "pitch": pitch,
+                }))?;
                 Ok(result["message"]
                     .as_str()
                     .unwrap_or("ok")

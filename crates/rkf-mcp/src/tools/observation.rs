@@ -167,6 +167,37 @@ impl ToolHandler for DebugModeHandler {
     }
 }
 
+// --- Camera Set tool ---
+
+struct CameraSetHandler;
+
+impl ToolHandler for CameraSetHandler {
+    fn call(&self, api: &dyn AutomationApi, params: serde_json::Value) -> Result<ToolResponse, ToolError> {
+        let x = params.get("x").and_then(|v| v.as_f64())
+            .ok_or_else(|| ToolError::InvalidParams("x is required".to_string()))? as f32;
+        let y = params.get("y").and_then(|v| v.as_f64())
+            .ok_or_else(|| ToolError::InvalidParams("y is required".to_string()))? as f32;
+        let z = params.get("z").and_then(|v| v.as_f64())
+            .ok_or_else(|| ToolError::InvalidParams("z is required".to_string()))? as f32;
+        let yaw_deg = params.get("yaw").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+        let pitch_deg = params.get("pitch").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+
+        // Route through execute_command (same pattern as debug_mode) so it
+        // works over IPC without needing a separate bridge method.
+        let cmd = format!("camera_set {x} {y} {z} {yaw_deg} {pitch_deg}");
+        match api.execute_command(&cmd) {
+            Ok(msg) => Ok(serde_json::json!({
+                "status": "ok",
+                "message": msg,
+                "position": [x, y, z],
+                "yaw": yaw_deg,
+                "pitch": pitch_deg,
+            }).into()),
+            Err(e) => Err(ToolError::EngineError(e.to_string())),
+        }
+    }
+}
+
 /// Register all built-in observation tools with the registry.
 pub fn register_observation_tools(registry: &mut ToolRegistry) {
     registry.register(
@@ -394,6 +425,57 @@ pub fn register_observation_tools(registry: &mut ToolRegistry) {
         },
         Arc::new(DebugModeHandler),
     );
+
+    registry.register(
+        ToolDefinition {
+            name: "camera_set".to_string(),
+            description: "Set camera position and orientation".to_string(),
+            category: ToolCategory::Observation,
+            parameters: vec![
+                ParameterDef {
+                    name: "x".to_string(),
+                    description: "X position".to_string(),
+                    param_type: ParamType::Number,
+                    required: true,
+                    default: None,
+                },
+                ParameterDef {
+                    name: "y".to_string(),
+                    description: "Y position".to_string(),
+                    param_type: ParamType::Number,
+                    required: true,
+                    default: None,
+                },
+                ParameterDef {
+                    name: "z".to_string(),
+                    description: "Z position".to_string(),
+                    param_type: ParamType::Number,
+                    required: true,
+                    default: None,
+                },
+                ParameterDef {
+                    name: "yaw".to_string(),
+                    description: "Yaw in degrees".to_string(),
+                    param_type: ParamType::Number,
+                    required: false,
+                    default: Some(serde_json::json!(0.0)),
+                },
+                ParameterDef {
+                    name: "pitch".to_string(),
+                    description: "Pitch in degrees".to_string(),
+                    param_type: ParamType::Number,
+                    required: false,
+                    default: Some(serde_json::json!(0.0)),
+                },
+            ],
+            return_type: ReturnTypeDef {
+                description: "Confirmation of camera position change".to_string(),
+                return_type: ParamType::Object,
+            },
+            mode: ToolMode::Both,
+        },
+        Arc::new(CameraSetHandler),
+    );
 }
 
 #[cfg(test)]
@@ -405,7 +487,7 @@ mod tests {
     fn register_all_observation_tools() {
         let mut registry = ToolRegistry::new();
         register_observation_tools(&mut registry);
-        assert_eq!(registry.len(), 10);
+        assert_eq!(registry.len(), 11);
     }
 
     #[test]
@@ -413,7 +495,7 @@ mod tests {
         let mut registry = ToolRegistry::new();
         register_observation_tools(&mut registry);
         let tools = registry.list_tools(ToolMode::Debug);
-        assert_eq!(tools.len(), 10);
+        assert_eq!(tools.len(), 11);
     }
 
     #[test]
@@ -421,7 +503,7 @@ mod tests {
         let mut registry = ToolRegistry::new();
         register_observation_tools(&mut registry);
         let tools = registry.list_tools(ToolMode::Editor);
-        assert_eq!(tools.len(), 10);
+        assert_eq!(tools.len(), 11);
     }
 
     #[test]
@@ -460,7 +542,7 @@ mod tests {
         let expected = [
             "screenshot", "scene_graph", "entity_inspect", "render_stats",
             "log_read", "camera_get", "brick_pool_stats", "spatial_query",
-            "asset_status", "debug_mode",
+            "asset_status", "debug_mode", "camera_set",
         ];
         for name in &expected {
             assert!(registry.get_tool(name).is_some(), "missing tool: {name}");
