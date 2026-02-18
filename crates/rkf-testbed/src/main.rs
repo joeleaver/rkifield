@@ -14,7 +14,7 @@ use rkf_core::aabb::Aabb;
 use rkf_core::brick_pool::Pool;
 use rkf_core::constants::RESOLUTION_TIERS;
 use rkf_core::populate::populate_grid;
-use rkf_core::sdf::sphere_sdf;
+use rkf_core::sdf::{box_sdf, capsule_sdf, sphere_sdf};
 use rkf_core::sparse_grid::SparseGrid;
 use rkf_core::BrickPool;
 
@@ -34,15 +34,23 @@ use automation::{SharedState, TestbedAutomationApi};
 /// Resolution tier for the test scene (Tier 1 = 2cm voxels).
 const TEST_TIER: usize = 1;
 
-/// Create a voxelized sphere test scene.
+/// Create a multi-object test scene: sphere + box + capsule.
 ///
 /// Returns `(BrickPool, SparseGrid, Aabb)`.
 fn create_test_scene() -> (BrickPool, SparseGrid, Aabb) {
+    // Object parameters
     let sphere_center = Vec3::ZERO;
-    let sphere_radius = 0.5;
-    let margin = 0.4;
-    let half = sphere_radius + margin;
-    let aabb = Aabb::new(Vec3::splat(-half), Vec3::splat(half));
+    let sphere_radius = 0.35;
+
+    let box_center = Vec3::new(0.8, 0.0, 0.0);
+    let box_half = Vec3::splat(0.25);
+
+    let capsule_a = Vec3::new(-0.8, -0.25, 0.0);
+    let capsule_b = Vec3::new(-0.8, 0.25, 0.0);
+    let capsule_radius = 0.15;
+
+    // Combined AABB with margin
+    let aabb = Aabb::new(Vec3::new(-1.5, -1.0, -1.0), Vec3::new(1.5, 1.0, 1.0));
 
     let res = &RESOLUTION_TIERS[TEST_TIER];
     let size = aabb.size();
@@ -55,10 +63,16 @@ fn create_test_scene() -> (BrickPool, SparseGrid, Aabb) {
     let mut pool: BrickPool = Pool::new(4096);
     let mut grid = SparseGrid::new(dims);
 
+    // SDF union of all three objects
     let count = populate_grid(
         &mut pool,
         &mut grid,
-        |p| sphere_sdf(sphere_center, sphere_radius, p),
+        |p| {
+            let s = sphere_sdf(sphere_center, sphere_radius, p);
+            let b = box_sdf(box_half, p - box_center);
+            let c = capsule_sdf(capsule_a, capsule_b, capsule_radius, p);
+            s.min(b).min(c)
+        },
         TEST_TIER,
         &aabb,
     )
@@ -117,8 +131,8 @@ impl GpuState {
             state.pool_allocated = pool.allocated_count() as u64;
         }
 
-        // Camera positioned to see the sphere
-        let mut camera = Camera::new(Vec3::new(0.0, 0.0, 2.0));
+        // Camera positioned to see all three objects (sphere, box, capsule)
+        let mut camera = Camera::new(Vec3::new(0.0, 0.5, 3.0));
         camera.fov_degrees = 60.0;
 
         let camera_uniforms = camera.uniforms(INTERNAL_WIDTH, INTERNAL_HEIGHT);

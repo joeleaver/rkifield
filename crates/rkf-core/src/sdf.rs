@@ -29,6 +29,18 @@ pub fn sphere_sdf(center: Vec3, radius: f32, point: Vec3) -> f32 {
     (point - center).length() - radius
 }
 
+/// Signed distance from `point` to a capsule defined by line segment `a`–`b`
+/// with the given `radius`.
+///
+/// Negative inside, positive outside.
+#[inline]
+pub fn capsule_sdf(a: Vec3, b: Vec3, radius: f32, point: Vec3) -> f32 {
+    let pa = point - a;
+    let ba = b - a;
+    let h = (pa.dot(ba) / ba.dot(ba)).clamp(0.0, 1.0);
+    (pa - ba * h).length() - radius
+}
+
 /// Signed distance from `point` to an axis-aligned box centered at the origin.
 ///
 /// Negative inside, positive outside.
@@ -166,6 +178,51 @@ mod tests {
         let d = sphere_sdf(center, 0.5, center);
         assert!((d - (-0.5)).abs() < 1e-6);
     }
+
+    // ------ Capsule SDF ------
+
+    #[test]
+    fn capsule_sdf_at_endpoint_a_center_is_negative_radius() {
+        let d = capsule_sdf(Vec3::ZERO, Vec3::new(0.0, 1.0, 0.0), 0.5, Vec3::ZERO);
+        assert!((d - (-0.5)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn capsule_sdf_at_endpoint_b_center_is_negative_radius() {
+        let d = capsule_sdf(Vec3::ZERO, Vec3::new(0.0, 1.0, 0.0), 0.5, Vec3::new(0.0, 1.0, 0.0));
+        assert!((d - (-0.5)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn capsule_sdf_at_midpoint_is_negative_radius() {
+        let d = capsule_sdf(Vec3::ZERO, Vec3::new(0.0, 1.0, 0.0), 0.5, Vec3::new(0.0, 0.5, 0.0));
+        assert!((d - (-0.5)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn capsule_sdf_on_surface_is_zero() {
+        // Point on the surface at the midpoint, offset by radius in x
+        let d = capsule_sdf(
+            Vec3::ZERO,
+            Vec3::new(0.0, 1.0, 0.0),
+            0.5,
+            Vec3::new(0.5, 0.5, 0.0),
+        );
+        assert!(d.abs() < 1e-6);
+    }
+
+    #[test]
+    fn capsule_sdf_outside_is_positive() {
+        let d = capsule_sdf(
+            Vec3::ZERO,
+            Vec3::new(0.0, 1.0, 0.0),
+            0.5,
+            Vec3::new(1.5, 0.5, 0.0),
+        );
+        assert!((d - 1.0).abs() < 1e-6);
+    }
+
+    // ------ Box SDF ------
 
     #[test]
     fn box_sdf_at_origin_is_negative() {
