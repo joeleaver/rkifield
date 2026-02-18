@@ -283,6 +283,19 @@ fn sss_contribution(pos: vec3<f32>, normal: vec3<f32>, light_dir: vec3<f32>,
     return subsurface_color * attenuation * wrap * subsurface;
 }
 
+// ---------- Light Attenuation ----------
+
+/// Windowed inverse-square distance attenuation for point/spot lights.
+/// Smooth falloff to zero at the light's range. Prevents singularity at distance=0.
+fn distance_attenuation(dist: f32, range: f32) -> f32 {
+    let d2 = dist * dist;
+    let r2 = range * range;
+    let factor = d2 / r2;
+    // Smooth window: (1 - (d/r)^2)^2, clamped to [0,1]
+    let smooth = clamp(1.0 - factor, 0.0, 1.0);
+    return (smooth * smooth) / max(d2, 0.0001);
+}
+
 // ---------- PBR Functions ----------
 
 /// GGX/Trowbridge-Reitz normal distribution function (D term).
@@ -412,8 +425,50 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
             sss_total += sss_contribution(world_pos, normal, light_dir, mat.subsurface, sss_color)
                          * radiance * shadow;
         }
-        // Point light evaluation (task 7.5) and spot light evaluation (task 7.6)
-        // will be added here.
+        } else if light.light_type == LIGHT_TYPE_POINT {
+            let light_pos = vec3<f32>(light.pos_x, light.pos_y, light.pos_z);
+            let to_light = light_pos - world_pos;
+            let dist = length(to_light);
+            let light_dir = to_light / max(dist, 0.0001);
+
+            let atten = distance_attenuation(dist, light.range);
+            if atten > 0.001 {
+                let half_vec = normalize(view_dir + light_dir);
+
+                let n_dot_l = max(dot(normal, light_dir), 0.0);
+                let n_dot_h = max(dot(normal, half_vec), 0.0);
+                let h_dot_v = max(dot(half_vec, view_dir), 0.0);
+
+                // Cook-Torrance specular BRDF
+                let d = distribution_ggx(n_dot_h, roughness);
+                let g = geometry_smith(n_dot_v, n_dot_l, roughness);
+                let f = fresnel_schlick(h_dot_v, f0);
+
+                let numerator = d * g * f;
+                let denominator = 4.0 * n_dot_v * n_dot_l + 0.0001;
+                let specular_brdf = numerator / denominator;
+
+                let ks = f;
+                let kd = (vec3<f32>(1.0) - ks) * (1.0 - metallic);
+                let diffuse_brdf = kd * albedo / PI;
+
+                // SDF soft shadow (if light casts shadows)
+                var shadow = 1.0;
+                if light.shadow_caster == 1u {
+                    let shadow_origin = world_pos + normal * SHADOW_BIAS;
+                    shadow = soft_shadow(shadow_origin, light_dir, min(dist, SHADOW_MAX_DIST), SHADOW_K);
+                }
+
+                let attenuated_radiance = radiance * atten;
+                total_diffuse += diffuse_brdf * attenuated_radiance * n_dot_l * shadow;
+                total_specular += specular_brdf * attenuated_radiance * n_dot_l * shadow;
+
+                // SSS for this light
+                sss_total += sss_contribution(world_pos, normal, light_dir, mat.subsurface, sss_color)
+                             * attenuated_radiance * shadow;
+            }
+        }
+        // Spot light evaluation (task 7.6) will be added here.
     }
 
     // SDF ambient occlusion
