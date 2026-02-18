@@ -18,23 +18,41 @@ use rkf_core::sdf::{box_sdf, capsule_sdf, sphere_sdf};
 use rkf_core::sparse_grid::SparseGrid;
 use rkf_core::BrickPool;
 
+use rkf_render::auto_exposure::AutoExposurePass;
 use rkf_render::blit::BlitPass;
+use rkf_render::bloom::BloomPass;
+use rkf_render::bloom_composite::BloomCompositePass;
 use rkf_render::camera::Camera;
+use rkf_render::cloud_shadow::CloudShadowPass;
+use rkf_render::color_grade::ColorGradePass;
+use rkf_render::cosmetics::CosmeticsPass;
+use rkf_render::dof::DofPass;
 use rkf_render::gbuffer::GBuffer;
 use rkf_render::gpu_scene::{GpuScene, SceneUniforms};
+use rkf_render::history::HistoryBuffers;
 use rkf_render::light::{Light, LightBuffer};
 use rkf_render::material_table::{self, MaterialTable};
-use rkf_render::ray_march::{RayMarchPass, INTERNAL_HEIGHT, INTERNAL_WIDTH};
+use rkf_render::motion_blur::MotionBlurPass;
 use rkf_render::radiance_inject::RadianceInjectPass;
 use rkf_render::radiance_mip::RadianceMipPass;
 use rkf_render::radiance_volume::RadianceVolume;
-use rkf_render::history::HistoryBuffers;
-use rkf_render::upscale::{QualityMode, ResolutionConfig, UpscalePass};
+use rkf_render::ray_march::{RayMarchPass, INTERNAL_HEIGHT, INTERNAL_WIDTH};
 use rkf_render::sharpen::SharpenPass;
 use rkf_render::shading::ShadingPass;
 use rkf_render::tile_cull::TileCullPass;
 use rkf_render::tone_map::ToneMapPass;
+use rkf_render::upscale::{QualityMode, ResolutionConfig, UpscalePass};
+use rkf_render::vol_composite::VolCompositePass;
+use rkf_render::vol_march::{VolMarchPass, VolMarchParams};
+use rkf_render::vol_shadow::VolShadowPass;
+use rkf_render::vol_temporal::VolTemporalPass;
+use rkf_render::vol_upscale::VolUpscalePass;
 use rkf_render::RenderContext;
+
+use rkf_runtime::{
+    CameraComponent, EngineConfig, FrameContext, FrameSettings, Scene as EcsScene, Transform,
+    execute_frame,
+};
 
 mod automation;
 use automation::{SharedState, TestbedAutomationApi};
@@ -369,6 +387,26 @@ struct GpuState {
     history: HistoryBuffers,
     upscale: UpscalePass,
     sharpen: SharpenPass,
+    // Volumetric passes
+    vol_shadow: VolShadowPass,
+    vol_march: VolMarchPass,
+    vol_temporal: VolTemporalPass,
+    vol_upscale: VolUpscalePass,
+    vol_composite: VolCompositePass,
+    cloud_shadow: CloudShadowPass,
+    // Pre-upscale post-processing
+    bloom: BloomPass,
+    dof: DofPass,
+    motion_blur: MotionBlurPass,
+    // Post-upscale post-processing
+    bloom_composite: BloomCompositePass,
+    auto_exposure: AutoExposurePass,
+    color_grade: ColorGradePass,
+    cosmetics: CosmeticsPass,
+    // ECS and configuration
+    scene_ecs: EcsScene,
+    config: EngineConfig,
+    frame_settings: FrameSettings,
     camera: Camera,
     staging_buffer: wgpu::Buffer,
     shared_state: Arc<Mutex<SharedState>>,
@@ -387,8 +425,10 @@ impl GpuState {
             .create_surface(window)
             .expect("failed to create surface");
         let context = RenderContext::new(&instance, &surface);
+        let display_width = size.width.max(1);
+        let display_height = size.height.max(1);
         let surface_format =
-            context.configure_surface(&surface, size.width.max(1), size.height.max(1));
+            context.configure_surface(&surface, display_width, display_height);
 
         // Auto-select upscaling backend based on hardware
         let dlss_context = rkf_render::dlss::DlssContext::new(
@@ -398,7 +438,7 @@ impl GpuState {
         let upscale_backend = rkf_render::UpscaleBackend::auto_select(&dlss_context);
         log::info!("Upscale backend: {}", upscale_backend.name());
 
-        let resolution_config = ResolutionConfig::new(size.width.max(1), size.height.max(1), QualityMode::Balanced);
+        let resolution_config = ResolutionConfig::new(display_width, display_height, QualityMode::Balanced);
         log::info!("Resolution: {}x{} → {}x{} ({})",
             resolution_config.display_width, resolution_config.display_height,
             resolution_config.internal_width(), resolution_config.internal_height(),
@@ -474,13 +514,13 @@ impl GpuState {
         // Create history buffers at display resolution for temporal upscaling
         let history = HistoryBuffers::new(
             &context.device,
-            size.width.max(1),
-            size.height.max(1),
+            display_width,
+            display_height,
             INTERNAL_WIDTH,
             INTERNAL_HEIGHT,
         );
 
-        // Create render passes
+        // Create core render passes
         let ray_march = RayMarchPass::new(&context.device, &scene, &gbuffer);
         let shading = ShadingPass::new(
             &context.device,
@@ -497,8 +537,8 @@ impl GpuState {
             &shading,
             &gbuffer,
             &history,
-            size.width.max(1),
-            size.height.max(1),
+            display_width,
+            display_height,
             INTERNAL_WIDTH,
             INTERNAL_HEIGHT,
         );
@@ -506,8 +546,8 @@ impl GpuState {
             &context.device,
             &upscale.output_view,
             &gbuffer,
-            size.width.max(1),
-            size.height.max(1),
+            display_width,
+            display_height,
         );
         let tone_map = ToneMapPass::new(
             &context.device,
@@ -516,6 +556,149 @@ impl GpuState {
             INTERNAL_HEIGHT,
         );
         let blit = BlitPass::new(&context.device, &tone_map.ldr_view, surface_format);
+
+        // ── Volumetric passes ─────────────────────────────────────────────────
+        let vol_shadow = VolShadowPass::new(&context.device, &context.queue);
+        let cloud_shadow = CloudShadowPass::new(&context.device);
+
+        let half_width = INTERNAL_WIDTH / 2;
+        let half_height = INTERNAL_HEIGHT / 2;
+
+        let vol_march = VolMarchPass::new(
+            &context.device,
+            &context.queue,
+            &gbuffer.position_view,
+            &vol_shadow.shadow_view,
+            half_width,
+            half_height,
+            INTERNAL_WIDTH,
+            INTERNAL_HEIGHT,
+        );
+
+        let vol_temporal = VolTemporalPass::new(
+            &context.device,
+            &vol_march.output_view,
+            &gbuffer.motion_view,
+            half_width,
+            half_height,
+        );
+
+        let vol_upscale = VolUpscalePass::new(
+            &context.device,
+            vol_temporal.output_view(),
+            &gbuffer.position_view,
+            INTERNAL_WIDTH,
+            INTERNAL_HEIGHT,
+            half_width,
+            half_height,
+        );
+
+        let vol_composite = VolCompositePass::new(
+            &context.device,
+            &shading.hdr_view,
+            &vol_upscale.output_view,
+            INTERNAL_WIDTH,
+            INTERNAL_HEIGHT,
+        );
+
+        // ── Pre-upscale post-processing ───────────────────────────────────────
+        let bloom = BloomPass::new(
+            &context.device,
+            &shading.hdr_view,
+            INTERNAL_WIDTH,
+            INTERNAL_HEIGHT,
+        );
+
+        let dof = DofPass::new(
+            &context.device,
+            &shading.hdr_view,
+            &gbuffer.position_view,
+            INTERNAL_WIDTH,
+            INTERNAL_HEIGHT,
+        );
+
+        let motion_blur = MotionBlurPass::new(
+            &context.device,
+            &shading.hdr_view,
+            &gbuffer.motion_view,
+            INTERNAL_WIDTH,
+            INTERNAL_HEIGHT,
+        );
+
+        // ── Post-upscale post-processing ──────────────────────────────────────
+        let bloom_composite = BloomCompositePass::new(
+            &context.device,
+            &upscale.output_view,
+            bloom.mip_views(),
+            display_width,
+            display_height,
+        );
+
+        let auto_exposure = AutoExposurePass::new(
+            &context.device,
+            &shading.hdr_view,
+            INTERNAL_WIDTH,
+            INTERNAL_HEIGHT,
+        );
+
+        let color_grade = ColorGradePass::new(
+            &context.device,
+            &context.queue,
+            &tone_map.ldr_view,
+            INTERNAL_WIDTH,
+            INTERNAL_HEIGHT,
+        );
+
+        let cosmetics = CosmeticsPass::new(
+            &context.device,
+            &tone_map.ldr_view,
+            INTERNAL_WIDTH,
+            INTERNAL_HEIGHT,
+        );
+
+        // ── ECS scene ─────────────────────────────────────────────────────────
+        let mut scene_ecs = EcsScene::new();
+
+        // Spawn camera entity
+        let _camera_entity = scene_ecs.spawn_camera(
+            Transform::default(),
+            CameraComponent {
+                fov: camera.fov_degrees.to_radians(),
+                near: 0.1,
+                far: 1000.0,
+                active: true,
+            },
+        );
+
+        // Spawn light entities as ECS markers
+        for _ in &lights {
+            scene_ecs.spawn_light(Transform::default());
+        }
+
+        log::info!(
+            "ECS scene: {} entities (1 camera + {} lights)",
+            scene_ecs.entity_count(),
+            lights.len()
+        );
+
+        // ── Engine configuration ──────────────────────────────────────────────
+        let config = EngineConfig::default();
+        // Start with only GI + sharpen enabled to match prior testbed behavior.
+        // All other optional passes are disabled for initial stability.
+        let frame_settings = FrameSettings {
+            gi_enabled: true,
+            sharpen_enabled: true,
+            volumetrics_enabled: false,
+            cloud_shadows_enabled: false,
+            dof_enabled: false,
+            motion_blur_enabled: false,
+            bloom_enabled: false,
+            auto_exposure_enabled: false,
+            color_grade_enabled: false,
+            cosmetics_enabled: false,
+        };
+
+        log::info!("Frame scheduler active — EngineConfig preset: {:?}", config.quality_preset);
 
         // Staging buffer for CPU readback of rendered frames (screenshot support).
         let staging_buffer = context.device.create_buffer(&wgpu::BufferDescriptor {
@@ -529,8 +712,8 @@ impl GpuState {
             context,
             surface,
             surface_format,
-            width: size.width.max(1),
-            height: size.height.max(1),
+            width: display_width,
+            height: display_height,
             scene,
             gbuffer,
             material_table,
@@ -546,6 +729,22 @@ impl GpuState {
             history,
             upscale,
             sharpen,
+            vol_shadow,
+            vol_march,
+            vol_temporal,
+            vol_upscale,
+            vol_composite,
+            cloud_shadow,
+            bloom,
+            dof,
+            motion_blur,
+            bloom_composite,
+            auto_exposure,
+            color_grade,
+            cosmetics,
+            scene_ecs,
+            config,
+            frame_settings,
             camera,
             staging_buffer,
             shared_state,
@@ -637,41 +836,84 @@ impl GpuState {
             1, // max 1 shadow-casting light in injection
         );
 
-        // Pass 1: Ray march (compute) → G-buffer
-        self.ray_march.dispatch(&mut encoder, &self.scene, &self.gbuffer);
+        // Normalized sun direction matching the main directional light
+        let sun_dir = Vec3::new(0.4, 0.8, 0.3).normalize();
+        let sun_dir_arr = [sun_dir.x, sun_dir.y, sun_dir.z];
 
-        // Pass 2: Tile light cull
-        self.tile_cull.dispatch(&mut encoder, &self.gbuffer);
+        // Default volumetric march params (zeroed — passes are disabled anyway)
+        let vol_march_params = VolMarchParams {
+            cam_pos: [cam_pos.x, cam_pos.y, cam_pos.z, 0.0],
+            cam_forward: [cam_fwd.x, cam_fwd.y, cam_fwd.z, 0.0],
+            cam_right: [0.0; 4],
+            cam_up: [0.0; 4],
+            sun_dir: [sun_dir.x, sun_dir.y, sun_dir.z, 0.0],
+            sun_color: [1.0, 0.95, 0.85, 0.0],
+            width: INTERNAL_WIDTH / 2,
+            height: INTERNAL_HEIGHT / 2,
+            full_width: INTERNAL_WIDTH,
+            full_height: INTERNAL_HEIGHT,
+            max_steps: 32,
+            step_size: 2.0,
+            near: 0.5,
+            far: 200.0,
+            fog_color: [0.7, 0.8, 0.9, 0.0],
+            fog_height: [0.0, 0.0, 0.1, 0.0],
+            fog_distance: [0.0, 0.01, 0.0, 0.3],
+            frame_index: self.frame_index,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
+            vol_shadow_min: [-64.0, -32.0, -64.0, 0.0],
+            vol_shadow_max: [64.0, 32.0, 64.0, 0.0],
+        };
 
-        // Pass 3: Radiance injection → Level 0
-        self.radiance_inject.dispatch(&mut encoder, &self.scene, &self.material_table);
+        // ── Execute frame via scheduler ──────────────────────────────────────
+        {
+            let mut frame_ctx = FrameContext {
+                encoder: &mut encoder,
+                queue: &self.context.queue,
+                settings: &self.frame_settings,
+                scene: &self.scene,
+                gbuffer: &self.gbuffer,
+                material_table: &self.material_table,
+                light_buffer: &self.light_buffer,
+                ray_march: &self.ray_march,
+                tile_cull: &self.tile_cull,
+                shading: &self.shading,
+                tone_map: &self.tone_map,
+                blit: &self.blit,
+                shade_light_bind_group: &self.tile_cull.shade_light_bind_group,
+                radiance_volume: &self.radiance_volume,
+                radiance_inject: &self.radiance_inject,
+                radiance_mip: &self.radiance_mip,
+                vol_shadow: &self.vol_shadow,
+                vol_march: &self.vol_march,
+                vol_march_params: &vol_march_params,
+                vol_temporal: &mut self.vol_temporal,
+                vol_upscale: &self.vol_upscale,
+                vol_composite: &self.vol_composite,
+                cloud_shadow: &self.cloud_shadow,
+                bloom: &self.bloom,
+                dof: &self.dof,
+                motion_blur: &self.motion_blur,
+                upscale: &self.upscale,
+                sharpen: &self.sharpen,
+                history_read_idx: self.history.read_index(),
+                bloom_composite: &self.bloom_composite,
+                auto_exposure: &self.auto_exposure,
+                color_grade: &self.color_grade,
+                cosmetics: &self.cosmetics,
+                frame_index: self.frame_index,
+                dt,
+                camera_pos: cam_pos_arr,
+                sun_dir: sun_dir_arr,
+                swapchain_view: &view,
+            };
 
-        // Pass 4: Radiance mip generation → L0→L1→L2→L3
-        self.radiance_mip.dispatch(&mut encoder);
+            execute_frame(&mut frame_ctx);
+        }
 
-        // Pass 5: Shading (compute) — G-buffer + materials + SDF + lights + GI → HDR
-        self.shading.dispatch(
-            &mut encoder,
-            &self.gbuffer,
-            &self.material_table,
-            &self.scene,
-            &self.tile_cull.shade_light_bind_group,
-            &self.radiance_volume,
-        );
-
-        // Pass 6: Temporal upscale — internal HDR → display HDR + history update
-        self.upscale.dispatch(&mut encoder, self.history.read_index());
-
-        // Pass 7: Edge-aware sharpening on upscaled result
-        self.sharpen.dispatch(&mut encoder);
-
-        // Pass 8: Tone map (compute) — HDR → LDR
-        self.tone_map.dispatch(&mut encoder);
-
-        // Pass 9: Blit LDR → swapchain
-        self.blit.draw(&mut encoder, &view);
-
-        // Pass 10: Copy LDR texture → staging buffer for screenshot readback
+        // Copy LDR texture → staging buffer for screenshot readback
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: self.tone_map.ldr_texture(),
