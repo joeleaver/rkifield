@@ -36,6 +36,8 @@ pub mod shading;
 pub mod tile_cull;
 /// Tone mapping compute pass (HDR → LDR).
 pub mod tone_map;
+/// Radiance volume for voxel cone tracing global illumination.
+pub mod radiance_volume;
 
 pub use camera::{Camera, CameraUniforms};
 pub use context::RenderContext;
@@ -48,3 +50,4 @@ pub use light::{Light, LightBuffer, MAX_LIGHTS, MAX_LIGHTS_PER_TILE, TILE_SIZE};
 pub use shading::{ShadeUniforms, ShadingPass};
 pub use tile_cull::{CullUniforms, TileCullPass};
 pub use tone_map::ToneMapPass;
+pub use radiance_volume::{RadianceVolume, RadianceVolumeUniforms, RADIANCE_DIM, RADIANCE_LEVELS};
