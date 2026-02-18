@@ -21,8 +21,8 @@ pub struct ShadeUniforms {
     pub num_lights: u32,
     /// Number of tiles horizontally (for indexing tile_light_counts/indices).
     pub num_tiles_x: u32,
-    /// Padding.
-    pub _pad: u32,
+    /// Shadow budget: max shadow-casting lights per pixel (0 = unlimited).
+    pub shadow_budget_k: u32,
     /// Camera world-space position (xyz) + unused (w).
     pub camera_pos: [f32; 4],
 }
@@ -118,7 +118,7 @@ impl ShadingPass {
             debug_mode: 0,
             num_lights: 0,
             num_tiles_x: 0,
-            _pad: 0,
+            shadow_budget_k: 4,
             camera_pos: [0.0; 4],
         };
         let shade_uniforms_buffer =
@@ -229,9 +229,19 @@ impl ShadingPass {
         queue.write_buffer(&self.shade_uniforms_buffer, 0, bytemuck::bytes_of(&mode));
     }
 
-    /// Update the light info in shade uniforms (num_lights at offset 4, num_tiles_x at offset 8).
-    pub fn update_light_info(&self, queue: &wgpu::Queue, num_lights: u32, num_tiles_x: u32) {
-        let data = [num_lights, num_tiles_x];
+    /// Update the light info in shade uniforms.
+    ///
+    /// - `num_lights`: total active lights
+    /// - `num_tiles_x`: horizontal tile count for indexing
+    /// - `shadow_budget_k`: max shadow-casting lights per pixel (0 = unlimited)
+    pub fn update_light_info(
+        &self,
+        queue: &wgpu::Queue,
+        num_lights: u32,
+        num_tiles_x: u32,
+        shadow_budget_k: u32,
+    ) {
+        let data = [num_lights, num_tiles_x, shadow_budget_k];
         queue.write_buffer(&self.shade_uniforms_buffer, 4, bytemuck::cast_slice(&data));
     }
 
@@ -258,7 +268,7 @@ mod tests {
             debug_mode: 3,
             num_lights: 5,
             num_tiles_x: 60,
-            _pad: 0,
+            shadow_budget_k: 4,
             camera_pos: [1.0, 2.0, 3.0, 0.0],
         };
         let bytes = bytemuck::bytes_of(&u);

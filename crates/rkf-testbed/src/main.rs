@@ -69,14 +69,8 @@ fn create_test_scene() -> (BrickPool, SparseGrid, Aabb) {
 
     let mut total = 0u32;
 
-    // Ground plane — flat box, material 1 (stone)
-    let ground_center = Vec3::new(0.0, -0.5, 0.0);
-    let ground_half = Vec3::new(2.8, 0.15, 2.8);
-    total += populate_grid_with_material(
-        &mut pool, &mut grid,
-        |p| box_sdf(ground_half, p - ground_center),
-        TEST_TIER, &aabb, 1,
-    ).expect("ground");
+    // Populate objects BEFORE the ground plane so objects take priority
+    // in overlapping narrow-band cells (first writer wins).
 
     // Center sphere — material 2 (metal)
     total += populate_grid_with_material(
@@ -120,6 +114,16 @@ fn create_test_scene() -> (BrickPool, SparseGrid, Aabb) {
         |p| sphere_sdf(Vec3::new(0.0, -0.2, 0.7), 0.18, p),
         TEST_TIER, &aabb, 1,
     ).expect("front sphere");
+
+    // Ground plane LAST — flat box, material 1 (stone)
+    // Populated after objects so it fills around them without overwriting.
+    let ground_center = Vec3::new(0.0, -0.5, 0.0);
+    let ground_half = Vec3::new(2.8, 0.15, 2.8);
+    total += populate_grid_with_material(
+        &mut pool, &mut grid,
+        |p| box_sdf(ground_half, p - ground_center),
+        TEST_TIER, &aabb, 1,
+    ).expect("ground");
 
     log::info!(
         "Lighting showcase: {total} bricks, grid {}x{}x{}, tier {TEST_TIER}",

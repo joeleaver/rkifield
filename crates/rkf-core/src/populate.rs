@@ -75,6 +75,12 @@ where
                 let center_dist = sdf_fn(brick_center);
 
                 if center_dist.abs() <= narrow_band_dist {
+                    // Skip cells already populated by a previous object to avoid
+                    // overwriting valid surface data (e.g., ground plane under a sphere).
+                    if grid.cell_state(cx, cy, cz) == CellState::Surface {
+                        continue;
+                    }
+
                     // Allocate a brick from the pool
                     let slot = pool.allocate().ok_or(PopulateError::PoolExhausted {
                         allocated_so_far: allocated,
@@ -99,7 +105,9 @@ where
                     grid.set_cell_state(cx, cy, cz, CellState::Surface);
                     grid.set_brick_slot(cx, cy, cz, slot);
                     allocated += 1;
-                } else if center_dist < 0.0 {
+                } else if center_dist < 0.0
+                    && grid.cell_state(cx, cy, cz) != CellState::Surface
+                {
                     grid.set_cell_state(cx, cy, cz, CellState::Interior);
                 }
             }
