@@ -238,7 +238,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Sample SDF
     let d = sample_sdf(pos);
-    let threshold = voxel_size * 1.5;
+    let threshold = voxel_size * 3.0;
 
     // Deep interior: opaque, blocks light
     if d < -threshold {

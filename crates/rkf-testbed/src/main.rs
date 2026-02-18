@@ -26,6 +26,8 @@ use rkf_render::gpu_color_pool::GpuColorPool;
 use rkf_render::gpu_scene::{GpuScene, SceneUniforms};
 use rkf_render::light::{Light, LightBuffer};
 use rkf_render::material_table::{self, MaterialTable};
+use rkf_render::radiance_inject::RadianceInjectPass;
+use rkf_render::radiance_mip::RadianceMipPass;
 use rkf_render::radiance_volume::RadianceVolume;
 use rkf_render::ray_march::{RayMarchPass, INTERNAL_HEIGHT, INTERNAL_WIDTH};
 use rkf_render::shading::ShadingPass;
@@ -37,13 +39,26 @@ mod automation;
 use automation::{SharedState, TestbedAutomationApi};
 
 // ---------------------------------------------------------------------------
-// Phase 6 scene — materials showcase (stone, metal, wood, emissive + ground)
+// Phase 7 scene — lighting showcase (7 objects, all materials, 22+ lights)
 // ---------------------------------------------------------------------------
 
-fn create_phase6_scene() -> (BrickPool, SparseGrid, Aabb) {
-    // AABB encompassing all objects + ground plane
-    let aabb = Aabb::new(Vec3::new(-2.0, -1.2, -1.5), Vec3::new(2.0, 1.5, 1.5));
-    let res = &RESOLUTION_TIERS[1]; // Tier 1 = 2cm voxels, 0.16m brick extent
+/// Resolution tier for the test scene (Tier 1 = 2cm voxels).
+const TEST_TIER: usize = 1;
+
+/// Create a lighting showcase scene with multiple objects and materials.
+///
+/// Objects and their material IDs:
+/// - Ground plane:         material 1 (stone)
+/// - Center sphere:        material 2 (metal)
+/// - Left sphere:          material 5 (skin/SSS)
+/// - Right sphere:         material 3 (wood)
+/// - Back-left capsule:    material 4 (emissive)
+/// - Back-right box:       material 2 (metal)
+/// - Front-center sphere:  material 1 (stone)
+#[allow(dead_code)]
+fn create_test_scene() -> (BrickPool, SparseGrid, Aabb) {
+    let aabb = Aabb::new(Vec3::new(-3.0, -0.6, -3.0), Vec3::new(3.0, 1.5, 3.0));
+    let res = &RESOLUTION_TIERS[TEST_TIER];
     let size = aabb.size();
     let dims = UVec3::new(
         ((size.x / res.brick_extent).ceil() as u32).max(1),
@@ -52,76 +67,231 @@ fn create_phase6_scene() -> (BrickPool, SparseGrid, Aabb) {
     );
     let mut pool: BrickPool = Pool::new(32768);
     let mut grid = SparseGrid::new(dims);
+    let mut total = 0u32;
 
-    // Ground plane: thin box at y=-0.5, material 6 (white diffuse — good for shadows/AO)
-    let ground_y = -0.5;
-    let c0 = populate_grid_with_material(
-        &mut pool,
-        &mut grid,
-        |p| box_sdf(Vec3::new(1.8, 0.05, 1.2), p - Vec3::new(0.0, ground_y, 0.0)),
-        1,
-        &aabb,
-        6,
-    )
-    .expect("ground");
-    log::info!("  Ground: {c0} bricks");
+    // Ground plane — thin flat box, material 1 (stone)
+    total += populate_grid_with_material(
+        &mut pool, &mut grid,
+        |p| box_sdf(Vec3::new(2.8, 0.05, 2.8), p - Vec3::new(0.0, -0.45, 0.0)),
+        TEST_TIER, &aabb, 1,
+    ).expect("ground");
 
-    // Object 1: Stone sphere at (-1.0, 0.0, 0.0), radius 0.35, material 1
-    let c1 = populate_grid_with_material(
-        &mut pool,
-        &mut grid,
-        |p| sphere_sdf(Vec3::new(-1.0, 0.0, 0.0), 0.35, p),
-        1,
-        &aabb,
-        1,
-    )
-    .expect("stone sphere");
-    log::info!("  Stone sphere: {c1} bricks");
+    // Center sphere — material 2 (metal)
+    total += populate_grid_with_material(
+        &mut pool, &mut grid,
+        |p| sphere_sdf(Vec3::new(0.0, 0.0, 0.0), 0.35, p),
+        TEST_TIER, &aabb, 2,
+    ).expect("center sphere");
 
-    // Object 2: Metal box at (0.0, 0.0, 0.0), half-extents 0.25, material 2
-    let c2 = populate_grid_with_material(
-        &mut pool,
-        &mut grid,
-        |p| box_sdf(Vec3::splat(0.25), p),
-        1,
-        &aabb,
-        2,
-    )
-    .expect("metal box");
-    log::info!("  Metal box: {c2} bricks");
+    // Left sphere — material 5 (skin/SSS)
+    total += populate_grid_with_material(
+        &mut pool, &mut grid,
+        |p| sphere_sdf(Vec3::new(-1.0, 0.0, 0.0), 0.3, p),
+        TEST_TIER, &aabb, 5,
+    ).expect("left sphere");
 
-    // Object 3: Wood capsule at (1.0, 0.0, 0.0), vertical, radius 0.2, material 3
-    let c3 = populate_grid_with_material(
-        &mut pool,
-        &mut grid,
-        |p| capsule_sdf(Vec3::new(1.0, -0.3, 0.0), Vec3::new(1.0, 0.3, 0.0), 0.18, p),
-        1,
-        &aabb,
-        3,
-    )
-    .expect("wood capsule");
-    log::info!("  Wood capsule: {c3} bricks");
+    // Right sphere — material 3 (wood)
+    total += populate_grid_with_material(
+        &mut pool, &mut grid,
+        |p| sphere_sdf(Vec3::new(1.0, 0.0, 0.0), 0.3, p),
+        TEST_TIER, &aabb, 3,
+    ).expect("right sphere");
 
-    // Object 4: Emissive sphere at (0.0, 0.6, 0.0), radius 0.15, material 4
-    let c4 = populate_grid_with_material(
-        &mut pool,
-        &mut grid,
-        |p| sphere_sdf(Vec3::new(0.0, 0.6, 0.0), 0.15, p),
-        1,
-        &aabb,
-        4,
-    )
-    .expect("emissive sphere");
-    log::info!("  Emissive sphere: {c4} bricks");
+    // Back-left capsule — material 4 (emissive cyan)
+    total += populate_grid_with_material(
+        &mut pool, &mut grid,
+        |p| capsule_sdf(Vec3::new(-0.7, -0.2, -0.8), Vec3::new(-0.7, 0.3, -0.8), 0.12, p),
+        TEST_TIER, &aabb, 4,
+    ).expect("emissive capsule");
 
-    let total = c0 + c1 + c2 + c3 + c4;
+    // Back-right box — material 2 (metal)
+    total += populate_grid_with_material(
+        &mut pool, &mut grid,
+        |p| box_sdf(Vec3::splat(0.22), p - Vec3::new(0.7, 0.0, -0.8)),
+        TEST_TIER, &aabb, 2,
+    ).expect("metal box");
+
+    // Front-center small sphere — material 1 (stone)
+    total += populate_grid_with_material(
+        &mut pool, &mut grid,
+        |p| sphere_sdf(Vec3::new(0.0, -0.2, 0.7), 0.18, p),
+        TEST_TIER, &aabb, 1,
+    ).expect("front sphere");
+
     log::info!(
-        "Phase 6 scene: {total} bricks total, grid {}x{}x{}",
-        dims.x,
-        dims.y,
-        dims.z,
+        "Lighting showcase: {total} bricks, grid {}x{}x{}, tier {TEST_TIER}",
+        dims.x, dims.y, dims.z,
     );
     (pool, grid, aabb)
+}
+
+/// Create the lighting showcase light set (22+ lights).
+///
+/// Mix of directional, point, and spot lights at various positions and colors.
+/// Some cast shadows, some don't, to exercise the shadow budget system.
+/// Light index 0 is a camera headlight updated per-frame.
+#[allow(dead_code)]
+fn create_showcase_lights(cam_pos: Vec3) -> Vec<Light> {
+    vec![
+        // 0: Camera headlight — updated per-frame
+        Light::point([cam_pos.x, cam_pos.y + 0.3, cam_pos.z], [1.0, 0.98, 0.95], 1.0, 25.0, true),
+
+        // --- Directional lights (2) ---
+        // 1: Main sun — warm, shadow-casting
+        Light::directional([0.4, 0.8, 0.3], [1.0, 0.95, 0.85], 0.8, true),
+        // 2: Fill sky — cool blue, no shadows
+        Light::directional([-0.2, 0.6, -0.5], [0.4, 0.5, 0.7], 0.25, false),
+
+        // --- Point lights (12) ---
+        // 3: Warm key above center
+        Light::point([0.0, 1.2, 0.5], [1.0, 0.9, 0.7], 3.0, 4.0, true),
+        // 4: Red accent left
+        Light::point([-1.5, 0.5, 0.3], [1.0, 0.2, 0.1], 2.0, 3.0, true),
+        // 5: Blue accent right
+        Light::point([1.5, 0.5, 0.3], [0.1, 0.3, 1.0], 2.0, 3.0, true),
+        // 6: Green ground bounce back
+        Light::point([0.0, -0.1, -1.2], [0.2, 0.8, 0.3], 1.5, 3.0, false),
+        // 7: Purple rim light
+        Light::point([0.0, 0.8, -1.5], [0.6, 0.1, 0.8], 2.5, 4.0, true),
+        // 8: Orange low left
+        Light::point([-0.8, -0.2, 0.6], [1.0, 0.5, 0.1], 1.2, 2.5, false),
+        // 9: Cyan low right
+        Light::point([0.8, -0.2, 0.6], [0.1, 0.8, 0.9], 1.2, 2.5, false),
+        // 10: White overhead far
+        Light::point([0.0, 1.5, -0.5], [1.0, 1.0, 1.0], 4.0, 5.0, true),
+        // 11: Yellow near ground front-left
+        Light::point([-1.2, 0.1, 1.0], [1.0, 0.9, 0.3], 1.2, 2.5, false),
+        // 12: Pink near ground front-right
+        Light::point([1.2, 0.1, 1.0], [1.0, 0.3, 0.5], 1.2, 2.5, false),
+        // 13: Dim white fill from below
+        Light::point([0.0, -0.35, 0.0], [1.0, 1.0, 1.0], 0.8, 2.0, false),
+        // 14: White back-center high
+        Light::point([0.0, 1.3, -1.0], [1.0, 1.0, 0.95], 3.0, 4.5, true),
+
+        // --- Spot lights (8) ---
+        // 15: Spotlight on center sphere from above-front
+        Light::spot([0.0, 1.5, 1.5], [0.0, -0.8, -0.6], [1.0, 1.0, 1.0], 5.0, 5.0, 0.15, 0.35, true),
+        // 16: Red spot on left sphere
+        Light::spot([-1.0, 1.2, 0.8], [0.0, -0.7, -0.5], [1.0, 0.15, 0.1], 4.0, 4.0, 0.2, 0.4, true),
+        // 17: Blue spot on right sphere
+        Light::spot([1.0, 1.2, 0.8], [0.0, -0.7, -0.5], [0.1, 0.2, 1.0], 4.0, 4.0, 0.2, 0.4, true),
+        // 18: Green spot from behind on ground
+        Light::spot([0.0, 0.8, -2.0], [0.0, -0.3, 0.9], [0.2, 1.0, 0.3], 3.0, 5.0, 0.1, 0.3, false),
+        // 19: Warm narrow spot on back-right box
+        Light::spot([0.7, 1.0, -0.3], [0.0, -1.0, -0.2], [1.0, 0.8, 0.5], 3.0, 3.0, 0.1, 0.2, true),
+        // 20: Cool narrow spot on back-left capsule
+        Light::spot([-0.7, 1.0, -0.3], [0.0, -1.0, -0.2], [0.5, 0.7, 1.0], 3.0, 3.0, 0.1, 0.2, true),
+        // 21: Wide purple wash from side
+        Light::spot([-2.0, 0.5, 0.0], [1.0, -0.2, 0.0], [0.5, 0.1, 0.8], 2.0, 5.0, 0.3, 0.6, false),
+        // 22: Wide orange wash from other side
+        Light::spot([2.0, 0.5, 0.0], [-1.0, -0.2, 0.0], [1.0, 0.5, 0.1], 2.0, 5.0, 0.3, 0.6, false),
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// Phase 8 scene — Cornell box for GI validation
+// ---------------------------------------------------------------------------
+
+/// Create a Cornell box scene for GI validation.
+///
+/// Closed box (~2m per side) with colored walls to make color bleeding obvious:
+/// - Floor, ceiling, back wall: white diffuse (material 6)
+/// - Left wall: red diffuse (material 7)
+/// - Right wall: green diffuse (material 8)
+/// - Ceiling light panel: emissive (material 9)
+/// - Interior box: metal (material 2)
+/// - Interior sphere: stone (material 1)
+fn create_cornell_box() -> (BrickPool, SparseGrid, Aabb) {
+    let aabb = Aabb::new(Vec3::new(-1.5, -1.5, -1.5), Vec3::new(1.5, 1.5, 1.5));
+    let res = &RESOLUTION_TIERS[TEST_TIER];
+    let size = aabb.size();
+    let dims = UVec3::new(
+        ((size.x / res.brick_extent).ceil() as u32).max(1),
+        ((size.y / res.brick_extent).ceil() as u32).max(1),
+        ((size.z / res.brick_extent).ceil() as u32).max(1),
+    );
+    let mut pool: BrickPool = Pool::new(32768);
+    let mut grid = SparseGrid::new(dims);
+    let mut total = 0u32;
+
+    let wall_thickness = 0.05;
+
+    // Floor — white diffuse (material 6)
+    total += populate_grid_with_material(
+        &mut pool, &mut grid,
+        |p| box_sdf(Vec3::new(1.0, wall_thickness, 1.0), p - Vec3::new(0.0, -1.0, 0.0)),
+        TEST_TIER, &aabb, 6,
+    ).expect("floor");
+
+    // Ceiling — white diffuse (material 6)
+    total += populate_grid_with_material(
+        &mut pool, &mut grid,
+        |p| box_sdf(Vec3::new(1.0, wall_thickness, 1.0), p - Vec3::new(0.0, 1.0, 0.0)),
+        TEST_TIER, &aabb, 6,
+    ).expect("ceiling");
+
+    // Back wall — white diffuse (material 6)
+    total += populate_grid_with_material(
+        &mut pool, &mut grid,
+        |p| box_sdf(Vec3::new(1.0, 1.0, wall_thickness), p - Vec3::new(0.0, 0.0, -1.0)),
+        TEST_TIER, &aabb, 6,
+    ).expect("back wall");
+
+    // Left wall — red diffuse (material 7)
+    total += populate_grid_with_material(
+        &mut pool, &mut grid,
+        |p| box_sdf(Vec3::new(wall_thickness, 1.0, 1.0), p - Vec3::new(-1.0, 0.0, 0.0)),
+        TEST_TIER, &aabb, 7,
+    ).expect("left wall");
+
+    // Right wall — green diffuse (material 8)
+    total += populate_grid_with_material(
+        &mut pool, &mut grid,
+        |p| box_sdf(Vec3::new(wall_thickness, 1.0, 1.0), p - Vec3::new(1.0, 0.0, 0.0)),
+        TEST_TIER, &aabb, 8,
+    ).expect("right wall");
+
+    // Ceiling light panel — emissive (material 9)
+    // Large panel on the ceiling for strong GI illumination
+    total += populate_grid_with_material(
+        &mut pool, &mut grid,
+        |p| box_sdf(Vec3::new(0.5, 0.03, 0.5), p - Vec3::new(0.0, 0.92, 0.0)),
+        TEST_TIER, &aabb, 9,
+    ).expect("ceiling light");
+
+    // Interior box — metal (material 2), slightly rotated feel via offset
+    total += populate_grid_with_material(
+        &mut pool, &mut grid,
+        |p| box_sdf(Vec3::splat(0.25), p - Vec3::new(-0.35, -0.7, -0.3)),
+        TEST_TIER, &aabb, 2,
+    ).expect("metal box");
+
+    // Interior sphere — stone (material 1)
+    total += populate_grid_with_material(
+        &mut pool, &mut grid,
+        |p| sphere_sdf(Vec3::new(0.35, -0.7, 0.2), 0.28, p),
+        TEST_TIER, &aabb, 1,
+    ).expect("stone sphere");
+
+    log::info!(
+        "Cornell box: {total} bricks, grid {}x{}x{}, tier {TEST_TIER}",
+        dims.x, dims.y, dims.z,
+    );
+    (pool, grid, aabb)
+}
+
+/// Cornell box lighting — single overhead light representing the emissive panel.
+/// This is the standard Cornell box setup: one area light on the ceiling.
+/// The point light approximates the panel's emission as direct illumination
+/// so the inject pass can compute how the panel lights nearby surfaces.
+fn create_cornell_lights(cam_pos: Vec3) -> Vec<Light> {
+    vec![
+        // 0: Camera headlight — very dim, updated per-frame
+        Light::point([cam_pos.x, cam_pos.y, cam_pos.z], [1.0, 0.98, 0.95], 0.1, 8.0, false),
+        // 1: Ceiling panel light — represents the emissive panel's illumination
+        // Positioned just below the panel surface, warm white, wide range
+        Light::point([0.0, 0.85, 0.0], [1.0, 0.98, 0.92], 5.0, 5.0, false),
+    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -143,6 +313,8 @@ struct GpuState {
     light_buffer: LightBuffer,
     tile_cull: TileCullPass,
     radiance_volume: RadianceVolume,
+    radiance_inject: RadianceInjectPass,
+    radiance_mip: RadianceMipPass,
     color_pool: GpuColorPool,
     ray_march: RayMarchPass,
     shading: ShadingPass,
@@ -170,8 +342,8 @@ impl GpuState {
         let surface_format =
             context.configure_surface(&surface, display_width, display_height);
 
-        // Scene
-        let (pool, grid, aabb) = create_phase6_scene();
+        // Scene — Cornell box for GI validation
+        let (pool, grid, aabb) = create_cornell_box();
 
         // Update shared state with pool info
         {
@@ -180,9 +352,9 @@ impl GpuState {
             state.pool_allocated = pool.allocated_count() as u64;
         }
 
-        // Camera
-        let mut camera = Camera::new(Vec3::new(0.0, 0.5, 3.5));
-        camera.fov_degrees = 60.0;
+        // Camera — inside Cornell box looking at back wall
+        let mut camera = Camera::new(Vec3::new(0.0, 0.0, 0.8));
+        camera.fov_degrees = 75.0;
 
         let camera_uniforms = camera.uniforms(INTERNAL_WIDTH, INTERNAL_HEIGHT, 0, [[0.0; 4]; 4]);
         let camera_bytes = bytemuck::bytes_of(&camera_uniforms);
@@ -195,31 +367,25 @@ impl GpuState {
                 aabb.min.x,
                 aabb.min.y,
                 aabb.min.z,
-                RESOLUTION_TIERS[1].brick_extent,
+                RESOLUTION_TIERS[TEST_TIER].brick_extent,
             ],
-            params: [RESOLUTION_TIERS[1].voxel_size, 0.0, 0.0, 0.0],
+            params: [RESOLUTION_TIERS[TEST_TIER].voxel_size, 0.0, 0.0, 0.0],
         };
 
         // Upload scene to GPU
         let scene = GpuScene::upload(&context.device, &pool, &grid, camera_bytes, &scene_uniforms);
 
-        // Materials
-        let materials = material_table::create_test_materials();
+        // Materials — boost ceiling light emission for GI validation
+        let mut materials = material_table::create_test_materials();
+        materials[9].emission_strength = 8.0;
         let material_table = MaterialTable::upload(&context.device, &materials);
 
         // G-buffer
         let gbuffer = GBuffer::new(&context.device, INTERNAL_WIDTH, INTERNAL_HEIGHT);
 
-        // Lighting: key + fill + camera headlight
-        let cam_p = camera.position;
-        let lights = vec![
-            // 0: Camera headlight — point light above camera (like headlamp), updated per-frame
-            Light::point([cam_p.x, cam_p.y + 0.3, cam_p.z], [1.0, 0.98, 0.95], 1.0, 25.0, true),
-            // 1: Key light — warm directional from upper-right-front
-            Light::directional([0.4, 0.8, 0.3], [1.0, 0.95, 0.85], 0.8, true),
-            // 2: Fill light — cool directional from opposite side (no shadow)
-            Light::directional([-0.5, 0.3, 0.7], [0.4, 0.45, 0.55], 0.25, false),
-        ];
+        // Cornell box lights — minimal direct lighting, GI does the rest
+        let lights = create_cornell_lights(camera.position);
+        log::info!("Cornell box: {} lights", lights.len());
         let light_buffer = LightBuffer::upload(&context.device, &lights);
 
         // Tile cull
@@ -231,8 +397,18 @@ impl GpuState {
             INTERNAL_HEIGHT,
         );
 
-        // Dummy/minimal resources needed by ShadingPass constructor
+        // Radiance volume + GI passes
         let radiance_volume = RadianceVolume::new(&context.device);
+        let radiance_inject = RadianceInjectPass::new(
+            &context.device, &scene, &material_table, &light_buffer, &radiance_volume,
+        );
+        let radiance_mip = RadianceMipPass::new(&context.device, &radiance_volume);
+
+        // Initialize inject uniforms with light count
+        radiance_inject.update_inject_uniforms(
+            &context.queue, lights.len() as u32, 2,
+        );
+
         let color_pool = GpuColorPool::empty(&context.device);
         let clipmap = ClipmapGpuData::empty(&context.device);
 
@@ -279,6 +455,8 @@ impl GpuState {
             light_buffer,
             tile_cull,
             radiance_volume,
+            radiance_inject,
+            radiance_mip,
             color_pool,
             ray_march,
             shading,
@@ -334,14 +512,13 @@ impl GpuState {
         self.shading
             .update_camera_pos(&self.context.queue, [cam_pos.x, cam_pos.y, cam_pos.z]);
 
-        // Update headlight (light index 0) — point light slightly above camera (like a headlamp)
-        // Offset upward so shadows are visible below objects instead of hidden behind them.
+        // Update headlight (light index 0) — dim point light at camera position
         self.lights[0] = Light::point(
-            [cam_pos.x, cam_pos.y + 0.3, cam_pos.z],
+            [cam_pos.x, cam_pos.y, cam_pos.z],
             [1.0, 0.98, 0.95],
-            1.0,
-            25.0,
-            true,
+            0.3,
+            10.0,
+            false,
         );
         self.light_buffer.update(&self.context.queue, &self.lights);
 
@@ -381,10 +558,30 @@ impl GpuState {
                 label: Some("frame encoder"),
             });
 
-        // Phase 6 pipeline: ray march -> tile cull -> shade -> tone map -> blit
+        // Update GI inject uniforms
+        self.radiance_inject.update_inject_uniforms(
+            &self.context.queue,
+            self.lights.len() as u32,
+            2,
+        );
+
+        // Update radiance volume center to camera position
+        self.radiance_volume.update_center(
+            &self.context.queue,
+            [cam_pos.x, cam_pos.y, cam_pos.z],
+        );
+
+        // Phase 8 pipeline: ray march -> tile cull -> GI inject -> GI mip -> shade -> tone map -> blit
         self.ray_march
             .dispatch(&mut encoder, &self.scene, &self.gbuffer, &self.clipmap);
         self.tile_cull.dispatch(&mut encoder, &self.gbuffer);
+
+        // GI: inject direct lighting into radiance volume L0
+        self.radiance_inject.dispatch(&mut encoder, &self.scene, &self.material_table);
+
+        // GI: generate mip levels L0 → L1 → L2 → L3
+        self.radiance_mip.dispatch(&mut encoder);
+
         self.shading.dispatch(
             &mut encoder,
             &self.gbuffer,
@@ -497,6 +694,7 @@ impl InputState {
             KeyCode::Digit3 if pressed => return Some(3),
             KeyCode::Digit4 if pressed => return Some(4),
             KeyCode::Digit5 if pressed => return Some(5),
+            KeyCode::Digit6 if pressed => return Some(6),
             _ => {}
         }
         None
@@ -614,7 +812,7 @@ impl ApplicationHandler for App {
             return;
         }
         let attrs = WindowAttributes::default()
-            .with_title("RKIField Testbed [Phase 6]")
+            .with_title("RKIField Testbed [Phase 8]")
             .with_inner_size(PhysicalSize::new(1280u32, 720u32));
         let window = Arc::new(
             event_loop
@@ -641,7 +839,7 @@ impl ApplicationHandler for App {
         log::info!("IPC server listening on {socket_path}");
         self.socket_path = Some(socket_path);
 
-        log::info!("Phase 6 validation — materials showcase (stone, metal, wood, emissive + ground)");
+        log::info!("Phase 8 validation — Cornell box GI (color bleeding, emissive ceiling light)");
         log::info!("Click to capture mouse, WASD to move, mouse to look, Esc to exit");
     }
 
@@ -705,7 +903,7 @@ impl ApplicationHandler for App {
                         let elapsed = now.duration_since(self.last_title_update).as_secs_f64();
                         let fps = self.frame_count as f64 / elapsed;
                         window.set_title(&format!(
-                            "RKIField Testbed [Phase 6] — {fps:.0} fps ({:.2} ms)",
+                            "RKIField Testbed [Phase 8] — {fps:.0} fps ({:.2} ms)",
                             1000.0 / fps
                         ));
                         self.frame_count = 0;

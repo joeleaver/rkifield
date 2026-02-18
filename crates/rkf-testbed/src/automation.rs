@@ -255,12 +255,12 @@ impl AutomationApi for TestbedAutomationApi {
             ["debug_mode", mode_str] => {
                 let mode: u32 = mode_str.parse().map_err(|_| {
                     AutomationError::InvalidParameter(format!(
-                        "invalid debug mode: {mode_str} (expected 0-5)"
+                        "invalid debug mode: {mode_str} (expected 0-6)"
                     ))
                 })?;
-                if mode > 5 {
+                if mode > 6 {
                     return Err(AutomationError::InvalidParameter(format!(
-                        "debug mode {mode} out of range (expected 0-5)"
+                        "debug mode {mode} out of range (expected 0-6)"
                     )));
                 }
                 let mut state = self
@@ -275,12 +275,13 @@ impl AutomationApi for TestbedAutomationApi {
                     3 => "material IDs",
                     4 => "diffuse only",
                     5 => "specular only",
+                    6 => "GI only",
                     _ => "unknown",
                 };
                 Ok(format!("debug mode set to {mode} ({mode_name})"))
             }
             ["debug_mode"] => Err(AutomationError::InvalidParameter(
-                "usage: debug_mode <0-5>".to_string(),
+                "usage: debug_mode <0-6>".to_string(),
             )),
             _ => Err(AutomationError::InvalidParameter(format!(
                 "unknown command: {command}"

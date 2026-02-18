@@ -439,9 +439,10 @@ const NOISE_CHANNEL_NORMAL: u32 = 4u;    // bit 2
 // ---------- Voxel Cone Tracing GI ----------
 
 // Cone tracing parameters
-const GI_CONE_STEPS: u32 = 16u;
+const GI_CONE_STEPS: u32 = 48u;
 const GI_CONE_HALF_ANGLE: f32 = 0.5236; // ~30 degrees
 const GI_STEP_MULT: f32 = 1.0;          // Step by cone diameter
+const GI_MAX_STEP: f32 = 0.16;          // Cap step size to avoid skipping thin surfaces
 const GI_OCCLUSION_CUTOFF: f32 = 0.95;
 const GI_STRENGTH: f32 = 1.0;
 
@@ -470,24 +471,29 @@ fn sample_radiance(pos: vec3<f32>, level: i32) -> vec4<f32> {
 
 /// Trace a single GI cone through the radiance volume.
 /// Front-to-back alpha compositing, automatic mip selection from cone radius.
-fn trace_gi_cone(origin: vec3<f32>, dir: vec3<f32>, half_angle: f32) -> vec4<f32> {
+fn trace_gi_cone(origin: vec3<f32>, dir: vec3<f32>, half_angle: f32, jitter: f32) -> vec4<f32> {
     let tan_half = tan(half_angle);
     let finest_voxel = vol.voxel_sizes.x;
 
     var color = vec3<f32>(0.0);
     var alpha = 0.0;
-    // Start a few voxels out to avoid self-intersection
-    var t = finest_voxel * 3.0;
+    // Start a few voxels out to avoid self-intersection, plus per-pixel jitter to break banding
+    var t = finest_voxel * (3.0 + jitter);
 
     for (var i = 0u; i < GI_CONE_STEPS; i++) {
         let sample_pos = origin + dir * t;
         let cone_radius = t * tan_half;
 
         // Select mip level based on cone radius vs finest voxel size
-        let mip_f = log2(max(cone_radius / finest_voxel, 1.0));
-        let level = clamp(i32(mip_f), 0, 3);
+        // Interpolate between adjacent levels for smooth transitions
+        let mip_f = clamp(log2(max(cone_radius / finest_voxel, 1.0)) * 0.5, 0.0, 3.0);
+        let level_lo = i32(floor(mip_f));
+        let level_hi = min(level_lo + 1, 3);
+        let frac = mip_f - floor(mip_f);
 
-        let s = sample_radiance(sample_pos, level);
+        let s_lo = sample_radiance(sample_pos, level_lo);
+        let s_hi = sample_radiance(sample_pos, level_hi);
+        let s = mix(s_lo, s_hi, frac);
 
         // Front-to-back compositing
         let a = s.a * (1.0 - alpha);
@@ -498,8 +504,8 @@ fn trace_gi_cone(origin: vec3<f32>, dir: vec3<f32>, half_angle: f32) -> vec4<f32
             break;
         }
 
-        // Advance by cone diameter (or at least one finest voxel)
-        t += max(cone_radius * 2.0 * GI_STEP_MULT, finest_voxel);
+        // Advance by cone diameter, clamped to avoid skipping thin surfaces
+        t += clamp(cone_radius * 2.0 * GI_STEP_MULT, finest_voxel, GI_MAX_STEP);
     }
 
     return vec4<f32>(color, alpha);
@@ -516,7 +522,7 @@ fn build_tangent_frame(n: vec3<f32>) -> mat3x3<f32> {
 
 /// Compute indirect illumination via 6-cone hemisphere trace.
 /// Returns indirect radiance (RGB).
-fn compute_indirect(pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+fn compute_indirect(pos: vec3<f32>, normal: vec3<f32>, jitter: f32) -> vec3<f32> {
     let frame = build_tangent_frame(normal);
 
     // 6 cosine-weighted cones: 1 centre + 5 side cones
@@ -534,7 +540,7 @@ fn compute_indirect(pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
     var result = vec3<f32>(0.0);
 
     // Centre cone (along normal)
-    let c0 = trace_gi_cone(pos, normal, GI_CONE_HALF_ANGLE);
+    let c0 = trace_gi_cone(pos, normal, GI_CONE_HALF_ANGLE, jitter);
     result += c0.rgb * center_weight;
 
     // 5 side cones
@@ -542,7 +548,7 @@ fn compute_indirect(pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
         let angle = f32(i) * 1.2566371; // 2π/5 = 72° in radians
         let local_dir = vec3<f32>(sin_a * cos(angle), sin_a * sin(angle), cos_a);
         let world_dir = frame * local_dir;
-        let c = trace_gi_cone(pos, world_dir, GI_CONE_HALF_ANGLE);
+        let c = trace_gi_cone(pos, world_dir, GI_CONE_HALF_ANGLE, jitter);
         result += c.rgb * side_weight;
     }
 
@@ -553,11 +559,11 @@ fn compute_indirect(pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
 /// For metallic/glossy surfaces, traces a narrow cone whose half-angle depends on roughness.
 /// Weighted by Fresnel reflectance at the given viewing angle.
 fn compute_specular_indirect(pos: vec3<f32>, normal: vec3<f32>, view_dir: vec3<f32>,
-                              roughness: f32, f0: vec3<f32>) -> vec3<f32> {
+                              roughness: f32, f0: vec3<f32>, jitter: f32) -> vec3<f32> {
     let reflect_dir = reflect(-view_dir, normal);
     // Map roughness to cone half-angle: 0 roughness = very narrow, 1.0 = ~45 degrees
     let half_angle = max(roughness * PI * 0.25, 0.05);
-    let result = trace_gi_cone(pos, reflect_dir, half_angle);
+    let result = trace_gi_cone(pos, reflect_dir, half_angle, jitter);
     let n_dot_v = max(dot(normal, view_dir), 0.001);
     let fresnel = fresnel_schlick(n_dot_v, f0);
     return fresnel * result.rgb;
@@ -875,12 +881,14 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
     let ao = sdf_ao(world_pos + normal * SHADOW_BIAS, normal);
 
     // Voxel cone tracing indirect illumination
+    // Per-pixel jitter breaks up banding from discrete cone steps
+    let gi_jitter = fract(sin(dot(vec2<f32>(pixel.xy), vec2<f32>(12.9898, 78.233))) * 43758.5453);
     let gi_origin = world_pos + normal * SHADOW_BIAS;
-    let indirect = compute_indirect(gi_origin, normal);
+    let indirect = compute_indirect(gi_origin, normal, gi_jitter);
     let gi_diffuse = indirect * albedo * (1.0 - metallic);
 
     // Specular GI: trace a single cone in the reflection direction for metallic/glossy surfaces.
-    let specular_gi = compute_specular_indirect(gi_origin, normal, view_dir, roughness, f0);
+    let specular_gi = compute_specular_indirect(gi_origin, normal, view_dir, roughness, f0, gi_jitter);
 
     // Ambient approximation — split into diffuse and specular components.
     // Metals get Fresnel-weighted sky reflection instead of flat ambient.
@@ -926,6 +934,10 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
         case 5u: {
             // Specular only (direct + indirect specular + ambient specular)
             color = total_specular + specular_gi * ao + ambient_specular;
+        }
+        case 6u: {
+            // GI only: indirect diffuse + specular, no direct lighting, no ambient
+            color = gi_diffuse * ao + specular_gi * ao;
         }
         default: {
             // Normal shading (already computed)
