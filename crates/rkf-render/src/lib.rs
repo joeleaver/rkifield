@@ -48,6 +48,8 @@ pub mod history;
 pub mod upscale;
 /// Edge-aware sharpening compute pass.
 pub mod sharpen;
+/// Post-processing stack architecture.
+pub mod post_process;
 /// DLSS integration layer (stub — falls back to custom upscaler).
 pub mod dlss;
 
@@ -68,4 +70,5 @@ pub use radiance_mip::RadianceMipPass;
 pub use history::{HistoryBuffers, HistoryUniforms, HISTORY_COLOR_FORMAT, HISTORY_METADATA_FORMAT};
 pub use upscale::{QualityMode, ResolutionConfig, UpscaleBackend, UpscalePass, UpscaleUniforms};
 pub use sharpen::{SharpenPass, SharpenUniforms, DEFAULT_SHARPEN_STRENGTH};
+pub use post_process::{PostProcessPassId, PostProcessConfig, PostProcessContext, PingPongBuffers, PP_FORMAT};
 pub use dlss::{DlssContext, DlssQuality};
