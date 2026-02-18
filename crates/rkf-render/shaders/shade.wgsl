@@ -112,6 +112,10 @@ const SHADOW_K: f32 = 16.0; // Penumbra softness (higher = sharper)
 const SHADOW_MAX_DIST: f32 = 50.0;
 const SHADOW_BIAS: f32 = 0.02; // Normal-direction bias to avoid self-shadowing
 
+// Ambient occlusion parameters
+const AO_STEP_SIZE: f32 = 0.03; // Distance between AO samples along normal
+const AO_STRENGTH: f32 = 1.5;   // AO intensity multiplier
+
 // ---------- SDF Sampling (duplicated from ray_march.wgsl) ----------
 
 fn extract_distance(word0: u32) -> f32 {
@@ -200,6 +204,24 @@ fn soft_shadow(origin: vec3<f32>, light_dir: vec3<f32>, max_dist: f32, k: f32) -
         }
     }
     return clamp(shadow, 0.0, 1.0);
+}
+
+// ---------- SDF Ambient Occlusion ----------
+
+/// SDF-based ambient occlusion — 6 samples along the surface normal.
+/// Compares expected vs actual SDF distance at each sample point.
+/// Exponentially decaying weights emphasize near-field occlusion.
+/// Returns AO factor in [0, 1] where 1 = no occlusion, 0 = fully occluded.
+fn sdf_ao(pos: vec3<f32>, normal: vec3<f32>) -> f32 {
+    var ao = 0.0;
+    var scale = 1.0;
+    for (var i = 1u; i <= 6u; i++) {
+        let dist = AO_STEP_SIZE * f32(i);
+        let d = sample_sdf(pos + normal * dist);
+        ao += scale * (dist - d);
+        scale *= 0.5;
+    }
+    return clamp(1.0 - AO_STRENGTH * ao, 0.0, 1.0);
 }
 
 // ---------- PBR Functions ----------
@@ -307,8 +329,11 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
     let radiance = SUN_COLOR * SUN_INTENSITY;
     let direct = (diffuse + specular) * radiance * n_dot_l * shadow;
 
-    // Ambient approximation (hemisphere) — not affected by shadow
-    let ambient = AMBIENT_COLOR * albedo;
+    // SDF ambient occlusion
+    let ao = sdf_ao(world_pos + normal * SHADOW_BIAS, normal);
+
+    // Ambient approximation (hemisphere) — modulated by AO
+    let ambient = AMBIENT_COLOR * albedo * ao;
 
     // Final color = direct + ambient + emission
     var color = direct + ambient + emission;
