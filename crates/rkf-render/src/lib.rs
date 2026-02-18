@@ -76,6 +76,8 @@ pub mod fog;
 pub mod fog_volume;
 /// Volumetric temporal reprojection compute pass.
 pub mod vol_temporal;
+/// Bilateral upscale for volumetric scattering buffer.
+pub mod vol_upscale;
 
 pub use camera::{Camera, CameraUniforms};
 pub use context::RenderContext;
@@ -108,3 +110,4 @@ pub use cosmetics::{CosmeticsPass, CosmeticsParams, DEFAULT_VIGNETTE_INTENSITY, 
 pub use dlss::{DlssContext, DlssQuality};
 pub use fog_volume::{GpuFogVolume, FogVolumeHeader, FogVolumeBuffer, MAX_FOG_VOLUMES};
 pub use vol_temporal::{VolTemporalPass, VolTemporalParams, DEFAULT_VOL_TEMPORAL_BLEND, DEFAULT_VOL_DEPTH_THRESHOLD};
+pub use vol_upscale::{VolUpscalePass, VolUpscaleParams, DEFAULT_DEPTH_SIGMA, VOL_UPSCALE_FORMAT};
