@@ -17,6 +17,9 @@
 pub mod context;
 /// Camera system for ray generation.
 pub mod camera;
+/// GPU buffer upload for scene data.
+pub mod gpu_scene;
 
 pub use camera::{Camera, CameraUniforms};
 pub use context::RenderContext;
+pub use gpu_scene::{GpuScene, SceneUniforms};
