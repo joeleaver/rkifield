@@ -297,9 +297,12 @@ impl GpuState {
     }
 
     fn update_camera(&mut self) {
-        let uniforms =
+        let mut uniforms =
             self.camera
                 .uniforms(INTERNAL_WIDTH, INTERNAL_HEIGHT, self.frame_index, [[0.0; 4]; 4]);
+        // Disable sub-pixel jitter until temporal accumulation is active (Phase 9).
+        // Without a resolve pass, jitter causes visible per-frame wobble.
+        uniforms.jitter = [0.0, 0.0];
         self.context.queue.write_buffer(
             &self.scene.camera_buffer,
             0,
