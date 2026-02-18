@@ -8,22 +8,23 @@ use rkf_core::brick_pool::BrickPool;
 use rkf_core::sparse_grid::SparseGrid;
 use wgpu::util::DeviceExt;
 
-/// Scene-level uniforms describing the spatial grid layout.
+/// Scene-level uniforms describing the spatial grid layout (48 bytes, vec4-packed).
+///
+/// Uses `[u32; 4]` / `[f32; 4]` to match WGSL `vec4` alignment and avoid
+/// `vec3` padding issues.
+///
+/// - `grid_dims`: `[x, y, z, 0]`
+/// - `grid_origin`: `[x, y, z, brick_extent]`
+/// - `params`: `[voxel_size, 0, 0, 0]`
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Pod, Zeroable)]
 pub struct SceneUniforms {
-    /// Grid dimensions in cells per axis (xyz) + padding.
-    pub grid_dims: [u32; 3],
-    /// Padding to 16-byte alignment.
-    pub _pad0: u32,
-    /// World-space position of the grid minimum corner (xyz).
-    pub grid_origin: [f32; 3],
-    /// World-space extent of one brick.
-    pub brick_extent: f32,
-    /// World-space size of one voxel.
-    pub voxel_size: f32,
-    /// Padding to 16-byte alignment.
-    pub _pad1: [f32; 3],
+    /// Grid dimensions in cells per axis. `[x, y, z, unused]`.
+    pub grid_dims: [u32; 4],
+    /// Grid world-space origin + brick extent. `[ox, oy, oz, brick_extent]`.
+    pub grid_origin: [f32; 4],
+    /// `[voxel_size, 0, 0, 0]`.
+    pub params: [f32; 4],
 }
 
 /// GPU-resident scene data: brick pool + sparse grid + scene uniforms.
@@ -215,17 +216,15 @@ mod tests {
     #[test]
     fn scene_uniforms_pod_roundtrip() {
         let u = SceneUniforms {
-            grid_dims: [10, 10, 10],
-            _pad0: 0,
-            grid_origin: [-0.8, -0.8, -0.8],
-            brick_extent: 0.16,
-            voxel_size: 0.02,
-            _pad1: [0.0; 3],
+            grid_dims: [10, 10, 10, 0],
+            grid_origin: [-0.8, -0.8, -0.8, 0.16],
+            params: [0.02, 0.0, 0.0, 0.0],
         };
         let bytes = bytemuck::bytes_of(&u);
         assert_eq!(bytes.len(), 48);
         let u2: &SceneUniforms = bytemuck::from_bytes(bytes);
         assert_eq!(u.grid_dims, u2.grid_dims);
         assert_eq!(u.grid_origin, u2.grid_origin);
+        assert_eq!(u.params, u2.params);
     }
 }

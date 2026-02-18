@@ -21,12 +21,9 @@ struct CameraUniforms {
 }
 
 struct SceneUniforms {
-    grid_dims:    vec3<u32>,
-    _pad0:        u32,
-    grid_origin:  vec3<f32>,
-    brick_extent: f32,
-    voxel_size:   f32,
-    _pad1:        vec3<f32>,
+    grid_dims:    vec4<u32>,   // xyz = dimensions, w = unused
+    grid_origin:  vec4<f32>,   // xyz = origin, w = brick_extent
+    params:       vec4<f32>,   // x = voxel_size, yzw = unused
 }
 
 // ---------- Bindings ----------
@@ -61,16 +58,22 @@ fn extract_distance(word0: u32) -> f32 {
     return unpack2x16float(word0).x;
 }
 
+// Accessor helpers for packed SceneUniforms.
+fn grid_dims() -> vec3<u32>  { return scene.grid_dims.xyz; }
+fn grid_origin() -> vec3<f32> { return scene.grid_origin.xyz; }
+fn brick_extent() -> f32     { return scene.grid_origin.w; }
+fn voxel_size() -> f32       { return scene.params.x; }
+
 /// Convert a world-space position to grid cell coordinates.
 /// Returns vec3<i32> — caller must bounds-check.
 fn world_to_cell(pos: vec3<f32>) -> vec3<i32> {
-    let local = pos - scene.grid_origin;
-    return vec3<i32>(floor(local / scene.brick_extent));
+    let local = pos - grid_origin();
+    return vec3<i32>(floor(local / brick_extent()));
 }
 
 /// Check if cell coordinates are within grid bounds.
 fn cell_in_bounds(cell: vec3<i32>) -> bool {
-    return all(cell >= vec3<i32>(0)) && all(vec3<u32>(cell) < scene.grid_dims);
+    return all(cell >= vec3<i32>(0)) && all(vec3<u32>(cell) < grid_dims());
 }
 
 /// Get the cell state (2-bit) for a flat cell index.
@@ -82,7 +85,8 @@ fn get_cell_state(flat: u32) -> u32 {
 
 /// Flat index from cell coordinates.
 fn cell_flat_index(cell: vec3<u32>) -> u32 {
-    return cell.x + cell.y * scene.grid_dims.x + cell.z * scene.grid_dims.x * scene.grid_dims.y;
+    let d = grid_dims();
+    return cell.x + cell.y * d.x + cell.z * d.x * d.y;
 }
 
 /// Sample the SDF at a world-space position using the sparse grid + brick pool.
@@ -90,9 +94,11 @@ fn cell_flat_index(cell: vec3<u32>) -> u32 {
 fn sample_sdf(pos: vec3<f32>) -> f32 {
     let cell_i = world_to_cell(pos);
 
+    let be = brick_extent();
+
     // Outside grid bounds — return large distance
     if !cell_in_bounds(cell_i) {
-        return scene.brick_extent;
+        return be;
     }
 
     let cell = vec3<u32>(cell_i);
@@ -100,24 +106,22 @@ fn sample_sdf(pos: vec3<f32>) -> f32 {
     let state = get_cell_state(flat);
 
     if state == CELL_EMPTY {
-        // Empty — step by at least half a brick extent
-        return scene.brick_extent * 0.5;
+        return be * 0.5;
     }
 
     if state == CELL_INTERIOR {
-        // Inside solid — negative distance, skip through
-        return -scene.brick_extent * 0.5;
+        return -be * 0.5;
     }
 
     if state == CELL_SURFACE {
         let slot = slots[flat];
         if slot == EMPTY_SLOT {
-            return scene.brick_extent * 0.5;
+            return be * 0.5;
         }
 
         // Convert to voxel coordinates within this brick
-        let brick_min = scene.grid_origin + vec3<f32>(cell) * scene.brick_extent;
-        let brick_local = (pos - brick_min) / scene.voxel_size;
+        let brick_min = grid_origin() + vec3<f32>(cell) * be;
+        let brick_local = (pos - brick_min) / voxel_size();
         let voxel = clamp(vec3<u32>(floor(brick_local)), vec3<u32>(0u), vec3<u32>(7u));
 
         // Read the voxel sample from the brick pool
@@ -129,7 +133,7 @@ fn sample_sdf(pos: vec3<f32>) -> f32 {
     }
 
     // Volumetric or unknown — skip
-    return scene.brick_extent * 0.5;
+    return be * 0.5;
 }
 
 /// March a ray through the scene, returning distance to hit or -1.0 on miss.
@@ -157,7 +161,7 @@ fn ray_march(origin: vec3<f32>, direction: vec3<f32>) -> f32 {
 
 /// Compute a cheap normal via central differences.
 fn compute_normal(pos: vec3<f32>) -> vec3<f32> {
-    let e = scene.voxel_size * 0.5;
+    let e = voxel_size() * 0.5;
     let nx = sample_sdf(pos + vec3<f32>(e, 0.0, 0.0)) - sample_sdf(pos - vec3<f32>(e, 0.0, 0.0));
     let ny = sample_sdf(pos + vec3<f32>(0.0, e, 0.0)) - sample_sdf(pos - vec3<f32>(0.0, e, 0.0));
     let nz = sample_sdf(pos + vec3<f32>(0.0, 0.0, e)) - sample_sdf(pos - vec3<f32>(0.0, 0.0, e));
