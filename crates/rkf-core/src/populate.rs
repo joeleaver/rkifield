@@ -75,16 +75,32 @@ where
                 let center_dist = sdf_fn(brick_center);
 
                 if center_dist.abs() <= narrow_band_dist {
-                    // Skip cells already populated by a previous object to avoid
-                    // overwriting valid surface data (e.g., ground plane under a sphere).
-                    if grid.cell_state(cx, cy, cz) == CellState::Surface {
-                        continue;
-                    }
+                    // If this cell already has a brick, merge via SDF union
+                    // (min distance wins, keeping the closer surface's material).
+                    let existing_slot = if grid.cell_state(cx, cy, cz) == CellState::Surface {
+                        grid.brick_slot(cx, cy, cz)
+                    } else {
+                        None
+                    };
 
-                    // Allocate a brick from the pool
-                    let slot = pool.allocate().ok_or(PopulateError::PoolExhausted {
-                        allocated_so_far: allocated,
-                    })?;
+                    let slot = if let Some(s) = existing_slot {
+                        s
+                    } else {
+                        let s = pool.allocate().ok_or(PopulateError::PoolExhausted {
+                            allocated_so_far: allocated,
+                        })?;
+                        // Initialize new brick to default (infinite distance)
+                        let brick = pool.get_mut(s);
+                        for vz in 0..BRICK_DIM {
+                            for vy in 0..BRICK_DIM {
+                                for vx in 0..BRICK_DIM {
+                                    brick.set(vx, vy, vz, VoxelSample::default());
+                                }
+                            }
+                        }
+                        allocated += 1;
+                        s
+                    };
 
                     let brick = pool.get_mut(slot);
                     for vz in 0..BRICK_DIM {
@@ -96,15 +112,19 @@ where
                                         (vy as f32 + 0.5) * voxel_size,
                                         (vz as f32 + 0.5) * voxel_size,
                                     );
-                                let dist = sdf_fn(voxel_pos);
-                                brick.set(vx, vy, vz, VoxelSample::new(dist, material_id, 0, 0, 0));
+                                let new_dist = sdf_fn(voxel_pos);
+                                let existing = brick.sample(vx, vy, vz);
+                                let old_dist = existing.distance_f32();
+                                // SDF union: closer surface wins (including its material)
+                                if new_dist < old_dist {
+                                    brick.set(vx, vy, vz, VoxelSample::new(new_dist, material_id, 0, 0, 0));
+                                }
                             }
                         }
                     }
 
                     grid.set_cell_state(cx, cy, cz, CellState::Surface);
                     grid.set_brick_slot(cx, cy, cz, slot);
-                    allocated += 1;
                 } else if center_dist < 0.0
                     && grid.cell_state(cx, cy, cz) != CellState::Surface
                 {
