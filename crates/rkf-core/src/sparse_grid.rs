@@ -130,6 +130,26 @@ impl SparseGrid {
         &self.slots
     }
 
+    /// Reconstruct a sparse grid from raw parts (for deserialization).
+    ///
+    /// # Errors
+    ///
+    /// Returns `None` if the occupancy or slot data lengths don't match the dimensions.
+    pub fn from_raw_parts(dimensions: UVec3, occupancy: Vec<u32>, slots: Vec<u32>) -> Option<Self> {
+        let total_cells = (dimensions.x as usize)
+            * (dimensions.y as usize)
+            * (dimensions.z as usize);
+        let expected_occ_words = total_cells.div_ceil(16);
+        if occupancy.len() != expected_occ_words || slots.len() != total_cells {
+            return None;
+        }
+        Some(Self {
+            dimensions,
+            occupancy,
+            slots,
+        })
+    }
+
     /// Count cells with the given state.
     pub fn count_cells(&self, state: CellState) -> u32 {
         let total = self.total_cells() as usize;

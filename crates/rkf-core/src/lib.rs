@@ -16,6 +16,8 @@ pub mod aabb;
 pub mod automation;
 /// 8×8×8 voxel brick — the fundamental unit of SDF storage.
 pub mod brick;
+/// Chunk data structure and `.rkf` binary format for streaming.
+pub mod chunk;
 /// Clipmap LOD system — multi-level sparse grids for camera-relative detail.
 pub mod clipmap;
 /// CPU-side brick pool with free-list allocation.
@@ -39,6 +41,7 @@ pub mod voxel;
 pub mod world_position;
 
 pub use aabb::{Aabb, WorldAabb};
+pub use chunk::{Chunk, ChunkIoError, RkfHeader, RkfTierHeader, TierGrid, load_chunk, load_chunk_file, save_chunk, save_chunk_file};
 pub use clipmap::{ClipmapConfig, ClipmapGridSet, ClipmapLevel, MAX_CLIPMAP_LEVELS, DEFAULT_CLIPMAP_LEVELS};
 pub use brick::Brick;
 pub use brick_pool::{BonePool, BrickPool, ColorPool, Pool, VolumetricPool};
