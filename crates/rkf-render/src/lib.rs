@@ -73,7 +73,7 @@ pub use ray_march::RayMarchPass;
 pub use light::{Light, LightBuffer, MAX_LIGHTS, MAX_LIGHTS_PER_TILE, TILE_SIZE};
 pub use shading::{ShadeUniforms, ShadingPass};
 pub use tile_cull::{CullUniforms, TileCullPass};
-pub use tone_map::ToneMapPass;
+pub use tone_map::{ToneMapPass, ToneMapMode, ToneMapParams, DEFAULT_EXPOSURE, LDR_FORMAT};
 pub use radiance_volume::{RadianceVolume, RadianceVolumeUniforms, RADIANCE_DIM, RADIANCE_LEVELS};
 pub use radiance_inject::{InjectUniforms, RadianceInjectPass};
 pub use radiance_mip::RadianceMipPass;

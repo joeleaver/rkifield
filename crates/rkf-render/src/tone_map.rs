@@ -1,11 +1,40 @@
 //! Tone mapping compute pass — HDR to LDR conversion.
 //!
-//! Reads the HDR `Rgba16Float` output from the shading pass, applies ACES
-//! tone mapping and sRGB gamma correction, and writes to an `Rgba8Unorm`
-//! texture ready for display via the blit pass.
+//! Reads the HDR `Rgba16Float` output from the shading pass, applies exposure,
+//! tone mapping (ACES or AgX), and sRGB gamma correction, and writes to an
+//! `Rgba8Unorm` texture ready for display via the blit pass.
+
+use bytemuck::{Pod, Zeroable};
+use wgpu::util::DeviceExt;
 
 /// LDR output format.
 pub const LDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+
+/// Tone mapping curve selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToneMapMode {
+    /// ACES filmic (Narkowicz approximation). Good default, slightly warm.
+    Aces = 0,
+    /// AgX (Troy Sobotka). Better highlight/shadow preservation.
+    AgX = 1,
+}
+
+/// GPU-uploadable tone map parameters (16 bytes).
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Pod, Zeroable)]
+pub struct ToneMapParams {
+    /// Tone mapping mode (0 = ACES, 1 = AgX).
+    pub mode: u32,
+    /// Exposure multiplier (typically 2^EV from auto-exposure).
+    pub exposure: f32,
+    #[doc(hidden)]
+    pub _pad0: u32,
+    #[doc(hidden)]
+    pub _pad1: u32,
+}
+
+/// Default exposure multiplier (1.0 = no exposure adjustment).
+pub const DEFAULT_EXPOSURE: f32 = 1.0;
 
 /// Tone mapping compute pass.
 #[allow(dead_code)]
@@ -24,6 +53,12 @@ pub struct ToneMapPass {
     ldr_output_bind_group_layout: wgpu::BindGroupLayout,
     /// Bind group for LDR output.
     ldr_output_bind_group: wgpu::BindGroup,
+    /// Tone map params buffer.
+    params_buffer: wgpu::Buffer,
+    /// Bind group layout for params (group 2).
+    params_bind_group_layout: wgpu::BindGroupLayout,
+    /// Bind group for params.
+    params_bind_group: wgpu::BindGroup,
     /// Internal resolution width.
     pub width: u32,
     /// Internal resolution height.
@@ -114,10 +149,51 @@ impl ToneMapPass {
             }],
         });
 
+        // Group 2: Tone map params (mode + exposure)
+        let tone_params = ToneMapParams {
+            mode: ToneMapMode::Aces as u32,
+            exposure: DEFAULT_EXPOSURE,
+            _pad0: 0,
+            _pad1: 0,
+        };
+        let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("tone map params"),
+            contents: bytemuck::bytes_of(&tone_params),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let params_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("tone map params layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+
+        let params_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("tone map params bind group"),
+            layout: &params_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: params_buffer.as_entire_binding(),
+            }],
+        });
+
         // Pipeline layout
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("tone map pipeline layout"),
-            bind_group_layouts: &[&hdr_input_bind_group_layout, &ldr_output_bind_group_layout],
+            bind_group_layouts: &[
+                &hdr_input_bind_group_layout,
+                &ldr_output_bind_group_layout,
+                &params_bind_group_layout,
+            ],
             push_constant_ranges: &[],
         });
 
@@ -138,6 +214,9 @@ impl ToneMapPass {
             hdr_input_bind_group,
             ldr_output_bind_group_layout,
             ldr_output_bind_group,
+            params_buffer,
+            params_bind_group_layout,
+            params_bind_group,
             width,
             height,
         }
@@ -152,6 +231,7 @@ impl ToneMapPass {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.hdr_input_bind_group, &[]);
         pass.set_bind_group(1, &self.ldr_output_bind_group, &[]);
+        pass.set_bind_group(2, &self.params_bind_group, &[]);
 
         let wg_x = self.width.div_ceil(8);
         let wg_y = self.height.div_ceil(8);
@@ -161,5 +241,52 @@ impl ToneMapPass {
     /// The LDR output texture (for screenshot staging copy).
     pub fn ldr_texture(&self) -> &wgpu::Texture {
         &self.ldr_texture
+    }
+
+    /// Set the tone mapping mode (ACES or AgX).
+    pub fn set_mode(&self, queue: &wgpu::Queue, mode: ToneMapMode) {
+        let mode_val = mode as u32;
+        queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&mode_val));
+    }
+
+    /// Set the exposure multiplier.
+    pub fn set_exposure(&self, queue: &wgpu::Queue, exposure: f32) {
+        queue.write_buffer(&self.params_buffer, 4, bytemuck::bytes_of(&exposure));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tone_map_params_size_is_16() {
+        assert_eq!(std::mem::size_of::<ToneMapParams>(), 16);
+    }
+
+    #[test]
+    fn tone_map_params_pod_roundtrip() {
+        let p = ToneMapParams {
+            mode: 1,
+            exposure: 2.5,
+            _pad0: 0,
+            _pad1: 0,
+        };
+        let bytes = bytemuck::bytes_of(&p);
+        assert_eq!(bytes.len(), 16);
+        let p2: &ToneMapParams = bytemuck::from_bytes(bytes);
+        assert_eq!(p.mode, p2.mode);
+        assert_eq!(p.exposure, p2.exposure);
+    }
+
+    #[test]
+    fn tone_map_mode_values() {
+        assert_eq!(ToneMapMode::Aces as u32, 0);
+        assert_eq!(ToneMapMode::AgX as u32, 1);
+    }
+
+    #[test]
+    fn default_exposure() {
+        assert_eq!(DEFAULT_EXPOSURE, 1.0);
     }
 }
