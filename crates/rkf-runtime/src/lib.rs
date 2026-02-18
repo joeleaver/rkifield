@@ -12,3 +12,14 @@
 //! - Window and input handling integration
 
 #![warn(missing_docs)]
+
+/// ECS component types for the scene graph.
+pub mod components;
+/// Scene management via hecs ECS.
+pub mod scene;
+
+pub use components::{
+    AnimatedCharacter, CameraComponent, ChunkRef, EditorMetadata, FogVolumeComponent, Parent,
+    SdfObject, Transform, WorldTransform,
+};
+pub use scene::Scene;
