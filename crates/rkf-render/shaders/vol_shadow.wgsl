@@ -37,7 +37,7 @@ struct VolShadowParams {
 // ---------- Bindings ----------
 
 @group(0) @binding(0) var<uniform> params: VolShadowParams;
-@group(0) @binding(1) var shadow_map: texture_storage_3d<r16float, write>;
+@group(0) @binding(1) var shadow_map: texture_storage_3d<r32float, write>;
 
 // ---------- Density sampling ----------
 
@@ -50,7 +50,7 @@ struct VolShadowParams {
 fn sample_density(pos: vec3<f32>) -> f32 {
     // Placeholder: no density (fully transparent atmosphere).
     // Remove this when real SDF brick pool sampling is wired in.
-    let _ = pos;
+    _ = pos;
     return 0.0;
 }
 
@@ -90,7 +90,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 
     // Write transmittance to shadow map (r channel only).
-    // textureStore expects vec4<f32> even for r16float.
+    // textureStore expects vec4<f32> even for r32float.
     let texel = vec3<i32>(id);
     textureStore(shadow_map, texel, vec4<f32>(transmittance, 0.0, 0.0, 0.0));
 }

@@ -1,6 +1,6 @@
 //! Volumetric shadow map compute pass — Phase 11 task 11.1.
 //!
-//! Generates a 3D texture (256×128×256, R16Float) where each texel stores
+//! Generates a 3D texture (256×128×256, R32Float) where each texel stores
 //! the transmittance from that world position to the sun. The volume is
 //! camera-centered and updated once per frame.
 //!
@@ -23,7 +23,7 @@ pub const VOL_SHADOW_DIM_Y: u32 = 128;
 pub const VOL_SHADOW_DIM_Z: u32 = 256;
 
 /// Texture format for the shadow map (single-channel half-float).
-pub const VOL_SHADOW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
+pub const VOL_SHADOW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
 
 /// Default world-space horizontal extent of the shadow volume (metres).
 /// The volume spans ±RANGE/2 around the camera in X and Z.
@@ -111,7 +111,7 @@ pub struct VolShadowPass {
     bind_group_layout: wgpu::BindGroupLayout,
     bind_group: wgpu::BindGroup,
     params_buffer: wgpu::Buffer,
-    /// The 3D shadow map texture (R16Float, STORAGE_BINDING | TEXTURE_BINDING).
+    /// The 3D shadow map texture (R32Float, STORAGE_BINDING | TEXTURE_BINDING).
     pub shadow_texture: wgpu::Texture,
     /// View over the full 3D shadow map texture.
     pub shadow_view: wgpu::TextureView,
@@ -406,7 +406,7 @@ mod tests {
 
     #[test]
     fn vol_shadow_format_is_r16float() {
-        assert_eq!(VOL_SHADOW_FORMAT, wgpu::TextureFormat::R16Float);
+        assert_eq!(VOL_SHADOW_FORMAT, wgpu::TextureFormat::R32Float);
     }
 
     #[test]

@@ -20,7 +20,7 @@ struct DofParams {
 // ---------------------------------------------------------------------------
 
 @group(0) @binding(0) var position_tex: texture_2d<f32>;
-@group(0) @binding(1) var coc_tex: texture_storage_2d<r16float, write>;
+@group(0) @binding(1) var coc_tex: texture_storage_2d<r32float, write>;
 @group(0) @binding(2) var<uniform> params: DofParams;
 
 @compute @workgroup_size(8, 8, 1)

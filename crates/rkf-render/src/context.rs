@@ -40,7 +40,7 @@ impl RenderContext {
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
                 label: Some("rkf-render device"),
-                required_features: wgpu::Features::empty(),
+                required_features: wgpu::Features::FLOAT32_FILTERABLE,
                 required_limits: wgpu::Limits {
                     max_bind_groups: 8,
                     ..wgpu::Limits::default()

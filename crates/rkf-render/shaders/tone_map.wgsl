@@ -67,7 +67,7 @@ fn agx_tonemap(color: vec3<f32>) -> vec3<f32> {
 // AgX "punchy" look — optional saturation boost for more vivid output
 fn agx_look(color: vec3<f32>) -> vec3<f32> {
     let luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
-    let offset = pow(luma, vec3(0.1));
+    let offset = pow(luma, 0.1);
     var c = color * offset / max(luma, 1e-6);
     // Mild saturation boost
     c = mix(vec3(luma), c, vec3(1.1));

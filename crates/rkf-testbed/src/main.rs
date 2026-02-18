@@ -12,493 +12,61 @@ use winit::window::{CursorGrabMode, Window, WindowAttributes, WindowId};
 
 use rkf_core::aabb::Aabb;
 use rkf_core::brick_pool::Pool;
-use rkf_core::clipmap::{ClipmapConfig, ClipmapGridSet, ClipmapLevel};
 use rkf_core::constants::RESOLUTION_TIERS;
 use rkf_core::populate::populate_grid_with_material;
-use rkf_core::sdf::{box_sdf, capsule_sdf, sphere_sdf};
+use rkf_core::sdf::sphere_sdf;
 use rkf_core::sparse_grid::SparseGrid;
 use rkf_core::BrickPool;
 
-use rkf_render::auto_exposure::AutoExposurePass;
 use rkf_render::blit::BlitPass;
-use rkf_render::bloom::BloomPass;
-use rkf_render::bloom_composite::BloomCompositePass;
 use rkf_render::camera::Camera;
 use rkf_render::clipmap_gpu::ClipmapGpuData;
-use rkf_render::cloud_shadow::CloudShadowPass;
-use rkf_render::color_grade::ColorGradePass;
-use rkf_render::cosmetics::CosmeticsPass;
-use rkf_render::dof::DofPass;
 use rkf_render::gbuffer::GBuffer;
+use rkf_render::gpu_color_pool::GpuColorPool;
 use rkf_render::gpu_scene::{GpuScene, SceneUniforms};
-use rkf_render::history::HistoryBuffers;
 use rkf_render::light::{Light, LightBuffer};
 use rkf_render::material_table::{self, MaterialTable};
-use rkf_render::motion_blur::MotionBlurPass;
-use rkf_render::radiance_inject::RadianceInjectPass;
-use rkf_render::radiance_mip::RadianceMipPass;
 use rkf_render::radiance_volume::RadianceVolume;
 use rkf_render::ray_march::{RayMarchPass, INTERNAL_HEIGHT, INTERNAL_WIDTH};
-use rkf_render::sharpen::SharpenPass;
-use rkf_render::gpu_color_pool::GpuColorPool;
 use rkf_render::shading::ShadingPass;
 use rkf_render::tile_cull::TileCullPass;
 use rkf_render::tone_map::ToneMapPass;
-use rkf_render::upscale::{QualityMode, ResolutionConfig, UpscalePass};
-use rkf_render::vol_composite::VolCompositePass;
-use rkf_render::vol_march::{VolMarchPass, VolMarchParams};
-use rkf_render::vol_shadow::VolShadowPass;
-use rkf_render::vol_temporal::VolTemporalPass;
-use rkf_render::vol_upscale::VolUpscalePass;
 use rkf_render::RenderContext;
-
-use rkf_runtime::{
-    CameraComponent, EngineConfig, FrameContext, FrameSettings, Scene as EcsScene, Transform,
-    execute_frame,
-};
 
 mod automation;
 use automation::{SharedState, TestbedAutomationApi};
 
 // ---------------------------------------------------------------------------
-// Test scene creation
+// Phase 4 scene — single sphere
 // ---------------------------------------------------------------------------
 
-/// Resolution tier for single-grid test scenes (Tier 1 = 2cm voxels).
-#[allow(dead_code)]
-const TEST_TIER: usize = 1;
-
-/// Create a lighting showcase scene with multiple objects and materials.
-///
-/// Objects and their material IDs:
-/// - Ground plane:         material 1 (stone)
-/// - Center sphere:        material 2 (metal)
-/// - Left sphere:          material 5 (skin/SSS)
-/// - Right sphere:         material 3 (wood)
-/// - Back-left capsule:    material 4 (emissive)
-/// - Back-right box:       material 2 (metal)
-/// - Front-center sphere:  material 1 (stone)
-///
-/// Returns `(BrickPool, SparseGrid, Aabb)`.
-#[allow(dead_code)]
-fn create_test_scene() -> (BrickPool, SparseGrid, Aabb) {
-    // Scene AABB — larger to accommodate ground plane and multiple objects
-    let aabb = Aabb::new(Vec3::new(-3.0, -0.6, -3.0), Vec3::new(3.0, 1.5, 3.0));
-
-    let res = &RESOLUTION_TIERS[TEST_TIER];
+fn create_phase4_scene() -> (BrickPool, SparseGrid, Aabb) {
+    let aabb = Aabb::new(Vec3::splat(-1.5), Vec3::splat(1.5));
+    let res = &RESOLUTION_TIERS[1]; // Tier 1 = 2cm
     let size = aabb.size();
     let dims = UVec3::new(
         ((size.x / res.brick_extent).ceil() as u32).max(1),
         ((size.y / res.brick_extent).ceil() as u32).max(1),
         ((size.z / res.brick_extent).ceil() as u32).max(1),
     );
-
-    let mut pool: BrickPool = Pool::new(16384);
+    let mut pool: BrickPool = Pool::new(4096);
     let mut grid = SparseGrid::new(dims);
-
-    let mut total = 0u32;
-
-    // Populate objects BEFORE the ground plane so objects take priority
-    // in overlapping narrow-band cells (first writer wins).
-
-    // Center sphere — material 2 (metal)
-    total += populate_grid_with_material(
-        &mut pool, &mut grid,
-        |p| sphere_sdf(Vec3::new(0.0, 0.0, 0.0), 0.35, p),
-        TEST_TIER, &aabb, 2,
-    ).expect("center sphere");
-
-    // Left sphere — material 5 (skin/SSS)
-    total += populate_grid_with_material(
-        &mut pool, &mut grid,
-        |p| sphere_sdf(Vec3::new(-1.0, 0.0, 0.0), 0.3, p),
-        TEST_TIER, &aabb, 5,
-    ).expect("left sphere");
-
-    // Right sphere — material 3 (wood)
-    total += populate_grid_with_material(
-        &mut pool, &mut grid,
-        |p| sphere_sdf(Vec3::new(1.0, 0.0, 0.0), 0.3, p),
-        TEST_TIER, &aabb, 3,
-    ).expect("right sphere");
-
-    // Back-left capsule — material 4 (emissive cyan)
-    total += populate_grid_with_material(
-        &mut pool, &mut grid,
-        |p| capsule_sdf(Vec3::new(-0.7, -0.2, -0.8), Vec3::new(-0.7, 0.3, -0.8), 0.12, p),
-        TEST_TIER, &aabb, 4,
-    ).expect("back-left capsule");
-
-    // Back-right box — material 2 (metal)
-    let box_center = Vec3::new(0.7, 0.0, -0.8);
-    total += populate_grid_with_material(
-        &mut pool, &mut grid,
-        |p| box_sdf(Vec3::splat(0.22), p - box_center),
-        TEST_TIER, &aabb, 2,
-    ).expect("back-right box");
-
-    // Front-center small sphere — material 1 (stone)
-    total += populate_grid_with_material(
-        &mut pool, &mut grid,
-        |p| sphere_sdf(Vec3::new(0.0, -0.2, 0.7), 0.18, p),
-        TEST_TIER, &aabb, 1,
-    ).expect("front sphere");
-
-    // Ground plane LAST — flat box, material 1 (stone)
-    // Populated after objects so it fills around them without overwriting.
-    let ground_center = Vec3::new(0.0, -0.5, 0.0);
-    let ground_half = Vec3::new(2.8, 0.15, 2.8);
-    total += populate_grid_with_material(
-        &mut pool, &mut grid,
-        |p| box_sdf(ground_half, p - ground_center),
-        TEST_TIER, &aabb, 1,
-    ).expect("ground");
-
+    let count = populate_grid_with_material(
+        &mut pool,
+        &mut grid,
+        |p| sphere_sdf(Vec3::ZERO, 0.5, p),
+        1,
+        &aabb,
+        1,
+    )
+    .expect("sphere");
     log::info!(
-        "Lighting showcase: {total} bricks, grid {}x{}x{}, tier {TEST_TIER}",
-        dims.x, dims.y, dims.z
+        "Phase 4 scene: {count} bricks, grid {}x{}x{}",
+        dims.x,
+        dims.y,
+        dims.z
     );
-
     (pool, grid, aabb)
-}
-
-/// Create a Cornell box scene for GI validation.
-///
-/// Classic Cornell box with colored walls to demonstrate color bleeding:
-/// - Red left wall, green right wall, white floor/ceiling/back
-/// - Emissive ceiling panel (material 9)
-/// - Tall white box (left side) and short white box (right side)
-/// - Small emissive sphere for secondary indirect illumination
-///
-/// Returns `(BrickPool, SparseGrid, Aabb)`.
-#[allow(dead_code)]
-fn create_cornell_box() -> (BrickPool, SparseGrid, Aabb) {
-    // Cornell box AABB — 2m cube centered at origin
-    let aabb = Aabb::new(Vec3::new(-1.2, -1.2, -1.2), Vec3::new(1.2, 1.2, 1.2));
-
-    let res = &RESOLUTION_TIERS[TEST_TIER];
-    let size = aabb.size();
-    let dims = UVec3::new(
-        ((size.x / res.brick_extent).ceil() as u32).max(1),
-        ((size.y / res.brick_extent).ceil() as u32).max(1),
-        ((size.z / res.brick_extent).ceil() as u32).max(1),
-    );
-
-    let mut pool: BrickPool = Pool::new(16384);
-    let mut grid = SparseGrid::new(dims);
-
-    let mut total = 0u32;
-
-    // --- Interior objects first (first-writer-wins) ---
-
-    // Tall box (left side) — white (mat 6)
-    let tall_center = Vec3::new(-0.35, -0.35, -0.2);
-    total += populate_grid_with_material(
-        &mut pool, &mut grid,
-        |p| box_sdf(Vec3::new(0.17, 0.35, 0.17), p - tall_center),
-        TEST_TIER, &aabb, 6,
-    ).expect("tall box");
-
-    // Short box (right side) — white (mat 6)
-    let short_center = Vec3::new(0.35, -0.55, 0.15);
-    total += populate_grid_with_material(
-        &mut pool, &mut grid,
-        |p| box_sdf(Vec3::new(0.17, 0.17, 0.17), p - short_center),
-        TEST_TIER, &aabb, 6,
-    ).expect("short box");
-
-    // Small emissive sphere — cyan glow (mat 4)
-    total += populate_grid_with_material(
-        &mut pool, &mut grid,
-        |p| sphere_sdf(Vec3::new(0.35, -0.28, 0.15), 0.1, p),
-        TEST_TIER, &aabb, 4,
-    ).expect("emissive sphere");
-
-    // Ceiling light panel — emissive (mat 9)
-    let light_center = Vec3::new(0.0, 0.95, 0.0);
-    total += populate_grid_with_material(
-        &mut pool, &mut grid,
-        |p| box_sdf(Vec3::new(0.25, 0.03, 0.25), p - light_center),
-        TEST_TIER, &aabb, 9,
-    ).expect("ceiling light");
-
-    // --- Walls (populated last so objects take priority) ---
-
-    // Floor — white (mat 6)
-    let floor_center = Vec3::new(0.0, -0.95, 0.0);
-    total += populate_grid_with_material(
-        &mut pool, &mut grid,
-        |p| box_sdf(Vec3::new(1.0, 0.05, 1.0), p - floor_center),
-        TEST_TIER, &aabb, 6,
-    ).expect("floor");
-
-    // Ceiling — white (mat 6)
-    let ceiling_center = Vec3::new(0.0, 0.95, 0.0);
-    total += populate_grid_with_material(
-        &mut pool, &mut grid,
-        |p| box_sdf(Vec3::new(1.0, 0.05, 1.0), p - ceiling_center),
-        TEST_TIER, &aabb, 6,
-    ).expect("ceiling");
-
-    // Back wall — white (mat 6)
-    let back_center = Vec3::new(0.0, 0.0, -0.95);
-    total += populate_grid_with_material(
-        &mut pool, &mut grid,
-        |p| box_sdf(Vec3::new(1.0, 1.0, 0.05), p - back_center),
-        TEST_TIER, &aabb, 6,
-    ).expect("back wall");
-
-    // Left wall — red (mat 7)
-    let left_center = Vec3::new(-0.95, 0.0, 0.0);
-    total += populate_grid_with_material(
-        &mut pool, &mut grid,
-        |p| box_sdf(Vec3::new(0.05, 1.0, 1.0), p - left_center),
-        TEST_TIER, &aabb, 7,
-    ).expect("left wall (red)");
-
-    // Right wall — green (mat 8)
-    let right_center = Vec3::new(0.95, 0.0, 0.0);
-    total += populate_grid_with_material(
-        &mut pool, &mut grid,
-        |p| box_sdf(Vec3::new(0.05, 1.0, 1.0), p - right_center),
-        TEST_TIER, &aabb, 8,
-    ).expect("right wall (green)");
-
-    log::info!(
-        "Cornell box: {total} bricks, grid {}x{}x{}, tier {TEST_TIER}",
-        dims.x, dims.y, dims.z
-    );
-
-    (pool, grid, aabb)
-}
-
-/// Create the lighting showcase light set (20+ lights).
-///
-/// Mix of directional, point, and spot lights at various positions and colors.
-/// Some cast shadows, some don't, to exercise the shadow budget system.
-#[allow(dead_code)]
-fn create_showcase_lights() -> Vec<Light> {
-    vec![
-        // --- Directional lights (2) ---
-        // Main sun — warm, shadow-casting (dominant light source)
-        Light::directional([0.4, 0.8, 0.3], [1.0, 0.95, 0.85], 1.0, true),
-        // Fill sky — cool blue, no shadows
-        Light::directional([-0.2, 0.6, -0.5], [0.4, 0.5, 0.7], 0.15, false),
-
-        // --- Point lights (12) ---
-        // Warm key light above center
-        Light::point([0.0, 1.2, 0.5], [1.0, 0.9, 0.7], 0.8, 4.0, true),
-        // Red accent left
-        Light::point([-1.5, 0.5, 0.3], [1.0, 0.2, 0.1], 0.6, 3.0, true),
-        // Blue accent right
-        Light::point([1.5, 0.5, 0.3], [0.1, 0.3, 1.0], 0.6, 3.0, true),
-        // Green ground bounce back
-        Light::point([0.0, -0.1, -1.2], [0.2, 0.8, 0.3], 0.4, 3.0, false),
-        // Purple rim light
-        Light::point([0.0, 0.8, -1.5], [0.6, 0.1, 0.8], 0.5, 4.0, true),
-        // Orange low left
-        Light::point([-0.8, -0.2, 0.6], [1.0, 0.5, 0.1], 0.3, 2.5, false),
-        // Cyan low right
-        Light::point([0.8, -0.2, 0.6], [0.1, 0.8, 0.9], 0.3, 2.5, false),
-        // White overhead far
-        Light::point([0.0, 1.5, -0.5], [1.0, 1.0, 1.0], 1.0, 5.0, true),
-        // Yellow near ground front-left
-        Light::point([-1.2, 0.1, 1.0], [1.0, 0.9, 0.3], 0.3, 2.5, false),
-        // Pink near ground front-right
-        Light::point([1.2, 0.1, 1.0], [1.0, 0.3, 0.5], 0.3, 2.5, false),
-        // Dim white fill from below
-        Light::point([0.0, -0.35, 0.0], [1.0, 1.0, 1.0], 0.2, 2.0, false),
-        // White back-center high
-        Light::point([0.0, 1.3, -1.0], [1.0, 1.0, 0.95], 0.8, 4.5, true),
-
-        // --- Spot lights (8) ---
-        // Spotlight on center sphere from above-front
-        Light::spot(
-            [0.0, 1.5, 1.5], [0.0, -0.8, -0.6],
-            [1.0, 1.0, 1.0], 2.0, 5.0, 0.15, 0.35, true,
-        ),
-        // Red spot on left sphere
-        Light::spot(
-            [-1.0, 1.2, 0.8], [0.0, -0.7, -0.5],
-            [1.0, 0.15, 0.1], 1.5, 4.0, 0.2, 0.4, true,
-        ),
-        // Blue spot on right sphere
-        Light::spot(
-            [1.0, 1.2, 0.8], [0.0, -0.7, -0.5],
-            [0.1, 0.2, 1.0], 1.5, 4.0, 0.2, 0.4, true,
-        ),
-        // Green spot from behind on ground
-        Light::spot(
-            [0.0, 0.8, -2.0], [0.0, -0.3, 0.9],
-            [0.2, 1.0, 0.3], 1.0, 5.0, 0.1, 0.3, false,
-        ),
-        // Warm narrow spot on back-right box
-        Light::spot(
-            [0.7, 1.0, -0.3], [0.0, -1.0, -0.2],
-            [1.0, 0.8, 0.5], 1.0, 3.0, 0.1, 0.2, true,
-        ),
-        // Cool narrow spot on back-left capsule
-        Light::spot(
-            [-0.7, 1.0, -0.3], [0.0, -1.0, -0.2],
-            [0.5, 0.7, 1.0], 1.0, 3.0, 0.1, 0.2, true,
-        ),
-        // Wide purple wash from side
-        Light::spot(
-            [-2.0, 0.5, 0.0], [1.0, -0.2, 0.0],
-            [0.5, 0.1, 0.8], 0.6, 5.0, 0.3, 0.6, false,
-        ),
-        // Wide orange wash from other side
-        Light::spot(
-            [2.0, 0.5, 0.0], [-1.0, -0.2, 0.0],
-            [1.0, 0.5, 0.1], 0.6, 5.0, 0.3, 0.6, false,
-        ),
-    ]
-}
-
-/// Create lights for the Cornell box scene.
-///
-/// A single overhead point light matching the ceiling emissive panel position,
-/// plus a dim fill to avoid completely black areas before GI converges.
-fn create_cornell_box_lights() -> Vec<Light> {
-    vec![
-        // Ceiling area light approximated as point light
-        Light::point([0.0, 0.85, 0.0], [1.0, 0.95, 0.85], 2.0, 4.0, true),
-        // Dim fill from front (no shadows) — prevents pitch black areas
-        Light::directional([0.0, 0.3, 1.0], [0.5, 0.5, 0.6], 0.05, false),
-    ]
-}
-
-/// Create a multi-LOD scene demonstrating clipmap rendering.
-///
-/// Two LOD levels:
-/// - Level 0: 2cm voxels (tier 1), radius 2m — near-detail objects + ground
-/// - Level 1: 8cm voxels (tier 2), radius 8m — coarse terrain extending further
-///
-/// Camera at origin sees detailed objects nearby and coarser ground at distance.
-/// Distant pillars at the coarser level demonstrate LOD transition.
-///
-/// Returns `(BrickPool, ClipmapGridSet)`.
-fn create_multi_lod_scene() -> (BrickPool, ClipmapGridSet) {
-    let config = ClipmapConfig::new(vec![
-        ClipmapLevel { voxel_size: 0.02, radius: 2.0 },
-        ClipmapLevel { voxel_size: 0.08, radius: 8.0 },
-    ]);
-    let max_dim = 64;
-    let mut grid_set = ClipmapGridSet::from_config(config.clone(), max_dim);
-    let mut pool: BrickPool = Pool::new(32768);
-
-    let mut total_bricks = 0u32;
-
-    // Tier-to-level mapping: level 0 → tier 1 (2cm), level 1 → tier 2 (8cm)
-    let tiers = [1usize, 2usize];
-
-    for level_idx in 0..config.num_levels() {
-        let level = config.level(level_idx);
-        let tier = tiers[level_idx];
-        let brick_ext = RESOLUTION_TIERS[tier].brick_extent;
-        let dims = grid_set.grid(level_idx).dimensions();
-        let half = level.radius;
-
-        // AABB aligned to grid origin (centered on camera at origin)
-        let aabb = Aabb::new(
-            Vec3::splat(-half),
-            Vec3::new(
-                -half + dims.x as f32 * brick_ext,
-                -half + dims.y as f32 * brick_ext,
-                -half + dims.z as f32 * brick_ext,
-            ),
-        );
-
-        let grid = grid_set.grid_mut(level_idx);
-
-        // Ground plane at y = -0.5, scaled to level extent
-        let ground_extent = half * 0.9;
-        let ground_half = Vec3::new(ground_extent, 0.15, ground_extent);
-        total_bricks += populate_grid_with_material(
-            &mut pool,
-            grid,
-            |p| box_sdf(ground_half, p - Vec3::new(0.0, -0.5, 0.0)),
-            tier,
-            &aabb,
-            1,
-        )
-        .unwrap_or_else(|e| panic!("ground level {level_idx}: {e}"));
-
-        if level_idx == 0 {
-            // Near-detail objects only at finest level
-
-            // Center metal sphere
-            total_bricks += populate_grid_with_material(
-                &mut pool,
-                grid,
-                |p| sphere_sdf(Vec3::ZERO, 0.35, p),
-                tier,
-                &aabb,
-                2,
-            )
-            .expect("center sphere");
-
-            // Left emissive capsule
-            total_bricks += populate_grid_with_material(
-                &mut pool,
-                grid,
-                |p| {
-                    capsule_sdf(
-                        Vec3::new(-0.7, -0.2, 0.0),
-                        Vec3::new(-0.7, 0.3, 0.0),
-                        0.12,
-                        p,
-                    )
-                },
-                tier,
-                &aabb,
-                4,
-            )
-            .expect("left capsule");
-
-            // Right wooden box
-            total_bricks += populate_grid_with_material(
-                &mut pool,
-                grid,
-                |p| box_sdf(Vec3::splat(0.22), p - Vec3::new(0.7, 0.0, 0.0)),
-                tier,
-                &aabb,
-                3,
-            )
-            .expect("right box");
-        }
-
-        if level_idx == 1 {
-            // Distant pillars only at coarser level
-            for &x in &[-5.0f32, 5.0] {
-                for &z in &[-5.0f32, 5.0] {
-                    total_bricks += populate_grid_with_material(
-                        &mut pool,
-                        grid,
-                        |p| {
-                            capsule_sdf(
-                                Vec3::new(x, -0.5, z),
-                                Vec3::new(x, 1.0, z),
-                                0.3,
-                                p,
-                            )
-                        },
-                        tier,
-                        &aabb,
-                        1,
-                    )
-                    .expect("distant pillar");
-                }
-            }
-        }
-    }
-
-    log::info!(
-        "Multi-LOD scene: {total_bricks} bricks across {} levels",
-        config.num_levels(),
-    );
-
-    (pool, grid_set)
 }
 
 // ---------------------------------------------------------------------------
@@ -518,42 +86,16 @@ struct GpuState {
     material_table: MaterialTable,
     light_buffer: LightBuffer,
     tile_cull: TileCullPass,
+    radiance_volume: RadianceVolume,
+    color_pool: GpuColorPool,
     ray_march: RayMarchPass,
     shading: ShadingPass,
     tone_map: ToneMapPass,
     blit: BlitPass,
-    radiance_volume: RadianceVolume,
-    radiance_inject: RadianceInjectPass,
-    radiance_mip: RadianceMipPass,
-    color_pool: GpuColorPool,
-    history: HistoryBuffers,
-    upscale: UpscalePass,
-    sharpen: SharpenPass,
-    // Volumetric passes
-    vol_shadow: VolShadowPass,
-    vol_march: VolMarchPass,
-    vol_temporal: VolTemporalPass,
-    vol_upscale: VolUpscalePass,
-    vol_composite: VolCompositePass,
-    cloud_shadow: CloudShadowPass,
-    // Pre-upscale post-processing
-    bloom: BloomPass,
-    dof: DofPass,
-    motion_blur: MotionBlurPass,
-    // Post-upscale post-processing
-    bloom_composite: BloomCompositePass,
-    auto_exposure: AutoExposurePass,
-    color_grade: ColorGradePass,
-    cosmetics: CosmeticsPass,
-    // ECS and configuration
-    scene_ecs: EcsScene,
-    config: EngineConfig,
-    frame_settings: FrameSettings,
     camera: Camera,
     staging_buffer: wgpu::Buffer,
     shared_state: Arc<Mutex<SharedState>>,
     frame_index: u32,
-    prev_vp: [[f32; 4]; 4],
 }
 
 impl GpuState {
@@ -572,22 +114,8 @@ impl GpuState {
         let surface_format =
             context.configure_surface(&surface, display_width, display_height);
 
-        // Auto-select upscaling backend based on hardware
-        let dlss_context = rkf_render::dlss::DlssContext::new(
-            &context.device,
-            &context.adapter_info,
-        );
-        let upscale_backend = rkf_render::UpscaleBackend::auto_select(&dlss_context);
-        log::info!("Upscale backend: {}", upscale_backend.name());
-
-        let resolution_config = ResolutionConfig::new(display_width, display_height, QualityMode::Balanced);
-        log::info!("Resolution: {}x{} → {}x{} ({})",
-            resolution_config.display_width, resolution_config.display_height,
-            resolution_config.internal_width(), resolution_config.internal_height(),
-            resolution_config.quality.name());
-
-        // Create multi-LOD scene for clipmap validation
-        let (pool, grid_set) = create_multi_lod_scene();
+        // Scene
+        let (pool, grid, aabb) = create_phase4_scene();
 
         // Update shared state with pool info
         {
@@ -596,46 +124,46 @@ impl GpuState {
             state.pool_allocated = pool.allocated_count() as u64;
         }
 
-        // Camera positioned to overlook the multi-LOD terrain
-        let mut camera = Camera::new(Vec3::new(0.0, 0.5, 3.0));
+        // Camera
+        let mut camera = Camera::new(Vec3::new(0.0, 0.0, 2.0));
         camera.fov_degrees = 60.0;
 
-        let prev_vp = camera.view_projection(INTERNAL_WIDTH, INTERNAL_HEIGHT).to_cols_array_2d();
-        let camera_uniforms = camera.uniforms(INTERNAL_WIDTH, INTERNAL_HEIGHT, 0, prev_vp);
+        let camera_uniforms = camera.uniforms(INTERNAL_WIDTH, INTERNAL_HEIGHT, 0, [[0.0; 4]; 4]);
         let camera_bytes = bytemuck::bytes_of(&camera_uniforms);
 
-        // Use level 0's grid for GpuScene (single-grid occupancy/slot; ignored when clipmap active)
-        let level0 = grid_set.config().level(0);
-        let level0_grid = grid_set.grid(0);
-        let level0_dims = level0_grid.dimensions();
+        // SceneUniforms from grid
+        let dims = grid.dimensions();
         let scene_uniforms = SceneUniforms {
-            grid_dims: [level0_dims.x, level0_dims.y, level0_dims.z, 0],
-            grid_origin: [-level0.radius, -level0.radius, -level0.radius, level0.brick_extent()],
-            params: [level0.voxel_size, 0.0, 0.0, 0.0],
+            grid_dims: [dims.x, dims.y, dims.z, 0],
+            grid_origin: [
+                aabb.min.x,
+                aabb.min.y,
+                aabb.min.z,
+                RESOLUTION_TIERS[1].brick_extent,
+            ],
+            params: [RESOLUTION_TIERS[1].voxel_size, 0.0, 0.0, 0.0],
         };
 
-        // Upload scene to GPU (brick pool shared; single-grid data used as fallback)
-        let scene = GpuScene::upload(
-            &context.device,
-            &pool,
-            level0_grid,
-            camera_bytes,
-            &scene_uniforms,
-        );
+        // Upload scene to GPU
+        let scene = GpuScene::upload(&context.device, &pool, &grid, camera_bytes, &scene_uniforms);
 
-        // Upload material table
+        // Materials
         let materials = material_table::create_test_materials();
         let material_table = MaterialTable::upload(&context.device, &materials);
 
-        // Create G-buffer
+        // G-buffer
         let gbuffer = GBuffer::new(&context.device, INTERNAL_WIDTH, INTERNAL_HEIGHT);
 
-        // Lights for the multi-LOD scene — overhead + fill
-        let lights = create_cornell_box_lights();
-        log::info!("Multi-LOD scene: {} lights", lights.len());
+        // Single directional light
+        let lights = vec![Light::directional(
+            [0.4, 0.8, 0.3],
+            [1.0, 0.95, 0.85],
+            1.0,
+            true,
+        )];
         let light_buffer = LightBuffer::upload(&context.device, &lights);
 
-        // Create tile cull pass
+        // Tile cull
         let tile_cull = TileCullPass::new(
             &context.device,
             &gbuffer,
@@ -644,33 +172,12 @@ impl GpuState {
             INTERNAL_HEIGHT,
         );
 
-        // Create radiance volume + GI passes
+        // Dummy/minimal resources needed by ShadingPass constructor
         let radiance_volume = RadianceVolume::new(&context.device);
-        let radiance_inject = RadianceInjectPass::new(
-            &context.device,
-            &scene,
-            &material_table,
-            &light_buffer,
-            &radiance_volume,
-        );
-        let radiance_mip = RadianceMipPass::new(&context.device, &radiance_volume);
-
-        // Create history buffers at display resolution for temporal upscaling
-        let history = HistoryBuffers::new(
-            &context.device,
-            display_width,
-            display_height,
-            INTERNAL_WIDTH,
-            INTERNAL_HEIGHT,
-        );
-
-        // Upload clipmap LOD data (enables multi-level ray marching)
-        let clipmap = ClipmapGpuData::upload(&context.device, &grid_set, [0.0, 0.0, 0.0]);
-
-        // Create empty color pool (placeholder — no objects use per-voxel color yet)
         let color_pool = GpuColorPool::empty(&context.device);
+        let clipmap = ClipmapGpuData::empty(&context.device);
 
-        // Create core render passes
+        // Render passes
         let ray_march = RayMarchPass::new(&context.device, &scene, &gbuffer, &clipmap);
         let shading = ShadingPass::new(
             &context.device,
@@ -683,23 +190,6 @@ impl GpuState {
             INTERNAL_WIDTH,
             INTERNAL_HEIGHT,
         );
-        let upscale = UpscalePass::new(
-            &context.device,
-            &shading,
-            &gbuffer,
-            &history,
-            display_width,
-            display_height,
-            INTERNAL_WIDTH,
-            INTERNAL_HEIGHT,
-        );
-        let sharpen = SharpenPass::new(
-            &context.device,
-            &upscale.output_view,
-            &gbuffer,
-            display_width,
-            display_height,
-        );
         let tone_map = ToneMapPass::new(
             &context.device,
             &shading.hdr_view,
@@ -707,150 +197,6 @@ impl GpuState {
             INTERNAL_HEIGHT,
         );
         let blit = BlitPass::new(&context.device, &tone_map.ldr_view, surface_format);
-
-        // ── Volumetric passes ─────────────────────────────────────────────────
-        let vol_shadow = VolShadowPass::new(&context.device, &context.queue);
-        let cloud_shadow = CloudShadowPass::new(&context.device);
-
-        let half_width = INTERNAL_WIDTH / 2;
-        let half_height = INTERNAL_HEIGHT / 2;
-
-        let vol_march = VolMarchPass::new(
-            &context.device,
-            &context.queue,
-            &gbuffer.position_view,
-            &vol_shadow.shadow_view,
-            half_width,
-            half_height,
-            INTERNAL_WIDTH,
-            INTERNAL_HEIGHT,
-        );
-
-        let vol_temporal = VolTemporalPass::new(
-            &context.device,
-            &vol_march.output_view,
-            &gbuffer.motion_view,
-            half_width,
-            half_height,
-        );
-
-        let vol_upscale = VolUpscalePass::new(
-            &context.device,
-            vol_temporal.output_view(),
-            &gbuffer.position_view,
-            INTERNAL_WIDTH,
-            INTERNAL_HEIGHT,
-            half_width,
-            half_height,
-        );
-
-        let vol_composite = VolCompositePass::new(
-            &context.device,
-            &shading.hdr_view,
-            &vol_upscale.output_view,
-            INTERNAL_WIDTH,
-            INTERNAL_HEIGHT,
-        );
-
-        // ── Pre-upscale post-processing ───────────────────────────────────────
-        let bloom = BloomPass::new(
-            &context.device,
-            &shading.hdr_view,
-            INTERNAL_WIDTH,
-            INTERNAL_HEIGHT,
-        );
-
-        let dof = DofPass::new(
-            &context.device,
-            &shading.hdr_view,
-            &gbuffer.position_view,
-            INTERNAL_WIDTH,
-            INTERNAL_HEIGHT,
-        );
-
-        let motion_blur = MotionBlurPass::new(
-            &context.device,
-            &shading.hdr_view,
-            &gbuffer.motion_view,
-            INTERNAL_WIDTH,
-            INTERNAL_HEIGHT,
-        );
-
-        // ── Post-upscale post-processing ──────────────────────────────────────
-        let bloom_composite = BloomCompositePass::new(
-            &context.device,
-            &upscale.output_view,
-            bloom.mip_views(),
-            display_width,
-            display_height,
-        );
-
-        let auto_exposure = AutoExposurePass::new(
-            &context.device,
-            &shading.hdr_view,
-            INTERNAL_WIDTH,
-            INTERNAL_HEIGHT,
-        );
-
-        let color_grade = ColorGradePass::new(
-            &context.device,
-            &context.queue,
-            &tone_map.ldr_view,
-            INTERNAL_WIDTH,
-            INTERNAL_HEIGHT,
-        );
-
-        let cosmetics = CosmeticsPass::new(
-            &context.device,
-            &tone_map.ldr_view,
-            INTERNAL_WIDTH,
-            INTERNAL_HEIGHT,
-        );
-
-        // ── ECS scene ─────────────────────────────────────────────────────────
-        let mut scene_ecs = EcsScene::new();
-
-        // Spawn camera entity
-        let _camera_entity = scene_ecs.spawn_camera(
-            Transform::default(),
-            CameraComponent {
-                fov: camera.fov_degrees.to_radians(),
-                near: 0.1,
-                far: 1000.0,
-                active: true,
-            },
-        );
-
-        // Spawn light entities as ECS markers
-        for _ in &lights {
-            scene_ecs.spawn_light(Transform::default());
-        }
-
-        log::info!(
-            "ECS: {} entities (1 camera + {} lights), clipmap {} levels",
-            scene_ecs.entity_count(),
-            lights.len(),
-            grid_set.config().num_levels(),
-        );
-
-        // ── Engine configuration ──────────────────────────────────────────────
-        let config = EngineConfig::default();
-        // Start with only GI + sharpen enabled to match prior testbed behavior.
-        // All other optional passes are disabled for initial stability.
-        let frame_settings = FrameSettings {
-            gi_enabled: true,
-            sharpen_enabled: true,
-            volumetrics_enabled: false,
-            cloud_shadows_enabled: false,
-            dof_enabled: false,
-            motion_blur_enabled: false,
-            bloom_enabled: false,
-            auto_exposure_enabled: false,
-            color_grade_enabled: false,
-            cosmetics_enabled: false,
-        };
-
-        log::info!("Frame scheduler active — EngineConfig preset: {:?}", config.quality_preset);
 
         // Staging buffer for CPU readback of rendered frames (screenshot support).
         let staging_buffer = context.device.create_buffer(&wgpu::BufferDescriptor {
@@ -872,38 +218,16 @@ impl GpuState {
             material_table,
             light_buffer,
             tile_cull,
+            radiance_volume,
+            color_pool,
             ray_march,
             shading,
             tone_map,
             blit,
-            radiance_volume,
-            radiance_inject,
-            radiance_mip,
-            color_pool,
-            history,
-            upscale,
-            sharpen,
-            vol_shadow,
-            vol_march,
-            vol_temporal,
-            vol_upscale,
-            vol_composite,
-            cloud_shadow,
-            bloom,
-            dof,
-            motion_blur,
-            bloom_composite,
-            auto_exposure,
-            color_grade,
-            cosmetics,
-            scene_ecs,
-            config,
-            frame_settings,
             camera,
             staging_buffer,
             shared_state,
             frame_index: 0,
-            prev_vp,
         }
     }
 
@@ -918,7 +242,9 @@ impl GpuState {
     }
 
     fn update_camera(&mut self) {
-        let uniforms = self.camera.uniforms(INTERNAL_WIDTH, INTERNAL_HEIGHT, self.frame_index, self.prev_vp);
+        let uniforms =
+            self.camera
+                .uniforms(INTERNAL_WIDTH, INTERNAL_HEIGHT, self.frame_index, [[0.0; 4]; 4]);
         self.context.queue.write_buffer(
             &self.scene.camera_buffer,
             0,
@@ -959,7 +285,7 @@ impl GpuState {
             &self.context.queue,
             self.light_buffer.count,
             self.tile_cull.num_tiles_x,
-            4, // shadow_budget_k: max 4 shadow rays per pixel
+            4,
         );
 
         let frame = match self.surface.get_current_texture() {
@@ -981,95 +307,23 @@ impl GpuState {
                 label: Some("frame encoder"),
             });
 
-        // Update radiance volume centre to camera position
-        let cam_pos_arr = [cam_pos.x, cam_pos.y, cam_pos.z];
-        self.radiance_volume.update_center(&self.context.queue, cam_pos_arr);
-        self.radiance_inject.update_inject_uniforms(
-            &self.context.queue,
-            self.light_buffer.count,
-            1, // max 1 shadow-casting light in injection
+        // Phase 4 pipeline: ray march -> tile cull -> shade -> tone map -> blit
+        self.ray_march
+            .dispatch(&mut encoder, &self.scene, &self.gbuffer, &self.clipmap);
+        self.tile_cull.dispatch(&mut encoder, &self.gbuffer);
+        self.shading.dispatch(
+            &mut encoder,
+            &self.gbuffer,
+            &self.material_table,
+            &self.scene,
+            &self.tile_cull.shade_light_bind_group,
+            &self.radiance_volume,
+            &self.color_pool,
         );
+        self.tone_map.dispatch(&mut encoder);
+        self.blit.draw(&mut encoder, &view);
 
-        // Normalized sun direction matching the main directional light
-        let sun_dir = Vec3::new(0.4, 0.8, 0.3).normalize();
-        let sun_dir_arr = [sun_dir.x, sun_dir.y, sun_dir.z];
-
-        // Default volumetric march params (zeroed — passes are disabled anyway)
-        let vol_march_params = VolMarchParams {
-            cam_pos: [cam_pos.x, cam_pos.y, cam_pos.z, 0.0],
-            cam_forward: [cam_fwd.x, cam_fwd.y, cam_fwd.z, 0.0],
-            cam_right: [0.0; 4],
-            cam_up: [0.0; 4],
-            sun_dir: [sun_dir.x, sun_dir.y, sun_dir.z, 0.0],
-            sun_color: [1.0, 0.95, 0.85, 0.0],
-            width: INTERNAL_WIDTH / 2,
-            height: INTERNAL_HEIGHT / 2,
-            full_width: INTERNAL_WIDTH,
-            full_height: INTERNAL_HEIGHT,
-            max_steps: 32,
-            step_size: 2.0,
-            near: 0.5,
-            far: 200.0,
-            fog_color: [0.7, 0.8, 0.9, 0.0],
-            fog_height: [0.0, 0.0, 0.1, 0.0],
-            fog_distance: [0.0, 0.01, 0.0, 0.3],
-            frame_index: self.frame_index,
-            _pad0: 0,
-            _pad1: 0,
-            _pad2: 0,
-            vol_shadow_min: [-64.0, -32.0, -64.0, 0.0],
-            vol_shadow_max: [64.0, 32.0, 64.0, 0.0],
-        };
-
-        // ── Execute frame via scheduler ──────────────────────────────────────
-        {
-            let mut frame_ctx = FrameContext {
-                encoder: &mut encoder,
-                queue: &self.context.queue,
-                settings: &self.frame_settings,
-                scene: &self.scene,
-                clipmap: &self.clipmap,
-                gbuffer: &self.gbuffer,
-                material_table: &self.material_table,
-                light_buffer: &self.light_buffer,
-                ray_march: &self.ray_march,
-                tile_cull: &self.tile_cull,
-                shading: &self.shading,
-                tone_map: &self.tone_map,
-                blit: &self.blit,
-                shade_light_bind_group: &self.tile_cull.shade_light_bind_group,
-                radiance_volume: &self.radiance_volume,
-                radiance_inject: &self.radiance_inject,
-                radiance_mip: &self.radiance_mip,
-                color_pool: &self.color_pool,
-                vol_shadow: &self.vol_shadow,
-                vol_march: &self.vol_march,
-                vol_march_params: &vol_march_params,
-                vol_temporal: &mut self.vol_temporal,
-                vol_upscale: &self.vol_upscale,
-                vol_composite: &self.vol_composite,
-                cloud_shadow: &self.cloud_shadow,
-                bloom: &self.bloom,
-                dof: &self.dof,
-                motion_blur: &self.motion_blur,
-                upscale: &self.upscale,
-                sharpen: &self.sharpen,
-                history_read_idx: self.history.read_index(),
-                bloom_composite: &self.bloom_composite,
-                auto_exposure: &self.auto_exposure,
-                color_grade: &self.color_grade,
-                cosmetics: &self.cosmetics,
-                frame_index: self.frame_index,
-                dt,
-                camera_pos: cam_pos_arr,
-                sun_dir: sun_dir_arr,
-                swapchain_view: &view,
-            };
-
-            execute_frame(&mut frame_ctx);
-        }
-
-        // Copy LDR texture → staging buffer for screenshot readback
+        // Copy LDR texture -> staging buffer for screenshot readback
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: self.tone_map.ldr_texture(),
@@ -1091,12 +345,6 @@ impl GpuState {
                 depth_or_array_layers: 1,
             },
         );
-
-        // Store current VP as previous for next frame's motion vectors
-        self.prev_vp = self.camera.view_projection(INTERNAL_WIDTH, INTERNAL_HEIGHT).to_cols_array_2d();
-
-        // Swap history ping-pong buffers
-        self.history.swap();
 
         self.context.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
@@ -1274,7 +522,8 @@ impl App {
         if let Some(window) = &self.window {
             self.input.mouse_captured = !self.input.mouse_captured;
             if self.input.mouse_captured {
-                let _ = window.set_cursor_grab(CursorGrabMode::Locked)
+                let _ = window
+                    .set_cursor_grab(CursorGrabMode::Locked)
                     .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined));
                 window.set_cursor_visible(false);
             } else {
@@ -1291,7 +540,7 @@ impl ApplicationHandler for App {
             return;
         }
         let attrs = WindowAttributes::default()
-            .with_title("RKIField Testbed")
+            .with_title("RKIField Testbed [Phase 4]")
             .with_inner_size(PhysicalSize::new(1280u32, 720u32));
         let window = Arc::new(
             event_loop
@@ -1318,7 +567,8 @@ impl ApplicationHandler for App {
         log::info!("IPC server listening on {socket_path}");
         self.socket_path = Some(socket_path);
 
-        log::info!("Window created — click to capture mouse, WASD to move, mouse to look, Esc to exit");
+        log::info!("Phase 4 validation — single sphere, basic shading");
+        log::info!("Click to capture mouse, WASD to move, mouse to look, Esc to exit");
     }
 
     fn window_event(
@@ -1381,7 +631,7 @@ impl ApplicationHandler for App {
                         let elapsed = now.duration_since(self.last_title_update).as_secs_f64();
                         let fps = self.frame_count as f64 / elapsed;
                         window.set_title(&format!(
-                            "RKIField Testbed — {fps:.0} fps ({:.2} ms)",
+                            "RKIField Testbed [Phase 4] — {fps:.0} fps ({:.2} ms)",
                             1000.0 / fps
                         ));
                         self.frame_count = 0;

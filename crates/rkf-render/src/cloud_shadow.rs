@@ -1,6 +1,6 @@
 //! Cloud shadow map compute pass — Phase 11 task 11.11.
 //!
-//! Generates a 2D texture (1024×1024, R16Float) where each texel stores the
+//! Generates a 2D texture (1024×1024, R32Float) where each texel stores the
 //! transmittance from the column of air above that world-XZ position down
 //! through the cloud layer. The map is camera-centered and updated once per
 //! frame.
@@ -34,7 +34,7 @@ pub const DEFAULT_CLOUD_SHADOW_STEPS: u32 = 16;
 pub const DEFAULT_CLOUD_SHADOW_EXTINCTION: f32 = 5.0;
 
 /// Texture format for the cloud shadow map (single-channel half-float).
-pub const CLOUD_SHADOW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
+pub const CLOUD_SHADOW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
 
 // ── GPU struct ────────────────────────────────────────────────────────────────
 
@@ -93,7 +93,7 @@ pub struct CloudShadowPass {
     bind_group_layout: wgpu::BindGroupLayout,
     bind_group: wgpu::BindGroup,
     params_buffer: wgpu::Buffer,
-    /// The 2D shadow map texture (R16Float, STORAGE_BINDING | TEXTURE_BINDING).
+    /// The 2D shadow map texture (R32Float, STORAGE_BINDING | TEXTURE_BINDING).
     pub shadow_texture: wgpu::Texture,
     /// View over the full 2D shadow map texture.
     pub shadow_view: wgpu::TextureView,
@@ -355,7 +355,7 @@ mod tests {
 
     #[test]
     fn format_is_r16float() {
-        assert_eq!(CLOUD_SHADOW_FORMAT, wgpu::TextureFormat::R16Float);
+        assert_eq!(CLOUD_SHADOW_FORMAT, wgpu::TextureFormat::R32Float);
     }
 
     #[test]

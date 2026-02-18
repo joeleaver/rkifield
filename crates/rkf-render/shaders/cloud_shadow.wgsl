@@ -22,7 +22,7 @@ struct CloudShadowParams {
 }
 
 @group(0) @binding(0) var<uniform> params: CloudShadowParams;
-@group(0) @binding(1) var output_shadow: texture_storage_2d<r16float, write>;
+@group(0) @binding(1) var output_shadow: texture_storage_2d<r32float, write>;
 
 // Simple 3D hash for noise
 fn hash3(p: vec3<f32>) -> f32 {

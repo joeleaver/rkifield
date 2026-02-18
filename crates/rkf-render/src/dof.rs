@@ -14,7 +14,7 @@ pub const DEFAULT_FOCUS_RANGE: f32 = 3.0;
 /// Default maximum CoC radius in pixels.
 pub const DEFAULT_MAX_COC: f32 = 8.0;
 /// CoC texture format (signed float for near/far distinction).
-pub const COC_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
+pub const COC_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
 
 /// GPU-uploadable depth-of-field parameters (32 bytes).
 ///
@@ -45,7 +45,7 @@ pub struct DofParams {
 ///
 /// Runs two compute dispatches per frame:
 /// 1. CoC compute — reads G-buffer position (w = depth) and writes signed CoC
-///    into an R16Float texture. Negative CoC = near field, positive = far field.
+///    into an R32Float texture. Negative CoC = near field, positive = far field.
 /// 2. DoF blur — disc-kernel gather over the HDR input, weighted by CoC, writes
 ///    blurred HDR into the output texture.
 ///
@@ -55,7 +55,7 @@ pub struct DofPass {
     coc_pipeline: wgpu::ComputePipeline,
     blur_pipeline: wgpu::ComputePipeline,
 
-    /// CoC texture (R16Float, signed: negative=near, positive=far).
+    /// CoC texture (R32Float, signed: negative=near, positive=far).
     coc_texture: wgpu::Texture,
     /// View of the CoC texture.
     pub coc_view: wgpu::TextureView,
@@ -340,7 +340,7 @@ impl DofPass {
     /// Dispatch both DoF passes into the command encoder.
     ///
     /// Order:
-    /// 1. CoC compute — G-buffer position → CoC texture (signed R16Float).
+    /// 1. CoC compute — G-buffer position → CoC texture (signed R32Float).
     /// 2. DoF blur    — HDR + CoC → blurred HDR output.
     ///
     /// Each dispatch is its own compute pass to ensure a pipeline barrier
