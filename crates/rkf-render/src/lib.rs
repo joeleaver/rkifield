@@ -74,6 +74,8 @@ pub mod dlss;
 pub mod fog;
 /// Local fog volume types and GPU buffer.
 pub mod fog_volume;
+/// Volumetric temporal reprojection compute pass.
+pub mod vol_temporal;
 
 pub use camera::{Camera, CameraUniforms};
 pub use context::RenderContext;
@@ -105,3 +107,4 @@ pub use color_grade::{ColorGradePass, ColorGradeParams, DEFAULT_LUT_SIZE, DEFAUL
 pub use cosmetics::{CosmeticsPass, CosmeticsParams, DEFAULT_VIGNETTE_INTENSITY, DEFAULT_GRAIN_INTENSITY, DEFAULT_CHROMATIC_ABERRATION};
 pub use dlss::{DlssContext, DlssQuality};
 pub use fog_volume::{GpuFogVolume, FogVolumeHeader, FogVolumeBuffer, MAX_FOG_VOLUMES};
+pub use vol_temporal::{VolTemporalPass, VolTemporalParams, DEFAULT_VOL_TEMPORAL_BLEND, DEFAULT_VOL_DEPTH_THRESHOLD};
