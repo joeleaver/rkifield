@@ -29,7 +29,7 @@ use rkf_render::radiance_inject::RadianceInjectPass;
 use rkf_render::radiance_mip::RadianceMipPass;
 use rkf_render::radiance_volume::RadianceVolume;
 use rkf_render::history::HistoryBuffers;
-use rkf_render::upscale::UpscalePass;
+use rkf_render::upscale::{QualityMode, ResolutionConfig, UpscalePass};
 use rkf_render::sharpen::SharpenPass;
 use rkf_render::shading::ShadingPass;
 use rkf_render::tile_cull::TileCullPass;
@@ -397,6 +397,12 @@ impl GpuState {
         );
         let upscale_backend = rkf_render::UpscaleBackend::auto_select(&dlss_context);
         log::info!("Upscale backend: {}", upscale_backend.name());
+
+        let resolution_config = ResolutionConfig::new(size.width.max(1), size.height.max(1), QualityMode::Balanced);
+        log::info!("Resolution: {}x{} → {}x{} ({})",
+            resolution_config.display_width, resolution_config.display_height,
+            resolution_config.internal_width(), resolution_config.internal_height(),
+            resolution_config.quality.name());
 
         // Create Cornell box scene for GI validation
         let (pool, grid, aabb) = create_cornell_box();

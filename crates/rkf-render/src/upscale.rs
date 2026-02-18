@@ -55,6 +55,91 @@ impl UpscaleBackend {
     }
 }
 
+/// Quality mode for internal render resolution relative to display resolution.
+///
+/// Controls the trade-off between image quality and rendering performance.
+/// The internal resolution is computed as `display * scale_factor`, then
+/// upscaled to display resolution by the temporal upscaler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QualityMode {
+    /// 1/1 — renders at native display resolution (no upscaling needed).
+    Ultra,
+    /// 3/4 — renders at 75% of display resolution.
+    Quality,
+    /// 1/2 — renders at 50% of display resolution (default).
+    Balanced,
+    /// 1/3 — renders at ~33% of display resolution.
+    Performance,
+    /// 1/4 — renders at 25% of display resolution (maximum performance).
+    Potato,
+}
+
+impl QualityMode {
+    /// Returns the internal-to-display resolution scale factor.
+    pub fn scale_factor(self) -> f32 {
+        match self {
+            QualityMode::Ultra => 1.0,
+            QualityMode::Quality => 0.75,
+            QualityMode::Balanced => 0.5,
+            QualityMode::Performance => 1.0 / 3.0,
+            QualityMode::Potato => 0.25,
+        }
+    }
+
+    /// Human-readable name for logging.
+    pub fn name(self) -> &'static str {
+        match self {
+            QualityMode::Ultra => "Ultra",
+            QualityMode::Quality => "Quality",
+            QualityMode::Balanced => "Balanced",
+            QualityMode::Performance => "Performance",
+            QualityMode::Potato => "Potato",
+        }
+    }
+}
+
+/// Configuration for display and internal render resolutions.
+///
+/// Derives the internal (render) resolution from the display resolution and
+/// the selected `QualityMode`. The internal resolution is what the ray marcher
+/// and G-buffer run at; the upscaler reconstructs the display resolution.
+pub struct ResolutionConfig {
+    /// Display (output) width in pixels.
+    pub display_width: u32,
+    /// Display (output) height in pixels.
+    pub display_height: u32,
+    /// Quality mode controlling the internal/display resolution ratio.
+    pub quality: QualityMode,
+}
+
+impl ResolutionConfig {
+    /// Create a new resolution configuration.
+    pub fn new(display_width: u32, display_height: u32, quality: QualityMode) -> Self {
+        Self {
+            display_width,
+            display_height,
+            quality,
+        }
+    }
+
+    /// Internal render width in pixels (at least 1).
+    pub fn internal_width(&self) -> u32 {
+        let scale = self.quality.scale_factor();
+        (self.display_width as f32 * scale).round().max(1.0) as u32
+    }
+
+    /// Internal render height in pixels (at least 1).
+    pub fn internal_height(&self) -> u32 {
+        let scale = self.quality.scale_factor();
+        (self.display_height as f32 * scale).round().max(1.0) as u32
+    }
+
+    /// Convenience tuple `(internal_width, internal_height)`.
+    pub fn internal_resolution(&self) -> (u32, u32) {
+        (self.internal_width(), self.internal_height())
+    }
+}
+
 /// GPU-uploadable upscale uniforms (16 bytes).
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Pod, Zeroable)]
@@ -525,5 +610,81 @@ mod tests {
     fn backend_equality() {
         assert_eq!(UpscaleBackend::Custom, UpscaleBackend::Custom);
         assert_ne!(UpscaleBackend::Dlss, UpscaleBackend::Custom);
+    }
+
+    #[test]
+    fn quality_mode_scale_factors() {
+        assert_eq!(QualityMode::Ultra.scale_factor(), 1.0);
+        assert_eq!(QualityMode::Quality.scale_factor(), 0.75);
+        assert_eq!(QualityMode::Balanced.scale_factor(), 0.5);
+        assert!((QualityMode::Performance.scale_factor() - 1.0 / 3.0).abs() < 1e-6);
+        assert_eq!(QualityMode::Potato.scale_factor(), 0.25);
+    }
+
+    #[test]
+    fn quality_mode_names() {
+        for mode in [
+            QualityMode::Ultra,
+            QualityMode::Quality,
+            QualityMode::Balanced,
+            QualityMode::Performance,
+            QualityMode::Potato,
+        ] {
+            assert!(!mode.name().is_empty(), "name() for {mode:?} must be non-empty");
+        }
+    }
+
+    #[test]
+    fn resolution_config_balanced_1080p() {
+        let cfg = ResolutionConfig::new(1920, 1080, QualityMode::Balanced);
+        assert_eq!(cfg.internal_width(), 960);
+        assert_eq!(cfg.internal_height(), 540);
+        assert_eq!(cfg.internal_resolution(), (960, 540));
+    }
+
+    #[test]
+    fn resolution_config_ultra_is_native() {
+        let cfg = ResolutionConfig::new(1920, 1080, QualityMode::Ultra);
+        assert_eq!(cfg.internal_width(), 1920);
+        assert_eq!(cfg.internal_height(), 1080);
+    }
+
+    #[test]
+    fn resolution_config_potato_is_aggressive() {
+        let cfg = ResolutionConfig::new(1920, 1080, QualityMode::Potato);
+        assert_eq!(cfg.internal_width(), 480);
+        assert_eq!(cfg.internal_height(), 270);
+    }
+
+    #[test]
+    fn resolution_config_minimum_one() {
+        // Even a 1×1 display with Potato mode stays at 1×1.
+        let cfg = ResolutionConfig::new(1, 1, QualityMode::Potato);
+        assert_eq!(cfg.internal_width(), 1);
+        assert_eq!(cfg.internal_height(), 1);
+
+        // Zero-sized display also clamps to 1.
+        let cfg = ResolutionConfig::new(0, 0, QualityMode::Potato);
+        assert_eq!(cfg.internal_width(), 1);
+        assert_eq!(cfg.internal_height(), 1);
+    }
+
+    #[test]
+    fn quality_modes_descending_scale() {
+        let scales = [
+            QualityMode::Ultra.scale_factor(),
+            QualityMode::Quality.scale_factor(),
+            QualityMode::Balanced.scale_factor(),
+            QualityMode::Performance.scale_factor(),
+            QualityMode::Potato.scale_factor(),
+        ];
+        for window in scales.windows(2) {
+            assert!(
+                window[0] > window[1],
+                "scale factors must be strictly descending: {} > {} failed",
+                window[0],
+                window[1]
+            );
+        }
     }
 }
