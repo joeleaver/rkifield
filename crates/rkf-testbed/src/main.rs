@@ -40,28 +40,21 @@ use automation::{SharedState, TestbedAutomationApi};
 /// Resolution tier for the test scene (Tier 1 = 2cm voxels).
 const TEST_TIER: usize = 1;
 
-/// Create a multi-object test scene with per-object materials.
+/// Create a lighting showcase scene with multiple objects and materials.
 ///
 /// Objects and their material IDs:
-/// - Sphere (center):  material 1 (stone)
-/// - Box (right):      material 2 (metal)
-/// - Capsule (left):   material 4 (emissive)
+/// - Ground plane:         material 1 (stone)
+/// - Center sphere:        material 2 (metal)
+/// - Left sphere:          material 5 (skin/SSS)
+/// - Right sphere:         material 3 (wood)
+/// - Back-left capsule:    material 4 (emissive)
+/// - Back-right box:       material 2 (metal)
+/// - Front-center sphere:  material 1 (stone)
 ///
 /// Returns `(BrickPool, SparseGrid, Aabb)`.
 fn create_test_scene() -> (BrickPool, SparseGrid, Aabb) {
-    // Object parameters
-    let sphere_center = Vec3::ZERO;
-    let sphere_radius = 0.35;
-
-    let box_center = Vec3::new(0.8, 0.0, 0.0);
-    let box_half = Vec3::splat(0.25);
-
-    let capsule_a = Vec3::new(-0.8, -0.25, 0.0);
-    let capsule_b = Vec3::new(-0.8, 0.25, 0.0);
-    let capsule_radius = 0.15;
-
-    // Combined AABB with margin
-    let aabb = Aabb::new(Vec3::new(-1.5, -1.0, -1.0), Vec3::new(1.5, 1.0, 1.0));
+    // Scene AABB — larger to accommodate ground plane and multiple objects
+    let aabb = Aabb::new(Vec3::new(-3.0, -0.6, -3.0), Vec3::new(3.0, 1.5, 3.0));
 
     let res = &RESOLUTION_TIERS[TEST_TIER];
     let size = aabb.size();
@@ -71,65 +64,151 @@ fn create_test_scene() -> (BrickPool, SparseGrid, Aabb) {
         ((size.z / res.brick_extent).ceil() as u32).max(1),
     );
 
-    let mut pool: BrickPool = Pool::new(4096);
+    let mut pool: BrickPool = Pool::new(16384);
     let mut grid = SparseGrid::new(dims);
 
-    // Populate each object with its own material ID.
-    // We use the union SDF for cell classification but assign per-object materials
-    // by populating each object separately. Since objects don't overlap, this works.
-    // Note: populate_grid_with_material will overwrite cells, so we do it once with
-    // the full union SDF but per-object material assignment.
+    let mut total = 0u32;
 
-    // Actually, the simplest correct approach: populate with the union SDF but use
-    // a closure that returns (distance, material_id). Since populate_grid takes
-    // a single SDF function and material_id, we need a different approach.
-    //
-    // Best approach: populate each object individually. Since the grid cells won't
-    // overlap (objects are spatially separated), each populate call fills different cells.
+    // Ground plane — thin flat box, material 1 (stone)
+    let ground_center = Vec3::new(0.0, -0.45, 0.0);
+    let ground_half = Vec3::new(2.8, 0.05, 2.8);
+    total += populate_grid_with_material(
+        &mut pool, &mut grid,
+        |p| box_sdf(ground_half, p - ground_center),
+        TEST_TIER, &aabb, 1,
+    ).expect("ground");
 
-    // Sphere → material 1 (stone)
-    let count1 = populate_grid_with_material(
-        &mut pool,
-        &mut grid,
-        |p| sphere_sdf(sphere_center, sphere_radius, p),
-        TEST_TIER,
-        &aabb,
-        1,
-    )
-    .expect("failed to populate sphere");
+    // Center sphere — material 2 (metal)
+    total += populate_grid_with_material(
+        &mut pool, &mut grid,
+        |p| sphere_sdf(Vec3::new(0.0, 0.0, 0.0), 0.35, p),
+        TEST_TIER, &aabb, 2,
+    ).expect("center sphere");
 
-    // Box → material 2 (metal)
-    let count2 = populate_grid_with_material(
-        &mut pool,
-        &mut grid,
-        |p| box_sdf(box_half, p - box_center),
-        TEST_TIER,
-        &aabb,
-        2,
-    )
-    .expect("failed to populate box");
+    // Left sphere — material 5 (skin/SSS)
+    total += populate_grid_with_material(
+        &mut pool, &mut grid,
+        |p| sphere_sdf(Vec3::new(-1.0, 0.0, 0.0), 0.3, p),
+        TEST_TIER, &aabb, 5,
+    ).expect("left sphere");
 
-    // Capsule → material 4 (emissive)
-    let count3 = populate_grid_with_material(
-        &mut pool,
-        &mut grid,
-        |p| capsule_sdf(capsule_a, capsule_b, capsule_radius, p),
-        TEST_TIER,
-        &aabb,
-        4,
-    )
-    .expect("failed to populate capsule");
+    // Right sphere — material 3 (wood)
+    total += populate_grid_with_material(
+        &mut pool, &mut grid,
+        |p| sphere_sdf(Vec3::new(1.0, 0.0, 0.0), 0.3, p),
+        TEST_TIER, &aabb, 3,
+    ).expect("right sphere");
 
-    let total = count1 + count2 + count3;
+    // Back-left capsule — material 4 (emissive cyan)
+    total += populate_grid_with_material(
+        &mut pool, &mut grid,
+        |p| capsule_sdf(Vec3::new(-0.7, -0.2, -0.8), Vec3::new(-0.7, 0.3, -0.8), 0.12, p),
+        TEST_TIER, &aabb, 4,
+    ).expect("back-left capsule");
+
+    // Back-right box — material 2 (metal)
+    let box_center = Vec3::new(0.7, 0.0, -0.8);
+    total += populate_grid_with_material(
+        &mut pool, &mut grid,
+        |p| box_sdf(Vec3::splat(0.22), p - box_center),
+        TEST_TIER, &aabb, 2,
+    ).expect("back-right box");
+
+    // Front-center small sphere — material 1 (stone)
+    total += populate_grid_with_material(
+        &mut pool, &mut grid,
+        |p| sphere_sdf(Vec3::new(0.0, -0.2, 0.7), 0.18, p),
+        TEST_TIER, &aabb, 1,
+    ).expect("front sphere");
+
     log::info!(
-        "Test scene: {total} bricks ({count1} sphere + {count2} box + {count3} capsule), \
-         grid {}x{}x{}, tier {TEST_TIER}",
-        dims.x,
-        dims.y,
-        dims.z
+        "Lighting showcase: {total} bricks, grid {}x{}x{}, tier {TEST_TIER}",
+        dims.x, dims.y, dims.z
     );
 
     (pool, grid, aabb)
+}
+
+/// Create the lighting showcase light set (20+ lights).
+///
+/// Mix of directional, point, and spot lights at various positions and colors.
+/// Some cast shadows, some don't, to exercise the shadow budget system.
+fn create_showcase_lights() -> Vec<Light> {
+    vec![
+        // --- Directional lights (2) ---
+        // Main sun — warm, shadow-casting
+        Light::directional([0.4, 0.8, 0.3], [1.0, 0.95, 0.85], 2.5, true),
+        // Fill sky — cool blue, no shadows
+        Light::directional([-0.2, 0.6, -0.5], [0.4, 0.5, 0.7], 0.8, false),
+
+        // --- Point lights (12) ---
+        // Warm key light above center
+        Light::point([0.0, 1.2, 0.5], [1.0, 0.9, 0.7], 8.0, 4.0, true),
+        // Red accent left
+        Light::point([-1.5, 0.5, 0.3], [1.0, 0.2, 0.1], 5.0, 3.0, true),
+        // Blue accent right
+        Light::point([1.5, 0.5, 0.3], [0.1, 0.3, 1.0], 5.0, 3.0, true),
+        // Green ground bounce back
+        Light::point([0.0, -0.1, -1.2], [0.2, 0.8, 0.3], 4.0, 3.0, false),
+        // Purple rim light
+        Light::point([0.0, 0.8, -1.5], [0.6, 0.1, 0.8], 6.0, 4.0, true),
+        // Orange low left
+        Light::point([-0.8, -0.2, 0.6], [1.0, 0.5, 0.1], 3.0, 2.5, false),
+        // Cyan low right
+        Light::point([0.8, -0.2, 0.6], [0.1, 0.8, 0.9], 3.0, 2.5, false),
+        // White overhead far
+        Light::point([0.0, 1.5, -0.5], [1.0, 1.0, 1.0], 10.0, 5.0, true),
+        // Yellow near ground front-left
+        Light::point([-1.2, 0.1, 1.0], [1.0, 0.9, 0.3], 3.0, 2.5, false),
+        // Pink near ground front-right
+        Light::point([1.2, 0.1, 1.0], [1.0, 0.3, 0.5], 3.0, 2.5, false),
+        // Dim white fill from below
+        Light::point([0.0, -0.35, 0.0], [1.0, 1.0, 1.0], 2.0, 2.0, false),
+        // Bright white back-center high
+        Light::point([0.0, 1.3, -1.0], [1.0, 1.0, 0.95], 7.0, 4.5, true),
+
+        // --- Spot lights (8) ---
+        // Spotlight on center sphere from above-front
+        Light::spot(
+            [0.0, 1.5, 1.5], [0.0, -0.8, -0.6],
+            [1.0, 1.0, 1.0], 15.0, 5.0, 0.15, 0.35, true,
+        ),
+        // Red spot on left sphere
+        Light::spot(
+            [-1.0, 1.2, 0.8], [0.0, -0.7, -0.5],
+            [1.0, 0.15, 0.1], 12.0, 4.0, 0.2, 0.4, true,
+        ),
+        // Blue spot on right sphere
+        Light::spot(
+            [1.0, 1.2, 0.8], [0.0, -0.7, -0.5],
+            [0.1, 0.2, 1.0], 12.0, 4.0, 0.2, 0.4, true,
+        ),
+        // Green spot from behind on ground
+        Light::spot(
+            [0.0, 0.8, -2.0], [0.0, -0.3, 0.9],
+            [0.2, 1.0, 0.3], 10.0, 5.0, 0.1, 0.3, false,
+        ),
+        // Warm narrow spot on back-right box
+        Light::spot(
+            [0.7, 1.0, -0.3], [0.0, -1.0, -0.2],
+            [1.0, 0.8, 0.5], 8.0, 3.0, 0.1, 0.2, true,
+        ),
+        // Cool narrow spot on back-left capsule
+        Light::spot(
+            [-0.7, 1.0, -0.3], [0.0, -1.0, -0.2],
+            [0.5, 0.7, 1.0], 8.0, 3.0, 0.1, 0.2, true,
+        ),
+        // Wide purple wash from side
+        Light::spot(
+            [-2.0, 0.5, 0.0], [1.0, -0.2, 0.0],
+            [0.5, 0.1, 0.8], 6.0, 5.0, 0.3, 0.6, false,
+        ),
+        // Wide orange wash from other side
+        Light::spot(
+            [2.0, 0.5, 0.0], [-1.0, -0.2, 0.0],
+            [1.0, 0.5, 0.1], 6.0, 5.0, 0.3, 0.6, false,
+        ),
+    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -181,8 +260,8 @@ impl GpuState {
             state.pool_allocated = pool.allocated_count() as u64;
         }
 
-        // Camera positioned to see all three objects (sphere, box, capsule)
-        let mut camera = Camera::new(Vec3::new(0.0, 0.5, 3.0));
+        // Camera positioned to see the full lighting showcase
+        let mut camera = Camera::new(Vec3::new(0.0, 0.8, 3.5));
         camera.fov_degrees = 60.0;
 
         let camera_uniforms = camera.uniforms(INTERNAL_WIDTH, INTERNAL_HEIGHT);
@@ -212,15 +291,9 @@ impl GpuState {
         // Create G-buffer
         let gbuffer = GBuffer::new(&context.device, INTERNAL_WIDTH, INTERNAL_HEIGHT);
 
-        // Create lights — directional sun matching previous hardcoded values
-        let lights = vec![
-            Light::directional(
-                [0.4, 0.8, 0.3],   // direction (same as old SUN_DIR)
-                [1.0, 0.95, 0.85], // color (same as old SUN_COLOR)
-                3.0,                // intensity (same as old SUN_INTENSITY)
-                true,               // shadow caster
-            ),
-        ];
+        // Create lighting showcase — 22 lights (2 directional + 12 point + 8 spot)
+        let lights = create_showcase_lights();
+        log::info!("Lighting showcase: {} lights", lights.len());
         let light_buffer = LightBuffer::upload(&context.device, &lights);
 
         // Create tile cull pass
