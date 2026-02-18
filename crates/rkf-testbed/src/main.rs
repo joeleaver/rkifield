@@ -24,6 +24,7 @@ use rkf_render::clipmap_gpu::ClipmapGpuData;
 use rkf_render::gbuffer::GBuffer;
 use rkf_render::gpu_color_pool::GpuColorPool;
 use rkf_render::gpu_scene::{GpuScene, SceneUniforms};
+use rkf_render::history::HistoryBuffers;
 use rkf_render::light::{Light, LightBuffer};
 use rkf_render::material_table::{self, MaterialTable};
 use rkf_render::radiance_inject::RadianceInjectPass;
@@ -31,8 +32,10 @@ use rkf_render::radiance_mip::RadianceMipPass;
 use rkf_render::radiance_volume::RadianceVolume;
 use rkf_render::ray_march::{RayMarchPass, INTERNAL_HEIGHT, INTERNAL_WIDTH};
 use rkf_render::shading::ShadingPass;
+use rkf_render::sharpen::SharpenPass;
 use rkf_render::tile_cull::TileCullPass;
 use rkf_render::tone_map::ToneMapPass;
+use rkf_render::upscale::UpscalePass;
 use rkf_render::RenderContext;
 
 mod automation;
@@ -44,6 +47,11 @@ use automation::{SharedState, TestbedAutomationApi};
 
 /// Resolution tier for the test scene (Tier 1 = 2cm voxels).
 const TEST_TIER: usize = 1;
+
+/// Display (output) resolution width — the window size.
+const DISPLAY_WIDTH: u32 = 1280;
+/// Display (output) resolution height — the window size.
+const DISPLAY_HEIGHT: u32 = 720;
 
 /// Create a lighting showcase scene with multiple objects and materials.
 ///
@@ -318,12 +326,16 @@ struct GpuState {
     color_pool: GpuColorPool,
     ray_march: RayMarchPass,
     shading: ShadingPass,
+    history: HistoryBuffers,
+    upscale: UpscalePass,
+    sharpen: SharpenPass,
     tone_map: ToneMapPass,
     blit: BlitPass,
     camera: Camera,
     staging_buffer: wgpu::Buffer,
     shared_state: Arc<Mutex<SharedState>>,
     frame_index: u32,
+    prev_vp: [[f32; 4]; 4],
 }
 
 impl GpuState {
@@ -425,18 +437,35 @@ impl GpuState {
             INTERNAL_WIDTH,
             INTERNAL_HEIGHT,
         );
+        // Phase 9: Temporal upscaling pipeline
+        log::info!("Upscale backend: Custom Temporal ({}×{} → {}×{})",
+            INTERNAL_WIDTH, INTERNAL_HEIGHT, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+
+        let history = HistoryBuffers::new(
+            &context.device, DISPLAY_WIDTH, DISPLAY_HEIGHT, INTERNAL_WIDTH, INTERNAL_HEIGHT,
+        );
+        let upscale = UpscalePass::new(
+            &context.device, &shading, &gbuffer, &history,
+            DISPLAY_WIDTH, DISPLAY_HEIGHT, INTERNAL_WIDTH, INTERNAL_HEIGHT,
+        );
+        let sharpen = SharpenPass::new(
+            &context.device, &upscale.output_view, &gbuffer,
+            DISPLAY_WIDTH, DISPLAY_HEIGHT,
+        );
+
+        // Tone map and blit now operate at display resolution
         let tone_map = ToneMapPass::new(
             &context.device,
-            &shading.hdr_view,
-            INTERNAL_WIDTH,
-            INTERNAL_HEIGHT,
+            &sharpen.output_view,
+            DISPLAY_WIDTH,
+            DISPLAY_HEIGHT,
         );
         let blit = BlitPass::new(&context.device, &tone_map.ldr_view, surface_format);
 
-        // Staging buffer for CPU readback of rendered frames (screenshot support).
+        // Staging buffer for CPU readback at display resolution
         let staging_buffer = context.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("screenshot staging"),
-            size: (INTERNAL_WIDTH * INTERNAL_HEIGHT * 4) as u64,
+            size: (DISPLAY_WIDTH * DISPLAY_HEIGHT * 4) as u64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -460,12 +489,16 @@ impl GpuState {
             color_pool,
             ray_march,
             shading,
+            history,
+            upscale,
+            sharpen,
             tone_map,
             blit,
             camera,
             staging_buffer,
             shared_state,
             frame_index: 0,
+            prev_vp: [[0.0; 4]; 4],
         }
     }
 
@@ -480,12 +513,13 @@ impl GpuState {
     }
 
     fn update_camera(&mut self) {
-        let mut uniforms =
+        let uniforms =
             self.camera
-                .uniforms(INTERNAL_WIDTH, INTERNAL_HEIGHT, self.frame_index, [[0.0; 4]; 4]);
-        // Disable sub-pixel jitter until temporal accumulation is active (Phase 9).
-        // Without a resolve pass, jitter causes visible per-frame wobble.
-        uniforms.jitter = [0.0, 0.0];
+                .uniforms(INTERNAL_WIDTH, INTERNAL_HEIGHT, self.frame_index, self.prev_vp);
+        // Store current VP as prev for next frame
+        let vp = self.camera.view_projection(INTERNAL_WIDTH, INTERNAL_HEIGHT);
+        self.prev_vp = vp.to_cols_array_2d();
+
         self.context.queue.write_buffer(
             &self.scene.camera_buffer,
             0,
@@ -571,7 +605,7 @@ impl GpuState {
             [cam_pos.x, cam_pos.y, cam_pos.z],
         );
 
-        // Phase 8 pipeline: ray march -> tile cull -> GI inject -> GI mip -> shade -> tone map -> blit
+        // Phase 9 pipeline: ray march -> tile cull -> GI inject -> GI mip -> shade -> upscale -> sharpen -> tone map -> blit
         self.ray_march
             .dispatch(&mut encoder, &self.scene, &self.gbuffer, &self.clipmap);
         self.tile_cull.dispatch(&mut encoder, &self.gbuffer);
@@ -591,6 +625,12 @@ impl GpuState {
             &self.radiance_volume,
             &self.color_pool,
         );
+
+        // Phase 9: temporal upscale + edge-aware sharpen
+        let history_read_idx = self.history.read_index();
+        self.upscale.dispatch(&mut encoder, history_read_idx);
+        self.sharpen.dispatch(&mut encoder);
+
         self.tone_map.dispatch(&mut encoder);
         self.blit.draw(&mut encoder, &view);
 
@@ -606,13 +646,13 @@ impl GpuState {
                 buffer: &self.staging_buffer,
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(INTERNAL_WIDTH * 4),
-                    rows_per_image: Some(INTERNAL_HEIGHT),
+                    bytes_per_row: Some(DISPLAY_WIDTH * 4),
+                    rows_per_image: Some(DISPLAY_HEIGHT),
                 },
             },
             wgpu::Extent3d {
-                width: INTERNAL_WIDTH,
-                height: INTERNAL_HEIGHT,
+                width: DISPLAY_WIDTH,
+                height: DISPLAY_HEIGHT,
                 depth_or_array_layers: 1,
             },
         );
@@ -622,6 +662,9 @@ impl GpuState {
 
         // Read back the staging buffer into shared state for MCP screenshot tool
         self.capture_frame();
+
+        // Swap history ping-pong for next frame
+        self.history.swap();
 
         // Update shared state with camera and timing info
         if let Ok(mut state) = self.shared_state.lock() {
@@ -812,7 +855,7 @@ impl ApplicationHandler for App {
             return;
         }
         let attrs = WindowAttributes::default()
-            .with_title("RKIField Testbed [Phase 8]")
+            .with_title("RKIField Testbed [Phase 9]")
             .with_inner_size(PhysicalSize::new(1280u32, 720u32));
         let window = Arc::new(
             event_loop
@@ -823,8 +866,8 @@ impl ApplicationHandler for App {
         // Create shared state for automation API
         let shared_state = Arc::new(Mutex::new(SharedState::new(
             0, 0, // will be updated by GpuState::new
-            INTERNAL_WIDTH,
-            INTERNAL_HEIGHT,
+            DISPLAY_WIDTH,
+            DISPLAY_HEIGHT,
         )));
 
         self.gpu = Some(GpuState::new(window.clone(), Arc::clone(&shared_state)));
@@ -839,7 +882,7 @@ impl ApplicationHandler for App {
         log::info!("IPC server listening on {socket_path}");
         self.socket_path = Some(socket_path);
 
-        log::info!("Phase 8 validation — Cornell box GI (color bleeding, emissive ceiling light)");
+        log::info!("Phase 9 validation — temporal upscaling (jitter, history, sharpen)");
         log::info!("Click to capture mouse, WASD to move, mouse to look, Esc to exit");
     }
 
@@ -903,7 +946,7 @@ impl ApplicationHandler for App {
                         let elapsed = now.duration_since(self.last_title_update).as_secs_f64();
                         let fps = self.frame_count as f64 / elapsed;
                         window.set_title(&format!(
-                            "RKIField Testbed [Phase 8] — {fps:.0} fps ({:.2} ms)",
+                            "RKIField Testbed [Phase 9] — {fps:.0} fps ({:.2} ms)",
                             1000.0 / fps
                         ));
                         self.frame_count = 0;
