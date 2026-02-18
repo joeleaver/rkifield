@@ -482,6 +482,12 @@ fn ray_march_dda_level(origin: vec3<f32>, dir: vec3<f32>,
             if result.hit {
                 return result;
             }
+        } else if state == CELL_EMPTY && level + 1u < clipmap.num_levels {
+            // Finest level has no data here — check coarser levels for surface data.
+            let fallback = probe_coarser_levels(origin, safe_dir, inv_dir, t, level);
+            if fallback.hit {
+                return fallback;
+            }
         }
 
         if t_max_axis.x < t_max_axis.y && t_max_axis.x < t_max_axis.z {
@@ -500,6 +506,40 @@ fn ray_march_dda_level(origin: vec3<f32>, dir: vec3<f32>,
     }
 
     return MarchResult(-1.0, false, 0u, 0u, 0.0, level);
+}
+
+/// Probe coarser clipmap levels for surface data at the current ray position.
+///
+/// When the finest level covering a position has an empty cell, coarser levels
+/// may still have surface data (e.g., coarse terrain where fine detail wasn't placed).
+/// Checks levels from `current_level + 1` to `num_levels - 1`.
+fn probe_coarser_levels(origin: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
+                        t: f32, current_level: u32) -> MarchResult {
+    let world_pos = origin + dir * t;
+
+    for (var lvl = current_level + 1u; lvl < clipmap.num_levels; lvl++) {
+        let be = cm_brick_extent(lvl);
+        let g_origin = cm_grid_origin(lvl);
+        let local = world_pos - g_origin;
+        let cell_i = vec3<i32>(floor(local / be));
+
+        if !cm_cell_in_bounds(cell_i, lvl) {
+            continue;
+        }
+
+        let cell = vec3<u32>(cell_i);
+        let flat = cm_cell_flat_index(cell, lvl);
+        let state = cm_get_cell_state(flat, lvl);
+
+        if state == CELL_SURFACE {
+            let result = sphere_trace_brick_cm(origin, dir, inv_dir, t, cell, flat, lvl);
+            if result.hit {
+                return result;
+            }
+        }
+    }
+
+    return MarchResult(-1.0, false, 0u, 0u, 0.0, current_level);
 }
 
 /// Multi-level clipmap ray march.
@@ -611,6 +651,57 @@ fn compute_normal_cm(pos: vec3<f32>, level: u32) -> vec3<f32> {
     return normalize(vec3<f32>(nx, ny, nz));
 }
 
+/// Sample SDF at a position using the finest clipmap level with data.
+///
+/// Iterates levels from finest (0) to coarsest. Returns the SDF distance
+/// from the first level that has surface or interior data at this position.
+/// Used for accurate normal computation when multiple tiers coexist.
+fn sample_sdf_finest(pos: vec3<f32>) -> f32 {
+    for (var lvl = 0u; lvl < clipmap.num_levels; lvl++) {
+        let be = cm_brick_extent(lvl);
+        let g_origin = cm_grid_origin(lvl);
+        let local = pos - g_origin;
+        let cell_i = vec3<i32>(floor(local / be));
+
+        if !cm_cell_in_bounds(cell_i, lvl) {
+            continue;
+        }
+
+        let cell = vec3<u32>(cell_i);
+        let flat = cm_cell_flat_index(cell, lvl);
+        let state = cm_get_cell_state(flat, lvl);
+
+        if state == CELL_SURFACE {
+            let slot = cm_get_slot(flat, lvl);
+            if slot != EMPTY_SLOT {
+                let brick_min = g_origin + vec3<f32>(cell) * be;
+                return sample_brick_cm(pos, brick_min, slot, lvl);
+            }
+        }
+        if state == CELL_INTERIOR {
+            return -be * 0.5;
+        }
+    }
+
+    // No data at any level — return large positive distance.
+    return cm_brick_extent(clipmap.num_levels - 1u);
+}
+
+/// Compute surface normal using the finest available clipmap level at each sample point.
+///
+/// The central difference epsilon is based on the hit level's voxel size,
+/// but each SDF sample uses the finest level with data at that position.
+fn compute_normal_finest(pos: vec3<f32>, hit_level: u32) -> vec3<f32> {
+    let e = cm_voxel_size(hit_level) * 1.5;
+    let nx = sample_sdf_finest(pos + vec3<f32>(e, 0.0, 0.0))
+           - sample_sdf_finest(pos - vec3<f32>(e, 0.0, 0.0));
+    let ny = sample_sdf_finest(pos + vec3<f32>(0.0, e, 0.0))
+           - sample_sdf_finest(pos - vec3<f32>(0.0, e, 0.0));
+    let nz = sample_sdf_finest(pos + vec3<f32>(0.0, 0.0, e))
+           - sample_sdf_finest(pos - vec3<f32>(0.0, 0.0, e));
+    return normalize(vec3<f32>(nx, ny, nz));
+}
+
 // ---------- Entry point ----------
 
 @compute @workgroup_size(8, 8, 1)
@@ -645,9 +736,12 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
         let hit_pos = ray_origin + ray_dir * result.t;
 
         // Compute normal using the appropriate path.
+        // compute_normal_finest checks all levels for the finest data at each
+        // sample point, producing accurate normals even when the hit came from
+        // a coarser fallback level.
         var normal: vec3<f32>;
         if clipmap.num_levels > 0u {
-            normal = compute_normal_cm(hit_pos, result.level);
+            normal = compute_normal_finest(hit_pos, result.level);
         } else {
             normal = compute_normal(hit_pos);
         }
