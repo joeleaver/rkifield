@@ -199,8 +199,8 @@ mod tests {
 
     struct EchoHandler;
     impl ToolHandler for EchoHandler {
-        fn call(&self, _api: &dyn AutomationApi, params: Value) -> Result<Value, ToolError> {
-            Ok(serde_json::json!({"echo": params}))
+        fn call(&self, _api: &dyn AutomationApi, params: Value) -> Result<ToolResponse, ToolError> {
+            Ok(serde_json::json!({"echo": params}).into())
         }
     }
 

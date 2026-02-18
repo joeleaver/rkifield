@@ -12,21 +12,15 @@ use std::sync::Arc;
 struct ScreenshotHandler;
 
 impl ToolHandler for ScreenshotHandler {
-    fn call(&self, api: &dyn AutomationApi, params: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+    fn call(&self, api: &dyn AutomationApi, params: serde_json::Value) -> Result<ToolResponse, ToolError> {
         let width = params.get("width").and_then(|v| v.as_u64()).unwrap_or(1920) as u32;
         let height = params.get("height").and_then(|v| v.as_u64()).unwrap_or(1080) as u32;
 
         match api.screenshot(width, height) {
-            Ok(data) => {
-                use base64::Engine;
-                let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
-                Ok(serde_json::json!({
-                    "format": "png",
-                    "width": width,
-                    "height": height,
-                    "data": b64,
-                }))
-            }
+            Ok(data) => Ok(ToolResponse::Image {
+                data,
+                mime_type: "image/png".to_string(),
+            }),
             Err(e) => Err(ToolError::EngineError(e.to_string())),
         }
     }
@@ -37,9 +31,9 @@ impl ToolHandler for ScreenshotHandler {
 struct SceneGraphHandler;
 
 impl ToolHandler for SceneGraphHandler {
-    fn call(&self, api: &dyn AutomationApi, _params: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+    fn call(&self, api: &dyn AutomationApi, _params: serde_json::Value) -> Result<ToolResponse, ToolError> {
         match api.scene_graph() {
-            Ok(snapshot) => serde_json::to_value(snapshot).map_err(ToolError::from),
+            Ok(snapshot) => Ok(serde_json::to_value(snapshot).map_err(ToolError::from)?.into()),
             Err(e) => Err(ToolError::EngineError(e.to_string())),
         }
     }
@@ -50,14 +44,14 @@ impl ToolHandler for SceneGraphHandler {
 struct EntityInspectHandler;
 
 impl ToolHandler for EntityInspectHandler {
-    fn call(&self, api: &dyn AutomationApi, params: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+    fn call(&self, api: &dyn AutomationApi, params: serde_json::Value) -> Result<ToolResponse, ToolError> {
         let entity_id = params
             .get("entity_id")
             .and_then(|v| v.as_u64())
             .ok_or_else(|| ToolError::InvalidParams("entity_id is required".to_string()))?;
 
         match api.entity_inspect(entity_id) {
-            Ok(snapshot) => serde_json::to_value(snapshot).map_err(ToolError::from),
+            Ok(snapshot) => Ok(serde_json::to_value(snapshot).map_err(ToolError::from)?.into()),
             Err(e) => Err(ToolError::EngineError(e.to_string())),
         }
     }
@@ -68,9 +62,9 @@ impl ToolHandler for EntityInspectHandler {
 struct RenderStatsHandler;
 
 impl ToolHandler for RenderStatsHandler {
-    fn call(&self, api: &dyn AutomationApi, _params: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+    fn call(&self, api: &dyn AutomationApi, _params: serde_json::Value) -> Result<ToolResponse, ToolError> {
         match api.render_stats() {
-            Ok(stats) => serde_json::to_value(stats).map_err(ToolError::from),
+            Ok(stats) => Ok(serde_json::to_value(stats).map_err(ToolError::from)?.into()),
             Err(e) => Err(ToolError::EngineError(e.to_string())),
         }
     }
@@ -81,11 +75,11 @@ impl ToolHandler for RenderStatsHandler {
 struct LogReadHandler;
 
 impl ToolHandler for LogReadHandler {
-    fn call(&self, api: &dyn AutomationApi, params: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+    fn call(&self, api: &dyn AutomationApi, params: serde_json::Value) -> Result<ToolResponse, ToolError> {
         let lines = params.get("lines").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
 
         match api.read_log(lines) {
-            Ok(entries) => serde_json::to_value(entries).map_err(ToolError::from),
+            Ok(entries) => Ok(serde_json::to_value(entries).map_err(ToolError::from)?.into()),
             Err(e) => Err(ToolError::EngineError(e.to_string())),
         }
     }
@@ -96,9 +90,9 @@ impl ToolHandler for LogReadHandler {
 struct CameraGetHandler;
 
 impl ToolHandler for CameraGetHandler {
-    fn call(&self, api: &dyn AutomationApi, _params: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+    fn call(&self, api: &dyn AutomationApi, _params: serde_json::Value) -> Result<ToolResponse, ToolError> {
         match api.camera_state() {
-            Ok(state) => serde_json::to_value(state).map_err(ToolError::from),
+            Ok(state) => Ok(serde_json::to_value(state).map_err(ToolError::from)?.into()),
             Err(e) => Err(ToolError::EngineError(e.to_string())),
         }
     }
@@ -109,9 +103,9 @@ impl ToolHandler for CameraGetHandler {
 struct BrickPoolStatsHandler;
 
 impl ToolHandler for BrickPoolStatsHandler {
-    fn call(&self, api: &dyn AutomationApi, _params: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+    fn call(&self, api: &dyn AutomationApi, _params: serde_json::Value) -> Result<ToolResponse, ToolError> {
         match api.brick_pool_stats() {
-            Ok(stats) => serde_json::to_value(stats).map_err(ToolError::from),
+            Ok(stats) => Ok(serde_json::to_value(stats).map_err(ToolError::from)?.into()),
             Err(e) => Err(ToolError::EngineError(e.to_string())),
         }
     }
@@ -122,7 +116,7 @@ impl ToolHandler for BrickPoolStatsHandler {
 struct SpatialQueryHandler;
 
 impl ToolHandler for SpatialQueryHandler {
-    fn call(&self, api: &dyn AutomationApi, params: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+    fn call(&self, api: &dyn AutomationApi, params: serde_json::Value) -> Result<ToolResponse, ToolError> {
         let chunk = [
             params.get("chunk_x").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
             params.get("chunk_y").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
@@ -135,7 +129,7 @@ impl ToolHandler for SpatialQueryHandler {
         ];
 
         match api.spatial_query(chunk, local) {
-            Ok(result) => serde_json::to_value(result).map_err(ToolError::from),
+            Ok(result) => Ok(serde_json::to_value(result).map_err(ToolError::from)?.into()),
             Err(e) => Err(ToolError::EngineError(e.to_string())),
         }
     }
@@ -146,9 +140,9 @@ impl ToolHandler for SpatialQueryHandler {
 struct AssetStatusHandler;
 
 impl ToolHandler for AssetStatusHandler {
-    fn call(&self, api: &dyn AutomationApi, _params: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+    fn call(&self, api: &dyn AutomationApi, _params: serde_json::Value) -> Result<ToolResponse, ToolError> {
         match api.asset_status() {
-            Ok(status) => serde_json::to_value(status).map_err(ToolError::from),
+            Ok(status) => Ok(serde_json::to_value(status).map_err(ToolError::from)?.into()),
             Err(e) => Err(ToolError::EngineError(e.to_string())),
         }
     }

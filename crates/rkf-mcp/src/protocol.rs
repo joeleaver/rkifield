@@ -294,10 +294,10 @@ pub fn handle_request(
             let tool_args = call_params.arguments.unwrap_or(Value::Null);
 
             match registry.call(&call_params.name, mode, api, tool_args) {
-                Ok(value) => {
-                    let text = serde_json::to_string_pretty(&value).unwrap_or_default();
+                Ok(response) => {
+                    let content = tool_response_to_content(response);
                     let result = ToolsCallResult {
-                        content: vec![ContentBlock::Text { text }],
+                        content,
                         is_error: None,
                     };
                     Some(JsonRpcResponse::success(
@@ -325,6 +325,26 @@ pub fn handle_request(
             METHOD_NOT_FOUND,
             format!("method not found: {}", request.method),
         )),
+    }
+}
+
+/// Convert a [`ToolResponse`] into MCP content blocks.
+fn tool_response_to_content(response: crate::registry::ToolResponse) -> Vec<ContentBlock> {
+    use base64::Engine;
+    use crate::registry::ToolResponse;
+
+    match response {
+        ToolResponse::Json(value) => {
+            let text = serde_json::to_string_pretty(&value).unwrap_or_default();
+            vec![ContentBlock::Text { text }]
+        }
+        ToolResponse::Image { data, mime_type } => {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+            vec![ContentBlock::Image {
+                data: b64,
+                mime_type,
+            }]
+        }
     }
 }
 
@@ -417,10 +437,10 @@ pub fn handle_request_locked(
                 api_slot.read().unwrap().clone();
 
             match registry.call(&call_params.name, mode, &*api, tool_args) {
-                Ok(value) => {
-                    let text = serde_json::to_string_pretty(&value).unwrap_or_default();
+                Ok(response) => {
+                    let content = tool_response_to_content(response);
                     let result = ToolsCallResult {
-                        content: vec![ContentBlock::Text { text }],
+                        content,
                         is_error: None,
                     };
                     Some(JsonRpcResponse::success(
@@ -471,8 +491,8 @@ mod tests {
             &self,
             _api: &dyn rkf_core::automation::AutomationApi,
             params: Value,
-        ) -> Result<Value, ToolError> {
-            Ok(serde_json::json!({ "echo": params }))
+        ) -> Result<ToolResponse, ToolError> {
+            Ok(serde_json::json!({ "echo": params }).into())
         }
     }
 

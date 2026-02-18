@@ -89,6 +89,29 @@ pub struct ToolDefinition {
     pub mode: ToolMode,
 }
 
+/// Response from a tool handler.
+///
+/// Most tools return JSON data (wrapped as a text content block in MCP).
+/// Tools that produce binary data (e.g., screenshots) return typed variants
+/// that the protocol layer converts to the appropriate MCP content block.
+pub enum ToolResponse {
+    /// Regular JSON result — serialized as a text content block.
+    Json(serde_json::Value),
+    /// Binary image data — returned as an MCP image content block.
+    Image {
+        /// Raw image bytes (e.g., PNG-encoded).
+        data: Vec<u8>,
+        /// MIME type (e.g., "image/png").
+        mime_type: String,
+    },
+}
+
+impl From<serde_json::Value> for ToolResponse {
+    fn from(v: serde_json::Value) -> Self {
+        ToolResponse::Json(v)
+    }
+}
+
 /// Trait for tool handler implementations.
 ///
 /// Each tool implements this trait to handle invocations.
@@ -98,7 +121,7 @@ pub trait ToolHandler: Send + Sync {
         &self,
         api: &dyn AutomationApi,
         params: serde_json::Value,
-    ) -> Result<serde_json::Value, ToolError>;
+    ) -> Result<ToolResponse, ToolError>;
 }
 
 /// Errors that can occur during tool execution.
@@ -189,7 +212,7 @@ impl ToolRegistry {
         mode: ToolMode,
         api: &dyn AutomationApi,
         params: serde_json::Value,
-    ) -> Result<serde_json::Value, ToolError> {
+    ) -> Result<ToolResponse, ToolError> {
         let tool = self
             .tools
             .get(name)
@@ -248,8 +271,8 @@ mod tests {
             &self,
             _api: &dyn AutomationApi,
             params: serde_json::Value,
-        ) -> Result<serde_json::Value, ToolError> {
-            Ok(serde_json::json!({ "echo": params }))
+        ) -> Result<ToolResponse, ToolError> {
+            Ok(serde_json::json!({ "echo": params }).into())
         }
     }
 
@@ -323,8 +346,12 @@ mod tests {
         let params = serde_json::json!({"width": 1920});
         let result = registry.call("screenshot", ToolMode::Editor, &api, params.clone());
         assert!(result.is_ok());
-        let value = result.unwrap();
-        assert_eq!(value, serde_json::json!({"echo": {"width": 1920}}));
+        match result.unwrap() {
+            ToolResponse::Json(value) => {
+                assert_eq!(value, serde_json::json!({"echo": {"width": 1920}}));
+            }
+            _ => panic!("expected ToolResponse::Json"),
+        }
     }
 
     #[test]

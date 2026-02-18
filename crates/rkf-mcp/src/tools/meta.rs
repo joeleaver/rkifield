@@ -22,7 +22,7 @@ impl ToolHandler for ConnectHandler {
         &self,
         _api: &dyn AutomationApi,
         params: serde_json::Value,
-    ) -> Result<serde_json::Value, ToolError> {
+    ) -> Result<ToolResponse, ToolError> {
         let socket_path = params
             .get("socket_path")
             .and_then(|v| v.as_str())
@@ -46,7 +46,7 @@ impl ToolHandler for ConnectHandler {
                     "status": "no_engine_found",
                     "message": "No running RKIField engine found. Start rkf-testbed, rkf-editor, or rkf-game first, then call connect again.",
                     "hint": "You can also specify socket_path directly if the engine uses a custom path."
-                }));
+                }).into());
             }
 
             // If exactly one socket found, auto-connect to it
@@ -58,7 +58,7 @@ impl ToolHandler for ConnectHandler {
                 "status": "engines_found",
                 "sockets": found,
                 "message": "Found multiple engine sockets. Call connect again with socket_path to attach.",
-            }));
+            }).into());
         }
 
         // Check if socket exists
@@ -67,7 +67,7 @@ impl ToolHandler for ConnectHandler {
                 "status": "socket_not_found",
                 "socket_path": socket_path,
                 "message": format!("Socket file not found: {socket_path}"),
-            }));
+            }).into());
         }
 
         self.do_connect(&socket_path)
@@ -75,7 +75,7 @@ impl ToolHandler for ConnectHandler {
 }
 
 impl ConnectHandler {
-    fn do_connect(&self, socket_path: &str) -> Result<serde_json::Value, ToolError> {
+    fn do_connect(&self, socket_path: &str) -> Result<ToolResponse, ToolError> {
         let bridge = BridgeAutomationApi::new(socket_path.to_string());
 
         let mut slot = self.api_slot.write().map_err(|e| {
@@ -88,7 +88,7 @@ impl ConnectHandler {
             "status": "connected",
             "socket_path": socket_path,
             "message": "Connected to engine via IPC bridge. Tools now return live data.",
-        }))
+        }).into())
     }
 }
 
@@ -104,7 +104,7 @@ impl ToolHandler for DisconnectHandler {
         &self,
         _api: &dyn AutomationApi,
         _params: serde_json::Value,
-    ) -> Result<serde_json::Value, ToolError> {
+    ) -> Result<ToolResponse, ToolError> {
         // Swap back to stub API
         let mut slot = self.api_slot.write().map_err(|e| {
             ToolError::EngineError(format!("failed to acquire write lock: {e}"))
@@ -115,7 +115,7 @@ impl ToolHandler for DisconnectHandler {
         Ok(serde_json::json!({
             "status": "disconnected",
             "message": "Disconnected from engine. All tools now return stub data.",
-        }))
+        }).into())
     }
 }
 
@@ -130,7 +130,7 @@ impl ToolHandler for StatusHandler {
         &self,
         _api: &dyn AutomationApi,
         _params: serde_json::Value,
-    ) -> Result<serde_json::Value, ToolError> {
+    ) -> Result<ToolResponse, ToolError> {
         let connected = self.connected.load(Ordering::Relaxed);
 
         // Auto-discover available engines
@@ -151,7 +151,7 @@ impl ToolHandler for StatusHandler {
                 "message": "Connected to engine via IPC bridge. Tools return live data.",
                 "available_engines": available_sockets,
                 "server_version": env!("CARGO_PKG_VERSION"),
-            }))
+            }).into())
         } else {
             Ok(serde_json::json!({
                 "connected": false,
@@ -159,7 +159,7 @@ impl ToolHandler for StatusHandler {
                 "message": "Running with stub API. Engine tools return placeholder data. Use the 'connect' tool to attach to a running engine.",
                 "available_engines": available_sockets,
                 "server_version": env!("CARGO_PKG_VERSION"),
-            }))
+            }).into())
         }
     }
 }
@@ -257,6 +257,14 @@ mod tests {
         assert_eq!(registry.list_tools(ToolMode::Debug).len(), 3);
     }
 
+    /// Helper to extract JSON value from a ToolResponse::Json variant.
+    fn unwrap_json(response: ToolResponse) -> serde_json::Value {
+        match response {
+            ToolResponse::Json(v) => v,
+            _ => panic!("expected ToolResponse::Json"),
+        }
+    }
+
     #[test]
     fn status_tool_shows_stub_mode() {
         let api_slot = make_api_slot();
@@ -266,7 +274,7 @@ mod tests {
         let api: Arc<dyn AutomationApi> = api_slot.read().unwrap().clone();
         let result = registry.call("status", ToolMode::Editor, &*api, serde_json::json!({}));
         assert!(result.is_ok());
-        let value = result.unwrap();
+        let value = unwrap_json(result.unwrap());
         assert_eq!(value["connected"], false);
         assert_eq!(value["api_mode"], "stub");
     }
@@ -279,7 +287,7 @@ mod tests {
         let api: Arc<dyn AutomationApi> = api_slot.read().unwrap().clone();
         let result = registry.call("connect", ToolMode::Editor, &*api, serde_json::json!({}));
         assert!(result.is_ok());
-        let value = result.unwrap();
+        let value = unwrap_json(result.unwrap());
         // Will be "no_engine_found", "engines_found", or "connected" (auto-connect single)
         let status = value["status"].as_str().unwrap();
         assert!(
@@ -302,7 +310,7 @@ mod tests {
             serde_json::json!({"socket_path": "/tmp/nonexistent.sock"}),
         );
         assert!(result.is_ok());
-        assert_eq!(result.unwrap()["status"], "socket_not_found");
+        assert_eq!(unwrap_json(result.unwrap())["status"], "socket_not_found");
     }
 
     #[test]
@@ -315,7 +323,7 @@ mod tests {
         let api: Arc<dyn AutomationApi> = api_slot.read().unwrap().clone();
         let result = registry.call("disconnect", ToolMode::Editor, &*api, serde_json::json!({}));
         assert!(result.is_ok());
-        assert_eq!(result.unwrap()["status"], "disconnected");
+        assert_eq!(unwrap_json(result.unwrap())["status"], "disconnected");
     }
 
     #[test]
@@ -327,11 +335,11 @@ mod tests {
 
         // Initially disconnected
         let result = registry.call("status", ToolMode::Editor, &*api, serde_json::json!({}));
-        assert_eq!(result.unwrap()["connected"], false);
+        assert_eq!(unwrap_json(result.unwrap())["connected"], false);
 
         // After disconnect, still disconnected
         let _ = registry.call("disconnect", ToolMode::Editor, &*api, serde_json::json!({}));
         let result = registry.call("status", ToolMode::Editor, &*api, serde_json::json!({}));
-        assert_eq!(result.unwrap()["connected"], false);
+        assert_eq!(unwrap_json(result.unwrap())["connected"], false);
     }
 }
