@@ -16,6 +16,8 @@ rkf-render = { workspace = true }
 wgpu = { workspace = true }
 winit = { workspace = true }
 glam = { workspace = true }
+bytemuck = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 anyhow = { workspace = true }
+pollster = { workspace = true }

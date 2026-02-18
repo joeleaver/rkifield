@@ -43,6 +43,7 @@ tokio = { version = "1", features = ["full"] }
 image = "0.25"
 clap = { version = "4", features = ["derive"] }
 base64 = "0.22"
+pollster = "0.4"
 
 # Internal crate cross-references
 rkf-core = { path = "crates/rkf-core" }

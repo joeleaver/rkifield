@@ -12,3 +12,8 @@
 //! - Upscaling (DLSS or custom temporal) and post-processing
 
 #![warn(missing_docs)]
+
+/// GPU device and queue wrapper.
+pub mod context;
+
+pub use context::RenderContext;
