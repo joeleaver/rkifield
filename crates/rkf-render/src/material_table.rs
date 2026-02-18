@@ -86,10 +86,10 @@ pub fn create_test_materials() -> Vec<Material> {
             metallic: 0.0,
             ..Default::default()
         },
-        // 2: Metal — polished silver
+        // 2: Metal — brushed silver
         Material {
             albedo: [0.9, 0.9, 0.92],
-            roughness: 0.15,
+            roughness: 0.35,
             metallic: 1.0,
             ..Default::default()
         },
@@ -215,7 +215,7 @@ mod tests {
     fn metal_is_shiny_conductor() {
         let mats = create_test_materials();
         let metal = &mats[2];
-        assert!(metal.roughness < 0.3);
+        assert!(metal.roughness < 0.5);
         assert_eq!(metal.metallic, 1.0);
     }
 

@@ -139,6 +139,7 @@ struct GpuState {
     clipmap: ClipmapGpuData,
     gbuffer: GBuffer,
     material_table: MaterialTable,
+    lights: Vec<Light>,
     light_buffer: LightBuffer,
     tile_cull: TileCullPass,
     radiance_volume: RadianceVolume,
@@ -209,13 +210,16 @@ impl GpuState {
         // G-buffer
         let gbuffer = GBuffer::new(&context.device, INTERNAL_WIDTH, INTERNAL_HEIGHT);
 
-        // Single directional light
-        let lights = vec![Light::directional(
-            [0.4, 0.8, 0.3],
-            [1.0, 0.95, 0.85],
-            1.0,
-            true,
-        )];
+        // Lighting: key + fill + camera headlight
+        let cam_p = camera.position;
+        let lights = vec![
+            // 0: Camera headlight — point light above camera (like headlamp), updated per-frame
+            Light::point([cam_p.x, cam_p.y + 0.3, cam_p.z], [1.0, 0.98, 0.95], 1.0, 25.0, true),
+            // 1: Key light — warm directional from upper-right-front
+            Light::directional([0.4, 0.8, 0.3], [1.0, 0.95, 0.85], 0.8, true),
+            // 2: Fill light — cool directional from opposite side (no shadow)
+            Light::directional([-0.5, 0.3, 0.7], [0.4, 0.45, 0.55], 0.25, false),
+        ];
         let light_buffer = LightBuffer::upload(&context.device, &lights);
 
         // Tile cull
@@ -271,6 +275,7 @@ impl GpuState {
             clipmap,
             gbuffer,
             material_table,
+            lights,
             light_buffer,
             tile_cull,
             radiance_volume,
@@ -328,6 +333,17 @@ impl GpuState {
         let cam_pos = self.camera.position;
         self.shading
             .update_camera_pos(&self.context.queue, [cam_pos.x, cam_pos.y, cam_pos.z]);
+
+        // Update headlight (light index 0) — point light slightly above camera (like a headlamp)
+        // Offset upward so shadows are visible below objects instead of hidden behind them.
+        self.lights[0] = Light::point(
+            [cam_pos.x, cam_pos.y + 0.3, cam_pos.z],
+            [1.0, 0.98, 0.95],
+            1.0,
+            25.0,
+            true,
+        );
+        self.light_buffer.update(&self.context.queue, &self.lights);
 
         // Update tile cull uniforms with camera data
         let cam_fwd = self.camera.forward();

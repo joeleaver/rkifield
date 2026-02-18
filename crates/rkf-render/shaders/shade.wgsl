@@ -148,12 +148,13 @@ const LIGHT_TYPE_POINT: u32 = 1u;
 const LIGHT_TYPE_SPOT: u32 = 2u;
 const MAX_LIGHTS_PER_TILE: u32 = 64u;
 
-// Ambient/sky
-const AMBIENT_COLOR: vec3<f32> = vec3<f32>(0.15, 0.18, 0.25);
+// Ambient/sky (subtle fill — direct lights should dominate)
+const AMBIENT_COLOR: vec3<f32> = vec3<f32>(0.03, 0.035, 0.05);
 
-// Sky gradient
+// Sky gradient (visual background + ambient specular source)
 const SKY_ZENITH: vec3<f32> = vec3<f32>(0.15, 0.25, 0.55);
 const SKY_HORIZON: vec3<f32> = vec3<f32>(0.6, 0.7, 0.85);
+const SKY_REFLECT_STRENGTH: f32 = 0.15; // Strength of sky reflection for ambient specular
 
 // Shadow parameters
 const MAX_SHADOW_STEPS: u32 = 64u;
@@ -320,9 +321,10 @@ fn distance_attenuation(dist: f32, range: f32) -> f32 {
 // ---------- PBR Functions ----------
 
 /// GGX/Trowbridge-Reitz normal distribution function (D term).
+/// Roughness is treated as linear alpha (α), not perceptual roughness.
+/// D(h) = α² / (π * ((n·h)² * (α² - 1) + 1)²)
 fn distribution_ggx(n_dot_h: f32, roughness: f32) -> f32 {
-    let a = roughness * roughness;
-    let a2 = a * a;
+    let a2 = roughness * roughness;
     let denom = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
     return a2 / (PI * denom * denom);
 }
@@ -332,15 +334,16 @@ fn fresnel_schlick(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {
     return f0 + (vec3<f32>(1.0) - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
 }
 
-/// Smith's method using Schlick-GGX for geometry term (G term).
-/// Combined G1(N,V) * G1(N,L).
-fn geometry_smith(n_dot_v: f32, n_dot_l: f32, roughness: f32) -> f32 {
-    let r = roughness + 1.0;
-    let k = (r * r) / 8.0;
-
-    let ggx_v = n_dot_v / (n_dot_v * (1.0 - k) + k);
-    let ggx_l = n_dot_l / (n_dot_l * (1.0 - k) + k);
-    return ggx_v * ggx_l;
+/// Height-correlated Smith-GGX visibility function (Heitz 2014).
+/// Returns V = G / (4 · NdotV · NdotL) — the BRDF denominator is baked in.
+/// More physically accurate than separated Schlick-GGX: preserves 50-100%
+/// more specular energy at oblique viewing angles.
+/// Input: roughness is linear alpha (α), same convention as distribution_ggx.
+fn visibility_smith_ggx(n_dot_v: f32, n_dot_l: f32, roughness: f32) -> f32 {
+    let a2 = roughness * roughness;
+    let ggxv = n_dot_l * sqrt(n_dot_v * n_dot_v * (1.0 - a2) + a2);
+    let ggxl = n_dot_v * sqrt(n_dot_l * n_dot_l * (1.0 - a2) + a2);
+    return 0.5 / max(ggxv + ggxl, 0.0001);
 }
 
 // ---------- 3D Simplex Noise (Ashima Arts webgl-noise) ----------
@@ -546,6 +549,20 @@ fn compute_indirect(pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
     return result * GI_STRENGTH / total_weight;
 }
 
+/// Compute specular indirect illumination via a single cone trace in the reflection direction.
+/// For metallic/glossy surfaces, traces a narrow cone whose half-angle depends on roughness.
+/// Weighted by Fresnel reflectance at the given viewing angle.
+fn compute_specular_indirect(pos: vec3<f32>, normal: vec3<f32>, view_dir: vec3<f32>,
+                              roughness: f32, f0: vec3<f32>) -> vec3<f32> {
+    let reflect_dir = reflect(-view_dir, normal);
+    // Map roughness to cone half-angle: 0 roughness = very narrow, 1.0 = ~45 degrees
+    let half_angle = max(roughness * PI * 0.25, 0.05);
+    let result = trace_gi_cone(pos, reflect_dir, half_angle);
+    let n_dot_v = max(dot(normal, view_dir), 0.001);
+    let fresnel = fresnel_schlick(n_dot_v, f0);
+    return fresnel * result.rgb;
+}
+
 // ---------- Material Blending ----------
 
 struct ResolvedMaterial {
@@ -737,14 +754,12 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
             let n_dot_h = max(dot(normal, half_vec), 0.0);
             let h_dot_v = max(dot(half_vec, view_dir), 0.0);
 
-            // Cook-Torrance specular BRDF
+            // Cook-Torrance specular BRDF (Heitz 2014 visibility)
             let d = distribution_ggx(n_dot_h, roughness);
-            let g = geometry_smith(n_dot_v, n_dot_l, roughness);
+            let v = visibility_smith_ggx(n_dot_v, n_dot_l, roughness);
             let f = fresnel_schlick(h_dot_v, f0);
 
-            let numerator = d * g * f;
-            let denominator = 4.0 * n_dot_v * n_dot_l + 0.0001;
-            let specular_brdf = numerator / denominator;
+            let specular_brdf = d * v * f;
 
             let ks = f;
             let kd = (vec3<f32>(1.0) - ks) * (1.0 - metallic);
@@ -753,7 +768,7 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
             // SDF soft shadow (if light casts shadows and budget allows)
             var shadow = 1.0;
             if light.shadow_caster == 1u && (shadow_budget == 0u || shadow_count < shadow_budget) {
-                let shadow_origin = world_pos + normal * SHADOW_BIAS;
+                let shadow_origin = world_pos + normal * SHADOW_BIAS + light_dir * SHADOW_BIAS * 0.5;
                 shadow = soft_shadow(shadow_origin, light_dir, SHADOW_MAX_DIST, SHADOW_K);
                 shadow_count += 1u;
             }
@@ -778,14 +793,12 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
                 let n_dot_h = max(dot(normal, half_vec), 0.0);
                 let h_dot_v = max(dot(half_vec, view_dir), 0.0);
 
-                // Cook-Torrance specular BRDF
+                // Cook-Torrance specular BRDF (Heitz 2014 visibility)
                 let d = distribution_ggx(n_dot_h, roughness);
-                let g = geometry_smith(n_dot_v, n_dot_l, roughness);
+                let v = visibility_smith_ggx(n_dot_v, n_dot_l, roughness);
                 let f = fresnel_schlick(h_dot_v, f0);
 
-                let numerator = d * g * f;
-                let denominator = 4.0 * n_dot_v * n_dot_l + 0.0001;
-                let specular_brdf = numerator / denominator;
+                let specular_brdf = d * v * f;
 
                 let ks = f;
                 let kd = (vec3<f32>(1.0) - ks) * (1.0 - metallic);
@@ -794,7 +807,7 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
                 // SDF soft shadow (if light casts shadows and budget allows)
                 var shadow = 1.0;
                 if light.shadow_caster == 1u && (shadow_budget == 0u || shadow_count < shadow_budget) {
-                    let shadow_origin = world_pos + normal * SHADOW_BIAS;
+                    let shadow_origin = world_pos + normal * SHADOW_BIAS + light_dir * SHADOW_BIAS * 0.5;
                     shadow = soft_shadow(shadow_origin, light_dir, min(dist, SHADOW_MAX_DIST), SHADOW_K);
                     shadow_count += 1u;
                 }
@@ -828,14 +841,12 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
                 let n_dot_h = max(dot(normal, half_vec), 0.0);
                 let h_dot_v = max(dot(half_vec, view_dir), 0.0);
 
-                // Cook-Torrance specular BRDF
+                // Cook-Torrance specular BRDF (Heitz 2014 visibility)
                 let d = distribution_ggx(n_dot_h, roughness);
-                let g = geometry_smith(n_dot_v, n_dot_l, roughness);
+                let v = visibility_smith_ggx(n_dot_v, n_dot_l, roughness);
                 let f = fresnel_schlick(h_dot_v, f0);
 
-                let numerator = d * g * f;
-                let denominator = 4.0 * n_dot_v * n_dot_l + 0.0001;
-                let specular_brdf = numerator / denominator;
+                let specular_brdf = d * v * f;
 
                 let ks = f;
                 let kd = (vec3<f32>(1.0) - ks) * (1.0 - metallic);
@@ -844,7 +855,7 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
                 // SDF soft shadow (if light casts shadows and budget allows)
                 var shadow = 1.0;
                 if light.shadow_caster == 1u && (shadow_budget == 0u || shadow_count < shadow_budget) {
-                    let shadow_origin = world_pos + normal * SHADOW_BIAS;
+                    let shadow_origin = world_pos + normal * SHADOW_BIAS + light_dir * SHADOW_BIAS * 0.5;
                     shadow = soft_shadow(shadow_origin, light_dir, min(dist, SHADOW_MAX_DIST), SHADOW_K);
                     shadow_count += 1u;
                 }
@@ -864,16 +875,30 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
     let ao = sdf_ao(world_pos + normal * SHADOW_BIAS, normal);
 
     // Voxel cone tracing indirect illumination
-    let indirect = compute_indirect(world_pos + normal * SHADOW_BIAS, normal);
-    let gi_contribution = indirect * albedo * (1.0 - metallic);
+    let gi_origin = world_pos + normal * SHADOW_BIAS;
+    let indirect = compute_indirect(gi_origin, normal);
+    let gi_diffuse = indirect * albedo * (1.0 - metallic);
 
-    // Ambient approximation (hemisphere) — modulated by AO, reduced by GI
-    // When GI is active, reduce ambient to avoid double-counting
-    let ambient = AMBIENT_COLOR * albedo * ao * 0.3;
+    // Specular GI: trace a single cone in the reflection direction for metallic/glossy surfaces.
+    let specular_gi = compute_specular_indirect(gi_origin, normal, view_dir, roughness, f0);
 
-    // Final color = direct + indirect GI + SSS + ambient + emission
+    // Ambient approximation — split into diffuse and specular components.
+    // Metals get Fresnel-weighted sky reflection instead of flat ambient.
+    let kd_ambient = 1.0 - metallic;
+    let ambient_diffuse = AMBIENT_COLOR * albedo * ao * 0.3 * kd_ambient;
+
+    // Sky-based ambient specular: sample sky gradient in reflection direction.
+    // This gives metals a visible "environment reflection" that varies per face.
+    let ambient_fresnel = fresnel_schlick(n_dot_v, f0);
+    let reflect_env = reflect(-view_dir, normal);
+    let sky_up = clamp(reflect_env.y * 0.5 + 0.5, 0.0, 1.0);
+    let sky_reflect = mix(SKY_HORIZON, SKY_ZENITH, sky_up);
+    let ambient_specular = sky_reflect * ambient_fresnel * ao * SKY_REFLECT_STRENGTH;
+    let ambient = ambient_diffuse + ambient_specular;
+
+    // Final color = direct + indirect GI (diffuse + specular) + SSS + ambient + emission
     let direct = total_diffuse + total_specular;
-    var color = direct + gi_contribution * ao + sss_total + ambient + emission;
+    var color = direct + gi_diffuse * ao + specular_gi * ao + sss_total + ambient + emission;
 
     // Debug visualization modes
     switch shade_uniforms.debug_mode {
@@ -899,8 +924,8 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
             color = total_diffuse + ambient;
         }
         case 5u: {
-            // Specular only
-            color = total_specular;
+            // Specular only (direct + indirect specular + ambient specular)
+            color = total_specular + specular_gi * ao + ambient_specular;
         }
         default: {
             // Normal shading (already computed)
