@@ -30,6 +30,7 @@ use rkf_render::radiance_mip::RadianceMipPass;
 use rkf_render::radiance_volume::RadianceVolume;
 use rkf_render::history::HistoryBuffers;
 use rkf_render::upscale::UpscalePass;
+use rkf_render::sharpen::SharpenPass;
 use rkf_render::shading::ShadingPass;
 use rkf_render::tile_cull::TileCullPass;
 use rkf_render::tone_map::ToneMapPass;
@@ -367,6 +368,7 @@ struct GpuState {
     radiance_mip: RadianceMipPass,
     history: HistoryBuffers,
     upscale: UpscalePass,
+    sharpen: SharpenPass,
     camera: Camera,
     staging_buffer: wgpu::Buffer,
     shared_state: Arc<Mutex<SharedState>>,
@@ -486,6 +488,13 @@ impl GpuState {
             INTERNAL_WIDTH,
             INTERNAL_HEIGHT,
         );
+        let sharpen = SharpenPass::new(
+            &context.device,
+            &upscale.output_view,
+            &gbuffer,
+            size.width.max(1),
+            size.height.max(1),
+        );
         let tone_map = ToneMapPass::new(
             &context.device,
             &shading.hdr_view,
@@ -522,6 +531,7 @@ impl GpuState {
             radiance_mip,
             history,
             upscale,
+            sharpen,
             camera,
             staging_buffer,
             shared_state,
@@ -638,13 +648,16 @@ impl GpuState {
         // Pass 6: Temporal upscale — internal HDR → display HDR + history update
         self.upscale.dispatch(&mut encoder, self.history.read_index());
 
-        // Pass 7: Tone map (compute) — HDR → LDR
+        // Pass 7: Edge-aware sharpening on upscaled result
+        self.sharpen.dispatch(&mut encoder);
+
+        // Pass 8: Tone map (compute) — HDR → LDR
         self.tone_map.dispatch(&mut encoder);
 
-        // Pass 8: Blit LDR → swapchain
+        // Pass 9: Blit LDR → swapchain
         self.blit.draw(&mut encoder, &view);
 
-        // Pass 9: Copy LDR texture → staging buffer for screenshot readback
+        // Pass 10: Copy LDR texture → staging buffer for screenshot readback
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: self.tone_map.ldr_texture(),

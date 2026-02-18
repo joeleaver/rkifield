@@ -46,6 +46,8 @@ pub mod radiance_mip;
 pub mod history;
 /// Custom temporal upscaler compute pass.
 pub mod upscale;
+/// Edge-aware sharpening compute pass.
+pub mod sharpen;
 
 pub use camera::{Camera, CameraUniforms};
 pub use context::RenderContext;
@@ -63,3 +65,4 @@ pub use radiance_inject::{InjectUniforms, RadianceInjectPass};
 pub use radiance_mip::RadianceMipPass;
 pub use history::{HistoryBuffers, HistoryUniforms, HISTORY_COLOR_FORMAT, HISTORY_METADATA_FORMAT};
 pub use upscale::{UpscalePass, UpscaleUniforms};
+pub use sharpen::{SharpenPass, SharpenUniforms, DEFAULT_SHARPEN_STRENGTH};
