@@ -390,16 +390,13 @@ impl GpuState {
         let surface_format =
             context.configure_surface(&surface, size.width.max(1), size.height.max(1));
 
-        // Check DLSS availability
+        // Auto-select upscaling backend based on hardware
         let dlss_context = rkf_render::dlss::DlssContext::new(
             &context.device,
             &context.adapter_info,
         );
-        if dlss_context.is_available() {
-            log::info!("DLSS available — will use NVIDIA upscaling");
-        } else {
-            log::info!("DLSS unavailable — using custom temporal upscaler");
-        }
+        let upscale_backend = rkf_render::UpscaleBackend::auto_select(&dlss_context);
+        log::info!("Upscale backend: {}", upscale_backend.name());
 
         // Create Cornell box scene for GI validation
         let (pool, grid, aabb) = create_cornell_box();

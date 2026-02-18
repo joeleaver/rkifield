@@ -66,6 +66,6 @@ pub use radiance_volume::{RadianceVolume, RadianceVolumeUniforms, RADIANCE_DIM, 
 pub use radiance_inject::{InjectUniforms, RadianceInjectPass};
 pub use radiance_mip::RadianceMipPass;
 pub use history::{HistoryBuffers, HistoryUniforms, HISTORY_COLOR_FORMAT, HISTORY_METADATA_FORMAT};
-pub use upscale::{UpscalePass, UpscaleUniforms};
+pub use upscale::{UpscaleBackend, UpscalePass, UpscaleUniforms};
 pub use sharpen::{SharpenPass, SharpenUniforms, DEFAULT_SHARPEN_STRENGTH};
 pub use dlss::{DlssContext, DlssQuality};

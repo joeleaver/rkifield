@@ -1,22 +1,59 @@
-//! Custom temporal upscaler compute pass.
+//! Upscaling backend selection and custom temporal upscaler.
 //!
-//! Runs at display resolution. Bilinear-samples the internal-resolution HDR
-//! frame, reprojects history via motion vectors, applies 3×3 neighborhood
-//! clipping in YCoCg color space, and blends for temporal super-sampling.
+//! Provides `UpscaleBackend` for choosing between DLSS and the custom temporal
+//! upscaler, plus the `UpscalePass` compute shader implementation.
 //!
-//! Inputs (internal resolution):
-//! - HDR color from shading pass
-//! - G-buffer: position, normal, material, motion vectors
+//! The custom upscaler runs at display resolution: bilinear-samples the
+//! internal-resolution HDR frame, reprojects history via motion vectors,
+//! applies 3×3 neighborhood clipping in YCoCg color space, and blends for
+//! temporal super-sampling.
 //!
-//! Outputs (display resolution):
-//! - Upscaled HDR color
-//! - Updated history color + metadata (ping-pong)
+//! Both backends produce display-resolution HDR output in the same format.
 
+use crate::dlss::DlssContext;
 use crate::gbuffer::GBuffer;
 use crate::history::{HistoryBuffers, HISTORY_COLOR_FORMAT, HISTORY_METADATA_FORMAT};
 use crate::shading::ShadingPass;
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
+
+/// Upscaling backend selection.
+///
+/// Auto-detected at startup based on hardware capabilities, but can be
+/// overridden via configuration. Both backends consume the same inputs
+/// (G-buffer + HDR color at internal resolution) and produce the same output
+/// (display-resolution HDR color).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpscaleBackend {
+    /// NVIDIA DLSS — preferred on RTX hardware. AI-based temporal upscaling
+    /// with detail hallucination. Cannot use SDF-specific material IDs.
+    Dlss,
+    /// Custom temporal upscaler — cross-platform fallback. Uses material ID
+    /// rejection for perfect SDF edges and SDF normal awareness.
+    Custom,
+}
+
+impl UpscaleBackend {
+    /// Auto-select the best available upscaling backend.
+    ///
+    /// Prefers DLSS on NVIDIA hardware with driver/SDK support. Falls back
+    /// to the custom temporal upscaler on all other hardware.
+    pub fn auto_select(dlss_context: &DlssContext) -> Self {
+        if dlss_context.is_available() {
+            UpscaleBackend::Dlss
+        } else {
+            UpscaleBackend::Custom
+        }
+    }
+
+    /// Human-readable name for logging.
+    pub fn name(self) -> &'static str {
+        match self {
+            UpscaleBackend::Dlss => "DLSS",
+            UpscaleBackend::Custom => "Custom Temporal",
+        }
+    }
+}
 
 /// GPU-uploadable upscale uniforms (16 bytes).
 #[repr(C)]
@@ -476,5 +513,17 @@ mod tests {
         let u2: &UpscaleUniforms = bytemuck::from_bytes(bytes);
         assert_eq!(u.display_width, u2.display_width);
         assert_eq!(u.internal_height, u2.internal_height);
+    }
+
+    #[test]
+    fn backend_name() {
+        assert_eq!(UpscaleBackend::Dlss.name(), "DLSS");
+        assert_eq!(UpscaleBackend::Custom.name(), "Custom Temporal");
+    }
+
+    #[test]
+    fn backend_equality() {
+        assert_eq!(UpscaleBackend::Custom, UpscaleBackend::Custom);
+        assert_ne!(UpscaleBackend::Dlss, UpscaleBackend::Custom);
     }
 }
