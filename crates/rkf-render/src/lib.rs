@@ -42,6 +42,8 @@ pub mod radiance_volume;
 pub mod radiance_inject;
 /// Radiance mip generation pass (downsample L0 → L1 → L2 → L3).
 pub mod radiance_mip;
+/// History buffers for temporal upscaling (ping-pong at display resolution).
+pub mod history;
 
 pub use camera::{Camera, CameraUniforms};
 pub use context::RenderContext;
@@ -57,3 +59,4 @@ pub use tone_map::ToneMapPass;
 pub use radiance_volume::{RadianceVolume, RadianceVolumeUniforms, RADIANCE_DIM, RADIANCE_LEVELS};
 pub use radiance_inject::{InjectUniforms, RadianceInjectPass};
 pub use radiance_mip::RadianceMipPass;
+pub use history::{HistoryBuffers, HistoryUniforms, HISTORY_COLOR_FORMAT, HISTORY_METADATA_FORMAT};

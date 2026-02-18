@@ -28,6 +28,7 @@ use rkf_render::ray_march::{RayMarchPass, INTERNAL_HEIGHT, INTERNAL_WIDTH};
 use rkf_render::radiance_inject::RadianceInjectPass;
 use rkf_render::radiance_mip::RadianceMipPass;
 use rkf_render::radiance_volume::RadianceVolume;
+use rkf_render::history::HistoryBuffers;
 use rkf_render::shading::ShadingPass;
 use rkf_render::tile_cull::TileCullPass;
 use rkf_render::tone_map::ToneMapPass;
@@ -363,6 +364,7 @@ struct GpuState {
     radiance_volume: RadianceVolume,
     radiance_inject: RadianceInjectPass,
     radiance_mip: RadianceMipPass,
+    history: HistoryBuffers,
     camera: Camera,
     staging_buffer: wgpu::Buffer,
     shared_state: Arc<Mutex<SharedState>>,
@@ -451,6 +453,15 @@ impl GpuState {
         );
         let radiance_mip = RadianceMipPass::new(&context.device, &radiance_volume);
 
+        // Create history buffers at display resolution for temporal upscaling
+        let history = HistoryBuffers::new(
+            &context.device,
+            size.width.max(1),
+            size.height.max(1),
+            INTERNAL_WIDTH,
+            INTERNAL_HEIGHT,
+        );
+
         // Create render passes
         let ray_march = RayMarchPass::new(&context.device, &scene, &gbuffer);
         let shading = ShadingPass::new(
@@ -497,6 +508,7 @@ impl GpuState {
             radiance_volume,
             radiance_inject,
             radiance_mip,
+            history,
             camera,
             staging_buffer,
             shared_state,
@@ -641,6 +653,9 @@ impl GpuState {
 
         // Store current VP as previous for next frame's motion vectors
         self.prev_vp = self.camera.view_projection(INTERNAL_WIDTH, INTERNAL_HEIGHT).to_cols_array_2d();
+
+        // Swap history ping-pong buffers
+        self.history.swap();
 
         self.context.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
