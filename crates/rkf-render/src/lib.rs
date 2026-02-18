@@ -42,6 +42,8 @@ pub mod radiance_volume;
 pub mod radiance_inject;
 /// Radiance mip generation pass (downsample L0 → L1 → L2 → L3).
 pub mod radiance_mip;
+/// Volumetric shadow map compute pass.
+pub mod vol_shadow;
 /// History buffers for temporal upscaling (ping-pong at display resolution).
 pub mod history;
 /// Custom temporal upscaler compute pass.
@@ -81,6 +83,7 @@ pub use tone_map::{ToneMapPass, ToneMapMode, ToneMapParams, DEFAULT_EXPOSURE, LD
 pub use radiance_volume::{RadianceVolume, RadianceVolumeUniforms, RADIANCE_DIM, RADIANCE_LEVELS};
 pub use radiance_inject::{InjectUniforms, RadianceInjectPass};
 pub use radiance_mip::RadianceMipPass;
+pub use vol_shadow::{VolShadowPass, VolShadowParams, VOL_SHADOW_DIM_X, VOL_SHADOW_DIM_Y, VOL_SHADOW_DIM_Z, VOL_SHADOW_FORMAT, DEFAULT_VOL_SHADOW_RANGE, DEFAULT_VOL_SHADOW_HEIGHT};
 pub use history::{HistoryBuffers, HistoryUniforms, HISTORY_COLOR_FORMAT, HISTORY_METADATA_FORMAT};
 pub use upscale::{QualityMode, ResolutionConfig, UpscaleBackend, UpscalePass, UpscaleUniforms};
 pub use sharpen::{SharpenPass, SharpenUniforms, DEFAULT_SHARPEN_STRENGTH};
