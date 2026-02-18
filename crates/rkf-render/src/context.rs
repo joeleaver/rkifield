@@ -38,7 +38,10 @@ impl RenderContext {
             &wgpu::DeviceDescriptor {
                 label: Some("rkf-render device"),
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
+                required_limits: wgpu::Limits {
+                    max_bind_groups: 8,
+                    ..wgpu::Limits::default()
+                },
                 memory_hints: wgpu::MemoryHints::Performance,
             },
             None,

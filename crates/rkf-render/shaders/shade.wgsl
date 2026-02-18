@@ -292,8 +292,8 @@ fn distance_attenuation(dist: f32, range: f32) -> f32 {
     let r2 = range * range;
     let factor = d2 / r2;
     // Smooth window: (1 - (d/r)^2)^2, clamped to [0,1]
-    let smooth = clamp(1.0 - factor, 0.0, 1.0);
-    return (smooth * smooth) / max(d2, 0.0001);
+    let window = clamp(1.0 - factor, 0.0, 1.0);
+    return (window * window) / max(d2, 0.0001);
 }
 
 // ---------- PBR Functions ----------
@@ -427,7 +427,6 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
             // SSS for this light
             sss_total += sss_contribution(world_pos, normal, light_dir, mat.subsurface, sss_color)
                          * radiance * shadow;
-        }
         } else if light.light_type == LIGHT_TYPE_POINT {
             let light_pos = vec3<f32>(light.pos_x, light.pos_y, light.pos_z);
             let to_light = light_pos - world_pos;
@@ -471,7 +470,6 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
                 sss_total += sss_contribution(world_pos, normal, light_dir, mat.subsurface, sss_color)
                              * attenuated_radiance * shadow;
             }
-        }
         } else if light.light_type == LIGHT_TYPE_SPOT {
             let light_pos = vec3<f32>(light.pos_x, light.pos_y, light.pos_z);
             let spot_dir = normalize(vec3<f32>(light.dir_x, light.dir_y, light.dir_z));
@@ -522,6 +520,7 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
                 sss_total += sss_contribution(world_pos, normal, light_dir, mat.subsurface, sss_color)
                              * attenuated_radiance * shadow;
             }
+        }
     }
 
     // SDF ambient occlusion
