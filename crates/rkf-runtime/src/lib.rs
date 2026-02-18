@@ -15,6 +15,8 @@
 
 /// ECS component types for the scene graph.
 pub mod components;
+/// Frame scheduling and render pass ordering.
+pub mod frame;
 /// Scene management via hecs ECS.
 pub mod scene;
 /// Transform hierarchy update system.
@@ -24,5 +26,6 @@ pub use components::{
     AnimatedCharacter, CameraComponent, ChunkRef, EditorMetadata, FogVolumeComponent, Parent,
     SdfObject, Transform, WorldTransform,
 };
+pub use frame::{execute_frame, FrameContext, FrameSettings};
 pub use scene::Scene;
 pub use transform_system::update_transforms;
