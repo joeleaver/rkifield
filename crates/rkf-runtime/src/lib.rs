@@ -27,6 +27,8 @@ pub mod double_buffer;
 pub mod frame;
 /// LRU eviction for the brick pool.
 pub mod lru_eviction;
+/// Procedural chunk generation for testing.
+pub mod procgen;
 /// Scene management via hecs ECS.
 pub mod scene;
 /// Chunk streaming system — camera-distance-based load/evict management.
@@ -49,6 +51,7 @@ pub use config::{
 pub use double_buffer::{DoubleBuffer, DoubleBufferSet};
 pub use frame::{execute_frame, FrameContext, FrameSettings};
 pub use lru_eviction::{EvictionPolicy, EvictionResult, LruEntry, LruTracker};
+pub use procgen::{ProcgenConfig, generate_chunk, generate_world};
 pub use scene::Scene;
 pub use streaming::{ChunkEntry, ChunkState, StreamingConfig, StreamingSystem};
 pub use streaming_budget::{BudgetMonitor, BudgetState, StreamingBudget};
