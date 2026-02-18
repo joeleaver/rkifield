@@ -42,28 +42,30 @@ pub const DEFAULT_AMBIENT_DUST_G: f32 = 0.3;
 
 /// GPU-uploadable volumetric march parameters.
 ///
-/// Memory layout (144 bytes, fully 16-byte aligned):
+/// Memory layout (176 bytes, fully 16-byte aligned):
 ///
 /// ```text
-/// offset   0 — cam_pos     [f32; 4]  (16 bytes)
-/// offset  16 — cam_forward [f32; 4]  (16 bytes)
-/// offset  32 — cam_right   [f32; 4]  (16 bytes)
-/// offset  48 — cam_up      [f32; 4]  (16 bytes)
-/// offset  64 — sun_dir     [f32; 4]  (16 bytes)
-/// offset  80 — sun_color   [f32; 4]  (16 bytes)
-/// offset  96 — width                  (4 bytes)
-/// offset 100 — height                 (4 bytes)
-/// offset 104 — full_width             (4 bytes)
-/// offset 108 — full_height            (4 bytes)
-/// offset 112 — max_steps              (4 bytes)
-/// offset 116 — step_size              (4 bytes)
-/// offset 120 — near                   (4 bytes)
-/// offset 124 — far                    (4 bytes)
-/// offset 128 — ambient_dust_density   (4 bytes)
-/// offset 132 — ambient_dust_g         (4 bytes)
-/// offset 136 — frame_index            (4 bytes)
-/// offset 140 — _pad0                  (4 bytes)
-/// total: 144 bytes
+/// offset   0 — cam_pos          [f32; 4]  (16 bytes)
+/// offset  16 — cam_forward      [f32; 4]  (16 bytes)
+/// offset  32 — cam_right        [f32; 4]  (16 bytes)
+/// offset  48 — cam_up           [f32; 4]  (16 bytes)
+/// offset  64 — sun_dir          [f32; 4]  (16 bytes)
+/// offset  80 — sun_color        [f32; 4]  (16 bytes)
+/// offset  96 — width                       (4 bytes)
+/// offset 100 — height                      (4 bytes)
+/// offset 104 — full_width                  (4 bytes)
+/// offset 108 — full_height                 (4 bytes)
+/// offset 112 — max_steps                   (4 bytes)
+/// offset 116 — step_size                   (4 bytes)
+/// offset 120 — near                        (4 bytes)
+/// offset 124 — far                         (4 bytes)
+/// offset 128 — ambient_dust_density        (4 bytes)
+/// offset 132 — ambient_dust_g              (4 bytes)
+/// offset 136 — frame_index                 (4 bytes)
+/// offset 140 — _pad0                       (4 bytes)
+/// offset 144 — vol_shadow_min   [f32; 4]  (16 bytes)
+/// offset 160 — vol_shadow_max   [f32; 4]  (16 bytes)
+/// total: 176 bytes
 /// ```
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Pod, Zeroable)]
@@ -104,6 +106,10 @@ pub struct VolMarchParams {
     pub frame_index: u32,
     #[doc(hidden)]
     pub _pad0: u32,
+    /// World-space minimum corner of the volumetric shadow volume (w unused).
+    pub vol_shadow_min: [f32; 4],
+    /// World-space maximum corner of the volumetric shadow volume (w unused).
+    pub vol_shadow_max: [f32; 4],
 }
 
 // ---------- Pass ----------
@@ -206,6 +212,9 @@ impl VolMarchPass {
             ambient_dust_g: DEFAULT_AMBIENT_DUST_G,
             frame_index: 0,
             _pad0: 0,
+            // Match VolShadowPass default bounds: 128×64×128 m volume centred at origin.
+            vol_shadow_min: [-64.0, -32.0, -64.0, 0.0],
+            vol_shadow_max: [64.0, 32.0, 64.0, 0.0],
         };
 
         let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -359,6 +368,24 @@ impl VolMarchPass {
             1,
         );
     }
+
+    /// Update the volumetric shadow map bounds in the params buffer.
+    ///
+    /// Call this after updating the [`VolShadowPass`] bounds to keep them in
+    /// sync. The offsets match the [`VolMarchParams`] layout:
+    /// - `vol_shadow_min` at offset 144
+    /// - `vol_shadow_max` at offset 160
+    pub fn set_shadow_bounds(
+        &self,
+        queue: &wgpu::Queue,
+        vol_min: [f32; 3],
+        vol_max: [f32; 3],
+    ) {
+        let min_vec4: [f32; 4] = [vol_min[0], vol_min[1], vol_min[2], 0.0];
+        let max_vec4: [f32; 4] = [vol_max[0], vol_max[1], vol_max[2], 0.0];
+        queue.write_buffer(&self.params_buffer, 144, bytemuck::bytes_of(&min_vec4));
+        queue.write_buffer(&self.params_buffer, 160, bytemuck::bytes_of(&max_vec4));
+    }
 }
 
 // ---------- Tests ----------
@@ -369,8 +396,8 @@ mod tests {
 
     #[test]
     fn vol_march_params_size() {
-        // 6 vec4s (96 bytes) + 12 u32/f32 fields (48 bytes) = 144 bytes
-        assert_eq!(std::mem::size_of::<VolMarchParams>(), 144);
+        // 6 vec4s (96 bytes) + 12 u32/f32 fields (48 bytes) + 2 vec4s (32 bytes) = 176 bytes
+        assert_eq!(std::mem::size_of::<VolMarchParams>(), 176);
     }
 
     #[test]
@@ -394,14 +421,18 @@ mod tests {
             ambient_dust_g: 0.3,
             frame_index: 0,
             _pad0: 0,
+            vol_shadow_min: [-64.0, -32.0, -64.0, 0.0],
+            vol_shadow_max: [64.0, 32.0, 64.0, 0.0],
         };
         let bytes = bytemuck::bytes_of(&p);
-        assert_eq!(bytes.len(), 144);
+        assert_eq!(bytes.len(), 176);
         let p2: &VolMarchParams = bytemuck::from_bytes(bytes);
         assert_eq!(p.width, p2.width);
         assert_eq!(p.ambient_dust_density, p2.ambient_dust_density);
         assert_eq!(p.cam_pos, p2.cam_pos);
         assert_eq!(p.sun_color, p2.sun_color);
+        assert_eq!(p.vol_shadow_min, p2.vol_shadow_min);
+        assert_eq!(p.vol_shadow_max, p2.vol_shadow_max);
     }
 
     #[test]
@@ -424,6 +455,50 @@ mod tests {
         assert_eq!(std::mem::offset_of!(VolMarchParams, ambient_dust_g), 132);
         assert_eq!(std::mem::offset_of!(VolMarchParams, frame_index), 136);
         assert_eq!(std::mem::offset_of!(VolMarchParams, _pad0), 140);
+        assert_eq!(std::mem::offset_of!(VolMarchParams, vol_shadow_min), 144);
+        assert_eq!(std::mem::offset_of!(VolMarchParams, vol_shadow_max), 160);
+    }
+
+    #[test]
+    fn shadow_bounds_default() {
+        // Default shadow volume bounds should match VolShadowPass defaults:
+        // 128×64×128 m volume centred at origin.
+        let expected_min = [-64.0f32, -32.0, -64.0, 0.0];
+        let expected_max = [64.0f32, 32.0, 64.0, 0.0];
+
+        // Construct a params with default shadow bounds and verify.
+        let p = VolMarchParams {
+            cam_pos: [0.0; 4],
+            cam_forward: [0.0, 0.0, 1.0, 0.0],
+            cam_right: [1.0, 0.0, 0.0, 0.0],
+            cam_up: [0.0, 1.0, 0.0, 0.0],
+            sun_dir: [0.0, 1.0, 0.0, 0.0],
+            sun_color: [1.0, 0.95, 0.8, 0.0],
+            width: 480,
+            height: 270,
+            full_width: 960,
+            full_height: 540,
+            max_steps: DEFAULT_VOL_MAX_STEPS,
+            step_size: DEFAULT_VOL_STEP_SIZE,
+            near: DEFAULT_VOL_NEAR,
+            far: DEFAULT_VOL_FAR,
+            ambient_dust_density: DEFAULT_AMBIENT_DUST,
+            ambient_dust_g: DEFAULT_AMBIENT_DUST_G,
+            frame_index: 0,
+            _pad0: 0,
+            vol_shadow_min: expected_min,
+            vol_shadow_max: expected_max,
+        };
+        assert_eq!(p.vol_shadow_min, expected_min);
+        assert_eq!(p.vol_shadow_max, expected_max);
+
+        // Volume dimensions should be 128×64×128.
+        let size_x = p.vol_shadow_max[0] - p.vol_shadow_min[0];
+        let size_y = p.vol_shadow_max[1] - p.vol_shadow_min[1];
+        let size_z = p.vol_shadow_max[2] - p.vol_shadow_min[2];
+        assert!((size_x - 128.0).abs() < 1e-5);
+        assert!((size_y - 64.0).abs() < 1e-5);
+        assert!((size_z - 128.0).abs() < 1e-5);
     }
 
     #[test]

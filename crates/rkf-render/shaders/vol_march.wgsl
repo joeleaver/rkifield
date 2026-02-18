@@ -28,6 +28,9 @@ struct VolMarchParams {
     ambient_dust_g:       f32,  // Henyey-Greenstein asymmetry for dust
     frame_index:          u32,
     _pad0:                u32,
+    // Volumetric shadow map volume bounds (world space)
+    vol_shadow_min: vec4<f32>,  // xyz = min corner, w = unused
+    vol_shadow_max: vec4<f32>,  // xyz = max corner, w = unused
 }
 
 @group(0) @binding(0) var<uniform> params: VolMarchParams;
@@ -68,13 +71,30 @@ fn henyey_greenstein(cos_theta: f32, g: f32) -> f32 {
 // Sample volumetric shadow map at a world position.
 // Returns transmittance in [0, 1] (1 = fully lit, 0 = fully shadowed).
 //
-// Placeholder: always returns 1.0. Will be connected to the actual shadow
-// volume bounds / UVW mapping when the shadow map is wired in task 11.3.
+// Computes UVW coordinates from the world position relative to the shadow
+// volume bounds stored in params. If the volume is unconfigured (zero size)
+// or the position lies outside the volume, returns 1.0 (fully lit).
 // ---------------------------------------------------------------------------
 fn sample_vol_shadow(pos: vec3<f32>) -> f32 {
-    // Suppress unused-variable warnings by doing a trivial read.
-    let _ = pos;
-    return 1.0;
+    // Compute UVW from world position relative to shadow volume bounds.
+    let vol_min = params.vol_shadow_min.xyz;
+    let vol_max = params.vol_shadow_max.xyz;
+    let vol_size = vol_max - vol_min;
+
+    // If volume size is zero (not configured), return fully lit.
+    if (vol_size.x <= 0.0 || vol_size.y <= 0.0 || vol_size.z <= 0.0) {
+        return 1.0;
+    }
+
+    let uvw = (pos - vol_min) / vol_size;
+
+    // If outside the shadow volume, return fully lit.
+    if (any(uvw < vec3(0.0)) || any(uvw > vec3(1.0))) {
+        return 1.0;
+    }
+
+    // Sample the 3D shadow map with trilinear filtering.
+    return textureSampleLevel(vol_shadow_map, vol_shadow_smp, uvw, 0.0).r;
 }
 
 // ---------------------------------------------------------------------------
