@@ -130,8 +130,13 @@ fn sample_brick(pos: vec3<f32>, brick_min: vec3<f32>, slot: u32) -> f32 {
     return extract_distance(brick_pool[sample_idx].word0);
 }
 
-/// Sphere trace within a single brick.
-/// Returns MarchResult — hit=true with distance, or hit=false.
+/// Sphere trace within a single brick, clipped to precise brick AABB bounds.
+///
+/// The ray is clipped to the brick's AABB to get exact entry/exit t values.
+/// Sphere tracing starts at max(t_enter, t_brick_near) and exits when
+/// t > t_brick_far. On miss, returns the brick exit t so the DDA can resume
+/// at the next cell boundary — this handles brick-to-brick transitions
+/// correctly since the DDA's t will be updated to the next cell's entry.
 fn sphere_trace_brick(origin: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
                       t_enter: f32, cell: vec3<u32>, flat: u32) -> MarchResult {
     let slot = slots[flat];
@@ -143,7 +148,7 @@ fn sphere_trace_brick(origin: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     let brick_min = grid_origin() + vec3<f32>(cell) * be;
     let brick_max = brick_min + vec3<f32>(be);
 
-    // Clip to brick AABB for precise entry/exit
+    // Clip to brick AABB for precise entry/exit t values
     let aabb_t = ray_aabb_intersect(origin, inv_dir, brick_min, brick_max);
     let t_start = max(t_enter, max(aabb_t.x, 0.0));
     let t_end = aabb_t.y;
@@ -155,7 +160,13 @@ fn sphere_trace_brick(origin: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     var t = t_start;
     for (var i = 0u; i < MAX_BRICK_STEPS; i++) {
         let pos = origin + dir * t;
-        let d = sample_brick(pos, brick_min, slot);
+
+        // Clamp position to brick interior to handle corner/edge entry:
+        // floating-point imprecision at brick boundaries can place the
+        // sample point just outside the brick, reading a neighbor's data.
+        let clamped = clamp(pos, brick_min + vec3<f32>(MIN_STEP),
+                                 brick_max - vec3<f32>(MIN_STEP));
+        let d = sample_brick(clamped, brick_min, slot);
         debug_sdf_evals += 1u;
 
         if d < HIT_EPSILON {
@@ -169,7 +180,7 @@ fn sphere_trace_brick(origin: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
         }
     }
 
-    // Miss — return brick exit t so DDA can continue from there
+    // Miss — return brick exit t so DDA resumes from this brick's far face
     return MarchResult(t_end, false);
 }
 
