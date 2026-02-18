@@ -39,6 +39,21 @@ pub fn populate_grid<F>(
 where
     F: Fn(Vec3) -> f32,
 {
+    populate_grid_with_material(pool, grid, sdf_fn, tier, aabb, 1)
+}
+
+/// Like [`populate_grid`] but assigns the given `material_id` to all voxels.
+pub fn populate_grid_with_material<F>(
+    pool: &mut BrickPool,
+    grid: &mut SparseGrid,
+    sdf_fn: F,
+    tier: usize,
+    aabb: &Aabb,
+    material_id: u16,
+) -> Result<u32, PopulateError>
+where
+    F: Fn(Vec3) -> f32,
+{
     let res = &RESOLUTION_TIERS[tier];
     let voxel_size = res.voxel_size;
     let brick_extent = res.brick_extent;
@@ -76,7 +91,7 @@ where
                                         (vz as f32 + 0.5) * voxel_size,
                                     );
                                 let dist = sdf_fn(voxel_pos);
-                                brick.set(vx, vy, vz, VoxelSample::new(dist, 1, 0, 0, 0));
+                                brick.set(vx, vy, vz, VoxelSample::new(dist, material_id, 0, 0, 0));
                             }
                         }
                     }
