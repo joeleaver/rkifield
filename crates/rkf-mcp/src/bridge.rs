@@ -20,18 +20,36 @@ impl BridgeAutomationApi {
         Self { socket_path }
     }
 
-    /// Send a `tools/call` request over IPC and return the parsed JSON result.
-    fn call_tool(
+    /// Send a `tools/call` request over IPC and return the raw result JSON.
+    fn call_tool_raw(
         &self,
         name: &str,
         args: serde_json::Value,
     ) -> AutomationResult<serde_json::Value> {
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(self.call_tool_async(name, args))
+            tokio::runtime::Handle::current().block_on(self.call_tool_raw_async(name, args))
         })
     }
 
-    async fn call_tool_async(
+    /// Send a `tools/call` request over IPC and return the parsed JSON result
+    /// (extracts text content and parses as JSON).
+    fn call_tool(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+    ) -> AutomationResult<serde_json::Value> {
+        let result = self.call_tool_raw(name, args)?;
+
+        // Extract text content and parse as JSON
+        let text = result["content"][0]["text"]
+            .as_str()
+            .ok_or_else(|| AutomationError::EngineError("missing content text".into()))?;
+
+        serde_json::from_str(text)
+            .map_err(|e| AutomationError::EngineError(format!("parse IPC result: {e}")))
+    }
+
+    async fn call_tool_raw_async(
         &self,
         name: &str,
         args: serde_json::Value,
@@ -75,25 +93,23 @@ impl BridgeAutomationApi {
             return Err(AutomationError::EngineError(text.to_string()));
         }
 
-        // Extract text content and parse as JSON
-        let text = result["content"][0]["text"]
-            .as_str()
-            .ok_or_else(|| AutomationError::EngineError("missing content text".into()))?;
-
-        serde_json::from_str(text)
-            .map_err(|e| AutomationError::EngineError(format!("parse IPC result: {e}")))
+        Ok(result)
     }
 }
 
 impl AutomationApi for BridgeAutomationApi {
     fn screenshot(&self, width: u32, height: u32) -> AutomationResult<Vec<u8>> {
-        let result = self.call_tool(
+        let result = self.call_tool_raw(
             "screenshot",
             serde_json::json!({"width": width, "height": height}),
         )?;
-        let b64 = result["data"]
+
+        // Screenshot returns an image content block, not text
+        let content = &result["content"][0];
+        let b64 = content["data"]
             .as_str()
-            .ok_or_else(|| AutomationError::EngineError("missing screenshot data".into()))?;
+            .ok_or_else(|| AutomationError::EngineError("missing screenshot image data".into()))?;
+
         use base64::Engine;
         base64::engine::general_purpose::STANDARD
             .decode(b64)
@@ -218,10 +234,25 @@ impl AutomationApi for BridgeAutomationApi {
         ))
     }
 
-    fn execute_command(&self, _command: &str) -> AutomationResult<String> {
-        Err(AutomationError::NotImplemented(
-            "execute_command (bridge is observation-only)",
-        ))
+    fn execute_command(&self, command: &str) -> AutomationResult<String> {
+        // Route known commands to their MCP tools
+        let parts: Vec<&str> = command.split_whitespace().collect();
+        match parts.as_slice() {
+            ["debug_mode", mode_str] => {
+                let mode: u64 = mode_str.parse().map_err(|_| {
+                    AutomationError::InvalidParameter(format!("invalid debug mode: {mode_str}"))
+                })?;
+                let result =
+                    self.call_tool("debug_mode", serde_json::json!({"mode": mode}))?;
+                Ok(result["message"]
+                    .as_str()
+                    .unwrap_or("ok")
+                    .to_string())
+            }
+            _ => Err(AutomationError::InvalidParameter(format!(
+                "unknown command: {command}"
+            ))),
+        }
     }
 }
 

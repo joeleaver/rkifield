@@ -53,6 +53,15 @@ struct Material {
 // Group 2: HDR output
 @group(2) @binding(0) var hdr_output: texture_storage_2d<rgba16float, write>;
 
+// Group 3: Debug uniforms
+struct DebugUniforms {
+    mode: u32, // 0=normal, 1=normals, 2=positions, 3=material IDs, 4=diffuse only, 5=specular only
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+}
+@group(3) @binding(0) var<uniform> debug: DebugUniforms;
+
 // ---------- Constants ----------
 
 const PI: f32 = 3.14159265359;
@@ -186,6 +195,38 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
 
     // Final color = direct + ambient + emission
     var color = direct + ambient + emission;
+
+    // Debug visualization modes
+    switch debug.mode {
+        case 1u: {
+            // Normals: remap [-1,1] → [0,1] for visualization
+            color = normal * 0.5 + 0.5;
+        }
+        case 2u: {
+            // World positions: scale to visible range
+            color = abs(world_pos) * 0.5;
+        }
+        case 3u: {
+            // Material IDs: distinct colors per ID
+            let mid = material_id;
+            color = vec3<f32>(
+                f32((mid * 7u + 3u) % 11u) / 10.0,
+                f32((mid * 13u + 5u) % 11u) / 10.0,
+                f32((mid * 19u + 7u) % 11u) / 10.0,
+            );
+        }
+        case 4u: {
+            // Diffuse only (no specular, no emission)
+            color = diffuse * radiance * n_dot_l + ambient;
+        }
+        case 5u: {
+            // Specular only
+            color = specular * radiance * n_dot_l;
+        }
+        default: {
+            // Normal shading (already computed)
+        }
+    }
 
     textureStore(hdr_output, coord, vec4<f32>(color, 1.0));
 }

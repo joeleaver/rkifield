@@ -32,6 +32,8 @@ pub struct SharedState {
     pub frame_width: u32,
     /// Frame height in pixels.
     pub frame_height: u32,
+    /// Pending debug mode change (set by MCP, consumed by render loop).
+    pub pending_debug_mode: Option<u32>,
 }
 
 impl SharedState {
@@ -48,6 +50,7 @@ impl SharedState {
             frame_pixels: vec![0u8; (width * height * 4) as usize],
             frame_width: width,
             frame_height: height,
+            pending_debug_mode: None,
         }
     }
 }
@@ -246,8 +249,43 @@ impl AutomationApi for TestbedAutomationApi {
         Err(AutomationError::NotImplemented("quality_preset"))
     }
 
-    fn execute_command(&self, _command: &str) -> AutomationResult<String> {
-        Err(AutomationError::NotImplemented("execute_command"))
+    fn execute_command(&self, command: &str) -> AutomationResult<String> {
+        let parts: Vec<&str> = command.split_whitespace().collect();
+        match parts.as_slice() {
+            ["debug_mode", mode_str] => {
+                let mode: u32 = mode_str.parse().map_err(|_| {
+                    AutomationError::InvalidParameter(format!(
+                        "invalid debug mode: {mode_str} (expected 0-5)"
+                    ))
+                })?;
+                if mode > 5 {
+                    return Err(AutomationError::InvalidParameter(format!(
+                        "debug mode {mode} out of range (expected 0-5)"
+                    )));
+                }
+                let mut state = self
+                    .state
+                    .lock()
+                    .map_err(|e| AutomationError::EngineError(format!("lock poisoned: {e}")))?;
+                state.pending_debug_mode = Some(mode);
+                let mode_name = match mode {
+                    0 => "normal shading",
+                    1 => "surface normals",
+                    2 => "world positions",
+                    3 => "material IDs",
+                    4 => "diffuse only",
+                    5 => "specular only",
+                    _ => "unknown",
+                };
+                Ok(format!("debug mode set to {mode} ({mode_name})"))
+            }
+            ["debug_mode"] => Err(AutomationError::InvalidParameter(
+                "usage: debug_mode <0-5>".to_string(),
+            )),
+            _ => Err(AutomationError::InvalidParameter(format!(
+                "unknown command: {command}"
+            ))),
+        }
     }
 }
 
@@ -345,6 +383,29 @@ mod tests {
         let png = api.screenshot(4, 4).unwrap();
         // PNG magic bytes
         assert_eq!(&png[..4], &[0x89, 0x50, 0x4E, 0x47]);
+    }
+
+    #[test]
+    fn execute_command_debug_mode() {
+        let state = make_shared_state();
+        let api = TestbedAutomationApi::new(Arc::clone(&state));
+        let result = api.execute_command("debug_mode 3").unwrap();
+        assert!(result.contains("material IDs"));
+        assert_eq!(state.lock().unwrap().pending_debug_mode, Some(3));
+    }
+
+    #[test]
+    fn execute_command_debug_mode_out_of_range() {
+        let state = make_shared_state();
+        let api = TestbedAutomationApi::new(state);
+        assert!(api.execute_command("debug_mode 9").is_err());
+    }
+
+    #[test]
+    fn execute_command_unknown() {
+        let state = make_shared_state();
+        let api = TestbedAutomationApi::new(state);
+        assert!(api.execute_command("unknown_cmd").is_err());
     }
 
     #[test]

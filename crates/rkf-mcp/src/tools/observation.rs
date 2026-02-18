@@ -148,6 +148,25 @@ impl ToolHandler for AssetStatusHandler {
     }
 }
 
+// --- Debug Mode tool ---
+
+struct DebugModeHandler;
+
+impl ToolHandler for DebugModeHandler {
+    fn call(&self, api: &dyn AutomationApi, params: serde_json::Value) -> Result<ToolResponse, ToolError> {
+        let mode = params
+            .get("mode")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| ToolError::InvalidParams("mode is required (0-5)".to_string()))?
+            as u32;
+
+        match api.execute_command(&format!("debug_mode {mode}")) {
+            Ok(msg) => Ok(serde_json::json!({ "status": "ok", "message": msg }).into()),
+            Err(e) => Err(ToolError::EngineError(e.to_string())),
+        }
+    }
+}
+
 /// Register all built-in observation tools with the registry.
 pub fn register_observation_tools(registry: &mut ToolRegistry) {
     registry.register(
@@ -354,6 +373,27 @@ pub fn register_observation_tools(registry: &mut ToolRegistry) {
         },
         Arc::new(AssetStatusHandler),
     );
+
+    registry.register(
+        ToolDefinition {
+            name: "debug_mode".to_string(),
+            description: "Set shading debug visualization mode. 0=normal, 1=normals, 2=positions, 3=material IDs, 4=diffuse only, 5=specular only".to_string(),
+            category: ToolCategory::Observation,
+            parameters: vec![ParameterDef {
+                name: "mode".to_string(),
+                description: "Debug mode (0=normal shading, 1=normals, 2=positions, 3=material IDs, 4=diffuse only, 5=specular only)".to_string(),
+                param_type: ParamType::Integer,
+                required: true,
+                default: None,
+            }],
+            return_type: ReturnTypeDef {
+                description: "Confirmation of mode change".to_string(),
+                return_type: ParamType::Object,
+            },
+            mode: ToolMode::Both,
+        },
+        Arc::new(DebugModeHandler),
+    );
 }
 
 #[cfg(test)]
@@ -365,7 +405,7 @@ mod tests {
     fn register_all_observation_tools() {
         let mut registry = ToolRegistry::new();
         register_observation_tools(&mut registry);
-        assert_eq!(registry.len(), 9);
+        assert_eq!(registry.len(), 10);
     }
 
     #[test]
@@ -373,7 +413,7 @@ mod tests {
         let mut registry = ToolRegistry::new();
         register_observation_tools(&mut registry);
         let tools = registry.list_tools(ToolMode::Debug);
-        assert_eq!(tools.len(), 9);
+        assert_eq!(tools.len(), 10);
     }
 
     #[test]
@@ -381,7 +421,7 @@ mod tests {
         let mut registry = ToolRegistry::new();
         register_observation_tools(&mut registry);
         let tools = registry.list_tools(ToolMode::Editor);
-        assert_eq!(tools.len(), 9);
+        assert_eq!(tools.len(), 10);
     }
 
     #[test]
@@ -420,7 +460,7 @@ mod tests {
         let expected = [
             "screenshot", "scene_graph", "entity_inspect", "render_stats",
             "log_read", "camera_get", "brick_pool_stats", "spatial_query",
-            "asset_status",
+            "asset_status", "debug_mode",
         ];
         for name in &expected {
             assert!(registry.get_tool(name).is_some(), "missing tool: {name}");

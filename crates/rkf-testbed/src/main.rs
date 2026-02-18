@@ -272,6 +272,14 @@ impl GpuState {
     }
 
     fn render(&mut self, dt: f32) {
+        // Check for pending debug mode change from MCP
+        if let Ok(mut state) = self.shared_state.lock() {
+            if let Some(mode) = state.pending_debug_mode.take() {
+                self.shading.set_debug_mode(&self.context.queue, mode);
+                log::info!("Debug mode set via MCP: {mode}");
+            }
+        }
+
         // Update camera uniforms on GPU
         self.update_camera();
 
@@ -391,7 +399,7 @@ impl InputState {
         }
     }
 
-    fn process_key(&mut self, key: KeyCode, pressed: bool) {
+    fn process_key(&mut self, key: KeyCode, pressed: bool) -> Option<u32> {
         match key {
             KeyCode::KeyW => self.forward = pressed,
             KeyCode::KeyS => self.backward = pressed,
@@ -399,8 +407,16 @@ impl InputState {
             KeyCode::KeyD => self.right = pressed,
             KeyCode::Space => self.up = pressed,
             KeyCode::ShiftLeft | KeyCode::ShiftRight => self.down = pressed,
+            // Number keys set debug visualization mode (only on press)
+            KeyCode::Digit0 if pressed => return Some(0),
+            KeyCode::Digit1 if pressed => return Some(1),
+            KeyCode::Digit2 if pressed => return Some(2),
+            KeyCode::Digit3 if pressed => return Some(3),
+            KeyCode::Digit4 if pressed => return Some(4),
+            KeyCode::Digit5 if pressed => return Some(5),
             _ => {}
         }
+        None
     }
 
     fn apply_to_camera(&self, camera: &mut Camera, dt: f32) {
@@ -578,7 +594,12 @@ impl ApplicationHandler for App {
                         }
                         return;
                     }
-                    self.input.process_key(key, pressed);
+                    if let Some(debug_mode) = self.input.process_key(key, pressed) {
+                        if let Some(gpu) = &self.gpu {
+                            gpu.shading.set_debug_mode(&gpu.context.queue, debug_mode);
+                            log::info!("Debug mode: {debug_mode}");
+                        }
+                    }
                 }
             }
             WindowEvent::RedrawRequested => {

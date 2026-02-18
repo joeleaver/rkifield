@@ -393,7 +393,30 @@ Reference: [ARCHITECTURE.md](./ARCHITECTURE.md) for all design decisions.
 
 **Crate:** `rkf-render`
 
+### Phase 6 Verification Results
+
+Debug visualization (modes 0-5 via MCP `debug_mode` tool) confirms Phase 6 G-buffer
+and shading pipeline are correct:
+
+- **Normals:** Correct — smooth gradients on curved surfaces, sharp edges on box
+- **World positions:** Correct — color gradients match known object positions
+- **Material IDs:** Correct — three distinct flat colors, no inter-object bleeding
+- **Diffuse shading:** Correct — Lambertian gradient visible; kd=0 for metallic surfaces
+- **Specular shading:** Near-zero on all objects (known limitation, see 7.0 below)
+- **Emission:** Correct — emissive capsule bright after ACES tone mapping
+- **Tone mapping:** Correct — ACES curve produces expected output
+
+The flat/muted appearance of the Phase 6 test scene is entirely caused by the broken
+specular term. The metal box (metallic=1.0, kd=0) shows only ambient because specular
+is misdirected. The stone sphere's diffuse shading is correct. No G-buffer data issues.
+
 ### Tasks
+
+7.0. **Fix view direction in shade.wgsl** _(Phase 6 prerequisite)_
+  - Currently `normalize(-world_pos)` — incorrect, assumes camera at origin
+  - Add camera position to shading uniforms (bind group 2 or extend scene uniforms)
+  - Change to `normalize(camera_pos - world_pos)`
+  - This unblocks specular highlights, and is required for correct shadows/AO/SSS
 
 7.1. **SDF soft shadows**
   - Implement `soft_shadow()` in shade shader (ARCHITECTURE.md §Shading)
