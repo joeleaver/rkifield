@@ -222,7 +222,7 @@ pub fn execute_frame(ctx: &mut FrameContext) {
     // ── 4. Volumetric shadow map ──────────────────────────────────────────────
     if ctx.settings.volumetrics_enabled {
         ctx.vol_shadow
-            .dispatch(ctx.encoder, ctx.queue, ctx.camera_pos, ctx.sun_dir);
+            .dispatch(ctx.encoder, ctx.queue, ctx.camera_pos, ctx.sun_dir, &ctx.scene.bind_group);
     }
 
     // ── 5. Cloud shadow map ───────────────────────────────────────────────────

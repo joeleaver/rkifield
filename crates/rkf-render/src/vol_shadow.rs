@@ -27,17 +27,17 @@ pub const VOL_SHADOW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float
 
 /// Default world-space horizontal extent of the shadow volume (metres).
 /// The volume spans ±RANGE/2 around the camera in X and Z.
-pub const DEFAULT_VOL_SHADOW_RANGE: f32 = 128.0;
+pub const DEFAULT_VOL_SHADOW_RANGE: f32 = 80.0;
 
 /// Default world-space vertical extent of the shadow volume (metres).
 /// The volume spans ±HEIGHT/2 around the camera in Y.
-pub const DEFAULT_VOL_SHADOW_HEIGHT: f32 = 64.0;
+pub const DEFAULT_VOL_SHADOW_HEIGHT: f32 = 20.0;
 
 /// Default maximum march steps per texel toward the sun.
-pub const DEFAULT_MAX_SHADOW_STEPS: u32 = 64;
+pub const DEFAULT_MAX_SHADOW_STEPS: u32 = 96;
 
 /// Default world-space step size along the sun direction (metres).
-pub const DEFAULT_SHADOW_STEP_SIZE: f32 = 1.0;
+pub const DEFAULT_SHADOW_STEP_SIZE: f32 = 0.15;
 
 /// Default extinction coefficient (controls opacity per unit density).
 pub const DEFAULT_EXTINCTION_COEFF: f32 = 10.0;
@@ -122,7 +122,11 @@ impl VolShadowPass {
     ///
     /// The volume is initially centered on the world origin with the sun
     /// direction set to `(0, -1, 0.5)` (normalized).
-    pub fn new(device: &wgpu::Device, _queue: &wgpu::Queue) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        _queue: &wgpu::Queue,
+        scene_bind_group_layout: &wgpu::BindGroupLayout,
+    ) -> Self {
         // --- Shader ---
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("vol_shadow.wgsl"),
@@ -230,7 +234,7 @@ impl VolShadowPass {
         let pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("vol shadow pipeline layout"),
-                bind_group_layouts: &[&bind_group_layout],
+                bind_group_layouts: &[&bind_group_layout, scene_bind_group_layout],
                 push_constant_ranges: &[],
             });
 
@@ -323,6 +327,7 @@ impl VolShadowPass {
         queue: &wgpu::Queue,
         camera_pos: [f32; 3],
         sun_dir: [f32; 3],
+        scene_bind_group: &wgpu::BindGroup,
     ) {
         self.update_params(queue, camera_pos, sun_dir);
 
@@ -332,6 +337,7 @@ impl VolShadowPass {
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.set_bind_group(1, scene_bind_group, &[]);
         pass.dispatch_workgroups(
             VOL_SHADOW_DIM_X.div_ceil(4),
             VOL_SHADOW_DIM_Y.div_ceil(4),

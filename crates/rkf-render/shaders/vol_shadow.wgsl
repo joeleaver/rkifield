@@ -154,10 +154,13 @@ fn sample_sdf_density(pos: vec3<f32>) -> f32 {
         return 1.0;
     }
 
-    // Close to surface, partial density (soft shadow edges)
+    // Close to surface, partial density (soft shadow edges).
+    // Band of vs*4.0 spans ~2 march steps, improving opacity accumulation
+    // at SDF seams between intersecting objects.
     let vs = voxel_size();
-    if dist < vs * 2.0 {
-        return 1.0 - dist / (vs * 2.0);
+    let band = vs * 4.0;
+    if dist < band {
+        return 1.0 - dist / band;
     }
 
     return 0.0;

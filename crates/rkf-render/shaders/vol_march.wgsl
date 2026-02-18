@@ -104,8 +104,18 @@ fn sample_vol_shadow(pos: vec3<f32>) -> f32 {
         return 1.0;
     }
 
+    // Edge fade: smoothstep from 0 at boundary → 1 at 15% inward, per axis.
+    // Eliminates the hard rectangular brightness cutoff at shadow volume edges.
+    let FADE = 0.15;
+    let fade_x = smoothstep(0.0, FADE, uvw.x) * smoothstep(1.0, 1.0 - FADE, uvw.x);
+    let fade_y = smoothstep(0.0, FADE, uvw.y) * smoothstep(1.0, 1.0 - FADE, uvw.y);
+    let fade_z = smoothstep(0.0, FADE, uvw.z) * smoothstep(1.0, 1.0 - FADE, uvw.z);
+    let edge_fade = fade_x * fade_y * fade_z;
+
     // Sample the 3D shadow map with trilinear filtering.
-    return textureSampleLevel(vol_shadow_map, vol_shadow_smp, uvw, 0.0).r;
+    let shadow_val = textureSampleLevel(vol_shadow_map, vol_shadow_smp, uvw, 0.0).r;
+    // Blend from fully lit (1.0) at edges to actual shadow value in center.
+    return mix(1.0, shadow_val, edge_fade);
 }
 
 // ---------------------------------------------------------------------------
@@ -194,9 +204,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Jittered start offset keeps the first step from always landing at t=near.
     let jitter = interleaved_gradient_noise(pixel, params.frame_index);
 
-    // Angle between view ray and sun direction (for phase function).
-    // sun_dir points *toward* the sun, ray_dir points *away* from camera.
-    let cos_sun = dot(-ray_dir, params.sun_dir.xyz);
+    // Scattering angle cosine for phase function.
+    // Standard HG convention: cos_theta = dot(incident, scattered).
+    // incident = -sun_dir (light travels from sun), scattered = -ray_dir (toward camera).
+    // cos_theta = dot(-sun_dir, -ray_dir) = dot(sun_dir, ray_dir).
+    // Forward scattering (g>0) peaks at cos=1, i.e. looking toward the sun.
+    let cos_sun = dot(ray_dir, params.sun_dir.xyz);
 
     // Fog scattering color acts as the single-scattering albedo.
     let scatter_albedo = params.fog_color.xyz;
