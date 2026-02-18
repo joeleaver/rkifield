@@ -69,9 +69,9 @@ fn create_test_scene() -> (BrickPool, SparseGrid, Aabb) {
 
     let mut total = 0u32;
 
-    // Ground plane — thin flat box, material 1 (stone)
-    let ground_center = Vec3::new(0.0, -0.45, 0.0);
-    let ground_half = Vec3::new(2.8, 0.05, 2.8);
+    // Ground plane — flat box, material 1 (stone)
+    let ground_center = Vec3::new(0.0, -0.5, 0.0);
+    let ground_half = Vec3::new(2.8, 0.15, 2.8);
     total += populate_grid_with_material(
         &mut pool, &mut grid,
         |p| box_sdf(ground_half, p - ground_center),
@@ -136,77 +136,77 @@ fn create_test_scene() -> (BrickPool, SparseGrid, Aabb) {
 fn create_showcase_lights() -> Vec<Light> {
     vec![
         // --- Directional lights (2) ---
-        // Main sun — warm, shadow-casting
-        Light::directional([0.4, 0.8, 0.3], [1.0, 0.95, 0.85], 2.5, true),
+        // Main sun — warm, shadow-casting (dominant light source)
+        Light::directional([0.4, 0.8, 0.3], [1.0, 0.95, 0.85], 1.0, true),
         // Fill sky — cool blue, no shadows
-        Light::directional([-0.2, 0.6, -0.5], [0.4, 0.5, 0.7], 0.8, false),
+        Light::directional([-0.2, 0.6, -0.5], [0.4, 0.5, 0.7], 0.15, false),
 
         // --- Point lights (12) ---
         // Warm key light above center
-        Light::point([0.0, 1.2, 0.5], [1.0, 0.9, 0.7], 8.0, 4.0, true),
+        Light::point([0.0, 1.2, 0.5], [1.0, 0.9, 0.7], 0.8, 4.0, true),
         // Red accent left
-        Light::point([-1.5, 0.5, 0.3], [1.0, 0.2, 0.1], 5.0, 3.0, true),
+        Light::point([-1.5, 0.5, 0.3], [1.0, 0.2, 0.1], 0.6, 3.0, true),
         // Blue accent right
-        Light::point([1.5, 0.5, 0.3], [0.1, 0.3, 1.0], 5.0, 3.0, true),
+        Light::point([1.5, 0.5, 0.3], [0.1, 0.3, 1.0], 0.6, 3.0, true),
         // Green ground bounce back
-        Light::point([0.0, -0.1, -1.2], [0.2, 0.8, 0.3], 4.0, 3.0, false),
+        Light::point([0.0, -0.1, -1.2], [0.2, 0.8, 0.3], 0.4, 3.0, false),
         // Purple rim light
-        Light::point([0.0, 0.8, -1.5], [0.6, 0.1, 0.8], 6.0, 4.0, true),
+        Light::point([0.0, 0.8, -1.5], [0.6, 0.1, 0.8], 0.5, 4.0, true),
         // Orange low left
-        Light::point([-0.8, -0.2, 0.6], [1.0, 0.5, 0.1], 3.0, 2.5, false),
+        Light::point([-0.8, -0.2, 0.6], [1.0, 0.5, 0.1], 0.3, 2.5, false),
         // Cyan low right
-        Light::point([0.8, -0.2, 0.6], [0.1, 0.8, 0.9], 3.0, 2.5, false),
+        Light::point([0.8, -0.2, 0.6], [0.1, 0.8, 0.9], 0.3, 2.5, false),
         // White overhead far
-        Light::point([0.0, 1.5, -0.5], [1.0, 1.0, 1.0], 10.0, 5.0, true),
+        Light::point([0.0, 1.5, -0.5], [1.0, 1.0, 1.0], 1.0, 5.0, true),
         // Yellow near ground front-left
-        Light::point([-1.2, 0.1, 1.0], [1.0, 0.9, 0.3], 3.0, 2.5, false),
+        Light::point([-1.2, 0.1, 1.0], [1.0, 0.9, 0.3], 0.3, 2.5, false),
         // Pink near ground front-right
-        Light::point([1.2, 0.1, 1.0], [1.0, 0.3, 0.5], 3.0, 2.5, false),
+        Light::point([1.2, 0.1, 1.0], [1.0, 0.3, 0.5], 0.3, 2.5, false),
         // Dim white fill from below
-        Light::point([0.0, -0.35, 0.0], [1.0, 1.0, 1.0], 2.0, 2.0, false),
-        // Bright white back-center high
-        Light::point([0.0, 1.3, -1.0], [1.0, 1.0, 0.95], 7.0, 4.5, true),
+        Light::point([0.0, -0.35, 0.0], [1.0, 1.0, 1.0], 0.2, 2.0, false),
+        // White back-center high
+        Light::point([0.0, 1.3, -1.0], [1.0, 1.0, 0.95], 0.8, 4.5, true),
 
         // --- Spot lights (8) ---
         // Spotlight on center sphere from above-front
         Light::spot(
             [0.0, 1.5, 1.5], [0.0, -0.8, -0.6],
-            [1.0, 1.0, 1.0], 15.0, 5.0, 0.15, 0.35, true,
+            [1.0, 1.0, 1.0], 2.0, 5.0, 0.15, 0.35, true,
         ),
         // Red spot on left sphere
         Light::spot(
             [-1.0, 1.2, 0.8], [0.0, -0.7, -0.5],
-            [1.0, 0.15, 0.1], 12.0, 4.0, 0.2, 0.4, true,
+            [1.0, 0.15, 0.1], 1.5, 4.0, 0.2, 0.4, true,
         ),
         // Blue spot on right sphere
         Light::spot(
             [1.0, 1.2, 0.8], [0.0, -0.7, -0.5],
-            [0.1, 0.2, 1.0], 12.0, 4.0, 0.2, 0.4, true,
+            [0.1, 0.2, 1.0], 1.5, 4.0, 0.2, 0.4, true,
         ),
         // Green spot from behind on ground
         Light::spot(
             [0.0, 0.8, -2.0], [0.0, -0.3, 0.9],
-            [0.2, 1.0, 0.3], 10.0, 5.0, 0.1, 0.3, false,
+            [0.2, 1.0, 0.3], 1.0, 5.0, 0.1, 0.3, false,
         ),
         // Warm narrow spot on back-right box
         Light::spot(
             [0.7, 1.0, -0.3], [0.0, -1.0, -0.2],
-            [1.0, 0.8, 0.5], 8.0, 3.0, 0.1, 0.2, true,
+            [1.0, 0.8, 0.5], 1.0, 3.0, 0.1, 0.2, true,
         ),
         // Cool narrow spot on back-left capsule
         Light::spot(
             [-0.7, 1.0, -0.3], [0.0, -1.0, -0.2],
-            [0.5, 0.7, 1.0], 8.0, 3.0, 0.1, 0.2, true,
+            [0.5, 0.7, 1.0], 1.0, 3.0, 0.1, 0.2, true,
         ),
         // Wide purple wash from side
         Light::spot(
             [-2.0, 0.5, 0.0], [1.0, -0.2, 0.0],
-            [0.5, 0.1, 0.8], 6.0, 5.0, 0.3, 0.6, false,
+            [0.5, 0.1, 0.8], 0.6, 5.0, 0.3, 0.6, false,
         ),
         // Wide orange wash from other side
         Light::spot(
             [2.0, 0.5, 0.0], [-1.0, -0.2, 0.0],
-            [1.0, 0.5, 0.1], 6.0, 5.0, 0.3, 0.6, false,
+            [1.0, 0.5, 0.1], 0.6, 5.0, 0.3, 0.6, false,
         ),
     ]
 }

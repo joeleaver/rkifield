@@ -329,9 +329,10 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
 
     let coord = vec2<i32>(pixel.xy);
 
-    // Generate UV in [0, 1], then NDC in [-1, 1]
+    // Generate UV in [0, 1], then NDC in [-1, 1].
+    // Y is flipped: pixel.y=0 is screen top → ndc.y=+1 (camera up).
     let uv = (vec2<f32>(pixel.xy) + 0.5) / vec2<f32>(dims);
-    let ndc = uv * 2.0 - 1.0;
+    let ndc = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
 
     // Camera ray
     let ray_origin = camera.position.xyz;
