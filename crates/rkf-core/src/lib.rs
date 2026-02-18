@@ -24,6 +24,8 @@ pub mod companion;
 pub mod constants;
 /// Material properties for the global GPU material table.
 pub mod material;
+/// BrickPool + SparseGrid integration: populate a grid from an SDF.
+pub mod populate;
 /// SDF generation utilities for testing and offline voxelization.
 pub mod sdf;
 /// Single-LOD sparse grid for voxel occupancy and brick indexing.
