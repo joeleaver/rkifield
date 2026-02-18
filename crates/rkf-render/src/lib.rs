@@ -50,6 +50,8 @@ pub mod upscale;
 pub mod sharpen;
 /// Post-processing stack architecture.
 pub mod post_process;
+/// Bloom compute pass (pre-upscale).
+pub mod bloom;
 /// DLSS integration layer (stub — falls back to custom upscaler).
 pub mod dlss;
 
@@ -71,4 +73,5 @@ pub use history::{HistoryBuffers, HistoryUniforms, HISTORY_COLOR_FORMAT, HISTORY
 pub use upscale::{QualityMode, ResolutionConfig, UpscaleBackend, UpscalePass, UpscaleUniforms};
 pub use sharpen::{SharpenPass, SharpenUniforms, DEFAULT_SHARPEN_STRENGTH};
 pub use post_process::{PostProcessPassId, PostProcessConfig, PostProcessContext, PingPongBuffers, PP_FORMAT};
+pub use bloom::{BloomPass, BloomParams, BLOOM_MIP_LEVELS, DEFAULT_BLOOM_THRESHOLD, DEFAULT_BLOOM_KNEE};
 pub use dlss::{DlssContext, DlssQuality};
