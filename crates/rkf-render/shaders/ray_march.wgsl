@@ -54,9 +54,18 @@ const MIN_STEP: f32 = 0.0005;
 const EMPTY_SLOT: u32 = 0xFFFFFFFFu;
 
 // CellState values (2-bit, matching Rust CellState enum)
-const CELL_EMPTY: u32     = 0u;
-const CELL_SURFACE: u32   = 1u;
-const CELL_INTERIOR: u32  = 2u;
+const CELL_EMPTY: u32      = 0u;
+const CELL_SURFACE: u32    = 1u;
+const CELL_INTERIOR: u32   = 2u;
+const CELL_VOLUMETRIC: u32 = 3u; // TODO(Phase 9): volumetric march with density accumulation
+
+// Debug: set to true to output a heat-map of SDF evaluations per ray
+// (blue = few, green = moderate, red = many). Useful for profiling.
+const DEBUG_STEPS: bool = false;
+const DEBUG_MAX_EVALS: f32 = 100.0; // evaluations at which heat-map saturates to red
+
+// Per-thread counter for debug step visualization
+var<private> debug_sdf_evals: u32;
 
 // ---------- Helpers ----------
 
@@ -147,6 +156,7 @@ fn sphere_trace_brick(origin: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
     for (var i = 0u; i < MAX_BRICK_STEPS; i++) {
         let pos = origin + dir * t;
         let d = sample_brick(pos, brick_min, slot);
+        debug_sdf_evals += 1u;
 
         if d < HIT_EPSILON {
             return MarchResult(t, true);
@@ -221,12 +231,17 @@ fn ray_march_dda(origin: vec3<f32>, dir: vec3<f32>) -> f32 {
         let state = get_cell_state(flat);
 
         if state == CELL_SURFACE {
+            // Surface brick: sphere trace within this brick for precise hit
             let result = sphere_trace_brick(origin, safe_dir, inv_dir, t, ucell, flat);
             if result.hit {
                 return result.t;
             }
+            // Miss within brick — continue DDA from brick exit
         }
-        // CELL_EMPTY and CELL_INTERIOR: skip — advance DDA to next cell
+        // CELL_EMPTY: no geometry, skip cheaply
+        // CELL_INTERIOR: fully inside an object, skip (future: could skip
+        //   multiple consecutive interior cells in one step)
+        // CELL_VOLUMETRIC: TODO(Phase 9) — accumulate density via volumetric march
 
         // Step to the axis with the smallest t_max (next cell boundary)
         if t_max.x < t_max.y && t_max.x < t_max.z {
@@ -310,10 +325,21 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
     );
 
     // March via DDA
+    debug_sdf_evals = 0u;
     let t = ray_march_dda(ray_origin, ray_dir);
 
     var color: vec3<f32>;
-    if t >= 0.0 {
+    if DEBUG_STEPS {
+        // Heat-map: blue (0) → green (50%) → red (100%) based on SDF evaluations
+        let ratio = clamp(f32(debug_sdf_evals) / DEBUG_MAX_EVALS, 0.0, 1.0);
+        if ratio < 0.5 {
+            let s = ratio * 2.0;
+            color = vec3<f32>(0.0, s, 1.0 - s); // blue → green
+        } else {
+            let s = (ratio - 0.5) * 2.0;
+            color = vec3<f32>(s, 1.0 - s, 0.0); // green → red
+        }
+    } else if t >= 0.0 {
         // Hit — basic directional lighting
         let hit_pos = ray_origin + ray_dir * t;
         let normal = compute_normal(hit_pos);
