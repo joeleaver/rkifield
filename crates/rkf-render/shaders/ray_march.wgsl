@@ -47,8 +47,8 @@ struct MarchResult {
 // Group 1: G-buffer output textures
 @group(1) @binding(0) var gbuf_position: texture_storage_2d<rgba32float, write>;
 @group(1) @binding(1) var gbuf_normal:   texture_storage_2d<rgba16float, write>;
-@group(1) @binding(2) var gbuf_material: texture_storage_2d<rg16uint, write>;
-@group(1) @binding(3) var gbuf_motion:   texture_storage_2d<rg16float, write>;
+@group(1) @binding(2) var gbuf_material: texture_storage_2d<r32uint, write>;
+@group(1) @binding(3) var gbuf_motion:   texture_storage_2d<rg32float, write>;
 
 // ---------- Constants ----------
 
@@ -349,13 +349,15 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
         // Write G-buffer
         textureStore(gbuf_position, coord, vec4<f32>(hit_pos, result.t));
         textureStore(gbuf_normal, coord, vec4<f32>(normal, result.blend_weight));
-        textureStore(gbuf_material, coord, vec2<u32>(result.material_id, result.secondary_id_and_flags));
-        textureStore(gbuf_motion, coord, vec2<f32>(0.0, 0.0));
+        // Pack material_id (lower 16) + secondary_id_and_flags (upper 16) into R32Uint
+        let packed_mat = result.material_id | (result.secondary_id_and_flags << 16u);
+        textureStore(gbuf_material, coord, vec4<u32>(packed_mat, 0u, 0u, 0u));
+        textureStore(gbuf_motion, coord, vec4<f32>(0.0, 0.0, 0.0, 0.0));
     } else {
         // Sky / miss — encode as MAX_FLOAT hit distance
         textureStore(gbuf_position, coord, vec4<f32>(0.0, 0.0, 0.0, MAX_FLOAT));
         textureStore(gbuf_normal, coord, vec4<f32>(0.0, 0.0, 0.0, 0.0));
-        textureStore(gbuf_material, coord, vec2<u32>(0u, 0u));
-        textureStore(gbuf_motion, coord, vec2<f32>(0.0, 0.0));
+        textureStore(gbuf_material, coord, vec4<u32>(0u, 0u, 0u, 0u));
+        textureStore(gbuf_motion, coord, vec4<f32>(0.0, 0.0, 0.0, 0.0));
     }
 }

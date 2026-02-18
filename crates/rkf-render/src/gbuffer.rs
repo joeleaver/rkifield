@@ -3,12 +3,12 @@
 //! The ray march pass writes per-pixel data to 4 render targets at internal
 //! resolution. The shading pass reads these to compute final lighting.
 //!
-//! | Target | Format       | Content                                  |
-//! |--------|-------------|------------------------------------------|
-//! | 0      | Rgba32Float | position.xyz + hit_distance              |
-//! | 1      | Rgba16Float | normal.xyz + material_blend_weight       |
-//! | 2      | Rg16Uint    | material_id + secondary_id_and_flags     |
-//! | 3      | Rg16Float   | motion_vector.xy (zeros for now)         |
+//! | Target | Format       | Content                                       |
+//! |--------|-------------|-----------------------------------------------|
+//! | 0      | Rgba32Float | position.xyz + hit_distance                   |
+//! | 1      | Rgba16Float | normal.xyz + material_blend_weight            |
+//! | 2      | R32Uint     | packed: material_id(lo16) + sec_id_flags(hi16)|
+//! | 3      | Rg32Float   | motion_vector.xy (zeros for now)              |
 
 /// G-buffer: 4 render targets at internal resolution for deferred shading.
 pub struct GBuffer {
@@ -22,7 +22,7 @@ pub struct GBuffer {
     /// View for target 1.
     pub normal_view: wgpu::TextureView,
 
-    /// Target 2: material_id (r) + secondary_id_and_flags (g). `Rg16Uint`.
+    /// Target 2: packed material_id (lo16) + secondary_id_and_flags (hi16). `R32Uint`.
     pub material_texture: wgpu::Texture,
     /// View for target 2.
     pub material_view: wgpu::TextureView,
@@ -52,10 +52,10 @@ pub struct GBuffer {
 pub const GBUFFER_POSITION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
 /// Texture format for G-buffer target 1 (normal + blend weight).
 pub const GBUFFER_NORMAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
-/// Texture format for G-buffer target 2 (material IDs).
-pub const GBUFFER_MATERIAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Uint;
+/// Texture format for G-buffer target 2 (packed material IDs).
+pub const GBUFFER_MATERIAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Uint;
 /// Texture format for G-buffer target 3 (motion vectors).
-pub const GBUFFER_MOTION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Float;
+pub const GBUFFER_MOTION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg32Float;
 
 impl GBuffer {
     /// Create the G-buffer with 4 render targets at the given resolution.
@@ -325,7 +325,7 @@ mod tests {
     fn gbuffer_format_constants() {
         assert_eq!(GBUFFER_POSITION_FORMAT, wgpu::TextureFormat::Rgba32Float);
         assert_eq!(GBUFFER_NORMAL_FORMAT, wgpu::TextureFormat::Rgba16Float);
-        assert_eq!(GBUFFER_MATERIAL_FORMAT, wgpu::TextureFormat::Rg16Uint);
-        assert_eq!(GBUFFER_MOTION_FORMAT, wgpu::TextureFormat::Rg16Float);
+        assert_eq!(GBUFFER_MATERIAL_FORMAT, wgpu::TextureFormat::R32Uint);
+        assert_eq!(GBUFFER_MOTION_FORMAT, wgpu::TextureFormat::Rg32Float);
     }
 }

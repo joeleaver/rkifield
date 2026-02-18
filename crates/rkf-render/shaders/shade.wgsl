@@ -44,8 +44,8 @@ struct Material {
 // Group 0: G-buffer read (sampled textures)
 @group(0) @binding(0) var gbuf_position: texture_2d<f32>;
 @group(0) @binding(1) var gbuf_normal:   texture_2d<f32>;
-@group(0) @binding(2) var gbuf_material: texture_2d<u32>;
-@group(0) @binding(3) var gbuf_motion:   texture_2d<f32>;
+@group(0) @binding(2) var gbuf_material: texture_2d<u32>;    // r32uint: packed material data
+@group(0) @binding(3) var gbuf_motion:   texture_2d<f32>;   // rg32float: motion vectors
 
 // Group 1: material table
 @group(1) @binding(0) var<storage, read> materials: array<Material>;
@@ -123,8 +123,8 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
     let normal = normalize(normal_data.xyz);
     let blend_weight = normal_data.w;
 
-    let mat_data = textureLoad(gbuf_material, coord, 0);
-    let material_id = mat_data.r;
+    let packed_mat = textureLoad(gbuf_material, coord, 0).r;
+    let material_id = packed_mat & 0xFFFFu;
 
     // Look up material
     let mat = materials[material_id];
