@@ -13,12 +13,14 @@
 
 #![warn(missing_docs)]
 
+/// Asset registry with generational handles and state tracking.
+pub mod asset_registry;
 /// Async I/O pipeline for background chunk loading.
 pub mod async_io;
-/// Engine configuration system with quality presets and RON serialization.
-pub mod config;
 /// ECS component types for the scene graph.
 pub mod components;
+/// Engine configuration system with quality presets and RON serialization.
+pub mod config;
 /// Double-buffered GPU uniform buffers.
 pub mod double_buffer;
 /// Frame scheduling and render pass ordering.
@@ -29,21 +31,25 @@ pub mod lru_eviction;
 pub mod scene;
 /// Chunk streaming system — camera-distance-based load/evict management.
 pub mod streaming;
+/// Streaming budget enforcement — memory and I/O throttling.
+pub mod streaming_budget;
 /// Transform hierarchy update system.
 pub mod transform_system;
 
+pub use asset_registry::{AssetEntry, AssetRegistry, AssetState, Handle};
+pub use async_io::{AsyncIoPipeline, ChunkLoadResult};
+pub use components::{
+    AnimatedCharacter, CameraComponent, ChunkRef, EditorMetadata, FogVolumeComponent, Parent,
+    SdfObject, Transform, WorldTransform,
+};
 pub use config::{
     ConfigError, EngineConfig, GiSettings, PostProcessSettings, QualityPreset, RayMarchSettings,
     ShadingSettings, UpscaleSettings, VolumetricSettings,
 };
 pub use double_buffer::{DoubleBuffer, DoubleBufferSet};
-pub use components::{
-    AnimatedCharacter, CameraComponent, ChunkRef, EditorMetadata, FogVolumeComponent, Parent,
-    SdfObject, Transform, WorldTransform,
-};
 pub use frame::{execute_frame, FrameContext, FrameSettings};
-pub use async_io::{AsyncIoPipeline, ChunkLoadResult};
-pub use scene::Scene;
 pub use lru_eviction::{EvictionPolicy, EvictionResult, LruEntry, LruTracker};
+pub use scene::Scene;
 pub use streaming::{ChunkEntry, ChunkState, StreamingConfig, StreamingSystem};
+pub use streaming_budget::{BudgetMonitor, BudgetState, StreamingBudget};
 pub use transform_system::update_transforms;
