@@ -58,6 +58,8 @@ pub mod dof;
 pub mod motion_blur;
 /// Bloom composite compute pass (post-upscale).
 pub mod bloom_composite;
+/// Auto-exposure compute pass.
+pub mod auto_exposure;
 /// DLSS integration layer (stub — falls back to custom upscaler).
 pub mod dlss;
 
@@ -83,4 +85,5 @@ pub use bloom::{BloomPass, BloomParams, BLOOM_MIP_LEVELS, DEFAULT_BLOOM_THRESHOL
 pub use dof::{DofPass, DofParams, DEFAULT_FOCUS_DISTANCE, DEFAULT_FOCUS_RANGE, DEFAULT_MAX_COC, COC_FORMAT};
 pub use motion_blur::{MotionBlurPass, MotionBlurParams, DEFAULT_MOTION_BLUR_INTENSITY, DEFAULT_MAX_MOTION_SAMPLES};
 pub use bloom_composite::{BloomCompositePass, BloomCompositeParams, DEFAULT_BLOOM_INTENSITY};
+pub use auto_exposure::{AutoExposurePass, ExposureParams, HISTOGRAM_BINS, DEFAULT_MIN_EV, DEFAULT_MAX_EV, DEFAULT_ADAPT_SPEED};
 pub use dlss::{DlssContext, DlssQuality};
