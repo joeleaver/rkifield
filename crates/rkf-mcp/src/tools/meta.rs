@@ -3,15 +3,18 @@
 //! These tools manage the MCP server's connection to the engine,
 //! not the engine itself. They work independently of the AutomationApi.
 
+use crate::bridge::BridgeAutomationApi;
 use crate::protocol::ApiSlot;
 use crate::registry::*;
 use rkf_core::automation::{AutomationApi, StubAutomationApi};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 // --- Connect tool ---
 
 struct ConnectHandler {
     api_slot: ApiSlot,
+    connected: Arc<AtomicBool>,
 }
 
 impl ToolHandler for ConnectHandler {
@@ -46,10 +49,15 @@ impl ToolHandler for ConnectHandler {
                 }));
             }
 
+            // If exactly one socket found, auto-connect to it
+            if found.len() == 1 {
+                return self.do_connect(&found[0]);
+            }
+
             return Ok(serde_json::json!({
                 "status": "engines_found",
                 "sockets": found,
-                "message": "Found engine socket(s). Call connect again with socket_path to attach.",
+                "message": "Found multiple engine sockets. Call connect again with socket_path to attach.",
             }));
         }
 
@@ -62,17 +70,24 @@ impl ToolHandler for ConnectHandler {
             }));
         }
 
-        // TODO: When engine IPC bridge is implemented, this will:
-        // 1. Connect to the engine via Unix socket
-        // 2. Create a BridgeAutomationApi that proxies calls over IPC
-        // 3. Swap it into self.api_slot
-        // For now, report that connection infrastructure exists but engine bridge isn't built yet.
-        let _api_slot = &self.api_slot;
+        self.do_connect(&socket_path)
+    }
+}
+
+impl ConnectHandler {
+    fn do_connect(&self, socket_path: &str) -> Result<serde_json::Value, ToolError> {
+        let bridge = BridgeAutomationApi::new(socket_path.to_string());
+
+        let mut slot = self.api_slot.write().map_err(|e| {
+            ToolError::EngineError(format!("failed to acquire write lock: {e}"))
+        })?;
+        *slot = Arc::new(bridge);
+        self.connected.store(true, Ordering::Relaxed);
 
         Ok(serde_json::json!({
-            "status": "not_yet_implemented",
+            "status": "connected",
             "socket_path": socket_path,
-            "message": "Socket found but engine IPC bridge is not yet implemented. Engine tools will return stub data. The bridge will be built as engine features come online.",
+            "message": "Connected to engine via IPC bridge. Tools now return live data.",
         }))
     }
 }
@@ -81,6 +96,7 @@ impl ToolHandler for ConnectHandler {
 
 struct DisconnectHandler {
     api_slot: ApiSlot,
+    connected: Arc<AtomicBool>,
 }
 
 impl ToolHandler for DisconnectHandler {
@@ -94,6 +110,7 @@ impl ToolHandler for DisconnectHandler {
             ToolError::EngineError(format!("failed to acquire write lock: {e}"))
         })?;
         *slot = Arc::new(StubAutomationApi);
+        self.connected.store(false, Ordering::Relaxed);
 
         Ok(serde_json::json!({
             "status": "disconnected",
@@ -105,7 +122,7 @@ impl ToolHandler for DisconnectHandler {
 // --- Status tool ---
 
 struct StatusHandler {
-    api_slot: ApiSlot,
+    connected: Arc<AtomicBool>,
 }
 
 impl ToolHandler for StatusHandler {
@@ -114,11 +131,7 @@ impl ToolHandler for StatusHandler {
         _api: &dyn AutomationApi,
         _params: serde_json::Value,
     ) -> Result<serde_json::Value, ToolError> {
-        // Check if we're using the stub or a real connection
-        // For now, we can only be in stub mode since engine bridge isn't built
-        let _api = self.api_slot.read().map_err(|e| {
-            ToolError::EngineError(format!("failed to acquire read lock: {e}"))
-        })?;
+        let connected = self.connected.load(Ordering::Relaxed);
 
         // Auto-discover available engines
         let mut available_sockets = Vec::new();
@@ -131,18 +144,30 @@ impl ToolHandler for StatusHandler {
             }
         }
 
-        Ok(serde_json::json!({
-            "connected": false,
-            "api_mode": "stub",
-            "message": "Running with stub API. Engine tools return placeholder data. Use the 'connect' tool to attach to a running engine.",
-            "available_engines": available_sockets,
-            "server_version": env!("CARGO_PKG_VERSION"),
-        }))
+        if connected {
+            Ok(serde_json::json!({
+                "connected": true,
+                "api_mode": "bridge",
+                "message": "Connected to engine via IPC bridge. Tools return live data.",
+                "available_engines": available_sockets,
+                "server_version": env!("CARGO_PKG_VERSION"),
+            }))
+        } else {
+            Ok(serde_json::json!({
+                "connected": false,
+                "api_mode": "stub",
+                "message": "Running with stub API. Engine tools return placeholder data. Use the 'connect' tool to attach to a running engine.",
+                "available_engines": available_sockets,
+                "server_version": env!("CARGO_PKG_VERSION"),
+            }))
+        }
     }
 }
 
 /// Register meta tools (connect, disconnect, status) with the registry.
 pub fn register_meta_tools(registry: &mut ToolRegistry, api_slot: ApiSlot) {
+    let connected = Arc::new(AtomicBool::new(false));
+
     registry.register(
         ToolDefinition {
             name: "connect".to_string(),
@@ -163,6 +188,7 @@ pub fn register_meta_tools(registry: &mut ToolRegistry, api_slot: ApiSlot) {
         },
         Arc::new(ConnectHandler {
             api_slot: Arc::clone(&api_slot),
+            connected: Arc::clone(&connected),
         }),
     );
 
@@ -180,6 +206,7 @@ pub fn register_meta_tools(registry: &mut ToolRegistry, api_slot: ApiSlot) {
         },
         Arc::new(DisconnectHandler {
             api_slot: Arc::clone(&api_slot),
+            connected: Arc::clone(&connected),
         }),
     );
 
@@ -196,7 +223,7 @@ pub fn register_meta_tools(registry: &mut ToolRegistry, api_slot: ApiSlot) {
             mode: ToolMode::Both,
         },
         Arc::new(StatusHandler {
-            api_slot: Arc::clone(&api_slot),
+            connected: Arc::clone(&connected),
         }),
     );
 }
@@ -253,9 +280,13 @@ mod tests {
         let result = registry.call("connect", ToolMode::Editor, &*api, serde_json::json!({}));
         assert!(result.is_ok());
         let value = result.unwrap();
-        // Will be either "no_engine_found" or "engines_found" depending on machine state
+        // Will be "no_engine_found", "engines_found", or "connected" (auto-connect single)
         let status = value["status"].as_str().unwrap();
-        assert!(status == "no_engine_found" || status == "engines_found");
+        assert!(
+            status == "no_engine_found"
+                || status == "engines_found"
+                || status == "connected"
+        );
     }
 
     #[test]
@@ -285,5 +316,22 @@ mod tests {
         let result = registry.call("disconnect", ToolMode::Editor, &*api, serde_json::json!({}));
         assert!(result.is_ok());
         assert_eq!(result.unwrap()["status"], "disconnected");
+    }
+
+    #[test]
+    fn status_reflects_connection_state() {
+        let api_slot = make_api_slot();
+        let mut registry = ToolRegistry::new();
+        register_meta_tools(&mut registry, Arc::clone(&api_slot));
+        let api: Arc<dyn AutomationApi> = api_slot.read().unwrap().clone();
+
+        // Initially disconnected
+        let result = registry.call("status", ToolMode::Editor, &*api, serde_json::json!({}));
+        assert_eq!(result.unwrap()["connected"], false);
+
+        // After disconnect, still disconnected
+        let _ = registry.call("disconnect", ToolMode::Editor, &*api, serde_json::json!({}));
+        let result = registry.call("status", ToolMode::Editor, &*api, serde_json::json!({}));
+        assert_eq!(result.unwrap()["connected"], false);
     }
 }

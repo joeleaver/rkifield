@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::Result;
@@ -23,6 +23,9 @@ use rkf_render::camera::Camera;
 use rkf_render::gpu_scene::{GpuScene, SceneUniforms};
 use rkf_render::ray_march::{RayMarchPass, INTERNAL_HEIGHT, INTERNAL_WIDTH};
 use rkf_render::RenderContext;
+
+mod automation;
+use automation::{SharedState, TestbedAutomationApi};
 
 // ---------------------------------------------------------------------------
 // Test scene creation
@@ -86,10 +89,12 @@ struct GpuState {
     ray_march: RayMarchPass,
     blit: BlitPass,
     camera: Camera,
+    staging_buffer: wgpu::Buffer,
+    shared_state: Arc<Mutex<SharedState>>,
 }
 
 impl GpuState {
-    fn new(window: Arc<Window>) -> Self {
+    fn new(window: Arc<Window>, shared_state: Arc<Mutex<SharedState>>) -> Self {
         let size = window.inner_size();
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
@@ -104,6 +109,13 @@ impl GpuState {
 
         // Create test scene on CPU
         let (pool, grid, aabb) = create_test_scene();
+
+        // Update shared state with pool info
+        {
+            let mut state = shared_state.lock().unwrap();
+            state.pool_capacity = pool.capacity() as u64;
+            state.pool_allocated = pool.allocated_count() as u64;
+        }
 
         // Camera positioned to see the sphere
         let mut camera = Camera::new(Vec3::new(0.0, 0.0, 2.0));
@@ -134,6 +146,15 @@ impl GpuState {
             RayMarchPass::new(&context.device, &scene, INTERNAL_WIDTH, INTERNAL_HEIGHT);
         let blit = BlitPass::new(&context.device, &ray_march.output_view, surface_format);
 
+        // Staging buffer for CPU readback of rendered frames (screenshot support).
+        // 960 * 4 = 3840 bytes per row, which is already 256-byte aligned.
+        let staging_buffer = context.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("screenshot staging"),
+            size: (INTERNAL_WIDTH * INTERNAL_HEIGHT * 4) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
         Self {
             context,
             surface,
@@ -144,6 +165,8 @@ impl GpuState {
             ray_march,
             blit,
             camera,
+            staging_buffer,
+            shared_state,
         }
     }
 
@@ -166,7 +189,7 @@ impl GpuState {
         );
     }
 
-    fn render(&mut self) {
+    fn render(&mut self, dt: f32) {
         // Update camera uniforms on GPU
         self.update_camera();
 
@@ -195,8 +218,61 @@ impl GpuState {
         // Pass 2: Blit output texture → swapchain
         self.blit.draw(&mut encoder, &view);
 
+        // Pass 3: Copy output texture → staging buffer for screenshot readback
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: self.ray_march.output_texture(),
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &self.staging_buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(INTERNAL_WIDTH * 4),
+                    rows_per_image: Some(INTERNAL_HEIGHT),
+                },
+            },
+            wgpu::Extent3d {
+                width: INTERNAL_WIDTH,
+                height: INTERNAL_HEIGHT,
+                depth_or_array_layers: 1,
+            },
+        );
+
         self.context.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
+
+        // Read back the staging buffer into shared state for MCP screenshot tool
+        self.capture_frame();
+
+        // Update shared state with camera and timing info
+        if let Ok(mut state) = self.shared_state.lock() {
+            state.camera_position = self.camera.position;
+            state.camera_yaw = self.camera.yaw;
+            state.camera_pitch = self.camera.pitch;
+            state.camera_fov = self.camera.fov_degrees;
+            state.frame_time_ms = dt as f64 * 1000.0;
+        }
+    }
+
+    fn capture_frame(&mut self) {
+        let slice = self.staging_buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        self.context.device.poll(wgpu::Maintain::Wait);
+
+        if let Ok(Ok(())) = rx.recv() {
+            let data = slice.get_mapped_range();
+            if let Ok(mut state) = self.shared_state.lock() {
+                state.frame_pixels.copy_from_slice(&data);
+            }
+            drop(data);
+            self.staging_buffer.unmap();
+        }
     }
 }
 
@@ -263,6 +339,46 @@ impl InputState {
 }
 
 // ---------------------------------------------------------------------------
+// IPC server
+// ---------------------------------------------------------------------------
+
+/// Spawn the IPC server on a background thread with its own tokio runtime.
+///
+/// Returns the socket path for cleanup.
+fn spawn_ipc_server(api: Arc<dyn rkf_core::automation::AutomationApi>) -> String {
+    let socket_path = rkf_mcp::ipc::IpcConfig::default_socket_path();
+    let path_clone = socket_path.clone();
+
+    std::thread::Builder::new()
+        .name("ipc-server".into())
+        .spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("failed to create tokio runtime for IPC server");
+
+            rt.block_on(async {
+                let mut registry = rkf_mcp::registry::ToolRegistry::new();
+                rkf_mcp::tools::observation::register_observation_tools(&mut registry);
+                let registry = Arc::new(registry);
+
+                let config = rkf_mcp::ipc::IpcConfig {
+                    socket_path: Some(path_clone),
+                    tcp_port: 0,
+                    mode: rkf_mcp::registry::ToolMode::Debug,
+                };
+
+                if let Err(e) = rkf_mcp::ipc::run_server(config, registry, api).await {
+                    log::error!("IPC server error: {e}");
+                }
+            });
+        })
+        .expect("failed to spawn IPC server thread");
+
+    socket_path
+}
+
+// ---------------------------------------------------------------------------
 // Application
 // ---------------------------------------------------------------------------
 
@@ -273,6 +389,7 @@ struct App {
     frame_count: u64,
     last_title_update: Instant,
     last_frame: Instant,
+    socket_path: Option<String>,
 }
 
 impl App {
@@ -284,6 +401,7 @@ impl App {
             frame_count: 0,
             last_title_update: Instant::now(),
             last_frame: Instant::now(),
+            socket_path: None,
         }
     }
 
@@ -315,10 +433,26 @@ impl ApplicationHandler for App {
                 .create_window(attrs)
                 .expect("failed to create window"),
         );
-        self.gpu = Some(GpuState::new(window.clone()));
+
+        // Create shared state for automation API
+        let shared_state = Arc::new(Mutex::new(SharedState::new(
+            0, 0, // will be updated by GpuState::new
+            INTERNAL_WIDTH,
+            INTERNAL_HEIGHT,
+        )));
+
+        self.gpu = Some(GpuState::new(window.clone(), Arc::clone(&shared_state)));
         self.window = Some(window);
         self.last_frame = Instant::now();
         self.last_title_update = Instant::now();
+
+        // Spawn IPC server for MCP tool access
+        let api: Arc<dyn rkf_core::automation::AutomationApi> =
+            Arc::new(TestbedAutomationApi::new(shared_state));
+        let socket_path = spawn_ipc_server(api);
+        log::info!("IPC server listening on {socket_path}");
+        self.socket_path = Some(socket_path);
+
         log::info!("Window created — click to capture mouse, WASD to move, mouse to look, Esc to exit");
     }
 
@@ -368,7 +502,7 @@ impl ApplicationHandler for App {
                 // Update camera from input
                 if let Some(gpu) = &mut self.gpu {
                     self.input.apply_to_camera(&mut gpu.camera, dt);
-                    gpu.render();
+                    gpu.render(dt);
                 }
 
                 // Update title bar with frame time every 500ms
@@ -406,6 +540,16 @@ impl ApplicationHandler for App {
                     gpu.camera.rotate(delta.0, delta.1);
                 }
             }
+        }
+    }
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        // Clean up IPC socket file
+        if let Some(path) = &self.socket_path {
+            let _ = std::fs::remove_file(path);
+            log::info!("Cleaned up IPC socket: {path}");
         }
     }
 }
