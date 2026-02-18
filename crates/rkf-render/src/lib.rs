@@ -84,6 +84,8 @@ pub mod vol_composite;
 pub mod god_rays;
 /// Procedural cloud configuration and GPU parameters.
 pub mod clouds;
+/// Cloud shadow map compute pass.
+pub mod cloud_shadow;
 
 pub use camera::{Camera, CameraUniforms};
 pub use context::RenderContext;
@@ -120,3 +122,4 @@ pub use vol_upscale::{VolUpscalePass, VolUpscaleParams, DEFAULT_DEPTH_SIGMA, VOL
 pub use vol_composite::{VolCompositePass, VolCompositeParams, VOL_COMPOSITE_FORMAT};
 pub use god_rays::{GodRaySettings, DEFAULT_GOD_RAY_DUST, DEFAULT_GOD_RAY_G, MIN_GOD_RAY_DUST, MAX_GOD_RAY_DUST};
 pub use clouds::{CloudSettings, CloudParams, DEFAULT_CLOUD_MIN, DEFAULT_CLOUD_MAX, DEFAULT_CLOUD_THRESHOLD, DEFAULT_CLOUD_DENSITY_SCALE, DEFAULT_CLOUD_SHADOW_RESOLUTION, DEFAULT_CLOUD_SHADOW_COVERAGE};
+pub use cloud_shadow::{CloudShadowPass, CloudShadowParams, DEFAULT_CLOUD_SHADOW_RES, CLOUD_SHADOW_FORMAT};
