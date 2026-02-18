@@ -15,5 +15,8 @@
 
 /// GPU device and queue wrapper.
 pub mod context;
+/// Camera system for ray generation.
+pub mod camera;
 
+pub use camera::{Camera, CameraUniforms};
 pub use context::RenderContext;
