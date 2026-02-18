@@ -20,6 +20,10 @@ pub mod camera;
 /// GPU buffer upload for scene data.
 pub mod gpu_scene;
 
+/// Ray march compute pass.
+pub mod ray_march;
+
 pub use camera::{Camera, CameraUniforms};
 pub use context::RenderContext;
 pub use gpu_scene::{GpuScene, SceneUniforms};
+pub use ray_march::RayMarchPass;
