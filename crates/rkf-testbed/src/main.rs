@@ -22,9 +22,11 @@ use rkf_render::blit::BlitPass;
 use rkf_render::camera::Camera;
 use rkf_render::gbuffer::GBuffer;
 use rkf_render::gpu_scene::{GpuScene, SceneUniforms};
+use rkf_render::light::{Light, LightBuffer};
 use rkf_render::material_table::{self, MaterialTable};
 use rkf_render::ray_march::{RayMarchPass, INTERNAL_HEIGHT, INTERNAL_WIDTH};
 use rkf_render::shading::ShadingPass;
+use rkf_render::tile_cull::TileCullPass;
 use rkf_render::tone_map::ToneMapPass;
 use rkf_render::RenderContext;
 
@@ -144,6 +146,8 @@ struct GpuState {
     scene: GpuScene,
     gbuffer: GBuffer,
     material_table: MaterialTable,
+    light_buffer: LightBuffer,
+    tile_cull: TileCullPass,
     ray_march: RayMarchPass,
     shading: ShadingPass,
     tone_map: ToneMapPass,
@@ -208,6 +212,26 @@ impl GpuState {
         // Create G-buffer
         let gbuffer = GBuffer::new(&context.device, INTERNAL_WIDTH, INTERNAL_HEIGHT);
 
+        // Create lights — directional sun matching previous hardcoded values
+        let lights = vec![
+            Light::directional(
+                [0.4, 0.8, 0.3],   // direction (same as old SUN_DIR)
+                [1.0, 0.95, 0.85], // color (same as old SUN_COLOR)
+                3.0,                // intensity (same as old SUN_INTENSITY)
+                true,               // shadow caster
+            ),
+        ];
+        let light_buffer = LightBuffer::upload(&context.device, &lights);
+
+        // Create tile cull pass
+        let tile_cull = TileCullPass::new(
+            &context.device,
+            &gbuffer,
+            &light_buffer,
+            INTERNAL_WIDTH,
+            INTERNAL_HEIGHT,
+        );
+
         // Create render passes
         let ray_march = RayMarchPass::new(&context.device, &scene, &gbuffer);
         let shading = ShadingPass::new(
@@ -215,6 +239,7 @@ impl GpuState {
             &gbuffer,
             &material_table,
             &scene,
+            &tile_cull.shade_light_bind_group_layout,
             INTERNAL_WIDTH,
             INTERNAL_HEIGHT,
         );
@@ -243,6 +268,8 @@ impl GpuState {
             scene,
             gbuffer,
             material_table,
+            light_buffer,
+            tile_cull,
             ray_march,
             shading,
             tone_map,
@@ -289,6 +316,22 @@ impl GpuState {
         self.shading
             .update_camera_pos(&self.context.queue, [cam_pos.x, cam_pos.y, cam_pos.z]);
 
+        // Update tile cull uniforms with camera data
+        let cam_fwd = self.camera.forward();
+        self.tile_cull.update_uniforms(
+            &self.context.queue,
+            self.light_buffer.count,
+            [cam_pos.x, cam_pos.y, cam_pos.z],
+            [cam_fwd.x, cam_fwd.y, cam_fwd.z],
+        );
+
+        // Update shade uniforms with light/tile info
+        self.shading.update_light_info(
+            &self.context.queue,
+            self.light_buffer.count,
+            self.tile_cull.num_tiles_x,
+        );
+
         let frame = match self.surface.get_current_texture() {
             Ok(f) => f,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
@@ -311,16 +354,25 @@ impl GpuState {
         // Pass 1: Ray march (compute) → G-buffer
         self.ray_march.dispatch(&mut encoder, &self.scene, &self.gbuffer);
 
-        // Pass 2: Shading (compute) — G-buffer + materials + SDF → HDR
-        self.shading.dispatch(&mut encoder, &self.gbuffer, &self.material_table, &self.scene);
+        // Pass 2: Tile light cull
+        self.tile_cull.dispatch(&mut encoder, &self.gbuffer);
 
-        // Pass 3: Tone map (compute) — HDR → LDR
+        // Pass 3: Shading (compute) — G-buffer + materials + SDF + lights → HDR
+        self.shading.dispatch(
+            &mut encoder,
+            &self.gbuffer,
+            &self.material_table,
+            &self.scene,
+            &self.tile_cull.shade_light_bind_group,
+        );
+
+        // Pass 4: Tone map (compute) — HDR → LDR
         self.tone_map.dispatch(&mut encoder);
 
-        // Pass 4: Blit LDR → swapchain
+        // Pass 5: Blit LDR → swapchain
         self.blit.draw(&mut encoder, &view);
 
-        // Pass 5: Copy LDR texture → staging buffer for screenshot readback
+        // Pass 6: Copy LDR texture → staging buffer for screenshot readback
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: self.tone_map.ldr_texture(),

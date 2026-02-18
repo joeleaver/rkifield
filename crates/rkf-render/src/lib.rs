@@ -28,8 +28,12 @@ pub mod gbuffer;
 pub mod material_table;
 /// Ray march compute pass.
 pub mod ray_march;
+/// Light types and GPU light buffer.
+pub mod light;
 /// PBR shading compute pass.
 pub mod shading;
+/// Tiled light culling compute pass.
+pub mod tile_cull;
 /// Tone mapping compute pass (HDR → LDR).
 pub mod tone_map;
 
@@ -40,5 +44,7 @@ pub use gpu_scene::{GpuScene, SceneUniforms};
 pub use material_table::MaterialTable;
 pub use blit::BlitPass;
 pub use ray_march::RayMarchPass;
+pub use light::{Light, LightBuffer, MAX_LIGHTS, MAX_LIGHTS_PER_TILE, TILE_SIZE};
 pub use shading::{ShadeUniforms, ShadingPass};
+pub use tile_cull::{CullUniforms, TileCullPass};
 pub use tone_map::ToneMapPass;

@@ -52,6 +52,27 @@ struct SceneUniforms {
     params:       vec4<f32>,   // x = voxel_size, yzw = unused
 }
 
+// ---------- Light type (must match Rust Light, 64 bytes) ----------
+
+struct Light {
+    light_type: u32,  // 0=directional, 1=point, 2=spot
+    pos_x: f32,
+    pos_y: f32,
+    pos_z: f32,
+    dir_x: f32,
+    dir_y: f32,
+    dir_z: f32,
+    color_r: f32,
+    color_g: f32,
+    color_b: f32,
+    intensity: f32,
+    range: f32,
+    inner_angle: f32,
+    outer_angle: f32,
+    cookie_index: i32,
+    shadow_caster: u32,
+}
+
 // ---------- Bindings ----------
 
 // Group 0: G-buffer read (sampled textures)
@@ -69,9 +90,9 @@ struct SceneUniforms {
 // Group 3: Shade uniforms (debug mode + camera position)
 struct ShadeUniforms {
     debug_mode: u32, // 0=normal, 1=normals, 2=positions, 3=material IDs, 4=diffuse only, 5=specular only
+    num_lights: u32,
+    num_tiles_x: u32,
     _pad0: u32,
-    _pad1: u32,
-    _pad2: u32,
     camera_pos: vec4<f32>, // xyz = world-space camera position, w = unused
 }
 @group(3) @binding(0) var<uniform> shade_uniforms: ShadeUniforms;
@@ -84,6 +105,11 @@ struct ShadeUniforms {
 // binding 4 = scene uniforms
 @group(4) @binding(4) var<uniform> scene: SceneUniforms;
 
+// Group 5: Light / tile data (read-only for shading)
+@group(5) @binding(0) var<storage, read> lights: array<Light>;
+@group(5) @binding(1) var<storage, read> tile_light_indices: array<u32>;
+@group(5) @binding(2) var<storage, read> tile_light_counts: array<u32>;
+
 // ---------- Constants ----------
 
 const PI: f32 = 3.14159265359;
@@ -95,10 +121,13 @@ const CELL_EMPTY: u32      = 0u;
 const CELL_SURFACE: u32    = 1u;
 const CELL_INTERIOR: u32   = 2u;
 
-// Sun light parameters
-const SUN_DIR: vec3<f32> = vec3<f32>(0.4, 0.8, 0.3);
-const SUN_COLOR: vec3<f32> = vec3<f32>(1.0, 0.95, 0.85);
-const SUN_INTENSITY: f32 = 3.0;
+// Light types
+const LIGHT_TYPE_DIRECTIONAL: u32 = 0u;
+const LIGHT_TYPE_POINT: u32 = 1u;
+const LIGHT_TYPE_SPOT: u32 = 2u;
+const MAX_LIGHTS_PER_TILE: u32 = 64u;
+
+// Ambient/sky
 const AMBIENT_COLOR: vec3<f32> = vec3<f32>(0.15, 0.18, 0.25);
 
 // Sky gradient
@@ -325,43 +354,67 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
 
     // View direction (from surface toward camera)
     let view_dir = normalize(shade_uniforms.camera_pos.xyz - world_pos);
-
-    // Lighting
-    let light_dir = normalize(SUN_DIR);
-    let half_vec = normalize(view_dir + light_dir);
-
-    let n_dot_l = max(dot(normal, light_dir), 0.0);
     let n_dot_v = max(dot(normal, view_dir), 0.001);
-    let n_dot_h = max(dot(normal, half_vec), 0.0);
-    let h_dot_v = max(dot(half_vec, view_dir), 0.0);
 
-    // Cook-Torrance specular BRDF
-    let d = distribution_ggx(n_dot_h, roughness);
-    let g = geometry_smith(n_dot_v, n_dot_l, roughness);
-    let f = fresnel_schlick(h_dot_v, f0);
-
-    let numerator = d * g * f;
-    let denominator = 4.0 * n_dot_v * n_dot_l + 0.0001;
-    let specular = numerator / denominator;
-
-    // Energy conservation: diffuse is reduced by what specular reflects
-    let ks = f;
-    let kd = (vec3<f32>(1.0) - ks) * (1.0 - metallic);
-
-    // Lambertian diffuse
-    let diffuse = kd * albedo / PI;
-
-    // SDF soft shadow from sun
-    let shadow_origin = world_pos + normal * SHADOW_BIAS;
-    let shadow = soft_shadow(shadow_origin, light_dir, SHADOW_MAX_DIST, SHADOW_K);
-
-    // Combined direct lighting (modulated by shadow)
-    let radiance = SUN_COLOR * SUN_INTENSITY;
-    let direct = (diffuse + specular) * radiance * n_dot_l * shadow;
-
-    // Subsurface scattering contribution (only for materials with subsurface > 0)
+    // SSS color lookup
     let sss_color = vec3<f32>(mat.subsurface_r, mat.subsurface_g, mat.subsurface_b);
-    let sss = sss_contribution(world_pos, normal, light_dir, mat.subsurface, sss_color) * radiance * shadow;
+
+    // Tile-based light iteration
+    let tile_x = pixel.x / 16u;
+    let tile_y = pixel.y / 16u;
+    let tile_id = tile_y * shade_uniforms.num_tiles_x + tile_x;
+    let tile_base = tile_id * MAX_LIGHTS_PER_TILE;
+    let tile_count = tile_light_counts[tile_id];
+
+    var total_diffuse = vec3<f32>(0.0);
+    var total_specular = vec3<f32>(0.0);
+    var sss_total = vec3<f32>(0.0);
+
+    for (var li = 0u; li < tile_count; li++) {
+        let light_idx = tile_light_indices[tile_base + li];
+        let light = lights[light_idx];
+
+        let light_color = vec3<f32>(light.color_r, light.color_g, light.color_b);
+        let radiance = light_color * light.intensity;
+
+        if light.light_type == LIGHT_TYPE_DIRECTIONAL {
+            let light_dir = normalize(vec3<f32>(light.dir_x, light.dir_y, light.dir_z));
+            let half_vec = normalize(view_dir + light_dir);
+
+            let n_dot_l = max(dot(normal, light_dir), 0.0);
+            let n_dot_h = max(dot(normal, half_vec), 0.0);
+            let h_dot_v = max(dot(half_vec, view_dir), 0.0);
+
+            // Cook-Torrance specular BRDF
+            let d = distribution_ggx(n_dot_h, roughness);
+            let g = geometry_smith(n_dot_v, n_dot_l, roughness);
+            let f = fresnel_schlick(h_dot_v, f0);
+
+            let numerator = d * g * f;
+            let denominator = 4.0 * n_dot_v * n_dot_l + 0.0001;
+            let specular_brdf = numerator / denominator;
+
+            let ks = f;
+            let kd = (vec3<f32>(1.0) - ks) * (1.0 - metallic);
+            let diffuse_brdf = kd * albedo / PI;
+
+            // SDF soft shadow (if light casts shadows)
+            var shadow = 1.0;
+            if light.shadow_caster == 1u {
+                let shadow_origin = world_pos + normal * SHADOW_BIAS;
+                shadow = soft_shadow(shadow_origin, light_dir, SHADOW_MAX_DIST, SHADOW_K);
+            }
+
+            total_diffuse += diffuse_brdf * radiance * n_dot_l * shadow;
+            total_specular += specular_brdf * radiance * n_dot_l * shadow;
+
+            // SSS for this light
+            sss_total += sss_contribution(world_pos, normal, light_dir, mat.subsurface, sss_color)
+                         * radiance * shadow;
+        }
+        // Point light evaluation (task 7.5) and spot light evaluation (task 7.6)
+        // will be added here.
+    }
 
     // SDF ambient occlusion
     let ao = sdf_ao(world_pos + normal * SHADOW_BIAS, normal);
@@ -369,8 +422,9 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
     // Ambient approximation (hemisphere) — modulated by AO
     let ambient = AMBIENT_COLOR * albedo * ao;
 
-    // Final color = direct + SSS + ambient + emission
-    var color = direct + sss + ambient + emission;
+    // Final color = direct diffuse + direct specular + SSS + ambient + emission
+    let direct = total_diffuse + total_specular;
+    var color = direct + sss_total + ambient + emission;
 
     // Debug visualization modes
     switch shade_uniforms.debug_mode {
@@ -393,11 +447,11 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
         }
         case 4u: {
             // Diffuse only (no specular, no emission)
-            color = diffuse * radiance * n_dot_l * shadow + ambient;
+            color = total_diffuse + ambient;
         }
         case 5u: {
             // Specular only
-            color = specular * radiance * n_dot_l * shadow;
+            color = total_specular;
         }
         default: {
             // Normal shading (already computed)

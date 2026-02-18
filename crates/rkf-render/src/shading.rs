@@ -17,8 +17,12 @@ use wgpu::util::DeviceExt;
 pub struct ShadeUniforms {
     /// Debug visualization mode (0=normal, 1=normals, 2=positions, 3=material IDs, 4=diffuse, 5=specular).
     pub debug_mode: u32,
+    /// Number of active lights.
+    pub num_lights: u32,
+    /// Number of tiles horizontally (for indexing tile_light_counts/indices).
+    pub num_tiles_x: u32,
     /// Padding.
-    pub _pad: [u32; 3],
+    pub _pad: u32,
     /// Camera world-space position (xyz) + unused (w).
     pub camera_pos: [f32; 4],
 }
@@ -58,6 +62,7 @@ impl ShadingPass {
         gbuffer: &GBuffer,
         material_table: &MaterialTable,
         scene: &GpuScene,
+        light_bind_group_layout: &wgpu::BindGroupLayout,
         width: u32,
         height: u32,
     ) -> Self {
@@ -111,7 +116,9 @@ impl ShadingPass {
         // Shade uniforms buffer (32 bytes: debug mode + padding + camera_pos)
         let shade_uniforms = ShadeUniforms {
             debug_mode: 0,
-            _pad: [0; 3],
+            num_lights: 0,
+            num_tiles_x: 0,
+            _pad: 0,
             camera_pos: [0.0; 4],
         };
         let shade_uniforms_buffer =
@@ -146,7 +153,7 @@ impl ShadingPass {
         });
 
         // Pipeline layout: group 0 = G-buffer, group 1 = materials, group 2 = HDR output,
-        // group 3 = shade uniforms, group 4 = scene SDF data
+        // group 3 = shade uniforms, group 4 = scene SDF data, group 5 = light/tile data
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("shading pipeline layout"),
             bind_group_layouts: &[
@@ -155,6 +162,7 @@ impl ShadingPass {
                 &hdr_bind_group_layout,
                 &shade_uniforms_bind_group_layout,
                 &scene.bind_group_layout,
+                light_bind_group_layout,
             ],
             push_constant_ranges: &[],
         });
@@ -189,6 +197,7 @@ impl ShadingPass {
         gbuffer: &GBuffer,
         material_table: &MaterialTable,
         scene: &GpuScene,
+        light_bind_group: &wgpu::BindGroup,
     ) {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("shading"),
@@ -200,6 +209,7 @@ impl ShadingPass {
         pass.set_bind_group(2, &self.hdr_bind_group, &[]);
         pass.set_bind_group(3, &self.shade_uniforms_bind_group, &[]);
         pass.set_bind_group(4, &scene.bind_group, &[]);
+        pass.set_bind_group(5, light_bind_group, &[]);
 
         let wg_x = self.width.div_ceil(8);
         let wg_y = self.height.div_ceil(8);
@@ -215,9 +225,14 @@ impl ShadingPass {
     /// - 4: Diffuse only
     /// - 5: Specular only
     pub fn set_debug_mode(&self, queue: &wgpu::Queue, mode: u32) {
-        // Write only the first 16 bytes (debug_mode + padding), preserving camera_pos.
-        let data = [mode, 0u32, 0u32, 0u32];
-        queue.write_buffer(&self.shade_uniforms_buffer, 0, bytemuck::cast_slice(&data));
+        // Write only the first 4 bytes (debug_mode), preserving other fields.
+        queue.write_buffer(&self.shade_uniforms_buffer, 0, bytemuck::bytes_of(&mode));
+    }
+
+    /// Update the light info in shade uniforms (num_lights at offset 4, num_tiles_x at offset 8).
+    pub fn update_light_info(&self, queue: &wgpu::Queue, num_lights: u32, num_tiles_x: u32) {
+        let data = [num_lights, num_tiles_x];
+        queue.write_buffer(&self.shade_uniforms_buffer, 4, bytemuck::cast_slice(&data));
     }
 
     /// Update the camera world-space position for correct view direction computation.
@@ -241,7 +256,9 @@ mod tests {
     fn shade_uniforms_pod_roundtrip() {
         let u = ShadeUniforms {
             debug_mode: 3,
-            _pad: [0; 3],
+            num_lights: 5,
+            num_tiles_x: 60,
+            _pad: 0,
             camera_pos: [1.0, 2.0, 3.0, 0.0],
         };
         let bytes = bytemuck::bytes_of(&u);
