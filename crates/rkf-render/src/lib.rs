@@ -38,6 +38,8 @@ pub mod tile_cull;
 pub mod tone_map;
 /// Radiance volume for voxel cone tracing global illumination.
 pub mod radiance_volume;
+/// Radiance injection compute pass for GI.
+pub mod radiance_inject;
 
 pub use camera::{Camera, CameraUniforms};
 pub use context::RenderContext;
@@ -51,3 +53,4 @@ pub use shading::{ShadeUniforms, ShadingPass};
 pub use tile_cull::{CullUniforms, TileCullPass};
 pub use tone_map::ToneMapPass;
 pub use radiance_volume::{RadianceVolume, RadianceVolumeUniforms, RADIANCE_DIM, RADIANCE_LEVELS};
+pub use radiance_inject::{InjectUniforms, RadianceInjectPass};
