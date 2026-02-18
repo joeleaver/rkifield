@@ -43,6 +43,8 @@ impl RenderContext {
                 required_features: wgpu::Features::FLOAT32_FILTERABLE,
                 required_limits: wgpu::Limits {
                     max_bind_groups: 8,
+                    max_storage_buffer_binding_size: 1 << 30, // 1 GB
+                    max_buffer_size: 1 << 31, // 2 GB
                     ..wgpu::Limits::default()
                 },
                 memory_hints: wgpu::MemoryHints::Performance,

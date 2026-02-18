@@ -41,6 +41,11 @@ use rkf_render::sharpen::SharpenPass;
 use rkf_render::tile_cull::TileCullPass;
 use rkf_render::tone_map::ToneMapPass;
 use rkf_render::upscale::UpscalePass;
+use rkf_render::vol_shadow::VolShadowPass;
+use rkf_render::vol_march::{VolMarchPass, VolMarchParams};
+use rkf_render::vol_upscale::VolUpscalePass;
+use rkf_render::vol_composite::VolCompositePass;
+use rkf_render::fog::{FogSettings, FogParams};
 use rkf_render::RenderContext;
 
 mod automation;
@@ -50,13 +55,133 @@ use automation::{SharedState, TestbedAutomationApi};
 // Phase 7 scene — lighting showcase (7 objects, all materials, 22+ lights)
 // ---------------------------------------------------------------------------
 
-/// Resolution tier for the test scene (Tier 1 = 2cm voxels).
-const TEST_TIER: usize = 1;
+/// Resolution tier for the test scene (Tier 2 = 8cm voxels).
+const TEST_TIER: usize = 2;
 
 /// Display (output) resolution width — the window size.
 const DISPLAY_WIDTH: u32 = 1280;
 /// Display (output) resolution height — the window size.
 const DISPLAY_HEIGHT: u32 = 720;
+
+/// Create a large outdoor scene for volumetric fog / god ray validation.
+///
+/// Tier 2 (8cm voxels, 0.64m bricks) allows a 30m scene with manageable grid size.
+/// Features:
+/// - Large ground plane (14m × 14m)
+/// - 8 tall stone pillars in two rows (avenue) for god-ray occlusion
+/// - 2 horizontal lintels connecting pillar pairs at the top
+/// - A tall monolith wall to create broad shadow regions
+/// - 2 boulders for variety
+fn create_volumetric_scene() -> (BrickPool, SparseGrid, Aabb) {
+    let aabb = Aabb::new(Vec3::new(-15.0, -1.0, -15.0), Vec3::new(15.0, 8.0, 15.0));
+    let res = &RESOLUTION_TIERS[TEST_TIER];
+    let size = aabb.size();
+    let dims = UVec3::new(
+        ((size.x / res.brick_extent).ceil() as u32).max(1),
+        ((size.y / res.brick_extent).ceil() as u32).max(1),
+        ((size.z / res.brick_extent).ceil() as u32).max(1),
+    );
+    let pool_cap = if TEST_TIER <= 1 { 262144 } else { 65536 }; // 256K bricks for fine tiers
+    let mut pool: BrickPool = Pool::new(pool_cap);
+    let mut grid = SparseGrid::new(dims);
+    let mut total = 0u32;
+
+    // Ground plane — large flat surface, stone (material 1)
+    total += populate_grid_with_material(
+        &mut pool, &mut grid,
+        |p| box_sdf(Vec3::new(7.0, 0.1, 7.0), p - Vec3::new(0.0, -0.5, 0.0)),
+        TEST_TIER, &aabb, 1,
+    ).expect("ground");
+
+    // --- Pillar avenue: two rows of 4 pillars each, aligned along X axis ---
+    // Left row (z = -1.5), pillars at x = -4, -1.5, 1.5, 4
+    let pillar_positions = [
+        Vec3::new(-4.0, 0.0, -1.5),
+        Vec3::new(-1.5, 0.0, -1.5),
+        Vec3::new( 1.5, 0.0, -1.5),
+        Vec3::new( 4.0, 0.0, -1.5),
+        // Right row (z = 1.5)
+        Vec3::new(-4.0, 0.0, 1.5),
+        Vec3::new(-1.5, 0.0, 1.5),
+        Vec3::new( 1.5, 0.0, 1.5),
+        Vec3::new( 4.0, 0.0, 1.5),
+    ];
+
+    for (i, base) in pillar_positions.iter().enumerate() {
+        let bottom = Vec3::new(base.x, -0.4, base.z);
+        let top = Vec3::new(base.x, 3.5, base.z);
+        total += populate_grid_with_material(
+            &mut pool, &mut grid,
+            |p| capsule_sdf(bottom, top, 0.25, p),
+            TEST_TIER, &aabb, 1, // stone
+        ).expect(&format!("pillar {i}"));
+    }
+
+    // --- Lintels: horizontal beams connecting pillar pairs across the avenue ---
+    // Lintel 1: connects pillars at x=-1.5 across z=-1.5 to z=1.5
+    total += populate_grid_with_material(
+        &mut pool, &mut grid,
+        |p| box_sdf(Vec3::new(0.3, 0.2, 1.8), p - Vec3::new(-1.5, 3.6, 0.0)),
+        TEST_TIER, &aabb, 1,
+    ).expect("lintel 1");
+
+    // Lintel 2: connects pillars at x=1.5
+    total += populate_grid_with_material(
+        &mut pool, &mut grid,
+        |p| box_sdf(Vec3::new(0.3, 0.2, 1.8), p - Vec3::new(1.5, 3.6, 0.0)),
+        TEST_TIER, &aabb, 1,
+    ).expect("lintel 2");
+
+    // --- Tall monolith wall — creates broad shadow region ---
+    // Positioned to one side, perpendicular to sun direction
+    total += populate_grid_with_material(
+        &mut pool, &mut grid,
+        |p| box_sdf(Vec3::new(0.3, 2.5, 3.0), p - Vec3::new(-7.0, 2.0, 0.0)),
+        TEST_TIER, &aabb, 2, // metal material for contrast
+    ).expect("monolith wall");
+
+    // --- Boulders for variety ---
+    total += populate_grid_with_material(
+        &mut pool, &mut grid,
+        |p| sphere_sdf(Vec3::new(3.0, 0.0, -3.5), 0.8, p),
+        TEST_TIER, &aabb, 1,
+    ).expect("boulder 1");
+
+    total += populate_grid_with_material(
+        &mut pool, &mut grid,
+        |p| sphere_sdf(Vec3::new(-2.5, -0.1, 4.0), 0.6, p),
+        TEST_TIER, &aabb, 1,
+    ).expect("boulder 2");
+
+    log::info!(
+        "Volumetric scene: {total} bricks, grid {}x{}x{}, tier {TEST_TIER}",
+        dims.x, dims.y, dims.z,
+    );
+    (pool, grid, aabb)
+}
+
+/// Single directional sun at low angle for volumetric god ray validation.
+/// No point lights, no spots — just a sunrise sun and a very dim fill.
+fn create_volumetric_lights(_cam_pos: Vec3) -> Vec<Light> {
+    vec![
+        // 0: Main sun — low angle (sunrise from +X direction), warm, shadow-casting
+        // Direction points FROM the sun toward the scene (light travels this way)
+        // Sun ~15 degrees above horizon — dir points TOWARD the sun
+        Light::directional(
+            [0.9, 0.26, 0.15],    // sun in +X direction, above horizon
+            [1.0, 0.85, 0.6],      // warm sunrise color
+            2.5,                    // strong intensity
+            true,
+        ),
+        // 1: Very dim cool fill from opposite side (no shadows)
+        Light::directional(
+            [-0.3, 0.8, -0.2],    // opposite side, above horizon
+            [0.3, 0.35, 0.5],
+            0.08,
+            false,
+        ),
+    ]
+}
 
 /// Create a lighting showcase scene with multiple objects and materials.
 ///
@@ -214,6 +339,7 @@ fn create_showcase_lights(cam_pos: Vec3) -> Vec<Light> {
 /// - Ceiling light panel: emissive (material 9)
 /// - Interior box: metal (material 2)
 /// - Interior sphere: stone (material 1)
+#[allow(dead_code)]
 fn create_cornell_box() -> (BrickPool, SparseGrid, Aabb) {
     let aabb = Aabb::new(Vec3::new(-1.5, -1.5, -1.5), Vec3::new(1.5, 1.5, 1.5));
     let res = &RESOLUTION_TIERS[TEST_TIER];
@@ -297,6 +423,7 @@ fn create_cornell_box() -> (BrickPool, SparseGrid, Aabb) {
 /// This is the standard Cornell box setup: one area light on the ceiling.
 /// The point light approximates the panel's emission as direct illumination
 /// so the inject pass can compute how the panel lights nearby surfaces.
+#[allow(dead_code)]
 fn create_cornell_lights(cam_pos: Vec3) -> Vec<Light> {
     vec![
         // 0: Camera headlight — very dim, updated per-frame
@@ -331,6 +458,11 @@ struct GpuState {
     color_pool: GpuColorPool,
     ray_march: RayMarchPass,
     shading: ShadingPass,
+    vol_shadow: VolShadowPass,
+    vol_march: VolMarchPass,
+    vol_upscale: VolUpscalePass,
+    vol_composite: VolCompositePass,
+    fog_settings: FogSettings,
     history: HistoryBuffers,
     upscale: UpscalePass,
     sharpen: SharpenPass,
@@ -364,8 +496,8 @@ impl GpuState {
         let surface_format =
             context.configure_surface(&surface, display_width, display_height);
 
-        // Scene — Cornell box for GI validation
-        let (pool, grid, aabb) = create_cornell_box();
+        // Scene — large outdoor environment for volumetric validation
+        let (pool, grid, aabb) = create_volumetric_scene();
 
         // Update shared state with pool info
         {
@@ -374,9 +506,12 @@ impl GpuState {
             state.pool_allocated = pool.allocated_count() as u64;
         }
 
-        // Camera — inside Cornell box looking at back wall
-        let mut camera = Camera::new(Vec3::new(0.0, 0.0, 0.8));
-        camera.fov_degrees = 75.0;
+        // Camera — side view of pillar avenue, sun to the right.
+        // From +Z side looking toward -Z across the avenue, sun at +X.
+        let mut camera = Camera::new(Vec3::new(0.0, 2.5, 8.0));
+        camera.yaw = 0.0;  // facing -Z (toward the avenue)
+        camera.pitch = -0.15;  // slightly downward
+        camera.fov_degrees = 70.0;
 
         let camera_uniforms = camera.uniforms(INTERNAL_WIDTH, INTERNAL_HEIGHT, 0, [[0.0; 4]; 4]);
         let camera_bytes = bytemuck::bytes_of(&camera_uniforms);
@@ -397,17 +532,16 @@ impl GpuState {
         // Upload scene to GPU
         let scene = GpuScene::upload(&context.device, &pool, &grid, camera_bytes, &scene_uniforms);
 
-        // Materials — boost ceiling light emission for GI validation
-        let mut materials = material_table::create_test_materials();
-        materials[9].emission_strength = 8.0;
+        // Materials
+        let materials = material_table::create_test_materials();
         let material_table = MaterialTable::upload(&context.device, &materials);
 
         // G-buffer
         let gbuffer = GBuffer::new(&context.device, INTERNAL_WIDTH, INTERNAL_HEIGHT);
 
-        // Cornell box lights — minimal direct lighting, GI does the rest
-        let lights = create_cornell_lights(camera.position);
-        log::info!("Cornell box: {} lights", lights.len());
+        // Volumetric validation lights — single directional sun
+        let lights = create_volumetric_lights(camera.position);
+        log::info!("Volumetric scene: {} lights", lights.len());
         let light_buffer = LightBuffer::upload(&context.device, &lights);
 
         // Tile cull
@@ -447,6 +581,45 @@ impl GpuState {
             INTERNAL_WIDTH,
             INTERNAL_HEIGHT,
         );
+        // Phase 11: Volumetric pipeline
+        let vol_shadow = VolShadowPass::new(&context.device, &context.queue, &scene.bind_group_layout);
+
+        let half_w = INTERNAL_WIDTH / 2;
+        let half_h = INTERNAL_HEIGHT / 2;
+        let vol_march = VolMarchPass::new(
+            &context.device, &context.queue,
+            &gbuffer.position_view, &vol_shadow.shadow_view,
+            half_w, half_h,
+            INTERNAL_WIDTH, INTERNAL_HEIGHT,
+        );
+
+        let vol_upscale_pass = VolUpscalePass::new(
+            &context.device,
+            &vol_march.output_view, &gbuffer.position_view,
+            INTERNAL_WIDTH, INTERNAL_HEIGHT,
+            half_w, half_h,
+        );
+
+        let vol_composite = VolCompositePass::new(
+            &context.device,
+            &shading.hdr_view, &vol_upscale_pass.output_view,
+            INTERNAL_WIDTH, INTERNAL_HEIGHT,
+        );
+
+        // Fog settings — height fog + strong ambient dust for god rays
+        let fog_settings = FogSettings {
+            height_fog_enabled: true,
+            fog_base_density: 0.015,
+            fog_base_height: -0.3,
+            fog_height_falloff: 0.12,
+            fog_color: [0.9, 0.7, 0.5],  // warm sunrise fog
+            distance_fog_enabled: true,
+            fog_distance_density: 0.008,
+            fog_distance_falloff: 0.02,
+            ambient_dust_density: 0.025,   // strong dust for visible god rays
+            ambient_dust_g: 0.82,          // strong forward scattering toward sun
+        };
+
         // Phase 10: Temporal upscaling pipeline
         log::info!("Upscale backend: Custom Temporal ({}×{} → {}×{})",
             INTERNAL_WIDTH, INTERNAL_HEIGHT, DISPLAY_WIDTH, DISPLAY_HEIGHT);
@@ -463,9 +636,9 @@ impl GpuState {
             DISPLAY_WIDTH, DISPLAY_HEIGHT,
         );
 
-        // Phase 10: Bloom (pre-upscale) — extract bright pixels from shading HDR
+        // Phase 10: Bloom (pre-upscale) — extract bright pixels from composited HDR
         let bloom = BloomPass::new(
-            &context.device, &shading.hdr_view,
+            &context.device, &vol_composite.output_view,
             INTERNAL_WIDTH, INTERNAL_HEIGHT,
         );
 
@@ -539,6 +712,11 @@ impl GpuState {
             color_pool,
             ray_march,
             shading,
+            vol_shadow,
+            vol_march,
+            vol_upscale: vol_upscale_pass,
+            vol_composite,
+            fog_settings,
             history,
             upscale,
             sharpen,
@@ -592,6 +770,12 @@ impl GpuState {
                 self.shading.set_debug_mode(&self.context.queue, mode);
                 log::info!("Debug mode set via MCP: {mode}");
             }
+            if let Some(cam) = state.pending_camera.take() {
+                self.camera.position = cam.position;
+                self.camera.yaw = cam.yaw;
+                self.camera.pitch = cam.pitch;
+                log::info!("Camera set via MCP: pos={:?} yaw={:.2} pitch={:.2}", cam.position, cam.yaw, cam.pitch);
+            }
         }
 
         self.frame_index = self.frame_index.wrapping_add(1);
@@ -604,15 +788,7 @@ impl GpuState {
         self.shading
             .update_camera_pos(&self.context.queue, [cam_pos.x, cam_pos.y, cam_pos.z]);
 
-        // Update headlight (light index 0) — dim point light at camera position
-        self.lights[0] = Light::point(
-            [cam_pos.x, cam_pos.y, cam_pos.z],
-            [1.0, 0.98, 0.95],
-            0.3,
-            10.0,
-            false,
-        );
-        self.light_buffer.update(&self.context.queue, &self.lights);
+        // No per-frame light updates needed — only directional lights
 
         // Update tile cull uniforms with camera data
         let cam_fwd = self.camera.forward();
@@ -684,7 +860,81 @@ impl GpuState {
             &self.color_pool,
         );
 
-        // Phase 10: Bloom extract/downsample/blur (pre-upscale, reads shading HDR)
+        // Phase 11: Volumetric pipeline
+        // Sun direction — toward the sun (matches directional light dir)
+        // Sun is at [0.9, 0.26, 0.15] — low angle sunrise from +X
+        let sun_dir = [0.9f32, 0.26, 0.15];
+        let sun_len = (sun_dir[0] * sun_dir[0] + sun_dir[1] * sun_dir[1] + sun_dir[2] * sun_dir[2]).sqrt();
+        let sun_dir_n = [sun_dir[0] / sun_len, sun_dir[1] / sun_len, sun_dir[2] / sun_len];
+
+        // Volumetric shadow map
+        self.vol_shadow.dispatch(
+            &mut encoder, &self.context.queue,
+            [cam_pos.x, cam_pos.y, cam_pos.z], sun_dir_n,
+            &self.scene.bind_group,
+        );
+
+        // Volumetric march (half-res)
+        let cam_right = self.camera.right();
+        let cam_up_vec = self.camera.up();
+        let fov_half_tan = (self.camera.fov_degrees.to_radians() * 0.5).tan();
+        let aspect = INTERNAL_WIDTH as f32 / INTERNAL_HEIGHT as f32;
+        let fog_params = FogParams::from_settings(&self.fog_settings);
+
+        // Compute vol shadow bounds to pass into march params
+        let half_range = rkf_render::DEFAULT_VOL_SHADOW_RANGE * 0.5;
+        let half_height = rkf_render::DEFAULT_VOL_SHADOW_HEIGHT * 0.5;
+
+        let vol_params = VolMarchParams {
+            cam_pos: [cam_pos.x, cam_pos.y, cam_pos.z, 0.0],
+            cam_forward: [cam_fwd.x, cam_fwd.y, cam_fwd.z, 0.0],
+            cam_right: [
+                cam_right.x * fov_half_tan * aspect,
+                cam_right.y * fov_half_tan * aspect,
+                cam_right.z * fov_half_tan * aspect,
+                0.0,
+            ],
+            cam_up: [
+                cam_up_vec.x * fov_half_tan,
+                cam_up_vec.y * fov_half_tan,
+                cam_up_vec.z * fov_half_tan,
+                0.0,
+            ],
+            sun_dir: [sun_dir_n[0], sun_dir_n[1], sun_dir_n[2], 0.0],
+            sun_color: [1.0, 0.85, 0.6, 0.0],
+            width: INTERNAL_WIDTH / 2,
+            height: INTERNAL_HEIGHT / 2,
+            full_width: INTERNAL_WIDTH,
+            full_height: INTERNAL_HEIGHT,
+            max_steps: 96,
+            step_size: 0.5,
+            near: 0.3,
+            far: 60.0,
+            fog_color: fog_params.fog_color,
+            fog_height: fog_params.fog_height,
+            fog_distance: fog_params.fog_distance,
+            frame_index: self.frame_index,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
+            vol_shadow_min: [
+                cam_pos.x - half_range, cam_pos.y - half_height,
+                cam_pos.z - half_range, 0.0,
+            ],
+            vol_shadow_max: [
+                cam_pos.x + half_range, cam_pos.y + half_height,
+                cam_pos.z + half_range, 0.0,
+            ],
+        };
+        self.vol_march.dispatch(&mut encoder, &self.context.queue, &vol_params);
+
+        // Bilateral upscale (half → full internal res)
+        self.vol_upscale.dispatch(&mut encoder);
+
+        // Volumetric compositing (shaded + scatter)
+        self.vol_composite.dispatch(&mut encoder);
+
+        // Phase 10: Bloom extract/downsample/blur (pre-upscale, reads composited HDR)
         self.bloom.dispatch(&mut encoder);
 
         // Phase 10: spatial upscale + edge-aware sharpen (no jitter — spatial only)
@@ -931,7 +1181,7 @@ impl ApplicationHandler for App {
             return;
         }
         let attrs = WindowAttributes::default()
-            .with_title("RKIField Testbed [Phase 10]")
+            .with_title("RKIField Testbed [Phase 11]")
             .with_inner_size(PhysicalSize::new(1280u32, 720u32));
         let window = Arc::new(
             event_loop
@@ -958,7 +1208,7 @@ impl ApplicationHandler for App {
         log::info!("IPC server listening on {socket_path}");
         self.socket_path = Some(socket_path);
 
-        log::info!("Phase 10 validation — spatial upscaling + sharpen");
+        log::info!("Phase 11 validation — volumetric fog, god rays, clouds");
         log::info!("Click to capture mouse, WASD to move, mouse to look, Esc to exit");
     }
 
@@ -1022,7 +1272,7 @@ impl ApplicationHandler for App {
                         let elapsed = now.duration_since(self.last_title_update).as_secs_f64();
                         let fps = self.frame_count as f64 / elapsed;
                         window.set_title(&format!(
-                            "RKIField Testbed [Phase 10] — {fps:.0} fps ({:.2} ms)",
+                            "RKIField Testbed [Phase 11] — {fps:.0} fps ({:.2} ms)",
                             1000.0 / fps
                         ));
                         self.frame_count = 0;

@@ -229,10 +229,32 @@ fn sample_brick_full(pos: vec3<f32>, brick_min: vec3<f32>, slot: u32) -> u32 {
     return slot * 512u + voxel_idx;
 }
 
-/// Read SDF distance from a specific brick slot at a world position.
+/// Read SDF distance from a specific brick slot at a world position (trilinear).
 fn sample_brick(pos: vec3<f32>, brick_min: vec3<f32>, slot: u32) -> f32 {
-    let idx = sample_brick_full(pos, brick_min, slot);
-    return extract_distance(brick_pool[idx].word0);
+    let vs = voxel_size();
+    let brick_local = (pos - brick_min) / vs - vec3<f32>(0.5);
+    let f = clamp(brick_local, vec3<f32>(0.0), vec3<f32>(6.9999));
+    let i0 = vec3<u32>(floor(f));
+    let i1 = min(i0 + vec3<u32>(1u), vec3<u32>(7u));
+    let t = f - floor(f);
+
+    let base = slot * 512u;
+    let c000 = extract_distance(brick_pool[base + i0.x + i0.y*8u + i0.z*64u].word0);
+    let c100 = extract_distance(brick_pool[base + i1.x + i0.y*8u + i0.z*64u].word0);
+    let c010 = extract_distance(brick_pool[base + i0.x + i1.y*8u + i0.z*64u].word0);
+    let c110 = extract_distance(brick_pool[base + i1.x + i1.y*8u + i0.z*64u].word0);
+    let c001 = extract_distance(brick_pool[base + i0.x + i0.y*8u + i1.z*64u].word0);
+    let c101 = extract_distance(brick_pool[base + i1.x + i0.y*8u + i1.z*64u].word0);
+    let c011 = extract_distance(brick_pool[base + i0.x + i1.y*8u + i1.z*64u].word0);
+    let c111 = extract_distance(brick_pool[base + i1.x + i1.y*8u + i1.z*64u].word0);
+
+    let c00 = mix(c000, c100, t.x);
+    let c10 = mix(c010, c110, t.x);
+    let c01 = mix(c001, c101, t.x);
+    let c11 = mix(c011, c111, t.x);
+    let c0 = mix(c00, c10, t.y);
+    let c1 = mix(c01, c11, t.y);
+    return mix(c0, c1, t.z);
 }
 
 /// Level-parameterized version of sample_brick_full for clipmap levels.
@@ -243,10 +265,32 @@ fn sample_brick_full_cm(pos: vec3<f32>, brick_min: vec3<f32>, slot: u32, level: 
     return slot * 512u + voxel_idx;
 }
 
-/// Level-parameterized version of sample_brick for clipmap levels.
+/// Level-parameterized version of sample_brick for clipmap levels (trilinear).
 fn sample_brick_cm(pos: vec3<f32>, brick_min: vec3<f32>, slot: u32, level: u32) -> f32 {
-    let idx = sample_brick_full_cm(pos, brick_min, slot, level);
-    return extract_distance(brick_pool[idx].word0);
+    let vs = cm_voxel_size(level);
+    let brick_local = (pos - brick_min) / vs - vec3<f32>(0.5);
+    let f = clamp(brick_local, vec3<f32>(0.0), vec3<f32>(6.9999));
+    let i0 = vec3<u32>(floor(f));
+    let i1 = min(i0 + vec3<u32>(1u), vec3<u32>(7u));
+    let t = f - floor(f);
+
+    let base = slot * 512u;
+    let c000 = extract_distance(brick_pool[base + i0.x + i0.y*8u + i0.z*64u].word0);
+    let c100 = extract_distance(brick_pool[base + i1.x + i0.y*8u + i0.z*64u].word0);
+    let c010 = extract_distance(brick_pool[base + i0.x + i1.y*8u + i0.z*64u].word0);
+    let c110 = extract_distance(brick_pool[base + i1.x + i1.y*8u + i0.z*64u].word0);
+    let c001 = extract_distance(brick_pool[base + i0.x + i0.y*8u + i1.z*64u].word0);
+    let c101 = extract_distance(brick_pool[base + i1.x + i0.y*8u + i1.z*64u].word0);
+    let c011 = extract_distance(brick_pool[base + i0.x + i1.y*8u + i1.z*64u].word0);
+    let c111 = extract_distance(brick_pool[base + i1.x + i1.y*8u + i1.z*64u].word0);
+
+    let c00 = mix(c000, c100, t.x);
+    let c10 = mix(c010, c110, t.x);
+    let c01 = mix(c001, c101, t.x);
+    let c11 = mix(c011, c111, t.x);
+    let c0 = mix(c00, c10, t.y);
+    let c1 = mix(c01, c11, t.y);
+    return mix(c0, c1, t.z);
 }
 
 /// Sphere trace within a single brick, returning full material info on hit.
@@ -275,11 +319,12 @@ fn sphere_trace_brick(origin: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
         let clamped = clamp(pos, brick_min + vec3<f32>(MIN_STEP),
                                  brick_max - vec3<f32>(MIN_STEP));
 
-        let sample_idx = sample_brick_full(clamped, brick_min, slot);
-        let sample = brick_pool[sample_idx];
-        let d = extract_distance(sample.word0);
+        let d = sample_brick(clamped, brick_min, slot);
 
         if d < HIT_EPSILON {
+            // Nearest-neighbor for material (categorical data)
+            let sample_idx = sample_brick_full(clamped, brick_min, slot);
+            let sample = brick_pool[sample_idx];
             let mat_id = extract_material_id(sample.word0);
             let blend = extract_blend_weight(sample.word1);
             let sec_id = extract_secondary_id(sample.word1);
@@ -326,11 +371,12 @@ fn sphere_trace_brick_cm(origin: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
         let clamped = clamp(pos, brick_min + vec3<f32>(MIN_STEP),
                                  brick_max - vec3<f32>(MIN_STEP));
 
-        let sample_idx = sample_brick_full_cm(clamped, brick_min, slot, level);
-        let sample = brick_pool[sample_idx];
-        let d = extract_distance(sample.word0);
+        let d = sample_brick_cm(clamped, brick_min, slot, level);
 
         if d < HIT_EPSILON {
+            // Nearest-neighbor for material (categorical data)
+            let sample_idx = sample_brick_full_cm(clamped, brick_min, slot, level);
+            let sample = brick_pool[sample_idx];
             let mat_id = extract_material_id(sample.word0);
             let blend = extract_blend_weight(sample.word1);
             let sec_id = extract_secondary_id(sample.word1);

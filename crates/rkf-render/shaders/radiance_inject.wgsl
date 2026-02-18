@@ -122,11 +122,30 @@ fn sdf_cell_flat_index(cell: vec3<u32>) -> u32 {
 }
 
 fn sdf_sample_brick(pos: vec3<f32>, brick_min: vec3<f32>, slot: u32) -> f32 {
-    let brick_local = (pos - brick_min) / sdf_voxel_size();
-    let voxel = clamp(vec3<u32>(floor(brick_local)), vec3<u32>(0u), vec3<u32>(7u));
-    let voxel_idx = voxel.x + voxel.y * 8u + voxel.z * 64u;
-    let idx = slot * 512u + voxel_idx;
-    return extract_distance(brick_pool[idx].word0);
+    let vs = sdf_voxel_size();
+    let brick_local = (pos - brick_min) / vs - vec3<f32>(0.5);
+    let f = clamp(brick_local, vec3<f32>(0.0), vec3<f32>(6.9999));
+    let i0 = vec3<u32>(floor(f));
+    let i1 = min(i0 + vec3<u32>(1u), vec3<u32>(7u));
+    let t = f - floor(f);
+
+    let base = slot * 512u;
+    let c000 = extract_distance(brick_pool[base + i0.x + i0.y*8u + i0.z*64u].word0);
+    let c100 = extract_distance(brick_pool[base + i1.x + i0.y*8u + i0.z*64u].word0);
+    let c010 = extract_distance(brick_pool[base + i0.x + i1.y*8u + i0.z*64u].word0);
+    let c110 = extract_distance(brick_pool[base + i1.x + i1.y*8u + i0.z*64u].word0);
+    let c001 = extract_distance(brick_pool[base + i0.x + i0.y*8u + i1.z*64u].word0);
+    let c101 = extract_distance(brick_pool[base + i1.x + i0.y*8u + i1.z*64u].word0);
+    let c011 = extract_distance(brick_pool[base + i0.x + i1.y*8u + i1.z*64u].word0);
+    let c111 = extract_distance(brick_pool[base + i1.x + i1.y*8u + i1.z*64u].word0);
+
+    let c00 = mix(c000, c100, t.x);
+    let c10 = mix(c010, c110, t.x);
+    let c01 = mix(c001, c101, t.x);
+    let c11 = mix(c011, c111, t.x);
+    let c0 = mix(c00, c10, t.y);
+    let c1 = mix(c01, c11, t.y);
+    return mix(c0, c1, t.z);
 }
 
 fn sample_sdf(pos: vec3<f32>) -> f32 {
