@@ -82,6 +82,8 @@ pub mod vol_upscale;
 pub mod vol_composite;
 /// God ray configuration and parameter tuning.
 pub mod god_rays;
+/// Procedural cloud configuration and GPU parameters.
+pub mod clouds;
 
 pub use camera::{Camera, CameraUniforms};
 pub use context::RenderContext;
@@ -117,3 +119,4 @@ pub use vol_temporal::{VolTemporalPass, VolTemporalParams, DEFAULT_VOL_TEMPORAL_
 pub use vol_upscale::{VolUpscalePass, VolUpscaleParams, DEFAULT_DEPTH_SIGMA, VOL_UPSCALE_FORMAT};
 pub use vol_composite::{VolCompositePass, VolCompositeParams, VOL_COMPOSITE_FORMAT};
 pub use god_rays::{GodRaySettings, DEFAULT_GOD_RAY_DUST, DEFAULT_GOD_RAY_G, MIN_GOD_RAY_DUST, MAX_GOD_RAY_DUST};
+pub use clouds::{CloudSettings, CloudParams, DEFAULT_CLOUD_MIN, DEFAULT_CLOUD_MAX, DEFAULT_CLOUD_THRESHOLD, DEFAULT_CLOUD_DENSITY_SCALE, DEFAULT_CLOUD_SHADOW_RESOLUTION, DEFAULT_CLOUD_SHADOW_COVERAGE};
