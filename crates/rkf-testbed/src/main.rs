@@ -18,9 +18,14 @@ use rkf_core::sdf::{box_sdf, capsule_sdf, sphere_sdf};
 use rkf_core::sparse_grid::SparseGrid;
 use rkf_core::BrickPool;
 
+use rkf_render::auto_exposure::AutoExposurePass;
 use rkf_render::blit::BlitPass;
+use rkf_render::bloom::BloomPass;
+use rkf_render::bloom_composite::BloomCompositePass;
 use rkf_render::camera::Camera;
 use rkf_render::clipmap_gpu::ClipmapGpuData;
+use rkf_render::color_grade::ColorGradePass;
+use rkf_render::cosmetics::CosmeticsPass;
 use rkf_render::gbuffer::GBuffer;
 use rkf_render::gpu_color_pool::GpuColorPool;
 use rkf_render::gpu_scene::{GpuScene, SceneUniforms};
@@ -329,7 +334,12 @@ struct GpuState {
     history: HistoryBuffers,
     upscale: UpscalePass,
     sharpen: SharpenPass,
+    bloom: BloomPass,
+    bloom_composite: BloomCompositePass,
+    auto_exposure: AutoExposurePass,
     tone_map: ToneMapPass,
+    color_grade: ColorGradePass,
+    cosmetics: CosmeticsPass,
     blit: BlitPass,
     camera: Camera,
     staging_buffer: wgpu::Buffer,
@@ -437,7 +447,7 @@ impl GpuState {
             INTERNAL_WIDTH,
             INTERNAL_HEIGHT,
         );
-        // Phase 9: Temporal upscaling pipeline
+        // Phase 10: Temporal upscaling pipeline
         log::info!("Upscale backend: Custom Temporal ({}×{} → {}×{})",
             INTERNAL_WIDTH, INTERNAL_HEIGHT, DISPLAY_WIDTH, DISPLAY_HEIGHT);
 
@@ -453,14 +463,54 @@ impl GpuState {
             DISPLAY_WIDTH, DISPLAY_HEIGHT,
         );
 
-        // Tone map and blit now operate at display resolution
+        // Phase 10: Bloom (pre-upscale) — extract bright pixels from shading HDR
+        let bloom = BloomPass::new(
+            &context.device, &shading.hdr_view,
+            INTERNAL_WIDTH, INTERNAL_HEIGHT,
+        );
+
+        // Phase 10: Bloom composite (post-upscale) — blend bloom onto sharpened HDR
+        let bloom_composite = BloomCompositePass::new(
+            &context.device, &sharpen.output_view,
+            bloom.mip_views(),
+            DISPLAY_WIDTH, DISPLAY_HEIGHT,
+        );
+
+        // Phase 10: Auto-exposure — histogram-based exposure computation
+        let auto_exposure = AutoExposurePass::new(
+            &context.device, &bloom_composite.output_view,
+            DISPLAY_WIDTH, DISPLAY_HEIGHT,
+        );
+
+        // Tone map now reads from bloom composite output (HDR with bloom applied)
         let tone_map = ToneMapPass::new(
             &context.device,
-            &sharpen.output_view,
+            &bloom_composite.output_view,
             DISPLAY_WIDTH,
             DISPLAY_HEIGHT,
         );
-        let blit = BlitPass::new(&context.device, &tone_map.ldr_view, surface_format);
+
+        // Phase 10: Color grading (identity LUT by default — passthrough)
+        let color_grade = ColorGradePass::new(
+            &context.device, &context.queue,
+            &tone_map.ldr_view,
+            DISPLAY_WIDTH, DISPLAY_HEIGHT,
+        );
+
+        // Phase 10: Cosmetics — vignette, grain, chromatic aberration
+        let cosmetics = CosmeticsPass::new(
+            &context.device,
+            &color_grade.output_view,
+            DISPLAY_WIDTH, DISPLAY_HEIGHT,
+        );
+        // Phase 10: tasteful post-process defaults
+        bloom.set_threshold(&context.queue, 0.8, 0.4);
+        bloom_composite.set_intensity(&context.queue, 0.4);
+        cosmetics.set_vignette(&context.queue, 0.3);
+        cosmetics.set_chromatic_aberration(&context.queue, 0.002);
+
+        // Blit reads from final cosmetics output
+        let blit = BlitPass::new(&context.device, &cosmetics.output_view, surface_format);
 
         // Staging buffer for CPU readback at display resolution
         let staging_buffer = context.device.create_buffer(&wgpu::BufferDescriptor {
@@ -492,7 +542,12 @@ impl GpuState {
             history,
             upscale,
             sharpen,
+            bloom,
+            bloom_composite,
+            auto_exposure,
             tone_map,
+            color_grade,
+            cosmetics,
             blit,
             camera,
             staging_buffer,
@@ -513,9 +568,12 @@ impl GpuState {
     }
 
     fn update_camera(&mut self) {
-        let uniforms =
+        let mut uniforms =
             self.camera
                 .uniforms(INTERNAL_WIDTH, INTERNAL_HEIGHT, self.frame_index, self.prev_vp);
+        // Disable sub-pixel jitter — spatial-only upscaling (Phase 9 decision)
+        uniforms.jitter = [0.0, 0.0];
+
         // Store current VP as prev for next frame
         let vp = self.camera.view_projection(INTERNAL_WIDTH, INTERNAL_HEIGHT);
         self.prev_vp = vp.to_cols_array_2d();
@@ -605,7 +663,7 @@ impl GpuState {
             [cam_pos.x, cam_pos.y, cam_pos.z],
         );
 
-        // Phase 9 pipeline: ray march -> tile cull -> GI inject -> GI mip -> shade -> upscale -> sharpen -> tone map -> blit
+        // Phase 10 pipeline: ray march -> tile cull -> GI inject -> GI mip -> shade -> upscale -> sharpen -> tone map -> blit
         self.ray_march
             .dispatch(&mut encoder, &self.scene, &self.gbuffer, &self.clipmap);
         self.tile_cull.dispatch(&mut encoder, &self.gbuffer);
@@ -626,19 +684,36 @@ impl GpuState {
             &self.color_pool,
         );
 
-        // Phase 9: spatial upscale + edge-aware sharpen (no jitter — spatial only)
+        // Phase 10: Bloom extract/downsample/blur (pre-upscale, reads shading HDR)
+        self.bloom.dispatch(&mut encoder);
+
+        // Phase 10: spatial upscale + edge-aware sharpen (no jitter — spatial only)
         self.upscale.update_jitter(&self.context.queue, [0.0, 0.0]);
         let history_read_idx = self.history.read_index();
         self.upscale.dispatch(&mut encoder, history_read_idx);
         self.sharpen.dispatch(&mut encoder);
 
+        // Phase 10: Bloom composite (post-upscale, blends bloom mips onto sharpened HDR)
+        self.bloom_composite.dispatch(&mut encoder);
+
+        // Phase 10: Auto-exposure (histogram + adaptation, updates exposure buffer)
+        self.auto_exposure.dispatch(&mut encoder, &self.context.queue, dt);
+
+        // Tone map (HDR → LDR with exposure + ACES/AgX curve)
         self.tone_map.dispatch(&mut encoder);
+
+        // Phase 10: Color grading (3D LUT — identity by default)
+        self.color_grade.dispatch(&mut encoder);
+
+        // Phase 10: Cosmetics (vignette, grain, chromatic aberration)
+        self.cosmetics.dispatch(&mut encoder, &self.context.queue, self.frame_index);
+
         self.blit.draw(&mut encoder, &view);
 
-        // Copy LDR texture -> staging buffer for screenshot readback
+        // Copy final LDR texture -> staging buffer for screenshot readback
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: self.tone_map.ldr_texture(),
+                texture: &self.cosmetics.output_texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -856,7 +931,7 @@ impl ApplicationHandler for App {
             return;
         }
         let attrs = WindowAttributes::default()
-            .with_title("RKIField Testbed [Phase 9]")
+            .with_title("RKIField Testbed [Phase 10]")
             .with_inner_size(PhysicalSize::new(1280u32, 720u32));
         let window = Arc::new(
             event_loop
@@ -883,7 +958,7 @@ impl ApplicationHandler for App {
         log::info!("IPC server listening on {socket_path}");
         self.socket_path = Some(socket_path);
 
-        log::info!("Phase 9 validation — spatial upscaling + sharpen");
+        log::info!("Phase 10 validation — spatial upscaling + sharpen");
         log::info!("Click to capture mouse, WASD to move, mouse to look, Esc to exit");
     }
 
@@ -947,7 +1022,7 @@ impl ApplicationHandler for App {
                         let elapsed = now.duration_since(self.last_title_update).as_secs_f64();
                         let fps = self.frame_count as f64 / elapsed;
                         window.set_title(&format!(
-                            "RKIField Testbed [Phase 9] — {fps:.0} fps ({:.2} ms)",
+                            "RKIField Testbed [Phase 10] — {fps:.0} fps ({:.2} ms)",
                             1000.0 / fps
                         ));
                         self.frame_count = 0;
