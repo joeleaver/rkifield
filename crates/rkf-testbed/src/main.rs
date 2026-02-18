@@ -214,6 +214,7 @@ impl GpuState {
             &context.device,
             &gbuffer,
             &material_table,
+            &scene,
             INTERNAL_WIDTH,
             INTERNAL_HEIGHT,
         );
@@ -310,8 +311,8 @@ impl GpuState {
         // Pass 1: Ray march (compute) → G-buffer
         self.ray_march.dispatch(&mut encoder, &self.scene, &self.gbuffer);
 
-        // Pass 2: Shading (compute) — G-buffer + materials → HDR
-        self.shading.dispatch(&mut encoder, &self.gbuffer, &self.material_table);
+        // Pass 2: Shading (compute) — G-buffer + materials + SDF → HDR
+        self.shading.dispatch(&mut encoder, &self.gbuffer, &self.material_table, &self.scene);
 
         // Pass 3: Tone map (compute) — HDR → LDR
         self.tone_map.dispatch(&mut encoder);

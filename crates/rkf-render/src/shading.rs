@@ -4,6 +4,7 @@
 //! directional sun light, and writes HDR color to an `Rgba16Float` texture.
 
 use crate::gbuffer::GBuffer;
+use crate::gpu_scene::GpuScene;
 use crate::material_table::MaterialTable;
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
@@ -56,6 +57,7 @@ impl ShadingPass {
         device: &wgpu::Device,
         gbuffer: &GBuffer,
         material_table: &MaterialTable,
+        scene: &GpuScene,
         width: u32,
         height: u32,
     ) -> Self {
@@ -143,7 +145,8 @@ impl ShadingPass {
             }],
         });
 
-        // Pipeline layout: group 0 = G-buffer read, group 1 = material table, group 2 = HDR output, group 3 = shade uniforms
+        // Pipeline layout: group 0 = G-buffer, group 1 = materials, group 2 = HDR output,
+        // group 3 = shade uniforms, group 4 = scene SDF data
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("shading pipeline layout"),
             bind_group_layouts: &[
@@ -151,6 +154,7 @@ impl ShadingPass {
                 &material_table.bind_group_layout,
                 &hdr_bind_group_layout,
                 &shade_uniforms_bind_group_layout,
+                &scene.bind_group_layout,
             ],
             push_constant_ranges: &[],
         });
@@ -184,6 +188,7 @@ impl ShadingPass {
         encoder: &mut wgpu::CommandEncoder,
         gbuffer: &GBuffer,
         material_table: &MaterialTable,
+        scene: &GpuScene,
     ) {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("shading"),
@@ -194,6 +199,7 @@ impl ShadingPass {
         pass.set_bind_group(1, &material_table.bind_group, &[]);
         pass.set_bind_group(2, &self.hdr_bind_group, &[]);
         pass.set_bind_group(3, &self.shade_uniforms_bind_group, &[]);
+        pass.set_bind_group(4, &scene.bind_group, &[]);
 
         let wg_x = self.width.div_ceil(8);
         let wg_y = self.height.div_ceil(8);
