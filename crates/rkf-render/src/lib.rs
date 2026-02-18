@@ -22,11 +22,14 @@ pub mod gpu_scene;
 
 /// Blit pass — fullscreen copy to swapchain.
 pub mod blit;
+/// G-buffer textures for deferred shading.
+pub mod gbuffer;
 /// Ray march compute pass.
 pub mod ray_march;
 
 pub use camera::{Camera, CameraUniforms};
 pub use context::RenderContext;
+pub use gbuffer::GBuffer;
 pub use gpu_scene::{GpuScene, SceneUniforms};
 pub use blit::BlitPass;
 pub use ray_march::RayMarchPass;
