@@ -49,6 +49,8 @@ thread_local! {
     static MODE_SIGNAL: Cell<Option<Signal<u8>>> = const { Cell::new(None) };
     static MENU_SIGNAL: Cell<Option<Signal<u8>>> = const { Cell::new(None) };
     static FPS_SIGNAL: Cell<Option<Signal<u16>>> = const { Cell::new(None) };
+    /// Bumped when environment settings change, to re-read values in UI.
+    static ENV_REFRESH: Cell<Option<Signal<u32>>> = const { Cell::new(None) };
 }
 
 // ---------------------------------------------------------------------------
@@ -265,6 +267,274 @@ fn build_menu_separator(scope: &mut RenderScope, parent: &NodeHandle) {
     let sep = scope.create_element("div");
     sep.set_attribute("style", MENU_SEPARATOR_STYLE);
     parent.append_child(&sep);
+}
+
+// ── Environment panel helpers ────────────────────────────────────────────
+
+const ENV_SECTION_STYLE: &str = "color: #aaa; font-weight: bold; font-size: 12px; \
+    margin-top: 8px; margin-bottom: 2px; border-bottom: 1px solid #333; padding-bottom: 2px;";
+const ENV_ROW_STYLE: &str = "display: flex; align-items: center; height: 22px; \
+    padding: 0 2px; gap: 4px;";
+const ENV_LABEL_STYLE: &str = "color: #999; font-size: 11px; flex: 1;";
+const ENV_VALUE_STYLE: &str = "color: #ccc; font-size: 11px; min-width: 48px; \
+    text-align: right;";
+const ENV_BTN_STYLE: &str = "border: none; background: #333; color: #ccc; \
+    width: 20px; height: 18px; font-size: 11px; cursor: pointer; border-radius: 2px; \
+    font-family: inherit; padding: 0; line-height: 18px;";
+const ENV_TOGGLE_ON_STYLE: &str = "border: none; background: #4a6fa5; color: #fff; \
+    padding: 1px 8px; font-size: 10px; cursor: pointer; border-radius: 2px; \
+    font-family: inherit; line-height: 16px;";
+const ENV_TOGGLE_OFF_STYLE: &str = "border: none; background: #444; color: #888; \
+    padding: 1px 8px; font-size: 10px; cursor: pointer; border-radius: 2px; \
+    font-family: inherit; line-height: 16px;";
+
+fn build_env_section_header(scope: &mut RenderScope, parent: &NodeHandle, label: &str) {
+    let hdr = scope.create_element("div");
+    hdr.set_attribute("style", ENV_SECTION_STYLE);
+    hdr.set_text(label);
+    parent.append_child(&hdr);
+}
+
+fn build_env_toggle(
+    scope: &mut RenderScope,
+    parent: &NodeHandle,
+    label: &str,
+    env_refresh: Signal<u32>,
+    get: impl Fn(&environment::EnvironmentState) -> bool + 'static + Copy,
+    set: impl Fn(&mut environment::EnvironmentState, bool) + 'static + Copy,
+) {
+    let row = scope.create_element("div");
+    row.set_attribute("style", ENV_ROW_STYLE);
+
+    let lbl = scope.create_element("span");
+    lbl.set_attribute("style", ENV_LABEL_STYLE);
+    lbl.set_text(label);
+    row.append_child(&lbl);
+
+    let btn = scope.create_element("button");
+    scope.create_effect({
+        let btn = btn.clone();
+        move || {
+            let _ = env_refresh.get();
+            let val = EDITOR_STATE
+                .get()
+                .and_then(|es| es.lock().ok().map(|s| get(&s.environment)))
+                .unwrap_or(false);
+            if val {
+                btn.set_attribute("style", ENV_TOGGLE_ON_STYLE);
+                btn.set_text("ON");
+            } else {
+                btn.set_attribute("style", ENV_TOGGLE_OFF_STYLE);
+                btn.set_text("OFF");
+            }
+        }
+    });
+    let h = scope.register_handler(move || {
+        if let Some(es) = EDITOR_STATE.get() {
+            if let Ok(mut state) = es.lock() {
+                let cur = get(&state.environment);
+                set(&mut state.environment, !cur);
+                state.environment.mark_dirty();
+            }
+        }
+        env_refresh.update(|v| *v = v.wrapping_add(1));
+    });
+    btn.set_attribute("data-rid", &h.0.to_string());
+    row.append_child(&btn);
+
+    parent.append_child(&row);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_env_slider(
+    scope: &mut RenderScope,
+    parent: &NodeHandle,
+    label: &str,
+    env_refresh: Signal<u32>,
+    get: impl Fn(&environment::EnvironmentState) -> f32 + 'static + Copy,
+    set: impl Fn(&mut environment::EnvironmentState, f32) + 'static + Copy,
+    step: f32,
+    min: f32,
+    max: f32,
+    decimals: usize,
+) {
+    let row = scope.create_element("div");
+    row.set_attribute("style", ENV_ROW_STYLE);
+
+    let lbl = scope.create_element("span");
+    lbl.set_attribute("style", ENV_LABEL_STYLE);
+    lbl.set_text(label);
+    row.append_child(&lbl);
+
+    let val_span = scope.create_element("span");
+    val_span.set_attribute("style", ENV_VALUE_STYLE);
+    scope.create_effect({
+        let val_span = val_span.clone();
+        move || {
+            let _ = env_refresh.get();
+            let val = EDITOR_STATE
+                .get()
+                .and_then(|es| es.lock().ok().map(|s| get(&s.environment)))
+                .unwrap_or(0.0);
+            val_span.set_text(&format!("{:.prec$}", val, prec = decimals));
+        }
+    });
+    row.append_child(&val_span);
+
+    let minus_btn = scope.create_element("button");
+    minus_btn.set_attribute("style", ENV_BTN_STYLE);
+    minus_btn.set_text("-");
+    let h = scope.register_handler(move || {
+        if let Some(es) = EDITOR_STATE.get() {
+            if let Ok(mut state) = es.lock() {
+                let cur = get(&state.environment);
+                set(&mut state.environment, (cur - step).clamp(min, max));
+                state.environment.mark_dirty();
+            }
+        }
+        env_refresh.update(|v| *v = v.wrapping_add(1));
+    });
+    minus_btn.set_attribute("data-rid", &h.0.to_string());
+    row.append_child(&minus_btn);
+
+    let plus_btn = scope.create_element("button");
+    plus_btn.set_attribute("style", ENV_BTN_STYLE);
+    plus_btn.set_text("+");
+    let h = scope.register_handler(move || {
+        if let Some(es) = EDITOR_STATE.get() {
+            if let Ok(mut state) = es.lock() {
+                let cur = get(&state.environment);
+                set(&mut state.environment, (cur + step).clamp(min, max));
+                state.environment.mark_dirty();
+            }
+        }
+        env_refresh.update(|v| *v = v.wrapping_add(1));
+    });
+    plus_btn.set_attribute("data-rid", &h.0.to_string());
+    row.append_child(&plus_btn);
+
+    parent.append_child(&row);
+}
+
+fn build_env_panel(scope: &mut RenderScope, env_refresh: Signal<u32>) -> NodeHandle {
+    let panel = scope.create_element("div");
+    panel.set_attribute("style", "display: flex; flex-direction: column; gap: 2px;");
+
+    // ── Fog ──────────────────────────────────────────────────────────────
+    build_env_section_header(scope, &panel, "Fog");
+    build_env_toggle(
+        scope, &panel, "Enabled", env_refresh,
+        |env| env.fog.enabled,
+        |env, v| env.fog.enabled = v,
+    );
+    build_env_slider(
+        scope, &panel, "Density", env_refresh,
+        |env| env.fog.density,
+        |env, v| env.fog.density = v,
+        0.005, 0.0, 1.0, 3,
+    );
+    build_env_slider(
+        scope, &panel, "Start Dist", env_refresh,
+        |env| env.fog.start_distance,
+        |env, v| env.fog.start_distance = v,
+        10.0, 0.0, 10000.0, 0,
+    );
+    build_env_slider(
+        scope, &panel, "End Dist", env_refresh,
+        |env| env.fog.end_distance,
+        |env, v| env.fog.end_distance = v,
+        10.0, 0.0, 10000.0, 0,
+    );
+    build_env_slider(
+        scope, &panel, "Height Falloff", env_refresh,
+        |env| env.fog.height_falloff,
+        |env, v| env.fog.height_falloff = v,
+        0.01, 0.0, 10.0, 2,
+    );
+
+    // ── Clouds ───────────────────────────────────────────────────────────
+    build_env_section_header(scope, &panel, "Clouds");
+    build_env_toggle(
+        scope, &panel, "Enabled", env_refresh,
+        |env| env.clouds.enabled,
+        |env, v| env.clouds.enabled = v,
+    );
+    build_env_slider(
+        scope, &panel, "Coverage", env_refresh,
+        |env| env.clouds.coverage,
+        |env, v| env.clouds.coverage = v,
+        0.05, 0.0, 1.0, 2,
+    );
+    build_env_slider(
+        scope, &panel, "Density", env_refresh,
+        |env| env.clouds.density,
+        |env, v| env.clouds.density = v,
+        0.1, 0.0, 10.0, 1,
+    );
+    build_env_slider(
+        scope, &panel, "Altitude", env_refresh,
+        |env| env.clouds.altitude,
+        |env, v| env.clouds.altitude = v,
+        10.0, 0.0, 2000.0, 0,
+    );
+    build_env_slider(
+        scope, &panel, "Thickness", env_refresh,
+        |env| env.clouds.thickness,
+        |env, v| env.clouds.thickness = v,
+        5.0, 1.0, 500.0, 0,
+    );
+    build_env_slider(
+        scope, &panel, "Wind Speed", env_refresh,
+        |env| env.clouds.wind_speed,
+        |env, v| env.clouds.wind_speed = v,
+        1.0, 0.0, 100.0, 1,
+    );
+
+    // ── Post-Processing ──────────────────────────────────────────────────
+    build_env_section_header(scope, &panel, "Post-Processing");
+    build_env_toggle(
+        scope, &panel, "Bloom", env_refresh,
+        |env| env.post_process.bloom_enabled,
+        |env, v| env.post_process.bloom_enabled = v,
+    );
+    build_env_slider(
+        scope, &panel, "Bloom Intensity", env_refresh,
+        |env| env.post_process.bloom_intensity,
+        |env, v| env.post_process.bloom_intensity = v,
+        0.05, 0.0, 5.0, 2,
+    );
+    build_env_slider(
+        scope, &panel, "Bloom Threshold", env_refresh,
+        |env| env.post_process.bloom_threshold,
+        |env, v| env.post_process.bloom_threshold = v,
+        0.1, 0.0, 10.0, 1,
+    );
+    build_env_slider(
+        scope, &panel, "Exposure", env_refresh,
+        |env| env.post_process.exposure,
+        |env, v| env.post_process.exposure = v,
+        0.1, 0.1, 10.0, 1,
+    );
+    build_env_slider(
+        scope, &panel, "Contrast", env_refresh,
+        |env| env.post_process.contrast,
+        |env, v| env.post_process.contrast = v,
+        0.05, 0.1, 3.0, 2,
+    );
+    build_env_slider(
+        scope, &panel, "Saturation", env_refresh,
+        |env| env.post_process.saturation,
+        |env, v| env.post_process.saturation = v,
+        0.05, 0.0, 3.0, 2,
+    );
+    build_env_slider(
+        scope, &panel, "Vignette", env_refresh,
+        |env| env.post_process.vignette_intensity,
+        |env, v| env.post_process.vignette_intensity = v,
+        0.05, 0.0, 2.0, 2,
+    );
+
+    panel
 }
 
 // ── Editor UI component ─────────────────────────────────────────────────
@@ -621,31 +891,52 @@ fn editor_ui() -> NodeHandle {
     });
     right_panel.append_child(&right_title);
 
-    // Mode-specific content placeholder
-    let right_content = __scope.create_element("div");
-    right_content.set_attribute(
-        "style",
-        "color: #666; font-size: 12px; font-style: italic;",
+    // Mode hint (shown for non-Environment modes)
+    show_dom(
+        __scope,
+        &right_panel,
+        move || mode_signal.get() != EditorMode::Environment.index(),
+        move |scope| {
+            let hint_div = scope.create_element("div");
+            hint_div.set_attribute("style", "color: #666; font-size: 12px; font-style: italic;");
+            let hint_text = scope.create_element("span");
+            scope.create_effect({
+                let hint_text = hint_text.clone();
+                move || {
+                    let idx = mode_signal.get();
+                    let mode = EditorMode::from_index(idx);
+                    let hint = match mode {
+                        EditorMode::Navigate => "Use right-click + WASD to fly camera",
+                        EditorMode::Select => "Click entities in viewport to select",
+                        EditorMode::Place => "Choose an asset to place in the scene",
+                        EditorMode::Sculpt => "Left-click + drag to sculpt terrain",
+                        EditorMode::Paint => "Left-click + drag to paint materials",
+                        EditorMode::Light => "Select a light to edit its properties",
+                        EditorMode::Animate => "Select an entity to preview animations",
+                        EditorMode::Environment => "",
+                    };
+                    hint_text.set_text(hint);
+                }
+            });
+            hint_div.append_child(&hint_text);
+            hint_div
+        },
+        None::<fn(&mut RenderScope) -> NodeHandle>,
     );
-    __scope.create_effect({
-        let right_content = right_content.clone();
-        move || {
-            let idx = mode_signal.get();
-            let mode = EditorMode::from_index(idx);
-            let hint = match mode {
-                EditorMode::Navigate => "Use right-click + WASD to fly camera",
-                EditorMode::Select => "Click entities in viewport to select",
-                EditorMode::Place => "Choose an asset to place in the scene",
-                EditorMode::Sculpt => "Left-click + drag to sculpt terrain",
-                EditorMode::Paint => "Left-click + drag to paint materials",
-                EditorMode::Light => "Select a light to edit its properties",
-                EditorMode::Animate => "Select an entity to preview animations",
-                EditorMode::Environment => "Adjust fog, clouds, and post-processing",
-            };
-            right_content.set_text(hint);
-        }
-    });
-    right_panel.append_child(&right_content);
+
+    // Environment panel (shown only in Environment mode)
+    let env_refresh = Signal::new(0u32);
+    ENV_REFRESH.with(|cell| cell.set(Some(env_refresh)));
+
+    show_dom(
+        __scope,
+        &right_panel,
+        move || mode_signal.get() == EditorMode::Environment.index(),
+        move |scope| {
+            build_env_panel(scope, env_refresh)
+        },
+        None::<fn(&mut RenderScope) -> NodeHandle>,
+    );
 
     content.append_child(&right_panel);
     root.append_child(&content);
