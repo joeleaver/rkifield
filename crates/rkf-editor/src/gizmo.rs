@@ -78,6 +78,8 @@ pub struct GizmoState {
     pub initial_rotation: Quat,
     /// Scale of the object when the drag began.
     pub initial_scale: f32,
+    /// Which axis the mouse is currently hovering over (for visual feedback).
+    pub hovered_axis: GizmoAxis,
 }
 
 impl Default for GizmoState {
@@ -98,6 +100,7 @@ impl GizmoState {
             initial_position: Vec3::ZERO,
             initial_rotation: Quat::IDENTITY,
             initial_scale: 1.0,
+            hovered_axis: GizmoAxis::None,
         }
     }
 
@@ -200,7 +203,7 @@ pub fn pick_gizmo_axis(
     gizmo_center: Vec3,
     gizmo_size: f32,
 ) -> GizmoAxis {
-    let threshold = gizmo_size * 0.15; // 15% of gizmo size as pick tolerance
+    let threshold = gizmo_size * 0.3; // 30% of gizmo size as pick tolerance
     let ray_dir = ray_dir.normalize();
 
     let axes = [

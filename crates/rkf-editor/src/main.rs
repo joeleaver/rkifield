@@ -2683,6 +2683,9 @@ struct App {
     /// Set after scene load; consumed on first render frame to bump UI signals.
     pending_ui_refresh: bool,
 
+    // Pending voxel rebuild after gizmo drag
+    pending_transform: Option<(u64, rkf_edit::transform_ops::ObjectTransform)>,
+
     // Timing
     last_frame: Instant,
     frame_count: u64,
@@ -2725,6 +2728,7 @@ impl App {
             socket_path: None,
             scene_path,
             pending_ui_refresh: false,
+            pending_transform: None,
             last_frame: Instant::now(),
             frame_count: 0,
             last_title_update: Instant::now(),
@@ -2955,58 +2959,71 @@ impl App {
         let sel_id = *selected.first()?;
         let node = es.scene_tree.find_node(sel_id)?;
         let pos = node.position;
+        let hovered = es.gizmo.hovered_axis;
+        let dragging_axis = if es.gizmo.dragging {
+            es.gizmo.active_axis
+        } else {
+            gizmo::GizmoAxis::None
+        };
 
         let mut batch = overlay::LineBatch::new();
 
-        // Translate gizmo: three colored axis arrows
+        // Translate gizmo: three colored axis arrows with hover/drag feedback
         let gizmo_size = 1.0f32;
-        let red = [1.0, 0.2, 0.2, 1.0];
-        let green = [0.2, 1.0, 0.2, 1.0];
-        let blue = [0.3, 0.3, 1.0, 1.0];
+        let axes: [(gizmo::GizmoAxis, glam::Vec3, [f32; 4]); 3] = [
+            (gizmo::GizmoAxis::X, glam::Vec3::X, [1.0, 0.2, 0.2, 1.0]),
+            (gizmo::GizmoAxis::Y, glam::Vec3::Y, [0.2, 1.0, 0.2, 1.0]),
+            (gizmo::GizmoAxis::Z, glam::Vec3::Z, [0.3, 0.3, 1.0, 1.0]),
+        ];
 
-        // X axis (red)
-        batch.add_line(pos, pos + glam::Vec3::X * gizmo_size, red);
-        // Arrowhead
-        batch.add_line(
-            pos + glam::Vec3::X * gizmo_size,
-            pos + glam::Vec3::new(gizmo_size * 0.85, gizmo_size * 0.07, 0.0),
-            red,
-        );
-        batch.add_line(
-            pos + glam::Vec3::X * gizmo_size,
-            pos + glam::Vec3::new(gizmo_size * 0.85, -gizmo_size * 0.07, 0.0),
-            red,
-        );
+        for &(axis_id, axis_dir, base_color) in &axes {
+            let is_active = dragging_axis == axis_id;
+            let is_hovered = hovered == axis_id && !es.gizmo.dragging;
 
-        // Y axis (green)
-        batch.add_line(pos, pos + glam::Vec3::Y * gizmo_size, green);
-        batch.add_line(
-            pos + glam::Vec3::Y * gizmo_size,
-            pos + glam::Vec3::new(gizmo_size * 0.07, gizmo_size * 0.85, 0.0),
-            green,
-        );
-        batch.add_line(
-            pos + glam::Vec3::Y * gizmo_size,
-            pos + glam::Vec3::new(-gizmo_size * 0.07, gizmo_size * 0.85, 0.0),
-            green,
-        );
+            let color = if is_active || is_hovered {
+                [
+                    (base_color[0] + 0.4).min(1.0),
+                    (base_color[1] + 0.4).min(1.0),
+                    (base_color[2] + 0.4).min(1.0),
+                    1.0,
+                ]
+            } else {
+                base_color
+            };
+            let width = if is_active {
+                8.0
+            } else if is_hovered {
+                6.0
+            } else {
+                4.0
+            };
 
-        // Z axis (blue)
-        batch.add_line(pos, pos + glam::Vec3::Z * gizmo_size, blue);
-        batch.add_line(
-            pos + glam::Vec3::Z * gizmo_size,
-            pos + glam::Vec3::new(0.0, gizmo_size * 0.07, gizmo_size * 0.85),
-            blue,
-        );
-        batch.add_line(
-            pos + glam::Vec3::Z * gizmo_size,
-            pos + glam::Vec3::new(0.0, -gizmo_size * 0.07, gizmo_size * 0.85),
-            blue,
-        );
+            // Shaft
+            batch.add_thick_line(pos, pos + axis_dir * gizmo_size, color, width);
+
+            // Arrowhead: 4 barbs forming a cross
+            let tip = pos + axis_dir * gizmo_size;
+            let perp1 = if axis_dir.dot(glam::Vec3::Y).abs() < 0.99 {
+                axis_dir.cross(glam::Vec3::Y).normalize()
+            } else {
+                axis_dir.cross(glam::Vec3::X).normalize()
+            };
+            let perp2 = axis_dir.cross(perp1).normalize();
+            let barb = gizmo_size * 0.12;
+            let back = gizmo_size * 0.15;
+            for &p in &[perp1, -perp1, perp2, -perp2] {
+                batch.add_thick_line(
+                    tip,
+                    tip - axis_dir * back + p * barb,
+                    color,
+                    width,
+                );
+            }
+        }
 
         // Selection wireframe (white box around entity)
         if es.overlay_config.show_selection_outlines {
-            let half = 0.5f32; // approximate entity extent
+            let half = 0.5f32;
             let outline_color = [1.0, 1.0, 1.0, 0.5];
             batch.add_box_wireframe(
                 pos - glam::Vec3::splat(half),
@@ -3134,6 +3151,13 @@ impl App {
         // ── Step 1: Engine renders full pipeline + blits to surface ────────
         // Build gizmo/wireframe overlay lines for selected entity.
         let line_batch = self.build_gizmo_lines();
+
+        // Process pending voxel rebuild from gizmo drag-end
+        if let Some((entity_id, new_xform)) = self.pending_transform.take() {
+            if let Some(engine) = &mut self.engine {
+                engine.apply_object_transform(entity_id, new_xform);
+            }
+        }
 
         if let Some(engine) = &mut self.engine {
             engine.render(&surface_view, dt, line_batch.as_ref());
@@ -3308,19 +3332,60 @@ impl ApplicationHandler for App {
                     es.editor_input.mouse_delta.x += dx;
                     es.editor_input.mouse_delta.y += dy;
 
-                    // Gizmo drag: update entity position in real time
+                    // Gizmo drag: update entity transform in real time
                     if es.gizmo.dragging {
                         let (ro, rd) = unproject_ray(&es.editor_camera, px, py);
-                        let delta =
-                            gizmo::compute_translate_delta(&es.gizmo, ro, rd);
-                        let new_pos = es.gizmo.initial_position + delta;
+                        // Copy gizmo state before mutable borrow of scene_tree
+                        let mode = es.gizmo.mode;
+                        let gizmo_snap = es.gizmo.clone();
                         let selected = es.scene_tree.selected_entities();
                         if let Some(&sel_id) = selected.first() {
-                            if let Some(node) =
-                                es.scene_tree.find_node_mut(sel_id)
-                            {
-                                node.position = new_pos;
+                            match mode {
+                                gizmo::GizmoMode::Translate => {
+                                    let delta =
+                                        gizmo::compute_translate_delta(&gizmo_snap, ro, rd);
+                                    let new_pos = gizmo_snap.initial_position + delta;
+                                    if let Some(node) = es.scene_tree.find_node_mut(sel_id) {
+                                        node.position = new_pos;
+                                    }
+                                }
+                                gizmo::GizmoMode::Rotate => {
+                                    let delta = gizmo::compute_rotate_delta(
+                                        &gizmo_snap, ro, rd, gizmo_snap.initial_position,
+                                    );
+                                    let new_rot = delta * gizmo_snap.initial_rotation;
+                                    if let Some(node) = es.scene_tree.find_node_mut(sel_id) {
+                                        node.rotation = new_rot;
+                                    }
+                                }
+                                gizmo::GizmoMode::Scale => {
+                                    let factor =
+                                        gizmo::compute_scale_delta(&gizmo_snap, ro, rd);
+                                    let new_scale = gizmo_snap.initial_scale * factor;
+                                    if let Some(node) = es.scene_tree.find_node_mut(sel_id) {
+                                        node.scale = new_scale;
+                                    }
+                                }
                             }
+                        }
+                    } else {
+                        // Hover detection: highlight gizmo axis under cursor
+                        let selected = es.scene_tree.selected_entities();
+                        if let Some(&sel_id) = selected.first() {
+                            if let Some(node) = es.scene_tree.find_node(sel_id)
+                            {
+                                let (ro, rd) =
+                                    unproject_ray(&es.editor_camera, px, py);
+                                let axis = gizmo::pick_gizmo_axis(
+                                    ro,
+                                    rd,
+                                    node.position,
+                                    1.0,
+                                );
+                                es.gizmo.hovered_axis = axis;
+                            }
+                        } else {
+                            es.gizmo.hovered_axis = gizmo::GizmoAxis::None;
                         }
                     }
                 }
@@ -3434,8 +3499,22 @@ impl ApplicationHandler for App {
                         // Always clear the button in editor input
                         if let Ok(mut es) = self.editor_state.lock() {
                             es.editor_input.mouse_buttons[btn_idx] = false;
-                            // End gizmo drag on left button release
+                            // End gizmo drag on left button release → trigger voxel rebuild
                             if btn_idx == 0 && es.gizmo.dragging {
+                                // Collect final transform from the scene node
+                                let selected = es.scene_tree.selected_entities();
+                                if let Some(&sel_id) = selected.first() {
+                                    if let Some(node) = es.scene_tree.find_node(sel_id) {
+                                        self.pending_transform = Some((
+                                            sel_id,
+                                            rkf_edit::transform_ops::ObjectTransform {
+                                                position: node.position,
+                                                rotation: node.rotation,
+                                                scale: node.scale,
+                                            },
+                                        ));
+                                    }
+                                }
                                 es.gizmo.end_drag();
                             }
                         }

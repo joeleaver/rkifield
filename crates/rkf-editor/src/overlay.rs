@@ -9,19 +9,26 @@
 use glam::Vec3;
 use std::f32::consts::PI;
 
-/// A single vertex in a line batch.
+/// A line segment with color and screen-space width.
 #[derive(Debug, Clone, Copy)]
-pub struct LineVertex {
-    /// World-space position.
-    pub position: Vec3,
+pub struct LineSeg {
+    /// World-space start position.
+    pub start: Vec3,
+    /// World-space end position.
+    pub end: Vec3,
     /// RGBA color.
     pub color: [f32; 4],
+    /// Width in pixels (screen space).
+    pub width: f32,
 }
 
 /// Accumulates line segments for overlay rendering.
+///
+/// Each segment is rendered as a camera-facing billboard quad with the
+/// specified pixel width.
 #[derive(Debug, Clone)]
 pub struct LineBatch {
-    pub vertices: Vec<LineVertex>,
+    pub segments: Vec<LineSeg>,
 }
 
 impl Default for LineBatch {
@@ -34,19 +41,33 @@ impl LineBatch {
     /// Create an empty line batch.
     pub fn new() -> Self {
         Self {
-            vertices: Vec::new(),
+            segments: Vec::new(),
         }
     }
 
-    /// Add a single line segment.
+    /// Add a single line segment with default width (1.5 px).
     pub fn add_line(&mut self, start: Vec3, end: Vec3, color: [f32; 4]) {
-        self.vertices.push(LineVertex {
-            position: start,
+        self.segments.push(LineSeg {
+            start,
+            end,
             color,
+            width: 1.5,
         });
-        self.vertices.push(LineVertex {
-            position: end,
+    }
+
+    /// Add a line segment with explicit pixel width.
+    pub fn add_thick_line(
+        &mut self,
+        start: Vec3,
+        end: Vec3,
+        color: [f32; 4],
+        width: f32,
+    ) {
+        self.segments.push(LineSeg {
+            start,
+            end,
             color,
+            width,
         });
     }
 
@@ -204,19 +225,19 @@ impl LineBatch {
         }
     }
 
-    /// Remove all vertices.
+    /// Remove all segments.
     pub fn clear(&mut self) {
-        self.vertices.clear();
+        self.segments.clear();
     }
 
-    /// Number of vertices in the batch.
+    /// Number of logical vertices (2 per segment).
     pub fn vertex_count(&self) -> usize {
-        self.vertices.len()
+        self.segments.len() * 2
     }
 
-    /// Whether the batch has no vertices.
+    /// Whether the batch has no segments.
     pub fn is_empty(&self) -> bool {
-        self.vertices.is_empty()
+        self.segments.is_empty()
     }
 }
 
@@ -259,6 +280,14 @@ mod tests {
         assert_eq!(batch.vertex_count(), 2);
         batch.add_line(Vec3::ZERO, Vec3::Y, WHITE);
         assert_eq!(batch.vertex_count(), 4);
+    }
+
+    #[test]
+    fn test_add_thick_line() {
+        let mut batch = LineBatch::new();
+        batch.add_thick_line(Vec3::ZERO, Vec3::X, RED, 5.0);
+        assert_eq!(batch.segments.len(), 1);
+        assert_eq!(batch.segments[0].width, 5.0);
     }
 
     #[test]
@@ -325,16 +354,16 @@ mod tests {
     }
 
     #[test]
-    fn test_line_vertex_data() {
+    fn test_line_segment_data() {
         let mut batch = LineBatch::new();
         let start = Vec3::new(1.0, 2.0, 3.0);
         let end = Vec3::new(4.0, 5.0, 6.0);
         let color = [0.5, 0.6, 0.7, 0.8];
         batch.add_line(start, end, color);
-        assert_eq!(batch.vertices[0].position, start);
-        assert_eq!(batch.vertices[0].color, color);
-        assert_eq!(batch.vertices[1].position, end);
-        assert_eq!(batch.vertices[1].color, color);
+        assert_eq!(batch.segments[0].start, start);
+        assert_eq!(batch.segments[0].end, end);
+        assert_eq!(batch.segments[0].color, color);
+        assert_eq!(batch.segments[0].width, 1.5);
     }
 
     #[test]
