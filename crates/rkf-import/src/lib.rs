@@ -15,3 +15,5 @@
 //! - `.rkf` asset file writing with LZ4 compression
 
 #![warn(missing_docs)]
+
+pub mod mesh;
