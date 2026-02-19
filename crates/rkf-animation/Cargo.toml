@@ -9,5 +9,6 @@ description = "Skeletal animation and blend shapes for the RKIField SDF engine"
 rkf-core = { workspace = true }
 glam = { workspace = true }
 bytemuck = { workspace = true }
+wgpu = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }

@@ -59,6 +59,13 @@ pub mod entry_flags {
     pub const REBAKED_JOINT: u8 = 2;
 }
 
+/// Voxel-level flag for joint region voxels (Lipschitz mitigation).
+///
+/// This is the same constant as [`rebake::JOINT_REGION_FLAG`](crate::rebake::JOINT_REGION_FLAG),
+/// re-exported here for convenience when working with voxel flags in segment context.
+/// The ray marcher checks this flag and applies 0.8x step multiplier.
+pub const JOINT_REGION_FLAG: u8 = 0x01;
+
 #[cfg(test)]
 mod tests {
     use super::*;
