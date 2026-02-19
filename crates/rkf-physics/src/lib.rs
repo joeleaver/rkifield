@@ -17,3 +17,6 @@
 pub mod rapier_world;
 pub mod sdf_collision;
 pub mod rigid_body;
+pub mod character_controller;
+pub mod destruction;
+pub mod playground;
