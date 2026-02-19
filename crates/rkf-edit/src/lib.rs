@@ -27,5 +27,6 @@ pub mod brush;
 pub mod edit_op;
 pub mod journal;
 pub mod pipeline;
+pub mod transform_ops;
 pub mod types;
 pub mod undo;
