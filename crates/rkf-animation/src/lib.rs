@@ -15,5 +15,7 @@
 
 #![warn(missing_docs)]
 
+pub mod character;
 pub mod clip;
+pub mod segment;
 pub mod skeleton;
