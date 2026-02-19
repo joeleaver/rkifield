@@ -8,7 +8,6 @@
 
 use glam::{Quat, Vec3};
 use log::warn;
-use std::f32::consts::PI;
 
 /// Which transform operation the gizmo performs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -379,6 +378,7 @@ pub fn compute_scale_delta(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::f32::consts::PI;
 
     const EPS: f32 = 1e-3;
 
