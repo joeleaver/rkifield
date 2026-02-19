@@ -30,6 +30,62 @@ struct Cli {
     mode: Mode,
 }
 
+/// Auto-discover a running engine and connect to it.
+///
+/// Scans `/tmp/rkifield-*.sock` for available sockets. If exactly one is found
+/// (and it's connectable), swaps the API slot to a live bridge. This lets agents
+/// use tools immediately without a manual `connect` call.
+fn auto_connect(api_slot: &ApiSlot) {
+    let mut sockets = Vec::new();
+    if let Ok(entries) = std::fs::read_dir("/tmp") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("rkifield-") && name.ends_with(".sock") {
+                sockets.push(entry.path().to_string_lossy().to_string());
+            }
+        }
+    }
+
+    match sockets.len() {
+        0 => {
+            log::info!("No running engines found — starting with stub API");
+        }
+        1 => {
+            let socket_path = &sockets[0];
+            // Verify the socket is connectable (not stale)
+            match std::os::unix::net::UnixStream::connect(socket_path) {
+                Ok(_) => {
+                    let bridge =
+                        rkf_mcp::bridge::BridgeAutomationApi::new(socket_path.to_string());
+                    if let Ok(mut slot) = api_slot.write() {
+                        *slot = Arc::new(bridge);
+                        // Read discovery metadata if available
+                        let meta_path = socket_path.replace(".sock", ".json");
+                        let engine_name = std::fs::read_to_string(&meta_path)
+                            .ok()
+                            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                            .and_then(|v| v["name"].as_str().map(String::from))
+                            .unwrap_or_else(|| "unknown".into());
+                        log::info!(
+                            "Auto-connected to {engine_name} via {socket_path}"
+                        );
+                    }
+                }
+                Err(e) => {
+                    log::warn!(
+                        "Found socket {socket_path} but connection failed: {e} — starting with stub API"
+                    );
+                }
+            }
+        }
+        n => {
+            log::info!(
+                "Found {n} engine sockets — use `connect` tool to choose one: {sockets:?}"
+            );
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Logging to stderr (stdout is the MCP protocol channel)
@@ -55,6 +111,9 @@ async fn main() -> anyhow::Result<()> {
     tools::observation::register_observation_tools(&mut registry);
     tools::meta::register_meta_tools(&mut registry, Arc::clone(&api_slot));
     let registry = Arc::new(registry);
+
+    // Auto-discover and connect to a running engine
+    auto_connect(&api_slot);
 
     // Run stdio MCP loop
     let stdin = BufReader::new(tokio::io::stdin());

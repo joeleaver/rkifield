@@ -824,22 +824,11 @@ impl EngineState {
     ///
     /// Submits GPU commands and blocks on staging readback for MCP screenshots.
     pub fn render(&mut self, swapchain_view: &wgpu::TextureView, dt: f32) {
-        // Check for pending MCP commands
+        // Check for pending MCP debug mode (camera is consumed in main loop)
         if let Ok(mut state) = self.shared_state.lock() {
             if let Some(mode) = state.pending_debug_mode.take() {
                 self.shading.set_debug_mode(&self.queue, mode);
                 log::info!("Debug mode set via MCP: {mode}");
-            }
-            if let Some(cam) = state.pending_camera.take() {
-                self.camera.position = cam.position;
-                self.camera.yaw = cam.yaw;
-                self.camera.pitch = cam.pitch;
-                log::info!(
-                    "Camera set via MCP: pos={:?} yaw={:.2} pitch={:.2}",
-                    cam.position,
-                    cam.yaw,
-                    cam.pitch
-                );
             }
         }
 

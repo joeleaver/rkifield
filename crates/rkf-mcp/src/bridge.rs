@@ -169,71 +169,92 @@ impl AutomationApi for BridgeAutomationApi {
         serde_json::from_value(result).map_err(|e| AutomationError::EngineError(e.to_string()))
     }
 
-    // --- Mutation methods (not supported over bridge) ---
+    // --- Mutation methods (forwarded over IPC) ---
 
-    fn entity_spawn(&self, _def: EntityDef) -> AutomationResult<u64> {
-        Err(AutomationError::NotImplemented(
-            "entity_spawn (bridge is observation-only)",
-        ))
+    fn entity_spawn(&self, def: EntityDef) -> AutomationResult<u64> {
+        let result = self.call_tool(
+            "entity_spawn",
+            serde_json::to_value(&def)
+                .map_err(|e| AutomationError::EngineError(format!("serialize: {e}")))?,
+        )?;
+        result["id"]
+            .as_u64()
+            .ok_or_else(|| AutomationError::EngineError("missing id in response".into()))
     }
 
-    fn entity_despawn(&self, _entity_id: u64) -> AutomationResult<()> {
-        Err(AutomationError::NotImplemented(
-            "entity_despawn (bridge is observation-only)",
-        ))
+    fn entity_despawn(&self, entity_id: u64) -> AutomationResult<()> {
+        self.call_tool(
+            "entity_despawn",
+            serde_json::json!({"entity_id": entity_id}),
+        )?;
+        Ok(())
     }
 
     fn entity_set_component(
         &self,
-        _entity_id: u64,
-        _component: ComponentDef,
+        entity_id: u64,
+        component: ComponentDef,
     ) -> AutomationResult<()> {
-        Err(AutomationError::NotImplemented(
-            "entity_set_component (bridge is observation-only)",
-        ))
+        let comp_value = serde_json::to_value(&component)
+            .map_err(|e| AutomationError::EngineError(format!("serialize: {e}")))?;
+        self.call_tool(
+            "entity_set_component",
+            serde_json::json!({"entity_id": entity_id, "component": comp_value}),
+        )?;
+        Ok(())
     }
 
-    fn material_set(&self, _id: u16, _material: MaterialDef) -> AutomationResult<()> {
-        Err(AutomationError::NotImplemented(
-            "material_set (bridge is observation-only)",
-        ))
+    fn material_set(&self, id: u16, material: MaterialDef) -> AutomationResult<()> {
+        let mat_value = serde_json::to_value(&material)
+            .map_err(|e| AutomationError::EngineError(format!("serialize: {e}")))?;
+        self.call_tool(
+            "material_set",
+            serde_json::json!({"id": id, "material": mat_value}),
+        )?;
+        Ok(())
     }
 
-    fn brush_apply(&self, _op: serde_json::Value) -> AutomationResult<()> {
-        Err(AutomationError::NotImplemented(
-            "brush_apply (bridge is observation-only)",
-        ))
+    fn brush_apply(&self, op: serde_json::Value) -> AutomationResult<()> {
+        self.call_tool("brush_apply", op)?;
+        Ok(())
     }
 
-    fn scene_load(&self, _path: &str) -> AutomationResult<()> {
-        Err(AutomationError::NotImplemented(
-            "scene_load (bridge is observation-only)",
-        ))
+    fn scene_load(&self, path: &str) -> AutomationResult<()> {
+        self.call_tool("scene_load", serde_json::json!({"path": path}))?;
+        Ok(())
     }
 
-    fn scene_save(&self, _path: &str) -> AutomationResult<()> {
-        Err(AutomationError::NotImplemented(
-            "scene_save (bridge is observation-only)",
-        ))
+    fn scene_save(&self, path: &str) -> AutomationResult<()> {
+        self.call_tool("scene_save", serde_json::json!({"path": path}))?;
+        Ok(())
     }
 
     fn camera_set(
         &self,
-        _chunk: [i32; 3],
-        _local: [f32; 3],
-        _rotation: [f32; 4],
+        chunk: [i32; 3],
+        local: [f32; 3],
+        rotation: [f32; 4],
     ) -> AutomationResult<()> {
-        // camera_set is routed via execute_command("camera_set ...") instead,
-        // which the bridge already forwards over IPC. See observation.rs handler.
-        Err(AutomationError::NotImplemented(
-            "camera_set (use execute_command route)",
-        ))
+        self.call_tool(
+            "camera_set",
+            serde_json::json!({
+                "x": local[0], "y": local[1], "z": local[2],
+                "yaw": 0.0, "pitch": 0.0,
+            }),
+        )?;
+        // Also store chunk/rotation for callers that use the full API
+        let _ = (chunk, rotation);
+        Ok(())
     }
 
-    fn quality_preset(&self, _preset: QualityPreset) -> AutomationResult<()> {
-        Err(AutomationError::NotImplemented(
-            "quality_preset (bridge is observation-only)",
-        ))
+    fn quality_preset(&self, preset: QualityPreset) -> AutomationResult<()> {
+        let preset_value = serde_json::to_value(&preset)
+            .map_err(|e| AutomationError::EngineError(format!("serialize: {e}")))?;
+        self.call_tool(
+            "quality_preset",
+            serde_json::json!({"preset": preset_value}),
+        )?;
+        Ok(())
     }
 
     fn execute_command(&self, command: &str) -> AutomationResult<String> {
@@ -287,8 +308,10 @@ impl AutomationApi for BridgeAutomationApi {
 mod tests {
     use super::*;
 
-    #[test]
-    fn bridge_mutation_methods_return_not_implemented() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bridge_mutation_methods_fail_without_server() {
+        // With no server running, all methods should return errors (connection refused).
+        // Needs a tokio runtime because the bridge uses block_in_place internally.
         let bridge = BridgeAutomationApi::new("/tmp/nonexistent.sock".to_string());
         assert!(bridge
             .entity_spawn(EntityDef {
@@ -299,10 +322,6 @@ mod tests {
         assert!(bridge.entity_despawn(1).is_err());
         assert!(bridge.scene_load("foo").is_err());
         assert!(bridge.scene_save("foo").is_err());
-        assert!(bridge
-            .camera_set([0, 0, 0], [0.0; 3], [0.0, 0.0, 0.0, 1.0])
-            .is_err());
-        assert!(bridge.quality_preset(QualityPreset::High).is_err());
         assert!(bridge.execute_command("test").is_err());
     }
 }

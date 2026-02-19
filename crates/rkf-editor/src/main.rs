@@ -707,6 +707,34 @@ fn editor_ui() -> NodeHandle {
 // IPC server
 // ---------------------------------------------------------------------------
 
+/// Path to the JSON discovery metadata file for the current process.
+fn discovery_metadata_path() -> String {
+    format!("/tmp/rkifield-{}.json", std::process::id())
+}
+
+/// Write a JSON discovery file so MCP clients can identify this engine instance.
+fn write_discovery_metadata(socket_path: &str) {
+    let metadata = serde_json::json!({
+        "type": "editor",
+        "pid": std::process::id(),
+        "socket": socket_path,
+        "name": "RKIField Editor",
+        "version": env!("CARGO_PKG_VERSION"),
+    });
+    let path = discovery_metadata_path();
+    if let Err(e) = std::fs::write(&path, serde_json::to_string_pretty(&metadata).unwrap()) {
+        log::warn!("Failed to write discovery metadata to {path}: {e}");
+    } else {
+        log::info!("Discovery metadata written to {path}");
+    }
+}
+
+/// Remove the discovery metadata file (best-effort).
+fn cleanup_discovery_metadata() {
+    let path = discovery_metadata_path();
+    let _ = std::fs::remove_file(&path);
+}
+
 fn spawn_ipc_server(api: Arc<dyn rkf_core::automation::AutomationApi>) -> String {
     let socket_path = rkf_mcp::ipc::IpcConfig::default_socket_path();
     let path_clone = socket_path.clone();
@@ -736,6 +764,9 @@ fn spawn_ipc_server(api: Arc<dyn rkf_core::automation::AutomationApi>) -> String
             });
         })
         .expect("failed to spawn IPC server thread");
+
+    // Write discovery metadata so MCP clients can find and identify us
+    write_discovery_metadata(&socket_path);
 
     socket_path
 }
@@ -1012,12 +1043,27 @@ impl App {
         self.engine = Some(engine);
 
         // Spawn MCP IPC server
-        let api: Arc<dyn rkf_core::automation::AutomationApi> =
-            Arc::new(EditorAutomationApi::new(Arc::clone(&self.shared_state)));
+        let api: Arc<dyn rkf_core::automation::AutomationApi> = Arc::new(
+            EditorAutomationApi::new(
+                Arc::clone(&self.shared_state),
+                Arc::clone(&self.editor_state),
+            ),
+        );
         let socket_path = spawn_ipc_server(api);
         log::info!("IPC server listening on {socket_path}");
         self.socket_path = Some(socket_path);
 
+        // Push startup log entries into shared state for MCP read_log
+        if let Ok(mut ss) = self.shared_state.lock() {
+            ss.push_log(
+                rkf_core::automation::LogLevel::Info,
+                "Editor initialized — engine viewport active",
+            );
+            ss.push_log(
+                rkf_core::automation::LogLevel::Info,
+                format!("IPC server listening on {}", self.socket_path.as_deref().unwrap_or("?")),
+            );
+        }
         log::info!("Editor initialized — engine viewport active");
     }
 
@@ -1062,6 +1108,21 @@ impl App {
             let mut es = self.editor_state.lock().unwrap();
             es.update_camera(dt);
             es.frame_time_history.push(dt * 1000.0);
+
+            // Consume pending MCP camera teleport — apply to editor camera
+            // so sync_to_engine_camera carries the correct values.
+            if let Ok(mut ss) = self.shared_state.lock() {
+                if let Some(cam) = ss.pending_camera.take() {
+                    es.editor_camera.position = cam.position;
+                    es.editor_camera.fly_yaw = cam.yaw;
+                    es.editor_camera.fly_pitch = cam.pitch;
+                    log::info!(
+                        "Camera set via MCP: pos={:?} yaw={:.2} pitch={:.2}",
+                        cam.position, cam.yaw, cam.pitch,
+                    );
+                }
+            }
+
             if let Some(engine) = &mut self.engine {
                 es.sync_to_engine_camera(&mut engine.camera);
             }
@@ -1233,7 +1294,10 @@ impl ApplicationHandler for App {
         event: WindowEvent,
     ) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                cleanup_discovery_metadata();
+                event_loop.exit();
+            }
 
             WindowEvent::Resized(size) => {
                 self.handle_resize(size.width, size.height);
@@ -1386,6 +1450,7 @@ impl ApplicationHandler for App {
                         })
                     });
                     if !menu_was_open {
+                        cleanup_discovery_metadata();
                         event_loop.exit();
                     }
                     return;
@@ -1475,6 +1540,7 @@ impl ApplicationHandler for App {
         // Check if UI requested exit (File > Quit)
         if let Ok(es) = self.editor_state.lock() {
             if es.wants_exit {
+                cleanup_discovery_metadata();
                 event_loop.exit();
                 return;
             }

@@ -3,12 +3,15 @@
 //! [`SharedState`] is updated by the render loop each frame. [`EditorAutomationApi`]
 //! reads it to serve MCP tool requests over IPC.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use glam::Vec3;
 use image::ImageEncoder;
 use rkf_core::automation::*;
+
+use crate::editor_state::EditorState;
 
 /// Camera position + orientation set via MCP camera_set tool.
 pub struct PendingCamera {
@@ -43,7 +46,14 @@ pub struct SharedState {
     pub pending_debug_mode: Option<u32>,
     /// Pending camera teleport (set by MCP, consumed by render loop).
     pub pending_camera: Option<PendingCamera>,
+    /// Ring buffer of recent log entries for MCP `read_log` tool.
+    pub log_entries: VecDeque<LogEntry>,
+    /// Engine start time for log timestamps.
+    pub start_time: Instant,
 }
+
+/// Maximum number of log entries kept in the ring buffer.
+const MAX_LOG_ENTRIES: usize = 500;
 
 impl SharedState {
     /// Create shared state with the given pool stats and frame dimensions.
@@ -61,18 +71,37 @@ impl SharedState {
             frame_height: height,
             pending_debug_mode: None,
             pending_camera: None,
+            log_entries: VecDeque::with_capacity(MAX_LOG_ENTRIES),
+            start_time: Instant::now(),
         }
+    }
+
+    /// Push a log entry into the ring buffer, evicting the oldest if full.
+    pub fn push_log(&mut self, level: LogLevel, message: impl Into<String>) {
+        let timestamp_ms = self.start_time.elapsed().as_millis() as u64;
+        if self.log_entries.len() >= MAX_LOG_ENTRIES {
+            self.log_entries.pop_front();
+        }
+        self.log_entries.push_back(LogEntry {
+            level,
+            message: message.into(),
+            timestamp_ms,
+        });
     }
 }
 
 /// Editor implementation of [`AutomationApi`] backed by shared engine state.
 pub struct EditorAutomationApi {
     state: Arc<Mutex<SharedState>>,
+    editor_state: Arc<Mutex<EditorState>>,
 }
 
 impl EditorAutomationApi {
-    pub fn new(state: Arc<Mutex<SharedState>>) -> Self {
-        Self { state }
+    pub fn new(state: Arc<Mutex<SharedState>>, editor_state: Arc<Mutex<EditorState>>) -> Self {
+        Self {
+            state,
+            editor_state,
+        }
     }
 }
 
@@ -195,15 +224,74 @@ impl AutomationApi for EditorAutomationApi {
     }
 
     fn scene_graph(&self) -> AutomationResult<SceneGraphSnapshot> {
-        Err(AutomationError::NotImplemented("scene_graph"))
+        let es = self
+            .editor_state
+            .lock()
+            .map_err(|e| AutomationError::EngineError(format!("lock poisoned: {e}")))?;
+
+        fn collect_nodes(
+            node: &crate::scene_tree::SceneNode,
+            parent_id: Option<u64>,
+            out: &mut Vec<EntityNode>,
+        ) {
+            out.push(EntityNode {
+                id: node.entity_id,
+                name: node.name.clone(),
+                parent: parent_id,
+                entity_type: "sdf_object".to_string(),
+                transform: [0.0; 10], // placeholder — no transform stored in SceneNode
+            });
+            for child in &node.children {
+                collect_nodes(child, Some(node.entity_id), out);
+            }
+        }
+
+        let mut entities = Vec::new();
+        for root in &es.scene_tree.roots {
+            collect_nodes(root, None, &mut entities);
+        }
+
+        Ok(SceneGraphSnapshot { entities })
     }
 
-    fn entity_inspect(&self, _entity_id: u64) -> AutomationResult<EntitySnapshot> {
-        Err(AutomationError::NotImplemented("entity_inspect"))
+    fn entity_inspect(&self, entity_id: u64) -> AutomationResult<EntitySnapshot> {
+        let es = self
+            .editor_state
+            .lock()
+            .map_err(|e| AutomationError::EngineError(format!("lock poisoned: {e}")))?;
+
+        let node = es
+            .scene_tree
+            .find_node(entity_id)
+            .ok_or(AutomationError::EntityNotFound(entity_id))?;
+
+        let mut components = HashMap::new();
+        components.insert(
+            "scene_node".to_string(),
+            serde_json::json!({
+                "visible": node.visible,
+                "expanded": node.expanded,
+                "selected": node.selected,
+                "children": node.children.len(),
+            }),
+        );
+
+        Ok(EntitySnapshot {
+            id: node.entity_id,
+            name: node.name.clone(),
+            components,
+        })
     }
 
-    fn read_log(&self, _lines: usize) -> AutomationResult<Vec<LogEntry>> {
-        Err(AutomationError::NotImplemented("read_log"))
+    fn read_log(&self, lines: usize) -> AutomationResult<Vec<LogEntry>> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|e| AutomationError::EngineError(format!("lock poisoned: {e}")))?;
+
+        let total = state.log_entries.len();
+        let skip = total.saturating_sub(lines);
+        Ok(state.log_entries.iter().skip(skip).cloned().collect())
     }
 
     fn entity_spawn(&self, _def: EntityDef) -> AutomationResult<u64> {
