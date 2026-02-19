@@ -234,12 +234,19 @@ impl AutomationApi for EditorAutomationApi {
             parent_id: Option<u64>,
             out: &mut Vec<EntityNode>,
         ) {
+            let entity_type = if node.asset_path.is_some() {
+                "sdf_object"
+            } else {
+                "entity"
+            };
+            let p = node.position;
+            let r = node.rotation;
             out.push(EntityNode {
                 id: node.entity_id,
                 name: node.name.clone(),
                 parent: parent_id,
-                entity_type: "sdf_object".to_string(),
-                transform: [0.0; 10], // placeholder — no transform stored in SceneNode
+                entity_type: entity_type.to_string(),
+                transform: [p.x, p.y, p.z, r.x, r.y, r.z, r.w, node.scale, 0.0, 0.0],
             });
             for child in &node.children {
                 collect_nodes(child, Some(node.entity_id), out);
@@ -249,6 +256,24 @@ impl AutomationApi for EditorAutomationApi {
         let mut entities = Vec::new();
         for root in &es.scene_tree.roots {
             collect_nodes(root, None, &mut entities);
+        }
+
+        // Include light entities from light editor
+        use crate::light_editor::EditorLightType;
+        for (idx, light) in es.light_editor.all_lights().iter().enumerate() {
+            let (light_type, type_name) = match light.light_type {
+                EditorLightType::Point => ("point_light", "Point"),
+                EditorLightType::Spot => ("spot_light", "Spot"),
+                EditorLightType::Directional => ("directional_light", "Directional"),
+            };
+            let p = light.position;
+            entities.push(EntityNode {
+                id: light.id,
+                name: format!("{} Light {}", type_name, idx + 1),
+                parent: None,
+                entity_type: light_type.to_string(),
+                transform: [p.x, p.y, p.z, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0],
+            });
         }
 
         Ok(SceneGraphSnapshot { entities })
