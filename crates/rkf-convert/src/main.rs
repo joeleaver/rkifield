@@ -56,8 +56,43 @@ fn main() -> anyhow::Result<()> {
         mesh_data.materials.len()
     );
 
-    // TODO: Phase 18.3+ — BVH, voxelize, write .rkf
-    log::info!("Conversion pipeline not yet complete (Phase 18.3+)");
+    // Auto-select or use specified tier
+    let tier = args.tier.map(|t| t as usize).unwrap_or_else(|| {
+        rkf_import::voxelize::auto_select_tier(&mesh_data)
+    });
+    log::info!("Using resolution tier {tier}");
+
+    // Voxelize
+    let config = rkf_import::voxelize::VoxelizeConfig {
+        tier,
+        narrow_band_bricks: 3,
+        compute_color: !args.no_color,
+    };
+    let result = rkf_import::voxelize::voxelize_mesh(&mesh_data, &config);
+    log::info!("Voxelized: {} bricks", result.brick_count);
+
+    // Generate LOD tiers
+    let lod_tiers = rkf_import::lod::generate_lod_tiers(
+        &result.grid,
+        &result.pool,
+        &result.aabb,
+        tier,
+        args.lod_levels.saturating_sub(1), // lod_levels includes the source tier
+    );
+    log::info!("Generated {} LOD tiers", lod_tiers.len());
+
+    // Convert to chunk
+    let chunk = rkf_import::voxelize::to_chunk(&result, &lod_tiers, tier, glam::IVec3::ZERO);
+    log::info!(
+        "Chunk: {} tiers, {} total bricks",
+        chunk.grids.len(),
+        chunk.brick_count
+    );
+
+    // Save .rkf
+    let path = std::path::Path::new(&output);
+    rkf_core::chunk::save_chunk_file(&chunk, path)?;
+    log::info!("Saved {}", output);
 
     Ok(())
 }

@@ -8,16 +8,19 @@
 //! 4. Determine sign via generalized winding number (Barill et al. 2018)
 //! 5. Write signed distance + material into brick pool
 
-use glam::{UVec3, Vec3};
+use glam::{IVec3, UVec3, Vec3};
 use rayon::prelude::*;
 use rkf_core::aabb::Aabb;
+use rkf_core::brick::Brick;
 use rkf_core::brick_pool::BrickPool;
 use rkf_core::cell_state::CellState;
+use rkf_core::chunk::{Chunk, TierGrid};
 use rkf_core::constants::RESOLUTION_TIERS;
 use rkf_core::sparse_grid::SparseGrid;
 use rkf_core::voxel::VoxelSample;
 
 use crate::bvh::TriangleBvh;
+use crate::lod::LodTier;
 use crate::mesh::MeshData;
 
 /// Per-brick voxel data collected during parallel voxelization.
@@ -208,6 +211,70 @@ pub fn auto_select_tier(mesh: &MeshData) -> usize {
         2 // < 16cm -> Tier 2 (8cm)
     } else {
         3 // else -> Tier 3 (32cm)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// VoxelizeResult → Chunk conversion
+// ---------------------------------------------------------------------------
+
+/// Convert voxelization results into a [`Chunk`] ready for `.rkf` serialization.
+///
+/// Takes the primary voxelization result (grid + pool at source tier) and
+/// optional LOD tiers, packing them into a single [`Chunk`] with local brick indices.
+///
+/// For each tier (source + LODs):
+/// 1. Walk the grid to find all Surface cells with brick slots
+/// 2. Extract bricks from the pool using those slots
+/// 3. Remap grid slots to 0-based local indices
+/// 4. Create [`TierGrid`] with remapped grid and extracted bricks
+pub fn to_chunk(result: &VoxelizeResult, lod_tiers: &[LodTier], tier: usize, coords: IVec3) -> Chunk {
+    let mut grids = Vec::with_capacity(1 + lod_tiers.len());
+
+    // Source tier
+    grids.push(extract_tier_grid(&result.grid, &result.pool, tier));
+
+    // LOD tiers
+    for lod in lod_tiers {
+        grids.push(extract_tier_grid(&lod.grid, &lod.pool, lod.tier));
+    }
+
+    let brick_count = grids.iter().map(|tg| tg.bricks.len() as u32).sum();
+
+    Chunk {
+        coords,
+        grids,
+        brick_count,
+    }
+}
+
+/// Extract a [`TierGrid`] from a grid + pool, remapping pool-global slots to
+/// contiguous 0-based local indices.
+fn extract_tier_grid(grid: &SparseGrid, pool: &BrickPool, tier: usize) -> TierGrid {
+    let dims = grid.dimensions();
+    let mut remapped_grid = grid.clone();
+    let mut bricks: Vec<Brick> = Vec::new();
+
+    // Walk every cell. For Surface cells with a brick slot, copy the brick
+    // from the pool and assign a new 0-based local index.
+    for z in 0..dims.z {
+        for y in 0..dims.y {
+            for x in 0..dims.x {
+                if grid.cell_state(x, y, z) == CellState::Surface {
+                    if let Some(pool_slot) = grid.brick_slot(x, y, z) {
+                        let local_index = bricks.len() as u32;
+                        bricks.push(*pool.get(pool_slot));
+                        remapped_grid.set_brick_slot(x, y, z, local_index);
+                    }
+                }
+            }
+        }
+    }
+
+    TierGrid {
+        tier: tier as u8,
+        grid: remapped_grid,
+        bricks,
     }
 }
 
@@ -443,6 +510,177 @@ mod tests {
         assert!(
             winding.abs() < 0.5,
             "winding number outside (negative) should be < 0.5, got {winding}"
+        );
+    }
+
+    // ------ to_chunk tests ------
+
+    /// Helper: create a VoxelizeResult with a small grid and some surface bricks.
+    fn make_voxelize_result(num_bricks: u32) -> VoxelizeResult {
+        let dims = UVec3::new(4, 4, 4);
+        let mut grid = SparseGrid::new(dims);
+        let max_bricks = 64;
+        let mut pool = rkf_core::brick_pool::Pool::new(max_bricks);
+        let tier = 1usize;
+        let brick_extent = RESOLUTION_TIERS[tier].brick_extent;
+
+        for i in 0..num_bricks {
+            let x = i % 4;
+            let y = (i / 4) % 4;
+            let z = i / 16;
+            let slot = pool.allocate().unwrap();
+            grid.set_cell_state(x, y, z, CellState::Surface);
+            grid.set_brick_slot(x, y, z, slot);
+
+            // Fill brick with recognizable data
+            let brick: &mut rkf_core::brick::Brick = pool.get_mut(slot);
+            let mat_id = (i + 1) as u16;
+            for vz in 0..8u32 {
+                for vy in 0..8u32 {
+                    for vx in 0..8u32 {
+                        let dist = 0.1 * (vx as f32 + vy as f32 + vz as f32);
+                        brick.set(vx, vy, vz, VoxelSample::new(dist, mat_id, 0, 0, 0));
+                    }
+                }
+            }
+        }
+
+        let aabb = Aabb::new(Vec3::ZERO, dims.as_vec3() * brick_extent);
+        VoxelizeResult {
+            grid,
+            pool,
+            aabb,
+            brick_count: num_bricks,
+        }
+    }
+
+    #[test]
+    fn to_chunk_empty_result() {
+        let result = make_voxelize_result(0);
+        let chunk = to_chunk(&result, &[], 1, IVec3::ZERO);
+
+        assert_eq!(chunk.coords, IVec3::ZERO);
+        assert_eq!(chunk.grids.len(), 1); // source tier always present
+        assert_eq!(chunk.brick_count, 0);
+        assert_eq!(chunk.grids[0].bricks.len(), 0);
+        assert_eq!(chunk.grids[0].tier, 1);
+    }
+
+    #[test]
+    fn to_chunk_preserves_brick_data() {
+        let result = make_voxelize_result(3);
+        let chunk = to_chunk(&result, &[], 1, IVec3::new(5, -2, 0));
+
+        assert_eq!(chunk.coords, IVec3::new(5, -2, 0));
+        assert_eq!(chunk.grids.len(), 1);
+        assert_eq!(chunk.brick_count, 3);
+        assert_eq!(chunk.grids[0].bricks.len(), 3);
+
+        // Verify brick data preserved — each brick has material_id = i+1
+        for (i, brick) in chunk.grids[0].bricks.iter().enumerate() {
+            let expected_mat = (i + 1) as u16;
+            assert_eq!(
+                brick.sample(0, 0, 0).material_id(),
+                expected_mat,
+                "brick {i} material mismatch"
+            );
+        }
+
+        // Verify roundtrip through .rkf format
+        let mut buf = Vec::new();
+        rkf_core::chunk::save_chunk(&chunk, &mut buf).unwrap();
+        let loaded = rkf_core::chunk::load_chunk(&mut std::io::Cursor::new(&buf)).unwrap();
+        assert_eq!(loaded.brick_count, 3);
+        assert_eq!(loaded.grids[0].bricks[0].sample(0, 0, 0).material_id(), 1);
+        assert_eq!(loaded.grids[0].bricks[1].sample(0, 0, 0).material_id(), 2);
+        assert_eq!(loaded.grids[0].bricks[2].sample(0, 0, 0).material_id(), 3);
+    }
+
+    #[test]
+    fn to_chunk_with_lod_tiers() {
+        let result = make_voxelize_result(8);
+
+        // Generate LOD tiers from tier 0 so downsampling has data to work with
+        // Re-create at tier 0 for LOD generation
+        let dims = UVec3::new(4, 4, 4);
+        let mut grid = SparseGrid::new(dims);
+        let mut pool = rkf_core::brick_pool::Pool::new(64);
+        let tier = 0usize;
+        let brick_extent = RESOLUTION_TIERS[tier].brick_extent;
+
+        for z in 0..2u32 {
+            for y in 0..2u32 {
+                for x in 0..2u32 {
+                    let slot = pool.allocate().unwrap();
+                    grid.set_cell_state(x, y, z, CellState::Surface);
+                    grid.set_brick_slot(x, y, z, slot);
+                    let brick: &mut rkf_core::brick::Brick = pool.get_mut(slot);
+                    for vz in 0..8u32 {
+                        for vy in 0..8u32 {
+                            for vx in 0..8u32 {
+                                brick.set(
+                                    vx, vy, vz,
+                                    VoxelSample::new(0.5, 2, 0, 0, 0),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let aabb = Aabb::new(Vec3::ZERO, dims.as_vec3() * brick_extent);
+        let lod_tiers = crate::lod::generate_lod_tiers(&grid, &pool, &aabb, tier, 2);
+
+        let src_result = VoxelizeResult {
+            grid,
+            pool,
+            aabb,
+            brick_count: 8,
+        };
+        let chunk = to_chunk(&src_result, &lod_tiers, tier, IVec3::ZERO);
+
+        // Source tier + LOD tiers
+        assert_eq!(chunk.grids.len(), 1 + lod_tiers.len());
+        assert_eq!(chunk.grids[0].tier, 0); // source
+        for (i, lod) in lod_tiers.iter().enumerate() {
+            assert_eq!(chunk.grids[1 + i].tier, lod.tier as u8);
+        }
+        // Total brick count should be sum across all tiers
+        let expected_total: u32 = chunk.grids.iter().map(|tg| tg.bricks.len() as u32).sum();
+        assert_eq!(chunk.brick_count, expected_total);
+    }
+
+    #[test]
+    fn to_chunk_local_indices_contiguous() {
+        let result = make_voxelize_result(5);
+        let chunk = to_chunk(&result, &[], 1, IVec3::ZERO);
+
+        let tg = &chunk.grids[0];
+        assert_eq!(tg.bricks.len(), 5);
+
+        // Collect all brick slots referenced by Surface cells
+        let dims = tg.grid.dimensions();
+        let mut referenced_slots: Vec<u32> = Vec::new();
+        for z in 0..dims.z {
+            for y in 0..dims.y {
+                for x in 0..dims.x {
+                    if tg.grid.cell_state(x, y, z) == CellState::Surface {
+                        if let Some(slot) = tg.grid.brick_slot(x, y, z) {
+                            referenced_slots.push(slot);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Slots should be 0-based contiguous: 0, 1, 2, 3, 4
+        referenced_slots.sort();
+        let expected: Vec<u32> = (0..5).collect();
+        assert_eq!(
+            referenced_slots, expected,
+            "brick slots should be 0-based contiguous, got {:?}",
+            referenced_slots
         );
     }
 }
