@@ -9,5 +9,6 @@ description = "GPU particle system for the RKIField SDF engine"
 rkf-core = { workspace = true }
 glam = { workspace = true }
 bytemuck = { workspace = true }
+half = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }

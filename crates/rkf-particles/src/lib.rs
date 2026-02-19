@@ -13,3 +13,7 @@
 //! and sorting.
 
 #![warn(missing_docs)]
+
+pub mod emitter;
+pub mod particle;
+pub mod simulate;
