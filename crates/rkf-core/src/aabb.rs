@@ -129,6 +129,23 @@ impl Aabb {
         s.x * s.y * s.z
     }
 
+    /// Return all 8 corners of the bounding box.
+    ///
+    /// Order: iterate Z low/high, then Y low/high, then X low/high.
+    #[inline]
+    pub fn corners(&self) -> [Vec3; 8] {
+        [
+            Vec3::new(self.min.x, self.min.y, self.min.z),
+            Vec3::new(self.min.x, self.min.y, self.max.z),
+            Vec3::new(self.min.x, self.max.y, self.min.z),
+            Vec3::new(self.min.x, self.max.y, self.max.z),
+            Vec3::new(self.max.x, self.min.y, self.min.z),
+            Vec3::new(self.max.x, self.min.y, self.max.z),
+            Vec3::new(self.max.x, self.max.y, self.min.z),
+            Vec3::new(self.max.x, self.max.y, self.max.z),
+        ]
+    }
+
     /// Total surface area (sum of six face areas).
     #[inline]
     pub fn surface_area(&self) -> f32 {
@@ -457,6 +474,38 @@ mod tests {
     fn aabb_surface_area_unit_cube() {
         let a = Aabb::new(Vec3::ZERO, Vec3::ONE);
         assert!((a.surface_area() - 6.0).abs() < 1e-6);
+    }
+
+    // ── corners ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn aabb_corners_returns_all_eight() {
+        let a = Aabb::new(Vec3::new(1.0, 2.0, 3.0), Vec3::new(4.0, 6.0, 9.0));
+        let c = a.corners();
+        assert_eq!(c.len(), 8);
+        // Every corner component should be either min or max on that axis
+        for corner in &c {
+            assert!(corner.x == 1.0 || corner.x == 4.0);
+            assert!(corner.y == 2.0 || corner.y == 6.0);
+            assert!(corner.z == 3.0 || corner.z == 9.0);
+        }
+        // All 8 should be unique
+        for i in 0..8 {
+            for j in (i + 1)..8 {
+                assert_ne!(c[i], c[j], "corners {i} and {j} are identical");
+            }
+        }
+    }
+
+    #[test]
+    fn aabb_corners_unit_cube() {
+        let a = Aabb::new(Vec3::ZERO, Vec3::ONE);
+        let c = a.corners();
+        // Check specific corners
+        assert!(c.contains(&Vec3::ZERO));
+        assert!(c.contains(&Vec3::ONE));
+        assert!(c.contains(&Vec3::new(1.0, 0.0, 0.0)));
+        assert!(c.contains(&Vec3::new(0.0, 1.0, 1.0)));
     }
 
     // ── WorldAabb ────────────────────────────────────────────────────────────
