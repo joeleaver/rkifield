@@ -14,6 +14,8 @@
 
 #![warn(missing_docs)]
 
+pub mod binning;
 pub mod emitter;
 pub mod particle;
 pub mod simulate;
+pub mod volumetric;
