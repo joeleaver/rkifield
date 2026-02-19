@@ -45,6 +45,12 @@ pub mod profiler;
 pub mod preset_validator;
 /// Stress test framework — scenario definitions, result tracking, evaluation.
 pub mod stress_test;
+/// Edge case handling — graceful degradation, chunk boundaries, LOD transitions, window resize.
+pub mod edge_cases;
+/// Shader hot-reload — registry, change detection, compilation state.
+pub mod shader_reload;
+/// Material hot-reload — registry, RON serialization, change diffing.
+pub mod material_reload;
 
 pub use asset_registry::{AssetEntry, AssetRegistry, AssetState, Handle};
 pub use async_io::{AsyncIoPipeline, ChunkLoadResult};
@@ -78,4 +84,16 @@ pub use preset_validator::{
 pub use stress_test::{
     StressConfig, StressResult, StressScenario, StressSuite, StressThresholds,
     build_default_suite, evaluate_result,
+};
+pub use edge_cases::{
+    BoundaryFix, ChunkBoundaryFixer, ConfigChange, DegradationLevel, GracefulDegradation,
+    LodTransitionBlender, ResizeAction, WindowResizeHandler,
+};
+pub use shader_reload::{
+    ChangeType, CompileError, ShaderChangeEvent, ShaderRegistry, ShaderReloadState, ShaderSource,
+    check_shader_changed, compute_source_hash,
+};
+pub use material_reload::{
+    MaterialChangeSet, MaterialDefinition, MaterialFile, MaterialFileEntry, MaterialProperties,
+    MaterialRegistry, diff_material_files, parse_material_file, serialize_material_file,
 };
