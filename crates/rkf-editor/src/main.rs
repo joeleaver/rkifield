@@ -3,8 +3,11 @@
 mod camera;
 mod gizmo;
 mod input;
+mod paint;
+mod placement;
 mod properties;
 mod scene_tree;
+mod sculpt;
 
 use rinch::prelude::*;
 
