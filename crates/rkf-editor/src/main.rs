@@ -1,8 +1,11 @@
 #![allow(dead_code)] // Editor modules are WIP — used incrementally
 
+mod animation_preview;
 mod camera;
+mod environment;
 mod gizmo;
 mod input;
+mod light_editor;
 mod paint;
 mod placement;
 mod properties;
