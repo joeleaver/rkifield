@@ -44,7 +44,7 @@ pub struct TextureData {
 }
 
 /// Loaded mesh data ready for voxelization.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MeshData {
     /// Vertex positions.
     pub positions: Vec<Vec3>,
