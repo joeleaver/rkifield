@@ -111,7 +111,7 @@ impl MeshData {
     }
 }
 
-/// Load a mesh from a file path. Supports glTF (.gltf, .glb).
+/// Load a mesh from a file path. Supports glTF (.gltf, .glb) and Wavefront OBJ (.obj).
 pub fn load_mesh(path: &str) -> Result<MeshData> {
     let ext = std::path::Path::new(path)
         .extension()
@@ -121,7 +121,8 @@ pub fn load_mesh(path: &str) -> Result<MeshData> {
 
     match ext.as_str() {
         "gltf" | "glb" => load_gltf(path),
-        other => anyhow::bail!("Unsupported format: .{other}. Supported: .gltf, .glb"),
+        "obj" => load_obj(path),
+        other => anyhow::bail!("Unsupported format: .{other}. Supported: .gltf, .glb, .obj"),
     }
 }
 
@@ -251,6 +252,118 @@ fn load_gltf(path: &str) -> Result<MeshData> {
         all_normals.push(Vec3::Y); // default up normal
     }
     // Don't pad UVs -- empty is OK (means no UV data)
+
+    Ok(MeshData {
+        positions: all_positions,
+        normals: all_normals,
+        uvs: all_uvs,
+        indices: all_indices,
+        material_indices: all_material_indices,
+        materials,
+        bounds_min,
+        bounds_max,
+    })
+}
+
+/// Load mesh data from a Wavefront OBJ file.
+fn load_obj(path: &str) -> Result<MeshData> {
+    let (models, materials_result) = tobj::load_obj(
+        path,
+        &tobj::LoadOptions {
+            triangulate: true,
+            single_index: true,
+            ..Default::default()
+        },
+    )
+    .with_context(|| format!("Failed to load OBJ: {path}"))?;
+
+    let tobj_materials = materials_result
+        .with_context(|| format!("Failed to load materials for OBJ: {path}"))?;
+
+    let mut all_positions = Vec::new();
+    let mut all_normals = Vec::new();
+    let mut all_uvs = Vec::new();
+    let mut all_indices = Vec::new();
+    let mut all_material_indices = Vec::new();
+    let mut bounds_min = Vec3::splat(f32::MAX);
+    let mut bounds_max = Vec3::splat(f32::MIN);
+
+    // Convert tobj materials to ImportMaterial
+    let materials: Vec<ImportMaterial> = tobj_materials
+        .iter()
+        .map(|m| {
+            let dc = m.diffuse.unwrap_or([0.8, 0.8, 0.8]);
+            ImportMaterial {
+                name: m.name.clone(),
+                base_color: dc,
+                metallic: m.shininess.unwrap_or(0.0) / 1000.0, // rough approximation
+                roughness: 1.0 - (m.shininess.unwrap_or(0.0) / 1000.0).min(1.0),
+                albedo_texture: None, // OBJ texture loading is an upgrade path
+            }
+        })
+        .collect();
+
+    for model in &models {
+        let mesh = &model.mesh;
+        let vertex_offset = all_positions.len() as u32;
+
+        // Positions
+        for chunk in mesh.positions.chunks(3) {
+            let v = Vec3::new(chunk[0], chunk[1], chunk[2]);
+            bounds_min = bounds_min.min(v);
+            bounds_max = bounds_max.max(v);
+            all_positions.push(v);
+        }
+
+        // Normals
+        if !mesh.normals.is_empty() {
+            for chunk in mesh.normals.chunks(3) {
+                all_normals.push(Vec3::new(chunk[0], chunk[1], chunk[2]));
+            }
+        }
+
+        // UVs
+        if !mesh.texcoords.is_empty() {
+            for chunk in mesh.texcoords.chunks(2) {
+                all_uvs.push([chunk[0], chunk[1]]);
+            }
+        }
+
+        // Indices + material indices
+        let mat_idx = mesh.material_id.unwrap_or(0) as u32;
+        let tri_start = all_indices.len() / 3;
+        for &idx in &mesh.indices {
+            all_indices.push(vertex_offset + idx);
+        }
+        let tri_end = all_indices.len() / 3;
+        for _ in tri_start..tri_end {
+            all_material_indices.push(mat_idx);
+        }
+    }
+
+    // Default material if none
+    let materials = if materials.is_empty() {
+        vec![ImportMaterial {
+            name: "default".to_string(),
+            base_color: [0.8, 0.8, 0.8],
+            metallic: 0.0,
+            roughness: 0.5,
+            albedo_texture: None,
+        }]
+    } else {
+        materials
+    };
+
+    // Pad normals if needed
+    while all_normals.len() < all_positions.len() {
+        all_normals.push(Vec3::Y);
+    }
+
+    // Handle empty mesh case
+    if all_positions.is_empty() {
+        bounds_min = Vec3::ZERO;
+        bounds_max = Vec3::ZERO;
+    }
 
     Ok(MeshData {
         positions: all_positions,
@@ -424,5 +537,11 @@ mod tests {
             bounds_max: Vec3::ONE,
         };
         assert_eq!(mesh.triangle_count(), 2);
+    }
+
+    #[test]
+    fn load_mesh_obj_not_found() {
+        let result = load_mesh("/tmp/nonexistent_rkf_test.obj");
+        assert!(result.is_err());
     }
 }

@@ -683,4 +683,83 @@ mod tests {
             referenced_slots
         );
     }
+
+    /// Integration test: full import pipeline (mesh -> voxelize -> chunk -> .rkf roundtrip)
+    #[test]
+    fn full_pipeline_roundtrip() {
+        use crate::lod::generate_lod_tiers;
+        use crate::mesh::{ImportMaterial, MeshData};
+
+        // Build a closed cube mesh (6 faces, 12 triangles)
+        let positions = vec![
+            // Front face
+            Vec3::new(-0.5, -0.5, 0.5),
+            Vec3::new(0.5, -0.5, 0.5),
+            Vec3::new(0.5, 0.5, 0.5),
+            Vec3::new(-0.5, 0.5, 0.5),
+            // Back face
+            Vec3::new(-0.5, -0.5, -0.5),
+            Vec3::new(0.5, -0.5, -0.5),
+            Vec3::new(0.5, 0.5, -0.5),
+            Vec3::new(-0.5, 0.5, -0.5),
+        ];
+        let indices = vec![
+            // Front
+            0, 1, 2, 0, 2, 3, // Back
+            5, 4, 7, 5, 7, 6, // Left
+            4, 0, 3, 4, 3, 7, // Right
+            1, 5, 6, 1, 6, 2, // Top
+            3, 2, 6, 3, 6, 7, // Bottom
+            4, 5, 1, 4, 1, 0,
+        ];
+
+        let mesh = MeshData {
+            positions,
+            normals: vec![Vec3::Y; 8],
+            uvs: Vec::new(),
+            indices,
+            material_indices: vec![0; 12],
+            materials: vec![ImportMaterial {
+                name: "cube".to_string(),
+                base_color: [1.0, 0.0, 0.0],
+                metallic: 0.0,
+                roughness: 0.5,
+                albedo_texture: None,
+            }],
+            bounds_min: Vec3::splat(-0.5),
+            bounds_max: Vec3::splat(0.5),
+        };
+
+        // Voxelize at tier 0 (finest, 0.5cm voxels)
+        let config = VoxelizeConfig {
+            tier: 0,
+            narrow_band_bricks: 2,
+            compute_color: false,
+        };
+        let result = voxelize_mesh(&mesh, &config);
+        assert!(result.brick_count > 0, "voxelization should produce bricks");
+
+        // Generate 1 LOD tier
+        let lod_tiers = generate_lod_tiers(&result.grid, &result.pool, &result.aabb, 0, 1);
+
+        // Convert to chunk
+        let chunk = to_chunk(&result, &lod_tiers, 0, IVec3::ZERO);
+        assert!(chunk.brick_count > 0);
+        assert!(chunk.grids.len() >= 1); // at least source tier
+
+        // Save and reload .rkf
+        let mut buf = Vec::new();
+        rkf_core::chunk::save_chunk(&chunk, &mut buf).unwrap();
+        assert!(!buf.is_empty());
+
+        let loaded = rkf_core::chunk::load_chunk(&mut std::io::Cursor::new(&buf)).unwrap();
+        assert_eq!(loaded.coords, IVec3::ZERO);
+        assert_eq!(loaded.brick_count, chunk.brick_count);
+        assert_eq!(loaded.grids.len(), chunk.grids.len());
+
+        // Verify brick data survived the roundtrip
+        for (i, tg) in loaded.grids.iter().enumerate() {
+            assert_eq!(tg.bricks.len(), chunk.grids[i].bricks.len());
+        }
+    }
 }
