@@ -2175,107 +2175,97 @@ fn editor_ui() -> NodeHandle {
     left_title.set_text("Scene Hierarchy");
     left_panel.append_child(&left_title);
 
-    // Reactive scene tree from EditorState.scene_tree
+    // Reactive scene tree using rinch Tree component.
+    // Uses ping-pong show_dom pattern: two alternating show_doms that rebuild
+    // the Tree component with fresh data each time select_refresh changes parity.
     let select_refresh = Signal::new(0u32);
     SELECT_REFRESH.with(|cell| cell.set(Some(select_refresh)));
 
-    let empty_msg = __scope.create_element("span");
-    empty_msg.set_attribute("style", "color: #555; font-size: 12px; font-style: italic;");
-    empty_msg.set_text("No entities in scene");
-    left_panel.append_child(&empty_msg);
-
-    // Pre-allocate 32 entity slots
-    const MAX_TREE_NODES: usize = 32;
-    let mut tree_slots = Vec::with_capacity(MAX_TREE_NODES);
-    for _ in 0..MAX_TREE_NODES {
-        let row = __scope.create_element("div");
-        row.set_attribute("style", "display: none;");
-
-        let name_btn = __scope.create_element("button");
-        name_btn.set_attribute(
-            "style",
-            "width: 100%; text-align: left; background: transparent; border: none; \
-             color: #ccc; font-size: 11px; cursor: pointer; padding: 2px 4px; \
-             font-family: inherit; overflow: hidden; text-overflow: ellipsis; \
-             white-space: nowrap; border-radius: 2px;",
-        );
-        row.append_child(&name_btn);
-        left_panel.append_child(&row);
-        tree_slots.push((row, name_btn));
+    // Convert SceneNode hierarchy to TreeNodeData hierarchy.
+    fn scene_node_to_tree_data(node: &scene_tree::SceneNode) -> TreeNodeData {
+        let mut td = TreeNodeData::new(node.entity_id.to_string(), &node.name);
+        for child in &node.children {
+            td = td.with_child(scene_node_to_tree_data(child));
+        }
+        td
     }
 
-    // Effect: populate slots from scene_tree roots when select_refresh changes
-    __scope.create_effect({
-        let tree_slots = tree_slots.clone();
-        let empty_msg = empty_msg.clone();
-        move || {
-            let _ = select_refresh.get();
-
-            let nodes: Vec<(u64, String, bool)> = EDITOR_STATE
-                .get()
-                .and_then(|es| {
-                    es.lock().ok().map(|s| {
-                        s.scene_tree
-                            .roots
-                            .iter()
-                            .take(MAX_TREE_NODES)
-                            .map(|n| (n.entity_id, n.name.clone(), n.selected))
-                            .collect()
-                    })
+    // Build a Tree component from current EditorState scene data.
+    fn build_scene_tree(scope: &mut RenderScope, select_refresh: Signal<u32>) -> NodeHandle {
+        let tree_data: Vec<TreeNodeData> = EDITOR_STATE
+            .get()
+            .and_then(|es| {
+                es.lock().ok().map(|s| {
+                    s.scene_tree
+                        .roots
+                        .iter()
+                        .map(scene_node_to_tree_data)
+                        .collect()
                 })
-                .unwrap_or_default();
+            })
+            .unwrap_or_default();
 
-            // Show/hide empty message
-            if nodes.is_empty() {
-                empty_msg.set_attribute("style", "color: #555; font-size: 12px; font-style: italic;");
-            } else {
-                empty_msg.set_attribute("style", "display: none;");
-            }
-
-            for (i, (row, name_btn)) in tree_slots.iter().enumerate() {
-                if i < nodes.len() {
-                    let (_eid, name, selected) = &nodes[i];
-                    row.set_attribute(
-                        "style",
-                        "display: flex; flex-direction: row; align-items: center;",
-                    );
-                    name_btn.set_text(name);
-                    name_btn.set_attribute(
-                        "style",
-                        if *selected {
-                            "width: 100%; text-align: left; background: #3a5a80; border: none; \
-                             color: #fff; font-size: 11px; cursor: pointer; padding: 2px 4px; \
-                             font-family: inherit; overflow: hidden; text-overflow: ellipsis; \
-                             white-space: nowrap; border-radius: 2px;"
-                        } else {
-                            "width: 100%; text-align: left; background: transparent; border: none; \
-                             color: #ccc; font-size: 11px; cursor: pointer; padding: 2px 4px; \
-                             font-family: inherit; overflow: hidden; text-overflow: ellipsis; \
-                             white-space: nowrap; border-radius: 2px;"
-                        },
-                    );
-                } else {
-                    row.set_attribute("style", "display: none;");
-                }
-            }
+        if tree_data.is_empty() {
+            let msg = scope.create_element("span");
+            msg.set_attribute(
+                "style",
+                "color: #555; font-size: 12px; font-style: italic;",
+            );
+            msg.set_text("No entities in scene");
+            return msg;
         }
-    });
 
-    // Click handlers for each slot — select the entity
-    for (i, (_row, name_btn)) in tree_slots.iter().enumerate() {
-        let h = __scope.register_handler(move || {
-            if let Some(es) = EDITOR_STATE.get() {
-                if let Ok(mut state) = es.lock() {
-                    if let Some(node) = state.scene_tree.roots.get(i) {
-                        let eid = node.entity_id;
-                        state.scene_tree.select_node(eid);
+        let expanded = get_tree_expanded_state(&tree_data, &["*"]);
+        let tree_state = UseTreeReturn::new(UseTreeOptions {
+            initial_expanded: expanded,
+            ..Default::default()
+        });
+
+        let tree = Tree {
+            data: tree_data,
+            tree: Some(tree_state),
+            expand_on_click: true,
+            select_on_click: true,
+            level_offset: "sm".into(),
+            onselect: Some(ValueCallback::new(move |value: String| {
+                if let Ok(eid) = value.parse::<u64>() {
+                    if let Some(es) = EDITOR_STATE.get() {
+                        if let Ok(mut state) = es.lock() {
+                            state.scene_tree.select_node(eid);
+                        }
                     }
                 }
-            }
-            select_refresh.update(|v| *v = v.wrapping_add(1));
-        });
-        name_btn.set_attribute("data-rid", &h.0.to_string());
+                select_refresh.update(|v| *v = v.wrapping_add(1));
+            })),
+            ..Default::default()
+        };
+
+        tree.render(scope, &[])
     }
+
+    // Ping-pong: odd versions render via show_dom #1, even via #2.
+    // v=0 → neither shows (before scene loads).
+    // v=1 → #1 builds tree, v=2 → #1 tears down / #2 builds fresh, etc.
+    show_dom(
+        __scope,
+        &left_panel,
+        move || {
+            let v = select_refresh.get();
+            v > 0 && v % 2 == 1
+        },
+        move |scope| build_scene_tree(scope, select_refresh),
+        None::<fn(&mut RenderScope) -> NodeHandle>,
+    );
+    show_dom(
+        __scope,
+        &left_panel,
+        move || {
+            let v = select_refresh.get();
+            v > 0 && v % 2 == 0
+        },
+        move |scope| build_scene_tree(scope, select_refresh),
+        None::<fn(&mut RenderScope) -> NodeHandle>,
+    );
 
     content.append_child(&left_panel);
 
