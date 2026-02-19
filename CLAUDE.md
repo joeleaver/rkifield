@@ -122,6 +122,109 @@ struct WorldPosition { chunk: IVec3, local: Vec3 }
 
 **MCP-native engine.** The engine is designed to be operated by AI agents. `rkf-mcp` is a standalone MCP server binary that connects to any running engine process via IPC. Tools self-register via a discovery system — add new tools by implementing a trait, not modifying the server. Every feature ships with MCP tools. If the MCP is broken, that's priority zero.
 
+## MCP Integration
+
+The engine is agent-native. `rkf-mcp` is the MCP server that bridges Claude Code (or any MCP client) to any running engine process (editor, testbed, game).
+
+### Architecture
+
+```
+Claude Code ←stdio→ rkf-mcp ←IPC (Unix socket)→ rkf-editor / rkf-testbed / rkf-game
+```
+
+- **rkf-mcp** (`crates/rkf-mcp/`) — standalone binary, runs over **stdio** for Claude Code. Connects to engine processes over IPC (Unix domain sockets at `/tmp/rkifield-{pid}.sock`).
+- **AutomationApi** trait (`rkf-core/src/automation.rs`) — the engine's control surface. Defines all observation and mutation methods. Implemented by each binary (editor, testbed, game).
+- **BridgeAutomationApi** (`rkf-mcp/src/bridge.rs`) — IPC proxy that forwards `AutomationApi` calls from `rkf-mcp` to the engine over the socket.
+- **EditorAutomationApi** (`rkf-editor/src/automation.rs`) — editor's implementation backed by `SharedState` (render loop data) and `EditorState` (scene tree, tools, etc.).
+- **ToolRegistry** (`rkf-mcp/src/registry.rs`) — self-describing tool system. Tools register with full metadata (name, description, params, return type, mode). MCP `tools/list` is generated dynamically from the registry.
+
+### Auto-Discovery & Auto-Connect
+
+On startup, `rkf-mcp` automatically:
+1. Scans `/tmp/rkifield-*.sock` for running engine sockets
+2. If exactly one socket found and connectable → auto-connects (no manual `connect` call needed)
+3. Reads `/tmp/rkifield-{pid}.json` discovery metadata for engine type/name
+4. If multiple sockets → logs the list, user picks via `connect` tool
+
+The editor writes discovery metadata on startup:
+```json
+// /tmp/rkifield-{pid}.json
+{ "type": "editor", "pid": 12345, "socket": "/tmp/rkifield-12345.sock", "name": "RKIField Editor", "version": "0.1.0" }
+```
+Cleaned up on exit (close, Escape, File > Quit).
+
+### Available MCP Tools
+
+**Observation (both Editor and Debug modes):**
+
+| Tool | Description |
+|------|-------------|
+| `screenshot` | Capture viewport as PNG (returns image content block) |
+| `camera_get` | Current camera position, orientation, FOV |
+| `camera_set` | Teleport camera to position + yaw/pitch |
+| `scene_graph` | List all entities with hierarchy and transforms |
+| `entity_inspect` | Read all components of a specific entity |
+| `render_stats` | Frame time, pass timings, brick pool usage, memory |
+| `brick_pool_stats` | Brick pool capacity, allocated, free list |
+| `spatial_query` | Sample SDF distance and material at a world position |
+| `asset_status` | Loaded chunks, pending uploads, total bricks |
+| `log_read` | Recent engine log entries (500-entry ring buffer) |
+| `debug_mode` | Set shading visualization (0=normal, 1=normals, 2=positions, 3=material IDs, 4=diffuse, 5=specular) |
+
+**Meta (both modes):**
+
+| Tool | Description |
+|------|-------------|
+| `connect` | Connect to engine via IPC socket (auto-discovers if no arg) |
+| `disconnect` | Revert to stub API |
+| `status` | Connection state, available engines, server version |
+
+**Mutation (forwarded over IPC bridge):**
+
+| Tool | Description |
+|------|-------------|
+| `entity_spawn` | Spawn entity with components |
+| `entity_despawn` | Remove entity by ID |
+| `entity_set_component` | Add/replace component on entity |
+| `material_set` | Update material table entry |
+| `brush_apply` | Apply CSG/sculpt brush operation |
+| `scene_load` | Load `.rkscene` file |
+| `scene_save` | Save current scene to file |
+| `quality_preset` | Switch render quality preset |
+
+### Key Implementation Details
+
+- **SharedState** (`Arc<Mutex<SharedState>>`) — render loop writes camera pos, frame pixels, pool stats, frame time each frame. MCP reads it for observation tools. Also holds a 500-entry log ring buffer (`push_log()`).
+- **EditorState** (`Arc<Mutex<EditorState>>`) — scene tree, tool states, undo stack. MCP reads it for `scene_graph` and `entity_inspect`.
+- **Swappable API slot** — `Arc<RwLock<Arc<dyn AutomationApi>>>`. Meta tools (connect/disconnect) swap the inner Arc. Tool dispatch clones the Arc and releases the lock before calling, preventing deadlocks.
+- **Tool modes** — `ToolMode::Editor` (full access), `ToolMode::Debug` (observation only), `ToolMode::Both`. Mutation tools are `Editor`-only.
+- **Screenshot** returns `ContentBlock::Image` (base64 PNG), not text. Bridge uses `call_tool_raw` (not `call_tool`) to handle this.
+- **camera_set and debug_mode** route through `execute_command()` string-based dispatch for IPC simplicity.
+- **All logging to stderr** in rkf-mcp — stdout is the MCP protocol channel.
+
+### Adding New MCP Tools
+
+1. Create a handler struct implementing `ToolHandler` trait in `rkf-mcp/src/tools/`
+2. Register it in the appropriate `register_*_tools()` function with a `ToolDefinition`
+3. Add the corresponding `AutomationApi` method in `rkf-core/src/automation.rs` if it touches engine state
+4. Implement the method in `EditorAutomationApi` (and testbed/game equivalents)
+5. Forward the method in `BridgeAutomationApi` for IPC bridge support
+
+### Configuration
+
+MCP server is configured in `.mcp.json` at the project root:
+```json
+{
+  "mcpServers": {
+    "rkf-mcp": {
+      "command": "cargo",
+      "args": ["run", "-p", "rkf-mcp", "--"],
+      "cwd": "/home/joe/dev/rkifield"
+    }
+  }
+}
+```
+
 ## File Formats
 
 | Format | Extension | Purpose |
