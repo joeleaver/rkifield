@@ -1,7 +1,10 @@
 #![allow(dead_code)] // Editor modules are WIP — used incrementally
 
 mod camera;
+mod gizmo;
 mod input;
+mod properties;
+mod scene_tree;
 
 use rinch::prelude::*;
 
