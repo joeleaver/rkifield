@@ -15,6 +15,7 @@
 
 #![warn(missing_docs)]
 
+pub mod blend_shape;
 pub mod character;
 pub mod clip;
 pub mod rebake;
