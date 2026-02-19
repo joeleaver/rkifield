@@ -12,6 +12,7 @@ use winit::window::{CursorGrabMode, Window, WindowAttributes, WindowId};
 
 use rkf_core::aabb::Aabb;
 use rkf_core::brick_pool::Pool;
+use rkf_core::clipmap::{ClipmapConfig, ClipmapGridSet, ClipmapLevel};
 use rkf_core::constants::RESOLUTION_TIERS;
 use rkf_core::populate::populate_grid_with_material;
 use rkf_core::sdf::{box_sdf, capsule_sdf, sphere_sdf};
@@ -79,6 +80,7 @@ const DISPLAY_HEIGHT: u32 = 720;
 /// - 2 horizontal lintels connecting pillar pairs at the top
 /// - A tall monolith wall to create broad shadow regions
 /// - 2 boulders for variety
+#[allow(dead_code)]
 fn create_volumetric_scene() -> (BrickPool, SparseGrid, Aabb) {
     let aabb = Aabb::new(Vec3::new(-15.0, -1.0, -15.0), Vec3::new(15.0, 8.0, 15.0));
     let res = &RESOLUTION_TIERS[TEST_TIER];
@@ -165,6 +167,121 @@ fn create_volumetric_scene() -> (BrickPool, SparseGrid, Aabb) {
         dims.x, dims.y, dims.z,
     );
     (pool, grid, aabb)
+}
+
+/// Create a multi-LOD clipmap scene for Phase 13 validation.
+///
+/// Two LOD levels sharing the same brick pool:
+/// - Level 0: Tier 2 (8cm voxels, 0.64m bricks), 8m radius — fine detail
+/// - Level 1: Tier 3 (32cm voxels, 2.56m bricks), 32m radius — distant/coarse
+///
+/// The same objects are populated at both resolutions. Near objects render
+/// at fine resolution, distant regions fall back to the coarse level.
+fn create_clipmap_scene() -> (BrickPool, ClipmapGridSet, ClipmapConfig, Aabb) {
+    let config = ClipmapConfig::new(vec![
+        ClipmapLevel { voxel_size: 0.08, radius: 8.0 },   // Level 0 = Tier 2
+        ClipmapLevel { voxel_size: 0.32, radius: 32.0 },   // Level 1 = Tier 3
+    ]);
+    let mut grid_set = ClipmapGridSet::from_config(config.clone(), 64);
+    let mut pool: BrickPool = Pool::new(65536);
+
+    let tiers = [2usize, 3usize]; // Level 0 -> Tier 2, Level 1 -> Tier 3
+
+    for level_idx in 0..config.num_levels() {
+        let level = config.level(level_idx);
+        let tier = tiers[level_idx];
+        let brick_ext = RESOLUTION_TIERS[tier].brick_extent;
+        let dims = grid_set.grid(level_idx).dimensions();
+        let half = level.radius;
+        let aabb = Aabb::new(
+            Vec3::new(-half, -half, -half),
+            Vec3::new(
+                -half + dims.x as f32 * brick_ext,
+                -half + dims.y as f32 * brick_ext,
+                -half + dims.z as f32 * brick_ext,
+            ),
+        );
+
+        let grid = grid_set.grid_mut(level_idx);
+
+        // Ground plane
+        let _ = populate_grid_with_material(
+            &mut pool, grid,
+            |p| box_sdf(Vec3::new(7.0, 0.1, 7.0), p - Vec3::new(0.0, -0.5, 0.0)),
+            tier, &aabb, 1,
+        );
+
+        // Pillar avenue
+        let pillar_positions = [
+            Vec3::new(-4.0, 0.0, -1.5), Vec3::new(-1.5, 0.0, -1.5),
+            Vec3::new( 1.5, 0.0, -1.5), Vec3::new( 4.0, 0.0, -1.5),
+            Vec3::new(-4.0, 0.0,  1.5), Vec3::new(-1.5, 0.0,  1.5),
+            Vec3::new( 1.5, 0.0,  1.5), Vec3::new( 4.0, 0.0,  1.5),
+        ];
+        for base in &pillar_positions {
+            let bottom = Vec3::new(base.x, -0.4, base.z);
+            let top = Vec3::new(base.x, 3.5, base.z);
+            let _ = populate_grid_with_material(
+                &mut pool, grid,
+                |p| capsule_sdf(bottom, top, 0.25, p),
+                tier, &aabb, 1,
+            );
+        }
+
+        // Lintels
+        let _ = populate_grid_with_material(
+            &mut pool, grid,
+            |p| box_sdf(Vec3::new(0.3, 0.2, 1.8), p - Vec3::new(-1.5, 3.6, 0.0)),
+            tier, &aabb, 1,
+        );
+        let _ = populate_grid_with_material(
+            &mut pool, grid,
+            |p| box_sdf(Vec3::new(0.3, 0.2, 1.8), p - Vec3::new(1.5, 3.6, 0.0)),
+            tier, &aabb, 1,
+        );
+
+        // Monolith wall
+        let _ = populate_grid_with_material(
+            &mut pool, grid,
+            |p| box_sdf(Vec3::new(0.3, 2.5, 3.0), p - Vec3::new(-7.0, 2.0, 0.0)),
+            tier, &aabb, 2,
+        );
+
+        // Boulders
+        let _ = populate_grid_with_material(
+            &mut pool, grid,
+            |p| sphere_sdf(Vec3::new(3.0, 0.0, -3.5), 0.8, p),
+            tier, &aabb, 1,
+        );
+        let _ = populate_grid_with_material(
+            &mut pool, grid,
+            |p| sphere_sdf(Vec3::new(-2.5, -0.1, 4.0), 0.6, p),
+            tier, &aabb, 1,
+        );
+
+        let count = pool.allocated_count();
+        log::info!("Clipmap level {level_idx} (tier {tier}): populated, total pool bricks so far: {count}");
+    }
+
+    // Use the finest level's AABB for GpuScene (single-grid fallback uses this)
+    let level0 = config.level(0);
+    let half0 = level0.radius;
+    let brick_ext0 = RESOLUTION_TIERS[tiers[0]].brick_extent;
+    let dims0 = grid_set.grid(0).dimensions();
+    let scene_aabb = Aabb::new(
+        Vec3::new(-half0, -half0, -half0),
+        Vec3::new(
+            -half0 + dims0.x as f32 * brick_ext0,
+            -half0 + dims0.y as f32 * brick_ext0,
+            -half0 + dims0.z as f32 * brick_ext0,
+        ),
+    );
+
+    log::info!(
+        "Clipmap scene: {} levels, {} total bricks in shared pool",
+        config.num_levels(), pool.allocated_count(),
+    );
+    (pool, grid_set, config, scene_aabb)
 }
 
 /// Single directional sun at low angle for volumetric god ray validation.
@@ -454,6 +571,7 @@ struct GpuState {
     height: u32,
     scene: GpuScene,
     clipmap: ClipmapGpuData,
+    clipmap_config: ClipmapConfig,
     gbuffer: GBuffer,
     material_table: MaterialTable,
     lights: Vec<Light>,
@@ -509,8 +627,9 @@ impl GpuState {
         let surface_format =
             context.configure_surface(&surface, display_width, display_height);
 
-        // Scene — large outdoor environment for volumetric validation
-        let (pool, grid, aabb) = create_volumetric_scene();
+        // Scene — multi-LOD clipmap for Phase 13 validation
+        let (pool, grid_set, clipmap_config, aabb) = create_clipmap_scene();
+        let grid = grid_set.grid(0); // Finest level grid for GpuScene (single-grid fallback)
 
         // Update shared state with pool info
         {
@@ -519,17 +638,17 @@ impl GpuState {
             state.pool_allocated = pool.allocated_count() as u64;
         }
 
-        // Camera — side view of pillar avenue, sun to the right.
-        // From +Z side looking toward -Z across the avenue, sun at +X.
-        let mut camera = Camera::new(Vec3::new(0.0, 2.5, 8.0));
+        // Camera — inside the pillar avenue, sun to the right.
+        // Positioned at scene center so fine clipmap level covers the area well.
+        let mut camera = Camera::new(Vec3::new(0.0, 2.5, 5.0));
         camera.yaw = 0.0;  // facing -Z (toward the avenue)
-        camera.pitch = 0.2;  // slightly upward to see clouds
+        camera.pitch = -0.15;  // slightly downward to see ground + pillars
         camera.fov_degrees = 70.0;
 
         let camera_uniforms = camera.uniforms(INTERNAL_WIDTH, INTERNAL_HEIGHT, 0, [[0.0; 4]; 4]);
         let camera_bytes = bytemuck::bytes_of(&camera_uniforms);
 
-        // SceneUniforms from grid
+        // SceneUniforms from finest-level grid
         let dims = grid.dimensions();
         let scene_uniforms = SceneUniforms {
             grid_dims: [dims.x, dims.y, dims.z, 0],
@@ -543,7 +662,7 @@ impl GpuState {
         };
 
         // Upload scene to GPU
-        let scene = GpuScene::upload(&context.device, &pool, &grid, camera_bytes, &scene_uniforms);
+        let scene = GpuScene::upload(&context.device, &pool, grid, camera_bytes, &scene_uniforms);
 
         // Materials
         let materials = material_table::create_test_materials();
@@ -579,7 +698,7 @@ impl GpuState {
         );
 
         let color_pool = GpuColorPool::empty(&context.device);
-        let clipmap = ClipmapGpuData::empty(&context.device);
+        let clipmap = ClipmapGpuData::upload(&context.device, &grid_set, [0.0, 0.0, 0.0]);
 
         // Render passes
         let ray_march = RayMarchPass::new(&context.device, &scene, &gbuffer, &clipmap);
@@ -758,6 +877,7 @@ impl GpuState {
             height: display_height,
             scene,
             clipmap,
+            clipmap_config,
             gbuffer,
             material_table,
             lights,
@@ -1246,7 +1366,7 @@ impl ApplicationHandler for App {
             return;
         }
         let attrs = WindowAttributes::default()
-            .with_title("RKIField Testbed [Phase 12]")
+            .with_title("RKIField Testbed [Phase 13]")
             .with_inner_size(PhysicalSize::new(1280u32, 720u32));
         let window = Arc::new(
             event_loop
@@ -1273,7 +1393,7 @@ impl ApplicationHandler for App {
         log::info!("IPC server listening on {socket_path}");
         self.socket_path = Some(socket_path);
 
-        log::info!("Phase 12 validation — volumetric fog, god rays, clouds");
+        log::info!("Phase 13 validation — multi-LOD clipmap scene");
         log::info!("Click to capture mouse, WASD to move, mouse to look, Esc to exit");
     }
 
@@ -1337,7 +1457,7 @@ impl ApplicationHandler for App {
                         let elapsed = now.duration_since(self.last_title_update).as_secs_f64();
                         let fps = self.frame_count as f64 / elapsed;
                         window.set_title(&format!(
-                            "RKIField Testbed [Phase 12] — {fps:.0} fps ({:.2} ms)",
+                            "RKIField Testbed [Phase 13] — {fps:.0} fps ({:.2} ms)",
                             1000.0 / fps
                         ));
                         self.frame_count = 0;
