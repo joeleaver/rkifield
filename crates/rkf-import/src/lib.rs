@@ -16,6 +16,7 @@
 
 #![warn(missing_docs)]
 
+pub mod animated_chunk;
 pub mod bvh;
 pub mod lod;
 pub mod material_transfer;

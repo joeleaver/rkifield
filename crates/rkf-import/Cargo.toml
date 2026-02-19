@@ -13,6 +13,7 @@ bytemuck = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
+lz4_flex = { workspace = true }
 gltf = { workspace = true }
 rayon = { workspace = true }
 image = { workspace = true }
