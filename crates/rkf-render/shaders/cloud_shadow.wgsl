@@ -21,17 +21,30 @@ struct CloudShadowParams {
     _pad1: u32,
 }
 
+// Cloud noise parameters — must match the CloudParams struct in vol_march.wgsl.
+struct CloudNoiseParams {
+    // x=cloud_min, y=cloud_max, z=threshold, w=density_scale
+    altitude: vec4<f32>,
+    // x=shape_freq, y=detail_freq, z=detail_weight, w=weather_scale
+    noise: vec4<f32>,
+    // x=wind_dir.x, y=wind_dir.y, z=wind_speed, w=time
+    wind: vec4<f32>,
+    // x=procedural_enable (0/1), y=shadow_coverage, z=shadow_res, w=brick_clouds_enable (0/1)
+    flags: vec4<f32>,
+}
+
 @group(0) @binding(0) var<uniform> params: CloudShadowParams;
 @group(0) @binding(1) var output_shadow: texture_storage_2d<r32float, write>;
+@group(0) @binding(2) var<uniform> cloud_noise: CloudNoiseParams;
 
-// Simple 3D hash for noise
+// Simple 3D hash for noise — identical to vol_march.wgsl.
 fn hash3(p: vec3<f32>) -> f32 {
     var p3 = fract(p * 0.1031);
     p3 += dot(p3, p3.yzx + 33.33);
     return fract((p3.x + p3.y) * p3.z);
 }
 
-// Value noise 3D
+// Value noise 3D — identical to vol_march.wgsl.
 fn value_noise_3d(p: vec3<f32>) -> f32 {
     let i = floor(p);
     let f = fract(p);
@@ -63,14 +76,43 @@ fn fbm_3d(p: vec3<f32>, octaves: u32) -> f32 {
     return val;
 }
 
-// Simplified cloud density for shadow map (no detail noise — just shape)
-fn cloud_density_simple(pos: vec3<f32>) -> f32 {
-    if (pos.y < params.cloud_min || pos.y > params.cloud_max) { return 0.0; }
-    let height_frac = (pos.y - params.cloud_min) / (params.cloud_max - params.cloud_min);
+// Cloud density for shadow map — uses same noise as vol_march cloud_density().
+// Omits detail noise (subtractive erosion) since the shadow map doesn't need
+// the fine-grained edges — shape + weather is sufficient for shadow projection.
+fn cloud_density_shadow(pos: vec3<f32>) -> f32 {
+    let cloud_min = cloud_noise.altitude.x;
+    let cloud_max = cloud_noise.altitude.y;
+
+    if (pos.y < cloud_min || pos.y > cloud_max) { return 0.0; }
+    if (cloud_noise.flags.x < 0.5)              { return 0.0; }
+
+    let height_frac     = (pos.y - cloud_min) / (cloud_max - cloud_min);
     let height_gradient = smoothstep(0.0, 0.1, height_frac)
                         * smoothstep(1.0, 0.6, height_frac);
-    let shape = fbm_3d(pos * 0.0003, 3u);
-    return max(0.0, shape * height_gradient - 0.4);
+
+    // Wind scrolling — must match vol_march exactly.
+    let wind_dir    = vec2<f32>(cloud_noise.wind.x, cloud_noise.wind.y);
+    let wind_offset = wind_dir * cloud_noise.wind.z * cloud_noise.wind.w;
+    let scrolled    = pos + vec3<f32>(wind_offset.x, 0.0, wind_offset.y);
+
+    // Noise offset — avoid hash3 zero-point at origin. Must match vol_march.
+    let noise_offset = vec3<f32>(173.5, 247.3, 391.7);
+
+    // Shape noise — 4-octave FBM (matches vol_march).
+    let shape_freq = cloud_noise.noise.x;
+    let shape      = fbm_3d(scrolled * shape_freq + noise_offset, 4u);
+
+    // Weather modulation — 2-octave FBM (matches vol_march).
+    let weather_scale = cloud_noise.noise.w;
+    let weather       = fbm_3d(
+        vec3<f32>(scrolled.x / weather_scale, 0.0, scrolled.z / weather_scale) + noise_offset,
+        2u
+    );
+
+    let threshold     = cloud_noise.altitude.z;
+    let density_scale = cloud_noise.altitude.w;
+
+    return max(0.0, shape * weather * height_gradient - threshold) * density_scale;
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -93,7 +135,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let t = f32(i) * step_size;
         let pos = vec3(world_xz.x, params.cloud_min + t, world_xz.y);
 
-        let density = cloud_density_simple(pos);
+        let density = cloud_density_shadow(pos);
         if (density > 0.001) {
             transmittance *= exp(-density * params.extinction * step_size);
         }

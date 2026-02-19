@@ -186,6 +186,7 @@ impl VolMarchPass {
         _queue: &wgpu::Queue,
         depth_view: &wgpu::TextureView,
         vol_shadow_view: &wgpu::TextureView,
+        cloud_shadow_view: &wgpu::TextureView,
         half_width: u32,
         half_height: u32,
         full_width: u32,
@@ -347,6 +348,17 @@ impl VolMarchPass {
                         },
                         count: None,
                     },
+                    // Cloud shadow map — filterable 2D float texture
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
                 ],
             });
 
@@ -378,6 +390,10 @@ impl VolMarchPass {
                 wgpu::BindGroupEntry {
                     binding: 5,
                     resource: cloud_params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(cloud_shadow_view),
                 },
             ],
         });

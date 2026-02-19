@@ -49,7 +49,7 @@ use rkf_render::vol_upscale::VolUpscalePass;
 use rkf_render::vol_composite::VolCompositePass;
 use rkf_render::fog::{FogSettings, FogParams};
 use rkf_render::clouds::{CloudSettings, CloudParams};
-use rkf_render::cloud_shadow::CloudShadowPass;
+use rkf_render::cloud_shadow::{CloudShadowPass, DEFAULT_CLOUD_SHADOW_EXTINCTION};
 use rkf_render::RenderContext;
 
 mod automation;
@@ -592,12 +592,14 @@ impl GpuState {
         );
         // Phase 11: Volumetric pipeline
         let vol_shadow = VolShadowPass::new(&context.device, &context.queue, &scene.bind_group_layout);
+        let cloud_shadow = CloudShadowPass::new(&context.device);
 
         let half_w = INTERNAL_WIDTH / 2;
         let half_h = INTERNAL_HEIGHT / 2;
         let vol_march = VolMarchPass::new(
             &context.device, &context.queue,
             &gbuffer.position_view, &vol_shadow.shadow_view,
+            &cloud_shadow.shadow_view,
             half_w, half_h,
             INTERNAL_WIDTH, INTERNAL_HEIGHT,
         );
@@ -629,9 +631,6 @@ impl GpuState {
             ambient_dust_g: 0.82,          // strong forward scattering toward sun
         };
 
-        // Phase 11: Cloud shadow pass
-        let cloud_shadow = CloudShadowPass::new(&context.device);
-
         // Cloud settings — low altitude for testbed validation (march far=60m).
         // Default cloud altitudes are 1000-3000m which is way beyond march range.
         // Use 5-15m so clouds are visible in the volumetric march.
@@ -648,6 +647,7 @@ impl GpuState {
             wind_direction: [1.0, 0.3],
             wind_speed: 0.3,
             shadow_enabled: true,
+            shadow_coverage: 120.0,  // 120m covers the 30m scene with margin
             ..Default::default()
         };
 
@@ -925,16 +925,21 @@ impl GpuState {
             &self.scene.bind_group,
         );
 
-        // Cloud shadow map
-        self.cloud_shadow.dispatch(
-            &mut encoder, &self.context.queue,
-            [cam_pos.x, cam_pos.y, cam_pos.z], sun_dir_n,
-        );
-
         // Update cloud params (time drives wind scrolling)
         let elapsed = self.start_time.elapsed().as_secs_f32();
         let cloud_gpu = CloudParams::from_settings(&self.cloud_settings, elapsed);
         self.vol_march.set_cloud_params(&self.context.queue, &cloud_gpu);
+
+        // Cloud shadow map — use matching cloud altitudes and coverage
+        self.cloud_shadow.update_params_ex(
+            &self.context.queue,
+            [cam_pos.x, cam_pos.y, cam_pos.z], sun_dir_n,
+            self.cloud_settings.cloud_min, self.cloud_settings.cloud_max,
+            self.cloud_settings.shadow_coverage,
+            DEFAULT_CLOUD_SHADOW_EXTINCTION,
+        );
+        self.cloud_shadow.set_cloud_params(&self.context.queue, &cloud_gpu);
+        self.cloud_shadow.dispatch_only(&mut encoder);
 
         // Volumetric march (half-res)
         let cam_right = self.camera.right();

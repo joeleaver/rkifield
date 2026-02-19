@@ -66,6 +66,8 @@ struct CloudParams {
     flags: vec4<f32>,
 }
 @group(0) @binding(5) var<uniform> cloud_params: CloudParams;
+// Cloud shadow map (2D R32Float, camera-centered transmittance).
+@group(0) @binding(6) var cloud_shadow_tex: texture_2d<f32>;
 
 const PI: f32 = 3.14159265359;
 
@@ -129,6 +131,34 @@ fn sample_vol_shadow(pos: vec3<f32>) -> f32 {
     let shadow_val = textureSampleLevel(vol_shadow_map, vol_shadow_smp, uvw, 0.0).r;
     // Blend from fully lit (1.0) at edges to actual shadow value in center.
     return mix(1.0, shadow_val, edge_fade);
+}
+
+// ---------------------------------------------------------------------------
+// Sample cloud shadow map at a world position.
+// Returns transmittance in [0, 1] (1 = fully lit, 0 = fully shadowed).
+//
+// The cloud shadow map is a 2D texture centered on the camera, covering
+// `cloud_params.flags.y` metres of world XZ space. Positions outside the map
+// smoothly fade to 1.0 (fully lit) to avoid hard cutoff.
+// ---------------------------------------------------------------------------
+fn sample_cloud_shadow(pos: vec3<f32>) -> f32 {
+    let coverage = cloud_params.flags.y;
+    // If coverage is zero or clouds disabled, return fully lit.
+    if (coverage <= 0.0 || cloud_params.flags.x < 0.5) { return 1.0; }
+
+    let cloud_uv = (pos.xz - params.cam_pos.xz) / coverage + 0.5;
+
+    // Edge fade: smoothstep from boundary to 10% inward.
+    let FADE = 0.1;
+    let fade_x = smoothstep(0.0, FADE, cloud_uv.x) * smoothstep(1.0, 1.0 - FADE, cloud_uv.x);
+    let fade_y = smoothstep(0.0, FADE, cloud_uv.y) * smoothstep(1.0, 1.0 - FADE, cloud_uv.y);
+    let edge_fade = fade_x * fade_y;
+
+    // Out of bounds → fully lit.
+    if (edge_fade <= 0.0) { return 1.0; }
+
+    let transmittance = textureSampleLevel(cloud_shadow_tex, vol_shadow_smp, cloud_uv, 0.0).r;
+    return mix(1.0, transmittance, edge_fade);
 }
 
 // ---------------------------------------------------------------------------
@@ -358,7 +388,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let step_transmittance = exp(-total * params.step_size);
 
         // In-scattering: fog and clouds use different albedo and phase.
-        let sun_vis = sample_vol_shadow(pos);
+        // Combine object volumetric shadows with cloud shadow map.
+        let sun_vis = sample_vol_shadow(pos) * sample_cloud_shadow(pos);
         let fog_in  = fog_dens * sun_vis * henyey_greenstein(cos_sun, dust_g)
                     * params.sun_color.xyz * scatter_albedo;
         // Two-lobe HG phase for clouds (multi-scatter approximation).

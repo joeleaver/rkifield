@@ -93,6 +93,7 @@ pub struct CloudShadowPass {
     bind_group_layout: wgpu::BindGroupLayout,
     bind_group: wgpu::BindGroup,
     params_buffer: wgpu::Buffer,
+    cloud_params_buffer: wgpu::Buffer,
     /// The 2D shadow map texture (R32Float, STORAGE_BINDING | TEXTURE_BINDING).
     pub shadow_texture: wgpu::Texture,
     /// View over the full 2D shadow map texture.
@@ -159,9 +160,23 @@ impl CloudShadowPass {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
+        // Default cloud noise params — disabled (flags.x = 0.0).
+        let default_cloud_params = crate::clouds::CloudParams {
+            altitude: [1000.0, 3000.0, 0.4, 1.0],
+            noise: [0.0003, 0.002, 0.3, 10000.0],
+            wind: [1.0, 0.0, 5.0, 0.0],
+            flags: [0.0, 4000.0, 1024.0, 0.0],
+        };
+        let cloud_params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("cloud shadow noise params"),
+            contents: bytemuck::bytes_of(&default_cloud_params),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
         // --- Bind group layout ---
         // binding 0: uniform buffer (CloudShadowParams)
-        // binding 1: texture_storage_2d<r16float, write>
+        // binding 1: texture_storage_2d<r32float, write>
+        // binding 2: uniform buffer (CloudParams — noise settings)
         let bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("cloud shadow bind group layout"),
@@ -186,6 +201,17 @@ impl CloudShadowPass {
                         },
                         count: None,
                     },
+                    // Cloud noise parameters (CloudParams, 64 bytes)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
                 ],
             });
 
@@ -201,6 +227,10 @@ impl CloudShadowPass {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::TextureView(&shadow_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: cloud_params_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -227,10 +257,19 @@ impl CloudShadowPass {
             bind_group_layout,
             bind_group,
             params_buffer,
+            cloud_params_buffer,
             shadow_texture,
             shadow_view,
             resolution,
         }
+    }
+
+    /// Update procedural cloud noise parameters.
+    ///
+    /// Writes the same [`crate::clouds::CloudParams`] used by [`crate::vol_march::VolMarchPass`]
+    /// so the cloud shadow map noise matches the visible clouds exactly.
+    pub fn set_cloud_params(&self, queue: &wgpu::Queue, cloud: &crate::clouds::CloudParams) {
+        queue.write_buffer(&self.cloud_params_buffer, 0, bytemuck::bytes_of(cloud));
     }
 
     /// Update the camera center and sun direction, then write params to GPU.
@@ -246,6 +285,21 @@ impl CloudShadowPass {
         camera_pos: [f32; 3],
         sun_dir: [f32; 3],
     ) {
+        self.update_params_ex(queue, camera_pos, sun_dir, DEFAULT_CLOUD_MIN, DEFAULT_CLOUD_MAX,
+            DEFAULT_CLOUD_SHADOW_COVERAGE, DEFAULT_CLOUD_SHADOW_EXTINCTION);
+    }
+
+    /// Update params with custom cloud altitude, coverage and extinction.
+    pub fn update_params_ex(
+        &self,
+        queue: &wgpu::Queue,
+        camera_pos: [f32; 3],
+        sun_dir: [f32; 3],
+        cloud_min: f32,
+        cloud_max: f32,
+        coverage: f32,
+        extinction: f32,
+    ) {
         // Normalise sun direction
         let len = (sun_dir[0] * sun_dir[0]
             + sun_dir[1] * sun_dir[1]
@@ -257,12 +311,12 @@ impl CloudShadowPass {
         let params = CloudShadowParams {
             center: [camera_pos[0], camera_pos[1], camera_pos[2], 0.0],
             sun_dir: [sun_norm[0], sun_norm[1], sun_norm[2], 0.0],
-            cloud_min: DEFAULT_CLOUD_MIN,
-            cloud_max: DEFAULT_CLOUD_MAX,
+            cloud_min,
+            cloud_max,
             resolution: self.resolution,
-            coverage: DEFAULT_CLOUD_SHADOW_COVERAGE,
+            coverage,
             march_steps: DEFAULT_CLOUD_SHADOW_STEPS,
-            extinction: DEFAULT_CLOUD_SHADOW_EXTINCTION,
+            extinction,
             _pad0: 0,
             _pad1: 0,
         };
@@ -272,6 +326,11 @@ impl CloudShadowPass {
             0,
             bytemuck::bytes_of(&params),
         );
+    }
+
+    /// World-space coverage of this shadow map (for sampling in other passes).
+    pub fn coverage(&self) -> f32 {
+        DEFAULT_CLOUD_SHADOW_COVERAGE
     }
 
     /// Dispatch the cloud shadow map compute shader.
@@ -286,7 +345,14 @@ impl CloudShadowPass {
         sun_dir: [f32; 3],
     ) {
         self.update_params(queue, camera_pos, sun_dir);
+        self.dispatch_only(encoder);
+    }
 
+    /// Dispatch without updating params.
+    ///
+    /// Use when params have already been written via [`Self::update_params_ex`]
+    /// and [`Self::set_cloud_params`].
+    pub fn dispatch_only(&self, encoder: &mut wgpu::CommandEncoder) {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("cloud shadow"),
             timestamp_writes: None,
