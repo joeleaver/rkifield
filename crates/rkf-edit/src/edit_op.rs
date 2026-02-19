@@ -16,9 +16,10 @@ use rkf_core::brick_pool::BrickPool;
 use rkf_core::cell_state::CellState;
 use rkf_core::constants::RESOLUTION_TIERS;
 use rkf_core::sparse_grid::SparseGrid;
+use rkf_core::voxel::VoxelSample;
 
 use crate::brush::{Brush, BrushType};
-use crate::types::EditParams;
+use crate::types::{EditParams, EditType, ShapeType};
 
 // ---------------------------------------------------------------------------
 // EditOp — an edit operation ready to be applied
@@ -189,6 +190,182 @@ pub fn prepare_edit(
         params: params_list,
         newly_allocated,
     }
+}
+
+// ---------------------------------------------------------------------------
+// apply_edit_cpu — CPU-side edit application (for testing / scene setup)
+// ---------------------------------------------------------------------------
+
+/// Apply an edit entirely on the CPU side.
+///
+/// This is useful for testing and for scene setup (before GPU upload).
+/// It performs the same operations as the GPU compute shader but on CPU data:
+/// evaluates the brush SDF at each voxel, applies the CSG operation, and
+/// updates material IDs for union/paint operations.
+///
+/// Returns the [`PreparedEdit`] describing which bricks were touched.
+pub fn apply_edit_cpu(
+    pool: &mut BrickPool,
+    grid: &mut SparseGrid,
+    grid_aabb: &Aabb,
+    tier: usize,
+    op: &EditOp,
+) -> PreparedEdit {
+    let prepared = prepare_edit(pool, grid, grid_aabb, tier, op);
+
+    let voxel_size = RESOLUTION_TIERS[tier].voxel_size;
+
+    // Apply the edit to each affected brick on CPU.
+    for params in &prepared.params {
+        let slot = params.brick_base_index / 512;
+        let brick_min = Vec3::new(
+            params.brick_world_min[0],
+            params.brick_world_min[1],
+            params.brick_world_min[2],
+        );
+        let edit_pos = Vec3::new(params.position[0], params.position[1], params.position[2]);
+        let edit_rot = Quat::from_xyzw(
+            params.rotation[0],
+            params.rotation[1],
+            params.rotation[2],
+            params.rotation[3],
+        );
+        let dims = Vec3::new(
+            params.dimensions[0],
+            params.dimensions[1],
+            params.dimensions[2],
+        );
+        let radius = dims.x.max(dims.y).max(dims.z);
+
+        let brick = pool.get_mut(slot);
+
+        for vz in 0..8u32 {
+            for vy in 0..8u32 {
+                for vx in 0..8u32 {
+                    let world_pos = brick_min
+                        + (Vec3::new(vx as f32, vy as f32, vz as f32) + 0.5) * voxel_size;
+                    let local_pos = edit_rot.inverse() * (world_pos - edit_pos);
+
+                    // Evaluate SDF based on shape.
+                    let shape_dist = match ShapeType::from_u8(params.shape_type as u8) {
+                        Some(ShapeType::Box) => {
+                            let d = local_pos.abs() - dims;
+                            d.max(Vec3::ZERO).length() + d.x.max(d.y.max(d.z)).min(0.0)
+                        }
+                        // Default: sphere
+                        _ => local_pos.length() - dims.x,
+                    };
+
+                    // Falloff from center to brush edge.
+                    let dist_from_center = (world_pos - edit_pos).length();
+                    let falloff =
+                        (1.0 - (dist_from_center / radius).clamp(0.0, 1.0)).max(0.0);
+                    if falloff <= 0.0 {
+                        continue;
+                    }
+
+                    let existing = brick.sample(vx, vy, vz);
+                    let existing_dist = existing.distance_f32();
+                    let strength = params.strength * falloff;
+
+                    // Cap existing distance to avoid infinity in smooth-min math.
+                    // For newly allocated bricks, voxels start at f16::INFINITY.
+                    let far_threshold = radius * 2.0;
+                    let capped_existing = existing_dist.min(far_threshold + 1.0);
+
+                    // Apply CSG operation.
+                    // For union ops on empty space (existing >> radius), the strength
+                    // interpolation is meaningless — just use the blended result directly.
+                    // The falloff guard above already limits the region of effect.
+                    let new_dist = match EditType::from_u8(params.edit_type as u8) {
+                        Some(EditType::SmoothUnion) => {
+                            let k = params.blend_k;
+                            let h = (0.5
+                                + 0.5 * (shape_dist - capped_existing) / k.max(0.0001))
+                            .clamp(0.0, 1.0);
+                            let blended = shape_dist * (1.0 - h) + capped_existing * h
+                                - k * h * (1.0 - h);
+                            if existing_dist > far_threshold {
+                                blended
+                            } else {
+                                capped_existing * (1.0 - strength) + blended * strength
+                            }
+                        }
+                        Some(EditType::SmoothSubtract) => {
+                            let k = params.blend_k;
+                            let neg_existing = -capped_existing;
+                            let h = (0.5
+                                + 0.5 * (shape_dist - neg_existing) / k.max(0.0001))
+                            .clamp(0.0, 1.0);
+                            let smooth = shape_dist * (1.0 - h) + neg_existing * h
+                                - k * h * (1.0 - h);
+                            let result = -smooth;
+                            capped_existing * (1.0 - strength) + result * strength
+                        }
+                        Some(EditType::CsgUnion) => {
+                            let result = capped_existing.min(shape_dist);
+                            if existing_dist > far_threshold {
+                                result
+                            } else {
+                                capped_existing * (1.0 - strength) + result * strength
+                            }
+                        }
+                        Some(EditType::CsgSubtract) => {
+                            let result = capped_existing.max(-shape_dist);
+                            capped_existing * (1.0 - strength) + result * strength
+                        }
+                        Some(EditType::Paint) => {
+                            // No geometry change, just material.
+                            existing_dist
+                        }
+                        _ => existing_dist,
+                    };
+
+                    // Material assignment: for union ops, paint new material
+                    // where the surface was added (distance decreased).
+                    let mat_id = if matches!(
+                        EditType::from_u8(params.edit_type as u8),
+                        Some(EditType::SmoothUnion) | Some(EditType::CsgUnion)
+                    ) && new_dist < existing_dist
+                    {
+                        params.material_id as u16
+                    } else if matches!(
+                        EditType::from_u8(params.edit_type as u8),
+                        Some(EditType::Paint)
+                    ) && existing_dist.abs() < voxel_size * 4.0
+                        && strength > 0.5
+                    {
+                        params.material_id as u16
+                    } else {
+                        existing.material_id()
+                    };
+
+                    brick.set(
+                        vx,
+                        vy,
+                        vz,
+                        VoxelSample::new(
+                            new_dist,
+                            mat_id,
+                            existing.blend_weight(),
+                            existing.secondary_id(),
+                            existing.flags(),
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
+    // Post-cleanup: deallocate bricks that remain empty after the edit.
+    let newly: Vec<(u32, u32, u32, u32)> = prepared
+        .newly_allocated
+        .iter()
+        .map(|&(cx, cy, cz, slot)| (cx, cy, cz, slot))
+        .collect();
+    post_edit_cleanup(pool, grid, &newly, voxel_size);
+
+    prepared
 }
 
 // ---------------------------------------------------------------------------
@@ -683,5 +860,58 @@ mod tests {
         }
         // Interior cell state should remain unchanged.
         assert_eq!(grid.cell_state(1, 1, 1), CellState::Interior);
+    }
+
+    // -- apply_edit_cpu --
+
+    #[test]
+    fn apply_edit_cpu_adds_sphere() {
+        let (mut pool, mut grid, grid_aabb) = test_setup();
+        let tier = 1; // 2cm voxels, 0.16m brick extent
+
+        // Start with no bricks.
+        assert_eq!(pool.allocated_count(), 0);
+
+        // Add a sphere at center of the grid.
+        let brush = Brush::add_sphere(0.05, 1);
+        let op = EditOp {
+            brush,
+            position: Vec3::new(0.08, 0.08, 0.08),
+            rotation: Quat::IDENTITY,
+        };
+        let result = apply_edit_cpu(&mut pool, &mut grid, &grid_aabb, tier, &op);
+
+        // Should have allocated some bricks.
+        assert!(pool.allocated_count() > 0, "expected bricks to be allocated");
+        assert!(!result.params.is_empty(), "expected at least one param");
+    }
+
+    #[test]
+    fn apply_edit_cpu_subtract_modifies_existing() {
+        let (mut pool, mut grid, grid_aabb) = test_setup();
+        let tier = 1;
+
+        // First, add a sphere to create some geometry.
+        let add_brush = Brush::add_sphere(0.1, 1);
+        let add_op = EditOp {
+            brush: add_brush,
+            position: Vec3::new(0.32, 0.32, 0.32),
+            rotation: Quat::IDENTITY,
+        };
+        apply_edit_cpu(&mut pool, &mut grid, &grid_aabb, tier, &add_op);
+        let count_after_add = pool.allocated_count();
+        assert!(count_after_add > 0);
+
+        // Now subtract from the same location.
+        let sub_brush = Brush::subtract_sphere(0.05);
+        let sub_op = EditOp {
+            brush: sub_brush,
+            position: Vec3::new(0.32, 0.32, 0.32),
+            rotation: Quat::IDENTITY,
+        };
+        let result = apply_edit_cpu(&mut pool, &mut grid, &grid_aabb, tier, &sub_op);
+
+        // Subtract should find existing surface cells and produce params.
+        assert!(!result.params.is_empty(), "subtract should produce params on existing geometry");
     }
 }

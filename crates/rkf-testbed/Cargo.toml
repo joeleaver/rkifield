@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 rkf-core = { workspace = true }
+rkf-edit = { workspace = true }
 rkf-runtime = { workspace = true }
 rkf-render = { workspace = true }
 rkf-mcp = { workspace = true }

@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::Result;
-use glam::{UVec3, Vec3};
+use glam::{Quat, UVec3, Vec3};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::{DeviceEvent, DeviceId, ElementState, WindowEvent};
@@ -355,6 +355,71 @@ fn create_clipmap_scene() -> (BrickPool, ClipmapGridSet, ClipmapConfig, Aabb) {
             let t = ((pos.y - 3.0) / 1.7).clamp(0.0, 1.0);
             if t < 0.01 { None } else { Some(t) }
         });
+
+        // === Sculpting Demo (Phase 16.8 validation) ===
+        // Demonstrates CPU-side CSG edits using the rkf-edit system.
+        {
+            use rkf_edit::brush::Brush;
+            use rkf_edit::edit_op::{apply_edit_cpu, EditOp};
+            use rkf_edit::undo::{capture_pre_edit, diff_deltas, EditDelta, UndoHistory};
+
+            let bricks_before = pool.allocated_count();
+
+            // 1) Add a gold sphere using the edit system (smooth union)
+            let add_brush = Brush::add_sphere(0.6, 11); // gold material
+            let add_op = EditOp {
+                brush: add_brush,
+                position: Vec3::new(3.0, 1.0, 2.0),
+                rotation: Quat::IDENTITY,
+            };
+
+            // Capture pre-edit state for undo demonstration
+            let mut undo = UndoHistory::new(100, 256 * 1024 * 1024);
+
+            // Prepare first to find which slots will be affected, then apply
+            let prep_info =
+                rkf_edit::edit_op::prepare_edit(&mut pool, grid, aabb, tier, &add_op);
+            let slots: Vec<u32> = prep_info.params.iter().map(|p| p.brick_base_index / 512).collect();
+            let pre = capture_pre_edit(&pool, &slots);
+
+            // Apply the actual edit (re-prepare internally, but slots are already allocated)
+            let _result = apply_edit_cpu(&mut pool, grid, aabb, tier, &add_op);
+
+            // Build undo delta from the diff
+            let diffed = diff_deltas(&pool, pre);
+            let op_id = undo.next_operation_id();
+            undo.push(EditDelta {
+                operation_id: op_id,
+                affected_bricks: diffed,
+                allocated_bricks: vec![],
+                deallocated_bricks: vec![],
+            });
+            log::info!(
+                "Edit 1 (add gold sphere at 3,1,2): {} new bricks, undo depth = {}",
+                pool.allocated_count() - bricks_before,
+                undo.depth(),
+            );
+
+            // 2) Subtract a bite from the boulder at (3.0, 0.2, -3.5)
+            let sub_brush = Brush::subtract_sphere(0.4);
+            let sub_op = EditOp {
+                brush: sub_brush,
+                position: Vec3::new(3.0, 0.2, -3.5),
+                rotation: Quat::IDENTITY,
+            };
+            apply_edit_cpu(&mut pool, grid, aabb, tier, &sub_op);
+            log::info!("Edit 2 (subtract from boulder): applied");
+
+            // 3) Paint a patch of ground with dirt material (mat 10)
+            let paint_brush = Brush::paint_sphere(1.0, 10);
+            let paint_op = EditOp {
+                brush: paint_brush,
+                position: Vec3::new(-2.0, 0.0, 2.0),
+                rotation: Quat::IDENTITY,
+            };
+            apply_edit_cpu(&mut pool, grid, aabb, tier, &paint_op);
+            log::info!("Edit 3 (paint dirt patch): applied");
+        }
 
         log::info!("Level 0 (tier 2, 8cm): {} bricks", pool.allocated_count());
     }
