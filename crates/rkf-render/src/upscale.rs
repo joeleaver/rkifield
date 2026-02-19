@@ -13,7 +13,6 @@
 use crate::dlss::DlssContext;
 use crate::gbuffer::GBuffer;
 use crate::history::{HistoryBuffers, HISTORY_COLOR_FORMAT, HISTORY_METADATA_FORMAT};
-use crate::shading::ShadingPass;
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
@@ -199,7 +198,7 @@ impl UpscalePass {
     /// Create the temporal upscale pass.
     pub fn new(
         device: &wgpu::Device,
-        shading: &ShadingPass,
+        hdr_view: &wgpu::TextureView,
         gbuffer: &GBuffer,
         history: &HistoryBuffers,
         display_width: u32,
@@ -316,7 +315,7 @@ impl UpscalePass {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&shading.hdr_view),
+                    resource: wgpu::BindingResource::TextureView(hdr_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
