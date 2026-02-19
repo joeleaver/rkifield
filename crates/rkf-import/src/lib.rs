@@ -17,5 +17,7 @@
 #![warn(missing_docs)]
 
 pub mod bvh;
+pub mod lod;
+pub mod material_transfer;
 pub mod mesh;
 pub mod voxelize;
