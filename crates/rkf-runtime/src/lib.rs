@@ -37,6 +37,10 @@ pub mod streaming;
 pub mod streaming_budget;
 /// Transform hierarchy update system.
 pub mod transform_system;
+/// GPU memory audit and leak detection.
+pub mod memory_audit;
+/// Performance profiling: CPU timing, per-pass breakdown, frame history.
+pub mod profiler;
 
 pub use asset_registry::{AssetEntry, AssetRegistry, AssetState, Handle};
 pub use async_io::{AsyncIoPipeline, ChunkLoadResult};
@@ -56,3 +60,10 @@ pub use scene::Scene;
 pub use streaming::{ChunkEntry, ChunkState, StreamingConfig, StreamingSystem};
 pub use streaming_budget::{BudgetMonitor, BudgetState, StreamingBudget};
 pub use transform_system::update_transforms;
+pub use memory_audit::{
+    LeakReport, MemoryAudit, MemoryHistory, PoolStats, detect_leaks, POOL_BONE_BRICKS,
+    POOL_COLOR_BRICKS, POOL_SDF_BRICKS, POOL_STAGING, POOL_VOLUMETRIC_BRICKS,
+};
+pub use profiler::{
+    CpuTimer, FrameProfile, PassTiming, ProfileHistory, Profiler, ProfilingConfig,
+};
