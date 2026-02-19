@@ -189,12 +189,14 @@ fn editor_ui() -> NodeHandle {
     };
     content.append_child(&left_panel);
 
-    // Engine viewport — transparent hole with data-viewport for input routing
+    // Engine viewport — transparent hole with data-viewport for input routing.
+    // NOTE: Do NOT use `pointer-events: none` — rinch's hit-test needs to find
+    // this element so `wants_mouse()` can detect `data-viewport` and return false.
     let viewport = __scope.create_element("div");
     viewport.set_attribute("data-viewport", "main");
     viewport.set_attribute(
         "style",
-        "flex: 1; pointer-events: none; background: transparent;",
+        "flex: 1; background: transparent;",
     );
     content.append_child(&viewport);
 
