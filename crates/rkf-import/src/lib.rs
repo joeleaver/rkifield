@@ -16,4 +16,6 @@
 
 #![warn(missing_docs)]
 
+pub mod bvh;
 pub mod mesh;
+pub mod voxelize;
