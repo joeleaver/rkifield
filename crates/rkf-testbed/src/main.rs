@@ -1702,7 +1702,7 @@ impl GpuState {
         slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = tx.send(result);
         });
-        self.context.device.poll(wgpu::Maintain::Wait);
+        let _ = self.context.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
         if let Ok(Ok(())) = rx.recv() {
             let data = slice.get_mapped_range();

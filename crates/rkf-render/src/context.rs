@@ -48,8 +48,9 @@ impl RenderContext {
                     ..wgpu::Limits::default()
                 },
                 memory_hints: wgpu::MemoryHints::Performance,
+                trace: wgpu::Trace::Off,
+                experimental_features: wgpu::ExperimentalFeatures::default(),
             },
-            None,
         ))
         .expect("failed to create GPU device");
 

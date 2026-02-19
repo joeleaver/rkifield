@@ -23,7 +23,7 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 # External dependencies
-wgpu = "24"
+wgpu = "27"
 winit = "0.30"
 glam = { version = "0.29", features = ["bytemuck", "serde"] }
 bytemuck = { version = "1", features = ["derive"] }
@@ -60,3 +60,11 @@ rkf-physics = { path = "crates/rkf-physics" }
 rkf-particles = { path = "crates/rkf-particles" }
 rkf-runtime = { path = "crates/rkf-runtime" }
 rkf-mcp = { path = "crates/rkf-mcp" }
+
+# Patch wgpu to use the same fork as rinch (Rgba8Unorm storage texture fix)
+[patch.crates-io]
+wgpu = { git = "https://github.com/joeleaver/wgpu-fork", branch = "rinch-patch" }
+wgpu-core = { git = "https://github.com/joeleaver/wgpu-fork", branch = "rinch-patch" }
+wgpu-hal = { git = "https://github.com/joeleaver/wgpu-fork", branch = "rinch-patch" }
+wgpu-types = { git = "https://github.com/joeleaver/wgpu-fork", branch = "rinch-patch" }
+naga = { git = "https://github.com/joeleaver/wgpu-fork", branch = "rinch-patch" }
