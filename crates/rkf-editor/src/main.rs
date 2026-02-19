@@ -57,6 +57,12 @@ thread_local! {
     static SCULPT_REFRESH: Cell<Option<Signal<u32>>> = const { Cell::new(None) };
     /// Bumped when paint brush settings change.
     static PAINT_REFRESH: Cell<Option<Signal<u32>>> = const { Cell::new(None) };
+    /// Bumped when scene tree selection/visibility changes.
+    static SELECT_REFRESH: Cell<Option<Signal<u32>>> = const { Cell::new(None) };
+    /// Bumped when placement settings change.
+    static PLACE_REFRESH: Cell<Option<Signal<u32>>> = const { Cell::new(None) };
+    /// Bumped when animation preview state changes.
+    static ANIM_REFRESH: Cell<Option<Signal<u32>>> = const { Cell::new(None) };
 }
 
 // ---------------------------------------------------------------------------
@@ -988,6 +994,571 @@ fn build_light_panel(scope: &mut RenderScope, light_refresh: Signal<u32>) -> Nod
     panel
 }
 
+// ── Select panel ─────────────────────────────────────────────────────────
+
+fn build_select_panel(scope: &mut RenderScope, select_refresh: Signal<u32>) -> NodeHandle {
+    let panel = scope.create_element("div");
+    panel.set_attribute("style", "display: flex; flex-direction: column; gap: 2px;");
+
+    // ── Scene Tree ───────────────────────────────────────────────────────
+    build_env_section_header(scope, &panel, "Scene Tree");
+
+    // Pre-allocate 32 node slots
+    const MAX_NODES: usize = 32;
+    let mut slot_handles = Vec::with_capacity(MAX_NODES);
+    for _ in 0..MAX_NODES {
+        let row = scope.create_element("div");
+        row.set_attribute("style", ENV_ROW_STYLE);
+
+        let name_btn = scope.create_element("button");
+        name_btn.set_attribute(
+            "style",
+            "flex: 1; text-align: left; background: transparent; border: none; \
+             color: #ccc; font-size: 11px; cursor: pointer; padding: 0 2px; \
+             font-family: inherit; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
+        );
+        row.append_child(&name_btn);
+        panel.append_child(&row);
+        slot_handles.push((row, name_btn));
+    }
+
+    // Effect: populate slots from scene tree roots (flattened, roots only)
+    scope.create_effect({
+        let slot_handles = slot_handles.clone();
+        move || {
+            let _ = select_refresh.get();
+
+            // Collect root nodes info
+            let nodes: Vec<(u64, String, bool)> = EDITOR_STATE
+                .get()
+                .and_then(|es| {
+                    es.lock().ok().map(|s| {
+                        s.scene_tree
+                            .roots
+                            .iter()
+                            .take(MAX_NODES)
+                            .map(|n| (n.entity_id, n.name.clone(), n.selected))
+                            .collect()
+                    })
+                })
+                .unwrap_or_default();
+
+            for (i, (row, name_btn)) in slot_handles.iter().enumerate() {
+                if i < nodes.len() {
+                    let (_eid, name, selected) = &nodes[i];
+                    row.set_attribute("style", ENV_ROW_STYLE);
+                    name_btn.set_text(name);
+                    name_btn.set_attribute(
+                        "style",
+                        if *selected {
+                            "flex: 1; text-align: left; background: #3a5a80; border: none; \
+                             color: #fff; font-size: 11px; cursor: pointer; padding: 0 2px; \
+                             font-family: inherit; overflow: hidden; text-overflow: ellipsis; \
+                             white-space: nowrap; border-radius: 2px;"
+                        } else {
+                            "flex: 1; text-align: left; background: transparent; border: none; \
+                             color: #ccc; font-size: 11px; cursor: pointer; padding: 0 2px; \
+                             font-family: inherit; overflow: hidden; text-overflow: ellipsis; \
+                             white-space: nowrap;"
+                        },
+                    );
+                } else {
+                    row.set_attribute("style", "display: none;");
+                }
+            }
+        }
+    });
+
+    // Register click handlers for each slot
+    for (i, (_row, name_btn)) in slot_handles.iter().enumerate() {
+        let h = scope.register_handler(move || {
+            if let Some(es) = EDITOR_STATE.get() {
+                if let Ok(mut state) = es.lock() {
+                    if let Some(node) = state.scene_tree.roots.get(i) {
+                        let eid = node.entity_id;
+                        state.scene_tree.select_node(eid);
+                    }
+                }
+            }
+            select_refresh.update(|v| *v = v.wrapping_add(1));
+        });
+        name_btn.set_attribute("data-rid", &h.0.to_string());
+    }
+
+    // ── Properties (shown when a node is selected) ───────────────────────
+    build_env_section_header(scope, &panel, "Properties");
+
+    let props_div = scope.create_element("div");
+    props_div.set_attribute("style", "display: flex; flex-direction: column; gap: 2px;");
+
+    // Entity ID row
+    let id_row = scope.create_element("div");
+    id_row.set_attribute("style", ENV_ROW_STYLE);
+    let id_lbl = scope.create_element("span");
+    id_lbl.set_attribute("style", ENV_LABEL_STYLE);
+    id_lbl.set_text("Entity ID");
+    id_row.append_child(&id_lbl);
+    let id_val = scope.create_element("span");
+    id_val.set_attribute("style", ENV_VALUE_STYLE);
+    scope.create_effect({
+        let id_val = id_val.clone();
+        move || {
+            let _ = select_refresh.get();
+            let text = EDITOR_STATE
+                .get()
+                .and_then(|es| {
+                    es.lock().ok().and_then(|s| {
+                        s.scene_tree
+                            .roots
+                            .iter()
+                            .find(|n| n.selected)
+                            .map(|n| n.entity_id.to_string())
+                    })
+                })
+                .unwrap_or_else(|| "—".to_string());
+            id_val.set_text(&text);
+        }
+    });
+    id_row.append_child(&id_val);
+    props_div.append_child(&id_row);
+
+    // Name row
+    let name_row = scope.create_element("div");
+    name_row.set_attribute("style", ENV_ROW_STYLE);
+    let name_lbl = scope.create_element("span");
+    name_lbl.set_attribute("style", ENV_LABEL_STYLE);
+    name_lbl.set_text("Name");
+    name_row.append_child(&name_lbl);
+    let name_val = scope.create_element("span");
+    name_val.set_attribute("style", ENV_VALUE_STYLE);
+    scope.create_effect({
+        let name_val = name_val.clone();
+        move || {
+            let _ = select_refresh.get();
+            let text = EDITOR_STATE
+                .get()
+                .and_then(|es| {
+                    es.lock().ok().and_then(|s| {
+                        s.scene_tree
+                            .roots
+                            .iter()
+                            .find(|n| n.selected)
+                            .map(|n| n.name.clone())
+                    })
+                })
+                .unwrap_or_else(|| "—".to_string());
+            name_val.set_text(&text);
+        }
+    });
+    name_row.append_child(&name_val);
+    props_div.append_child(&name_row);
+
+    // Visible toggle row
+    let vis_row = scope.create_element("div");
+    vis_row.set_attribute("style", ENV_ROW_STYLE);
+    let vis_lbl = scope.create_element("span");
+    vis_lbl.set_attribute("style", ENV_LABEL_STYLE);
+    vis_lbl.set_text("Visible");
+    vis_row.append_child(&vis_lbl);
+    let vis_btn = scope.create_element("button");
+    scope.create_effect({
+        let vis_btn = vis_btn.clone();
+        move || {
+            let _ = select_refresh.get();
+            let (visible, has_sel) = EDITOR_STATE
+                .get()
+                .and_then(|es| {
+                    es.lock().ok().map(|s| {
+                        if let Some(n) = s.scene_tree.roots.iter().find(|n| n.selected) {
+                            (n.visible, true)
+                        } else {
+                            (false, false)
+                        }
+                    })
+                })
+                .unwrap_or((false, false));
+            if has_sel {
+                if visible {
+                    vis_btn.set_attribute("style", ENV_TOGGLE_ON_STYLE);
+                    vis_btn.set_text("ON");
+                } else {
+                    vis_btn.set_attribute("style", ENV_TOGGLE_OFF_STYLE);
+                    vis_btn.set_text("OFF");
+                }
+            } else {
+                vis_btn.set_attribute("style", ENV_TOGGLE_OFF_STYLE);
+                vis_btn.set_text("—");
+            }
+        }
+    });
+    let h = scope.register_handler(move || {
+        if let Some(es) = EDITOR_STATE.get() {
+            if let Ok(mut state) = es.lock() {
+                // Find selected root node id
+                if let Some(eid) = state
+                    .scene_tree
+                    .roots
+                    .iter()
+                    .find(|n| n.selected)
+                    .map(|n| n.entity_id)
+                {
+                    if let Some(node) = state.scene_tree.find_node_mut(eid) {
+                        node.visible = !node.visible;
+                    }
+                }
+            }
+        }
+        select_refresh.update(|v| *v = v.wrapping_add(1));
+    });
+    vis_btn.set_attribute("data-rid", &h.0.to_string());
+    vis_row.append_child(&vis_btn);
+    props_div.append_child(&vis_row);
+
+    panel.append_child(&props_div);
+
+    panel
+}
+
+// ── Place panel ───────────────────────────────────────────────────────────
+
+fn build_place_panel(scope: &mut RenderScope, place_refresh: Signal<u32>) -> NodeHandle {
+    let panel = scope.create_element("div");
+    panel.set_attribute("style", "display: flex; flex-direction: column; gap: 2px;");
+
+    // ── Primitives ───────────────────────────────────────────────────────
+    build_env_section_header(scope, &panel, "Primitives");
+    let prim_row = scope.create_element("div");
+    prim_row.set_attribute("style", "display: flex; flex-wrap: wrap; gap: 3px; padding: 2px;");
+    for label in ["Sphere", "Box", "Cylinder", "Torus", "Cone", "Capsule"] {
+        let btn = scope.create_element("button");
+        btn.set_attribute("style", ENUM_BTN_STYLE);
+        btn.set_text(label);
+        // Primitive buttons are informational placeholders (placement is viewport-driven)
+        let lbl_owned = label.to_string();
+        let h = scope.register_handler(move || {
+            // Log intent; actual spawning is handled by the viewport placement system
+            let _ = &lbl_owned; // capture
+            place_refresh.update(|v| *v = v.wrapping_add(1));
+        });
+        btn.set_attribute("data-rid", &h.0.to_string());
+        prim_row.append_child(&btn);
+    }
+    panel.append_child(&prim_row);
+
+    // ── Grid Snap ────────────────────────────────────────────────────────
+    build_env_section_header(scope, &panel, "Grid Snap");
+
+    // Enable toggle
+    let snap_row = scope.create_element("div");
+    snap_row.set_attribute("style", ENV_ROW_STYLE);
+    let snap_lbl = scope.create_element("span");
+    snap_lbl.set_attribute("style", ENV_LABEL_STYLE);
+    snap_lbl.set_text("Enabled");
+    snap_row.append_child(&snap_lbl);
+    let snap_btn = scope.create_element("button");
+    scope.create_effect({
+        let snap_btn = snap_btn.clone();
+        move || {
+            let _ = place_refresh.get();
+            let enabled = EDITOR_STATE
+                .get()
+                .and_then(|es| es.lock().ok().map(|s| s.grid_snap.enabled))
+                .unwrap_or(false);
+            if enabled {
+                snap_btn.set_attribute("style", ENV_TOGGLE_ON_STYLE);
+                snap_btn.set_text("ON");
+            } else {
+                snap_btn.set_attribute("style", ENV_TOGGLE_OFF_STYLE);
+                snap_btn.set_text("OFF");
+            }
+        }
+    });
+    let h = scope.register_handler(move || {
+        if let Some(es) = EDITOR_STATE.get() {
+            if let Ok(mut state) = es.lock() {
+                state.grid_snap.enabled = !state.grid_snap.enabled;
+            }
+        }
+        place_refresh.update(|v| *v = v.wrapping_add(1));
+    });
+    snap_btn.set_attribute("data-rid", &h.0.to_string());
+    snap_row.append_child(&snap_btn);
+    panel.append_child(&snap_row);
+
+    // Grid size display
+    let size_row = scope.create_element("div");
+    size_row.set_attribute("style", ENV_ROW_STYLE);
+    let size_lbl = scope.create_element("span");
+    size_lbl.set_attribute("style", ENV_LABEL_STYLE);
+    size_lbl.set_text("Grid Size");
+    size_row.append_child(&size_lbl);
+    let size_val = scope.create_element("span");
+    size_val.set_attribute("style", ENV_VALUE_STYLE);
+    scope.create_effect({
+        let size_val = size_val.clone();
+        move || {
+            let _ = place_refresh.get();
+            let gs = EDITOR_STATE
+                .get()
+                .and_then(|es| es.lock().ok().map(|s| s.grid_snap.grid_size))
+                .unwrap_or(1.0);
+            size_val.set_text(&format!("{:.2}", gs));
+        }
+    });
+    size_row.append_child(&size_val);
+
+    // Decrease / Increase grid size buttons
+    let minus_btn = scope.create_element("button");
+    minus_btn.set_attribute("style", ENV_BTN_STYLE);
+    minus_btn.set_text("-");
+    let h = scope.register_handler(move || {
+        if let Some(es) = EDITOR_STATE.get() {
+            if let Ok(mut state) = es.lock() {
+                state.grid_snap.grid_size = (state.grid_snap.grid_size - 0.25).max(0.25);
+            }
+        }
+        place_refresh.update(|v| *v = v.wrapping_add(1));
+    });
+    minus_btn.set_attribute("data-rid", &h.0.to_string());
+    size_row.append_child(&minus_btn);
+
+    let plus_btn = scope.create_element("button");
+    plus_btn.set_attribute("style", ENV_BTN_STYLE);
+    plus_btn.set_text("+");
+    let h = scope.register_handler(move || {
+        if let Some(es) = EDITOR_STATE.get() {
+            if let Ok(mut state) = es.lock() {
+                state.grid_snap.grid_size = (state.grid_snap.grid_size + 0.25).min(64.0);
+            }
+        }
+        place_refresh.update(|v| *v = v.wrapping_add(1));
+    });
+    plus_btn.set_attribute("data-rid", &h.0.to_string());
+    size_row.append_child(&plus_btn);
+
+    panel.append_child(&size_row);
+
+    panel
+}
+
+// ── Animate panel ─────────────────────────────────────────────────────────
+
+fn build_animate_panel(scope: &mut RenderScope, anim_refresh: Signal<u32>) -> NodeHandle {
+    let panel = scope.create_element("div");
+    panel.set_attribute("style", "display: flex; flex-direction: column; gap: 2px;");
+
+    // ── Playback ─────────────────────────────────────────────────────────
+    build_env_section_header(scope, &panel, "Playback");
+    let pb_row = scope.create_element("div");
+    pb_row.set_attribute("style", "display: flex; gap: 4px; padding: 2px;");
+
+    // Play button
+    let play_btn = scope.create_element("button");
+    play_btn.set_attribute("style", ENV_BTN_STYLE);
+    play_btn.set_text("Play");
+    let h = scope.register_handler(move || {
+        if let Some(es) = EDITOR_STATE.get() {
+            if let Ok(mut state) = es.lock() {
+                state.animation.play();
+            }
+        }
+        anim_refresh.update(|v| *v = v.wrapping_add(1));
+    });
+    play_btn.set_attribute("data-rid", &h.0.to_string());
+    pb_row.append_child(&play_btn);
+
+    // Pause button
+    let pause_btn = scope.create_element("button");
+    pause_btn.set_attribute("style", ENV_BTN_STYLE);
+    pause_btn.set_text("Pause");
+    let h = scope.register_handler(move || {
+        if let Some(es) = EDITOR_STATE.get() {
+            if let Ok(mut state) = es.lock() {
+                state.animation.pause();
+            }
+        }
+        anim_refresh.update(|v| *v = v.wrapping_add(1));
+    });
+    pause_btn.set_attribute("data-rid", &h.0.to_string());
+    pb_row.append_child(&pause_btn);
+
+    // Stop button
+    let stop_btn = scope.create_element("button");
+    stop_btn.set_attribute("style", ENV_BTN_STYLE);
+    stop_btn.set_text("Stop");
+    let h = scope.register_handler(move || {
+        if let Some(es) = EDITOR_STATE.get() {
+            if let Ok(mut state) = es.lock() {
+                state.animation.stop();
+            }
+        }
+        anim_refresh.update(|v| *v = v.wrapping_add(1));
+    });
+    stop_btn.set_attribute("data-rid", &h.0.to_string());
+    pb_row.append_child(&stop_btn);
+
+    panel.append_child(&pb_row);
+
+    // ── Timeline ─────────────────────────────────────────────────────────
+    build_env_section_header(scope, &panel, "Timeline");
+    let tl_row = scope.create_element("div");
+    tl_row.set_attribute("style", ENV_ROW_STYLE);
+    let tl_lbl = scope.create_element("span");
+    tl_lbl.set_attribute("style", ENV_LABEL_STYLE);
+    tl_lbl.set_text("Time");
+    tl_row.append_child(&tl_lbl);
+    let tl_val = scope.create_element("span");
+    tl_val.set_attribute("style", ENV_VALUE_STYLE);
+    scope.create_effect({
+        let tl_val = tl_val.clone();
+        move || {
+            let _ = anim_refresh.get();
+            let (cur, dur) = EDITOR_STATE
+                .get()
+                .and_then(|es| {
+                    es.lock()
+                        .ok()
+                        .map(|s| (s.animation.current_time, s.animation.duration))
+                })
+                .unwrap_or((0.0, 0.0));
+            tl_val.set_text(&format!("{:.2} / {:.2}", cur, dur));
+        }
+    });
+    tl_row.append_child(&tl_val);
+    panel.append_child(&tl_row);
+
+    // ── Speed ────────────────────────────────────────────────────────────
+    build_env_section_header(scope, &panel, "Speed");
+    let spd_row = scope.create_element("div");
+    spd_row.set_attribute("style", ENV_ROW_STYLE);
+    let spd_lbl = scope.create_element("span");
+    spd_lbl.set_attribute("style", ENV_LABEL_STYLE);
+    spd_lbl.set_text("Speed");
+    spd_row.append_child(&spd_lbl);
+    let spd_val = scope.create_element("span");
+    spd_val.set_attribute("style", ENV_VALUE_STYLE);
+    scope.create_effect({
+        let spd_val = spd_val.clone();
+        move || {
+            let _ = anim_refresh.get();
+            let spd = EDITOR_STATE
+                .get()
+                .and_then(|es| es.lock().ok().map(|s| s.animation.speed))
+                .unwrap_or(1.0);
+            spd_val.set_text(&format!("{:.1}x", spd));
+        }
+    });
+    spd_row.append_child(&spd_val);
+
+    let spd_minus = scope.create_element("button");
+    spd_minus.set_attribute("style", ENV_BTN_STYLE);
+    spd_minus.set_text("-");
+    let h = scope.register_handler(move || {
+        if let Some(es) = EDITOR_STATE.get() {
+            if let Ok(mut state) = es.lock() {
+                let new_spd = (state.animation.speed - 0.1).clamp(0.1, 4.0);
+                state.animation.set_speed(new_spd);
+            }
+        }
+        anim_refresh.update(|v| *v = v.wrapping_add(1));
+    });
+    spd_minus.set_attribute("data-rid", &h.0.to_string());
+    spd_row.append_child(&spd_minus);
+
+    let spd_plus = scope.create_element("button");
+    spd_plus.set_attribute("style", ENV_BTN_STYLE);
+    spd_plus.set_text("+");
+    let h = scope.register_handler(move || {
+        if let Some(es) = EDITOR_STATE.get() {
+            if let Ok(mut state) = es.lock() {
+                let new_spd = (state.animation.speed + 0.1).clamp(0.1, 4.0);
+                state.animation.set_speed(new_spd);
+            }
+        }
+        anim_refresh.update(|v| *v = v.wrapping_add(1));
+    });
+    spd_plus.set_attribute("data-rid", &h.0.to_string());
+    spd_row.append_child(&spd_plus);
+
+    panel.append_child(&spd_row);
+
+    // ── Loop toggle ──────────────────────────────────────────────────────
+    let loop_row = scope.create_element("div");
+    loop_row.set_attribute("style", ENV_ROW_STYLE);
+    let loop_lbl = scope.create_element("span");
+    loop_lbl.set_attribute("style", ENV_LABEL_STYLE);
+    loop_lbl.set_text("Loop");
+    loop_row.append_child(&loop_lbl);
+    let loop_btn = scope.create_element("button");
+    scope.create_effect({
+        let loop_btn = loop_btn.clone();
+        move || {
+            let _ = anim_refresh.get();
+            let looping = EDITOR_STATE
+                .get()
+                .and_then(|es| es.lock().ok().map(|s| s.animation.looping))
+                .unwrap_or(false);
+            if looping {
+                loop_btn.set_attribute("style", ENV_TOGGLE_ON_STYLE);
+                loop_btn.set_text("ON");
+            } else {
+                loop_btn.set_attribute("style", ENV_TOGGLE_OFF_STYLE);
+                loop_btn.set_text("OFF");
+            }
+        }
+    });
+    let h = scope.register_handler(move || {
+        if let Some(es) = EDITOR_STATE.get() {
+            if let Ok(mut state) = es.lock() {
+                state.animation.looping = !state.animation.looping;
+            }
+        }
+        anim_refresh.update(|v| *v = v.wrapping_add(1));
+    });
+    loop_btn.set_attribute("data-rid", &h.0.to_string());
+    loop_row.append_child(&loop_btn);
+    panel.append_child(&loop_row);
+
+    // ── Skeleton toggle ──────────────────────────────────────────────────
+    let skel_row = scope.create_element("div");
+    skel_row.set_attribute("style", ENV_ROW_STYLE);
+    let skel_lbl = scope.create_element("span");
+    skel_lbl.set_attribute("style", ENV_LABEL_STYLE);
+    skel_lbl.set_text("Skeleton");
+    skel_row.append_child(&skel_lbl);
+    let skel_btn = scope.create_element("button");
+    scope.create_effect({
+        let skel_btn = skel_btn.clone();
+        move || {
+            let _ = anim_refresh.get();
+            let show = EDITOR_STATE
+                .get()
+                .and_then(|es| es.lock().ok().map(|s| s.animation.show_skeleton))
+                .unwrap_or(false);
+            if show {
+                skel_btn.set_attribute("style", ENV_TOGGLE_ON_STYLE);
+                skel_btn.set_text("ON");
+            } else {
+                skel_btn.set_attribute("style", ENV_TOGGLE_OFF_STYLE);
+                skel_btn.set_text("OFF");
+            }
+        }
+    });
+    let h = scope.register_handler(move || {
+        if let Some(es) = EDITOR_STATE.get() {
+            if let Ok(mut state) = es.lock() {
+                state.animation.toggle_skeleton();
+            }
+        }
+        anim_refresh.update(|v| *v = v.wrapping_add(1));
+    });
+    skel_btn.set_attribute("data-rid", &h.0.to_string());
+    skel_row.append_child(&skel_btn);
+    panel.append_child(&skel_row);
+
+    panel
+}
+
 // ── Sculpt panel ─────────────────────────────────────────────────────────
 
 const ENUM_BTN_STYLE: &str = "border: 1px solid #444; background: #333; color: #bbb; \
@@ -1721,18 +2292,11 @@ fn editor_ui() -> NodeHandle {
     });
     right_panel.append_child(&right_title);
 
-    // Mode hint (shown for modes without a dedicated panel)
+    // Mode hint (shown only in Navigate mode)
     show_dom(
         __scope,
         &right_panel,
-        move || {
-            let idx = mode_signal.get();
-            !matches!(
-                EditorMode::from_index(idx),
-                EditorMode::Environment | EditorMode::Light
-                    | EditorMode::Sculpt | EditorMode::Paint
-            )
-        },
+        move || matches!(EditorMode::from_index(mode_signal.get()), EditorMode::Navigate),
         move |scope| {
             let hint_div = scope.create_element("div");
             hint_div.set_attribute("style", "color: #666; font-size: 12px; font-style: italic;");
@@ -1743,10 +2307,7 @@ fn editor_ui() -> NodeHandle {
                     let idx = mode_signal.get();
                     let mode = EditorMode::from_index(idx);
                     let hint = match mode {
-                        EditorMode::Navigate => "Use right-click + WASD to fly camera",
-                        EditorMode::Select => "Click entities in viewport to select",
-                        EditorMode::Place => "Choose an asset to place in the scene",
-                        EditorMode::Animate => "Select an entity to preview animations",
+                        EditorMode::Navigate => "Use right-click + WASD to fly camera. F1-F8 to switch modes.",
                         _ => "",
                     };
                     hint_text.set_text(hint);
@@ -1755,6 +2316,42 @@ fn editor_ui() -> NodeHandle {
             hint_div.append_child(&hint_text);
             hint_div
         },
+        None::<fn(&mut RenderScope) -> NodeHandle>,
+    );
+
+    // Select panel (shown in Select mode)
+    let select_refresh = Signal::new(0u32);
+    SELECT_REFRESH.with(|cell| cell.set(Some(select_refresh)));
+
+    show_dom(
+        __scope,
+        &right_panel,
+        move || mode_signal.get() == EditorMode::Select.index(),
+        move |scope| build_select_panel(scope, select_refresh),
+        None::<fn(&mut RenderScope) -> NodeHandle>,
+    );
+
+    // Place panel (shown in Place mode)
+    let place_refresh = Signal::new(0u32);
+    PLACE_REFRESH.with(|cell| cell.set(Some(place_refresh)));
+
+    show_dom(
+        __scope,
+        &right_panel,
+        move || mode_signal.get() == EditorMode::Place.index(),
+        move |scope| build_place_panel(scope, place_refresh),
+        None::<fn(&mut RenderScope) -> NodeHandle>,
+    );
+
+    // Animate panel (shown in Animate mode)
+    let anim_refresh = Signal::new(0u32);
+    ANIM_REFRESH.with(|cell| cell.set(Some(anim_refresh)));
+
+    show_dom(
+        __scope,
+        &right_panel,
+        move || mode_signal.get() == EditorMode::Animate.index(),
+        move |scope| build_animate_panel(scope, anim_refresh),
         None::<fn(&mut RenderScope) -> NodeHandle>,
     );
 
@@ -2276,8 +2873,7 @@ impl App {
             es.update_camera(dt);
             es.frame_time_history.push(dt * 1000.0);
 
-            // Consume pending MCP camera teleport — apply to editor camera
-            // so sync_to_engine_camera carries the correct values.
+            // Consume pending MCP commands (camera teleport, debug mode).
             if let Ok(mut ss) = self.shared_state.lock() {
                 if let Some(cam) = ss.pending_camera.take() {
                     es.editor_camera.position = cam.position;
@@ -2287,6 +2883,12 @@ impl App {
                         "Camera set via MCP: pos={:?} yaw={:.2} pitch={:.2}",
                         cam.position, cam.yaw, cam.pitch,
                     );
+                }
+                if let Some(dm) = ss.pending_debug_mode.take() {
+                    if let Some(engine) = &self.engine {
+                        engine.shading.set_debug_mode(queue, dm);
+                        log::info!("Debug mode (from MCP): {dm}");
+                    }
                 }
             }
 
@@ -2690,6 +3292,31 @@ impl ApplicationHandler for App {
                                 debug_mode,
                             );
                             log::info!("Debug mode: {debug_mode}");
+                        }
+                    }
+
+                    // Mode switching: F1-F8
+                    if pressed {
+                        let mode_idx: Option<u8> = match key_code {
+                            winit::keyboard::KeyCode::F1 => Some(0),
+                            winit::keyboard::KeyCode::F2 => Some(1),
+                            winit::keyboard::KeyCode::F3 => Some(2),
+                            winit::keyboard::KeyCode::F4 => Some(3),
+                            winit::keyboard::KeyCode::F5 => Some(4),
+                            winit::keyboard::KeyCode::F6 => Some(5),
+                            winit::keyboard::KeyCode::F7 => Some(6),
+                            winit::keyboard::KeyCode::F8 => Some(7),
+                            _ => None,
+                        };
+                        if let Some(idx) = mode_idx {
+                            if let Ok(mut es) = self.editor_state.lock() {
+                                es.mode = EditorMode::from_index(idx);
+                            }
+                            MODE_SIGNAL.with(|cell| {
+                                if let Some(sig) = cell.get() {
+                                    sig.set(idx);
+                                }
+                            });
                         }
                     }
                 }
