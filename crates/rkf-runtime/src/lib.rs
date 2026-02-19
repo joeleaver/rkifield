@@ -41,6 +41,10 @@ pub mod transform_system;
 pub mod memory_audit;
 /// Performance profiling: CPU timing, per-pass breakdown, frame history.
 pub mod profiler;
+/// Quality preset validation — checks engine configs for out-of-range values.
+pub mod preset_validator;
+/// Stress test framework — scenario definitions, result tracking, evaluation.
+pub mod stress_test;
 
 pub use asset_registry::{AssetEntry, AssetRegistry, AssetState, Handle};
 pub use async_io::{AsyncIoPipeline, ChunkLoadResult};
@@ -66,4 +70,12 @@ pub use memory_audit::{
 };
 pub use profiler::{
     CpuTimer, FrameProfile, PassTiming, ProfileHistory, Profiler, ProfilingConfig,
+};
+pub use preset_validator::{
+    PresetComparison, PresetValidation, Severity, SettingDiff, ValidationIssue, compare_presets,
+    validate_all_presets, validate_config,
+};
+pub use stress_test::{
+    StressConfig, StressResult, StressScenario, StressSuite, StressThresholds,
+    build_default_suite, evaluate_result,
 };
