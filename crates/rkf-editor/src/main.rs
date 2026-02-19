@@ -2571,6 +2571,71 @@ fn debug_mode_from_key(key: winit::keyboard::KeyCode, pressed: bool) -> Option<u
 }
 
 // ---------------------------------------------------------------------------
+// Viewport ray casting helpers
+// ---------------------------------------------------------------------------
+
+/// Unproject a pixel coordinate to a world-space ray (origin, direction).
+fn unproject_ray(cam: &camera::EditorCamera, px: f32, py: f32) -> (glam::Vec3, glam::Vec3) {
+    let aspect = DISPLAY_WIDTH as f32 / DISPLAY_HEIGHT as f32;
+    let view = cam.view_matrix();
+    let proj = cam.projection_matrix(aspect);
+    let vp_inv = (proj * view).inverse();
+
+    // Pixel → NDC (wgpu: Y down in pixels, Y up in NDC; depth 0..1)
+    let ndc_x = (px / DISPLAY_WIDTH as f32) * 2.0 - 1.0;
+    let ndc_y = 1.0 - (py / DISPLAY_HEIGHT as f32) * 2.0;
+
+    let near_world = vp_inv * glam::Vec4::new(ndc_x, ndc_y, 0.0, 1.0);
+    let far_world = vp_inv * glam::Vec4::new(ndc_x, ndc_y, 1.0, 1.0);
+
+    let near = near_world.truncate() / near_world.w;
+    let far = far_world.truncate() / far_world.w;
+
+    (near, (far - near).normalize())
+}
+
+/// Ray-AABB intersection. Returns hit distance or None.
+fn ray_aabb_intersect(
+    origin: glam::Vec3,
+    dir: glam::Vec3,
+    aabb_min: glam::Vec3,
+    aabb_max: glam::Vec3,
+) -> Option<f32> {
+    let inv = dir.recip();
+    let t1 = (aabb_min - origin) * inv;
+    let t2 = (aabb_max - origin) * inv;
+    let tmin_v = t1.min(t2);
+    let tmax_v = t1.max(t2);
+    let tmin = tmin_v.x.max(tmin_v.y).max(tmin_v.z);
+    let tmax = tmax_v.x.min(tmax_v.y).min(tmax_v.z);
+    if tmax >= tmin.max(0.0) {
+        Some(tmin.max(0.0))
+    } else {
+        None
+    }
+}
+
+/// Recursively hit-test scene nodes against a ray, tracking closest hit.
+fn pick_entity(
+    node: &scene_tree::SceneNode,
+    origin: glam::Vec3,
+    dir: glam::Vec3,
+    best_id: &mut Option<u64>,
+    best_t: &mut f32,
+) {
+    let half = glam::Vec3::splat(node.scale * 0.5);
+    if let Some(t) = ray_aabb_intersect(origin, dir, node.position - half, node.position + half) {
+        if t < *best_t {
+            *best_t = t;
+            *best_id = Some(node.entity_id);
+        }
+    }
+    for child in &node.children {
+        pick_entity(child, origin, dir, best_id, best_t);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Application
 // ---------------------------------------------------------------------------
 
@@ -3242,6 +3307,22 @@ impl ApplicationHandler for App {
                     es.editor_input.mouse_pos = glam::Vec2::new(px, py);
                     es.editor_input.mouse_delta.x += dx;
                     es.editor_input.mouse_delta.y += dy;
+
+                    // Gizmo drag: update entity position in real time
+                    if es.gizmo.dragging {
+                        let (ro, rd) = unproject_ray(&es.editor_camera, px, py);
+                        let delta =
+                            gizmo::compute_translate_delta(&es.gizmo, ro, rd);
+                        let new_pos = es.gizmo.initial_position + delta;
+                        let selected = es.scene_tree.selected_entities();
+                        if let Some(&sel_id) = selected.first() {
+                            if let Some(node) =
+                                es.scene_tree.find_node_mut(sel_id)
+                            {
+                                node.position = new_pos;
+                            }
+                        }
+                    }
                 }
 
                 self.prev_mouse = self.mouse_phys;
@@ -3286,14 +3367,77 @@ impl ApplicationHandler for App {
                             // Viewport interaction — feed into editor input
                             if let Ok(mut es) = self.editor_state.lock() {
                                 es.editor_input.mouse_buttons[btn_idx] = true;
+
+                                // Left click: gizmo pick → entity pick
+                                if btn_idx == 0 {
+                                    let (ro, rd) =
+                                        unproject_ray(&es.editor_camera, px, py);
+                                    let mut picked_gizmo = false;
+
+                                    // Try gizmo axis hit if something is selected
+                                    let selected = es.scene_tree.selected_entities();
+                                    if let Some(&sel_id) = selected.first() {
+                                        if let Some(node) =
+                                            es.scene_tree.find_node(sel_id)
+                                        {
+                                            let center = node.position;
+                                            let rot = node.rotation;
+                                            let scl = node.scale;
+                                            let axis = gizmo::pick_gizmo_axis(
+                                                ro, rd, center, 1.0,
+                                            );
+                                            if axis != gizmo::GizmoAxis::None {
+                                                let ad = axis.direction();
+                                                let t = gizmo::ray_axis_closest_point(
+                                                    ro, rd, center, ad,
+                                                );
+                                                let sp = center + ad * t;
+                                                es.gizmo.begin_drag(
+                                                    axis, sp, center, rot, scl,
+                                                );
+                                                picked_gizmo = true;
+                                            }
+                                        }
+                                    }
+
+                                    if !picked_gizmo {
+                                        // Entity picking via ray-AABB
+                                        let mut best_id: Option<u64> = None;
+                                        let mut best_t = f32::MAX;
+                                        for root in &es.scene_tree.roots {
+                                            pick_entity(
+                                                root, ro, rd, &mut best_id,
+                                                &mut best_t,
+                                            );
+                                        }
+                                        if let Some(id) = best_id {
+                                            es.scene_tree.select_node(id);
+                                        } else {
+                                            es.scene_tree.clear_selection();
+                                        }
+                                    }
+                                }
                             }
                             self.viewport_dragging = true;
+
+                            // Bump scene tree UI on left click
+                            if btn_idx == 0 {
+                                SELECT_REFRESH.with(|cell| {
+                                    if let Some(sig) = cell.get() {
+                                        sig.update(|v| *v = v.wrapping_add(1));
+                                    }
+                                });
+                            }
                         }
                     }
                     ElementState::Released => {
                         // Always clear the button in editor input
                         if let Ok(mut es) = self.editor_state.lock() {
                             es.editor_input.mouse_buttons[btn_idx] = false;
+                            // End gizmo drag on left button release
+                            if btn_idx == 0 && es.gizmo.dragging {
+                                es.gizmo.end_drag();
+                            }
                         }
 
                         if self.viewport_dragging {
