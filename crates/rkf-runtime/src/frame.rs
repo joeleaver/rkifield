@@ -226,9 +226,10 @@ pub fn execute_frame(ctx: &mut FrameContext) {
     }
 
     // ── 5. Cloud shadow map ───────────────────────────────────────────────────
+    // Callers must pre-configure cloud shadow params (update_params_ex +
+    // set_cloud_params) before calling execute_frame.
     if ctx.settings.cloud_shadows_enabled {
-        ctx.cloud_shadow
-            .dispatch(ctx.encoder, ctx.queue, ctx.camera_pos, ctx.sun_dir);
+        ctx.cloud_shadow.dispatch_only(ctx.encoder);
     }
 
     // ── 6. Shade ──────────────────────────────────────────────────────────────

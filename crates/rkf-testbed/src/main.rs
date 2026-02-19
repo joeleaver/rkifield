@@ -50,7 +50,10 @@ use rkf_render::vol_composite::VolCompositePass;
 use rkf_render::fog::{FogSettings, FogParams};
 use rkf_render::clouds::{CloudSettings, CloudParams};
 use rkf_render::cloud_shadow::{CloudShadowPass, DEFAULT_CLOUD_SHADOW_EXTINCTION};
+use rkf_render::vol_temporal::VolTemporalPass;
 use rkf_render::RenderContext;
+
+use rkf_runtime::frame::{execute_frame, FrameContext, FrameSettings};
 
 mod automation;
 use automation::{SharedState, TestbedAutomationApi};
@@ -464,6 +467,7 @@ struct GpuState {
     shading: ShadingPass,
     vol_shadow: VolShadowPass,
     vol_march: VolMarchPass,
+    vol_temporal: VolTemporalPass,
     vol_upscale: VolUpscalePass,
     vol_composite: VolCompositePass,
     fog_settings: FogSettings,
@@ -590,7 +594,7 @@ impl GpuState {
             INTERNAL_WIDTH,
             INTERNAL_HEIGHT,
         );
-        // Phase 11: Volumetric pipeline
+        // Phase 12: Volumetric pipeline
         let vol_shadow = VolShadowPass::new(&context.device, &context.queue, &scene.bind_group_layout);
         let cloud_shadow = CloudShadowPass::new(&context.device);
 
@@ -602,6 +606,13 @@ impl GpuState {
             &cloud_shadow.shadow_view,
             half_w, half_h,
             INTERNAL_WIDTH, INTERNAL_HEIGHT,
+        );
+
+        let vol_temporal = VolTemporalPass::new(
+            &context.device,
+            &vol_march.output_view,
+            &gbuffer.motion_view,
+            half_w, half_h,
         );
 
         let vol_upscale_pass = VolUpscalePass::new(
@@ -760,6 +771,7 @@ impl GpuState {
             shading,
             vol_shadow,
             vol_march,
+            vol_temporal,
             vol_upscale: vol_upscale_pass,
             vol_composite,
             fog_settings,
@@ -890,47 +902,19 @@ impl GpuState {
             [cam_pos.x, cam_pos.y, cam_pos.z],
         );
 
-        // Phase 10 pipeline: ray march -> tile cull -> GI inject -> GI mip -> shade -> upscale -> sharpen -> tone map -> blit
-        self.ray_march
-            .dispatch(&mut encoder, &self.scene, &self.gbuffer, &self.clipmap);
-        self.tile_cull.dispatch(&mut encoder, &self.gbuffer);
+        // ── Pre-frame param updates for execute_frame ────────────────────────
 
-        // GI: inject direct lighting into radiance volume L0
-        self.radiance_inject.dispatch(&mut encoder, &self.scene, &self.material_table);
-
-        // GI: generate mip levels L0 → L1 → L2 → L3
-        self.radiance_mip.dispatch(&mut encoder);
-
-        self.shading.dispatch(
-            &mut encoder,
-            &self.gbuffer,
-            &self.material_table,
-            &self.scene,
-            &self.tile_cull.shade_light_bind_group,
-            &self.radiance_volume,
-            &self.color_pool,
-        );
-
-        // Phase 11: Volumetric pipeline
-        // Sun direction — toward the sun (matches directional light dir)
-        // Sun is at [0.9, 0.26, 0.15] — low angle sunrise from +X
+        // Sun direction (matches directional light)
         let sun_dir = [0.9f32, 0.26, 0.15];
         let sun_len = (sun_dir[0] * sun_dir[0] + sun_dir[1] * sun_dir[1] + sun_dir[2] * sun_dir[2]).sqrt();
         let sun_dir_n = [sun_dir[0] / sun_len, sun_dir[1] / sun_len, sun_dir[2] / sun_len];
 
-        // Volumetric shadow map
-        self.vol_shadow.dispatch(
-            &mut encoder, &self.context.queue,
-            [cam_pos.x, cam_pos.y, cam_pos.z], sun_dir_n,
-            &self.scene.bind_group,
-        );
-
-        // Update cloud params (time drives wind scrolling)
+        // Cloud params (time drives wind scrolling)
         let elapsed = self.start_time.elapsed().as_secs_f32();
         let cloud_gpu = CloudParams::from_settings(&self.cloud_settings, elapsed);
         self.vol_march.set_cloud_params(&self.context.queue, &cloud_gpu);
 
-        // Cloud shadow map — use matching cloud altitudes and coverage
+        // Cloud shadow — pre-configure params (execute_frame calls dispatch_only)
         self.cloud_shadow.update_params_ex(
             &self.context.queue,
             [cam_pos.x, cam_pos.y, cam_pos.z], sun_dir_n,
@@ -939,16 +923,13 @@ impl GpuState {
             DEFAULT_CLOUD_SHADOW_EXTINCTION,
         );
         self.cloud_shadow.set_cloud_params(&self.context.queue, &cloud_gpu);
-        self.cloud_shadow.dispatch_only(&mut encoder);
 
-        // Volumetric march (half-res)
+        // Volumetric march params
         let cam_right = self.camera.right();
         let cam_up_vec = self.camera.up();
         let fov_half_tan = (self.camera.fov_degrees.to_radians() * 0.5).tan();
         let aspect = INTERNAL_WIDTH as f32 / INTERNAL_HEIGHT as f32;
         let fog_params = FogParams::from_settings(&self.fog_settings);
-
-        // Compute vol shadow bounds to pass into march params
         let half_range = rkf_render::DEFAULT_VOL_SHADOW_RANGE * 0.5;
         let half_height = rkf_render::DEFAULT_VOL_SHADOW_HEIGHT * 0.5;
 
@@ -993,45 +974,56 @@ impl GpuState {
                 cam_pos.z + half_range, 0.0,
             ],
         };
-        self.vol_march.dispatch(&mut encoder, &self.context.queue, &vol_params);
 
-        // Bilateral upscale (half → full internal res)
-        self.vol_upscale.dispatch(&mut encoder);
-
-        // Volumetric compositing (shaded + scatter)
-        self.vol_composite.dispatch(&mut encoder);
-
-        // Phase 10: DoF (pre-upscale, reads composited HDR + gbuffer depth)
-        self.dof.dispatch(&mut encoder);
-
-        // Phase 10: Motion blur (pre-upscale, reads DoF output + gbuffer motion vectors)
-        self.motion_blur.dispatch(&mut encoder);
-
-        // Phase 10: Bloom extract/downsample/blur (pre-upscale, reads motion-blurred HDR)
-        self.bloom.dispatch(&mut encoder);
-
-        // Phase 10: spatial upscale + edge-aware sharpen (no jitter — spatial only)
+        // Upscale jitter (disabled — spatial only, Phase 9 decision)
         self.upscale.update_jitter(&self.context.queue, [0.0, 0.0]);
         let history_read_idx = self.history.read_index();
-        self.upscale.dispatch(&mut encoder, history_read_idx);
-        self.sharpen.dispatch(&mut encoder);
 
-        // Phase 10: Bloom composite (post-upscale, blends bloom mips onto sharpened HDR)
-        self.bloom_composite.dispatch(&mut encoder);
-
-        // Phase 10: Auto-exposure (histogram + adaptation, updates exposure buffer)
-        self.auto_exposure.dispatch(&mut encoder, &self.context.queue, dt);
-
-        // Tone map (HDR → LDR with exposure + ACES/AgX curve)
-        self.tone_map.dispatch(&mut encoder);
-
-        // Phase 10: Color grading (3D LUT — identity by default)
-        self.color_grade.dispatch(&mut encoder);
-
-        // Phase 10: Cosmetics (vignette, grain, chromatic aberration)
-        self.cosmetics.dispatch(&mut encoder, &self.context.queue, self.frame_index);
-
-        self.blit.draw(&mut encoder, &view);
+        // ── Execute frame via rkf-runtime frame scheduler ────────────────────
+        let settings = FrameSettings::default();
+        let mut ctx = FrameContext {
+            encoder: &mut encoder,
+            queue: &self.context.queue,
+            settings: &settings,
+            scene: &self.scene,
+            gbuffer: &self.gbuffer,
+            material_table: &self.material_table,
+            light_buffer: &self.light_buffer,
+            clipmap: &self.clipmap,
+            ray_march: &self.ray_march,
+            tile_cull: &self.tile_cull,
+            shading: &self.shading,
+            tone_map: &self.tone_map,
+            blit: &self.blit,
+            shade_light_bind_group: &self.tile_cull.shade_light_bind_group,
+            radiance_volume: &self.radiance_volume,
+            radiance_inject: &self.radiance_inject,
+            radiance_mip: &self.radiance_mip,
+            color_pool: &self.color_pool,
+            vol_shadow: &self.vol_shadow,
+            vol_march: &self.vol_march,
+            vol_march_params: &vol_params,
+            vol_temporal: &mut self.vol_temporal,
+            vol_upscale: &self.vol_upscale,
+            vol_composite: &self.vol_composite,
+            cloud_shadow: &self.cloud_shadow,
+            bloom: &self.bloom,
+            dof: &self.dof,
+            motion_blur: &self.motion_blur,
+            upscale: &self.upscale,
+            sharpen: &self.sharpen,
+            history_read_idx,
+            bloom_composite: &self.bloom_composite,
+            auto_exposure: &self.auto_exposure,
+            color_grade: &self.color_grade,
+            cosmetics: &self.cosmetics,
+            frame_index: self.frame_index,
+            dt,
+            camera_pos: [cam_pos.x, cam_pos.y, cam_pos.z],
+            sun_dir: sun_dir_n,
+            swapchain_view: &view,
+        };
+        execute_frame(&mut ctx);
 
         // Copy final LDR texture -> staging buffer for screenshot readback
         encoder.copy_texture_to_buffer(
@@ -1254,7 +1246,7 @@ impl ApplicationHandler for App {
             return;
         }
         let attrs = WindowAttributes::default()
-            .with_title("RKIField Testbed [Phase 11]")
+            .with_title("RKIField Testbed [Phase 12]")
             .with_inner_size(PhysicalSize::new(1280u32, 720u32));
         let window = Arc::new(
             event_loop
@@ -1281,7 +1273,7 @@ impl ApplicationHandler for App {
         log::info!("IPC server listening on {socket_path}");
         self.socket_path = Some(socket_path);
 
-        log::info!("Phase 11 validation — volumetric fog, god rays, clouds");
+        log::info!("Phase 12 validation — volumetric fog, god rays, clouds");
         log::info!("Click to capture mouse, WASD to move, mouse to look, Esc to exit");
     }
 
@@ -1345,7 +1337,7 @@ impl ApplicationHandler for App {
                         let elapsed = now.duration_since(self.last_title_update).as_secs_f64();
                         let fps = self.frame_count as f64 / elapsed;
                         window.set_title(&format!(
-                            "RKIField Testbed [Phase 11] — {fps:.0} fps ({:.2} ms)",
+                            "RKIField Testbed [Phase 12] — {fps:.0} fps ({:.2} ms)",
                             1000.0 / fps
                         ));
                         self.frame_count = 0;
