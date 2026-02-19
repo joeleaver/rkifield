@@ -943,4 +943,230 @@ mod tests {
             "not all bytes consumed"
         );
     }
+
+    // ------ 8. Full animated pipeline integration test ------
+
+    /// Integration test: full animated import pipeline.
+    /// Build skinned mesh -> segment -> voxelize -> animated asset -> .rkf roundtrip.
+    #[test]
+    fn full_animated_pipeline_roundtrip() {
+        use crate::mesh::{ImportMaterial, MeshData};
+        use crate::skeleton_extract::{auto_segment, VertexSkinning};
+        use crate::segment_voxelize::voxelize_segments;
+        use crate::voxelize::{VoxelizeConfig, to_chunk};
+        use rkf_animation::blend_shape::BlendShape;
+        use rkf_animation::clip::{AnimationClip, BoneChannel, Keyframe};
+        use rkf_animation::segment::{JointRegion, Segment};
+        use rkf_animation::skeleton::{Bone, Skeleton};
+        use rkf_core::aabb::Aabb;
+        use rkf_core::chunk::Chunk;
+        use glam::{IVec3, Mat4, Quat, Vec3};
+
+        // Build a simple two-segment mesh: left box + right box
+        // Left box vertices (indices 0-7) attached to bone 0
+        // Right box vertices (indices 8-15) attached to bone 1
+        let half = 0.25f32;
+
+        // Left box centered at (-0.5, 0, 0)
+        let left_center = Vec3::new(-0.5, 0.0, 0.0);
+        let left_verts = box_vertices(left_center, half);
+        let right_center = Vec3::new(0.5, 0.0, 0.0);
+        let right_verts = box_vertices(right_center, half);
+
+        let mut positions: Vec<Vec3> = Vec::new();
+        let mut indices: Vec<u32> = Vec::new();
+
+        let left_offset = positions.len() as u32;
+        positions.extend_from_slice(&left_verts);
+        indices.extend(box_indices(left_offset));
+
+        let right_offset = positions.len() as u32;
+        positions.extend_from_slice(&right_verts);
+        indices.extend(box_indices(right_offset));
+
+        let tri_count = indices.len() / 3;
+        let mesh = MeshData {
+            normals: vec![Vec3::Y; positions.len()],
+            uvs: Vec::new(),
+            material_indices: vec![0; tri_count],
+            materials: vec![ImportMaterial {
+                name: "skin".to_string(),
+                base_color: [0.8, 0.6, 0.5],
+                metallic: 0.0,
+                roughness: 0.7,
+                albedo_texture: None,
+            }],
+            bounds_min: Vec3::new(-0.75, -0.25, -0.25),
+            bounds_max: Vec3::new(0.75, 0.25, 0.25),
+            indices,
+            positions,
+        };
+
+        // Skinning: left box (verts 0-7) -> bone 0, right box (verts 8-15) -> bone 1
+        let vert_count = mesh.positions.len();
+        let mut joints = Vec::with_capacity(vert_count);
+        let mut weights = Vec::with_capacity(vert_count);
+        for i in 0..vert_count {
+            if i < 8 {
+                joints.push([0, -1, -1, -1]); // bone 0
+            } else {
+                joints.push([1, -1, -1, -1]); // bone 1
+            }
+            weights.push([1.0, 0.0, 0.0, 0.0]);
+        }
+        let skinning = VertexSkinning { joints, weights };
+
+        // Segment
+        let segmentation = auto_segment(&mesh, &skinning);
+        assert_eq!(segmentation.segment_bones.len(), 2, "should have 2 segments");
+        assert!(
+            segmentation.joint_pairs.is_empty(),
+            "no joint triangles for separate boxes"
+        );
+
+        // Voxelize segments
+        let config = VoxelizeConfig {
+            tier: 0,
+            narrow_band_bricks: 2,
+            compute_color: false,
+        };
+        let seg_vox = voxelize_segments(&mesh, &segmentation, &config);
+        assert_eq!(seg_vox.segments.len(), 2);
+
+        // Build skeleton: 2 bones, bone 0 is root, bone 1 is child
+        let skeleton = Skeleton::new(
+            vec![
+                Bone {
+                    name: "root".to_string(),
+                    bind_transform: Mat4::from_translation(Vec3::new(-0.5, 0.0, 0.0)),
+                    inverse_bind: Mat4::from_translation(Vec3::new(0.5, 0.0, 0.0)),
+                },
+                Bone {
+                    name: "child".to_string(),
+                    bind_transform: Mat4::from_translation(Vec3::new(1.0, 0.0, 0.0)),
+                    inverse_bind: Mat4::from_translation(Vec3::new(-0.5, 0.0, 0.0)),
+                },
+            ],
+            vec![-1, 0],
+        )
+        .unwrap();
+
+        // Build a simple animation clip
+        let clip = AnimationClip {
+            name: "wave".to_string(),
+            duration: 1.0,
+            channels: vec![BoneChannel {
+                bone_index: 1,
+                keyframes: vec![
+                    Keyframe {
+                        time: 0.0,
+                        position: Vec3::new(1.0, 0.0, 0.0),
+                        rotation: Quat::IDENTITY,
+                        scale: Vec3::ONE,
+                    },
+                    Keyframe {
+                        time: 0.5,
+                        position: Vec3::new(1.0, 0.3, 0.0),
+                        rotation: Quat::from_rotation_z(0.3),
+                        scale: Vec3::ONE,
+                    },
+                    Keyframe {
+                        time: 1.0,
+                        position: Vec3::new(1.0, 0.0, 0.0),
+                        rotation: Quat::IDENTITY,
+                        scale: Vec3::ONE,
+                    },
+                ],
+            }],
+        };
+
+        // Build chunk from all segment voxelization results
+        // Collect grids from all segments into a single chunk
+        let mut all_tier_grids = Vec::new();
+        for sd in &seg_vox.segments {
+            let sub_chunk = to_chunk(&sd.voxelize_result, &[], config.tier, IVec3::ZERO);
+            all_tier_grids.extend(sub_chunk.grids);
+        }
+        let total_bricks: u32 = all_tier_grids
+            .iter()
+            .map(|tg| tg.bricks.len() as u32)
+            .sum();
+        let chunk = Chunk {
+            coords: IVec3::ZERO,
+            grids: all_tier_grids,
+            brick_count: total_bricks,
+        };
+
+        // Build segment descriptors from voxelization
+        let segments: Vec<Segment> = seg_vox.segments.iter().map(|sd| sd.segment.clone()).collect();
+        let joints_desc: Vec<JointRegion> = seg_vox.joints.iter().map(|jd| jd.joint.clone()).collect();
+
+        // Build animated asset
+        let asset = AnimatedAsset {
+            chunk,
+            skeleton,
+            segments,
+            joints: joints_desc,
+            clips: vec![clip],
+            blend_shapes: vec![BlendShape::new(
+                "smile",
+                0,
+                1,
+                Aabb::new(Vec3::splat(-0.1), Vec3::splat(0.1)),
+            )],
+        };
+
+        // Roundtrip
+        let mut buf = Vec::new();
+        save_animated_asset(&asset, &mut buf).unwrap();
+        assert!(!buf.is_empty());
+
+        let loaded = load_animated_asset(&mut std::io::Cursor::new(&buf)).unwrap();
+
+        // Verify all components
+        assert_eq!(loaded.skeleton.bones.len(), 2);
+        assert_eq!(loaded.skeleton.bones[0].name, "root");
+        assert_eq!(loaded.skeleton.bones[1].name, "child");
+        assert_eq!(loaded.skeleton.hierarchy, vec![-1, 0]);
+
+        assert_eq!(loaded.segments.len(), 2);
+        assert_eq!(loaded.joints.len(), 0);
+
+        assert_eq!(loaded.clips.len(), 1);
+        assert_eq!(loaded.clips[0].name, "wave");
+        assert_eq!(loaded.clips[0].channels.len(), 1);
+        assert_eq!(loaded.clips[0].channels[0].keyframes.len(), 3);
+
+        assert_eq!(loaded.blend_shapes.len(), 1);
+        assert_eq!(loaded.blend_shapes[0].name, "smile");
+
+        assert_eq!(loaded.chunk.brick_count, asset.chunk.brick_count);
+    }
+
+    // Helper: generate 8 vertices of an axis-aligned box
+    fn box_vertices(center: Vec3, half: f32) -> [Vec3; 8] {
+        [
+            center + Vec3::new(-half, -half, -half),
+            center + Vec3::new(half, -half, -half),
+            center + Vec3::new(half, half, -half),
+            center + Vec3::new(-half, half, -half),
+            center + Vec3::new(-half, -half, half),
+            center + Vec3::new(half, -half, half),
+            center + Vec3::new(half, half, half),
+            center + Vec3::new(-half, half, half),
+        ]
+    }
+
+    // Helper: generate 36 indices (12 triangles) for a box with vertex offset
+    fn box_indices(offset: u32) -> Vec<u32> {
+        let faces: [[u32; 6]; 6] = [
+            [0, 1, 2, 0, 2, 3], // front
+            [5, 4, 7, 5, 7, 6], // back
+            [4, 0, 3, 4, 3, 7], // left
+            [1, 5, 6, 1, 6, 2], // right
+            [3, 2, 6, 3, 6, 7], // top
+            [4, 5, 1, 4, 1, 0], // bottom
+        ];
+        faces.iter().flatten().map(|&i| offset + i).collect()
+    }
 }
