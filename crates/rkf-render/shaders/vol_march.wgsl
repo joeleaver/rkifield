@@ -54,6 +54,19 @@ struct VolMarchParams {
 // Output half-res scatter texture: (scatter_r, scatter_g, scatter_b, transmittance).
 @group(0) @binding(4) var output_scatter:  texture_storage_2d<rgba16float, write>;
 
+// Cloud parameters (procedural FBM clouds).
+struct CloudParams {
+    // x=cloud_min, y=cloud_max, z=threshold, w=density_scale
+    altitude: vec4<f32>,
+    // x=shape_freq, y=detail_freq, z=detail_weight, w=weather_scale
+    noise: vec4<f32>,
+    // x=wind_dir.x, y=wind_dir.y, z=wind_speed, w=time
+    wind: vec4<f32>,
+    // x=procedural_enable (0/1), y=shadow_coverage, z=shadow_res, w=brick_clouds_enable (0/1)
+    flags: vec4<f32>,
+}
+@group(0) @binding(5) var<uniform> cloud_params: CloudParams;
+
 const PI: f32 = 3.14159265359;
 
 // ---------------------------------------------------------------------------
@@ -119,6 +132,108 @@ fn sample_vol_shadow(pos: vec3<f32>) -> f32 {
 }
 
 // ---------------------------------------------------------------------------
+// Noise primitives for procedural clouds (ported from clouds.wgsl).
+// ---------------------------------------------------------------------------
+
+// Simple 3D hash for noise generation.
+fn hash3(p: vec3<f32>) -> f32 {
+    var p3 = fract(p * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+// Value noise 3D — tri-linearly interpolated hash lattice.
+fn value_noise_3d(p: vec3<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+
+    return mix(
+        mix(
+            mix(hash3(i + vec3<f32>(0.0, 0.0, 0.0)),
+                hash3(i + vec3<f32>(1.0, 0.0, 0.0)), u.x),
+            mix(hash3(i + vec3<f32>(0.0, 1.0, 0.0)),
+                hash3(i + vec3<f32>(1.0, 1.0, 0.0)), u.x),
+            u.y
+        ),
+        mix(
+            mix(hash3(i + vec3<f32>(0.0, 0.0, 1.0)),
+                hash3(i + vec3<f32>(1.0, 0.0, 1.0)), u.x),
+            mix(hash3(i + vec3<f32>(0.0, 1.0, 1.0)),
+                hash3(i + vec3<f32>(1.0, 1.0, 1.0)), u.x),
+            u.y
+        ),
+        u.z
+    );
+}
+
+// Fractal Brownian Motion — sums octaves of value noise.
+fn fbm_3d(p: vec3<f32>, octaves: u32) -> f32 {
+    var val: f32 = 0.0;
+    var amp: f32 = 0.5;
+    var freq: f32 = 1.0;
+    var pos = p;
+    for (var i = 0u; i < octaves; i++) {
+        val += amp * value_noise_3d(pos * freq);
+        freq *= 2.0;
+        amp  *= 0.5;
+    }
+    return val;
+}
+
+// ---------------------------------------------------------------------------
+// Procedural cloud density (ported from clouds.wgsl).
+//
+// Evaluates FBM-based cloud density at a world position.
+// Returns non-negative density; zero means no cloud.
+// ---------------------------------------------------------------------------
+fn cloud_density(pos: vec3<f32>) -> f32 {
+    let cloud_min = cloud_params.altitude.x;
+    let cloud_max = cloud_params.altitude.y;
+
+    // Early out: outside altitude band or feature disabled.
+    if (pos.y < cloud_min || pos.y > cloud_max) { return 0.0; }
+    if (cloud_params.flags.x < 0.5)             { return 0.0; }
+
+    // Height gradient: ramp up over bottom 10%, ramp down over top 40%.
+    let height_frac     = (pos.y - cloud_min) / (cloud_max - cloud_min);
+    let height_gradient = smoothstep(0.0, 0.1, height_frac)
+                        * smoothstep(1.0, 0.6, height_frac);
+
+    // Wind scrolling (XZ plane).
+    let wind_dir    = vec2<f32>(cloud_params.wind.x, cloud_params.wind.y);
+    let wind_offset = wind_dir * cloud_params.wind.z * cloud_params.wind.w;
+    let scrolled    = pos + vec3<f32>(wind_offset.x, 0.0, wind_offset.y);
+
+    // Large offset avoids hash3 zero-point at world origin.
+    let noise_offset = vec3<f32>(173.5, 247.3, 391.7);
+
+    // Shape noise — 4-octave FBM at low frequency.
+    let shape_freq = cloud_params.noise.x;
+    let shape      = fbm_3d(scrolled * shape_freq + noise_offset, 4u);
+
+    // Weather modulation — 2-octave FBM tiled at weather_scale.
+    let weather_scale = cloud_params.noise.w;
+    let weather       = fbm_3d(
+        vec3<f32>(scrolled.x / weather_scale, 0.0, scrolled.z / weather_scale) + noise_offset,
+        2u
+    );
+
+    // Base density after threshold.
+    let threshold = cloud_params.altitude.z;
+    let base      = saturate(shape * weather * height_gradient - threshold);
+
+    // Subtractive detail — 3-octave FBM erodes cloud edges.
+    let detail_freq   = cloud_params.noise.y;
+    let detail_weight = cloud_params.noise.z;
+    let detail        = fbm_3d(scrolled * detail_freq + noise_offset, 3u);
+
+    let density_scale = cloud_params.altitude.w;
+
+    return max(0.0, base - detail * detail_weight) * density_scale;
+}
+
+// ---------------------------------------------------------------------------
 // Height fog: exponential density falloff above the base height.
 //
 // fog_height.x = base_density
@@ -145,28 +260,25 @@ fn distance_fog_density(t: f32) -> f32 {
 }
 
 // ---------------------------------------------------------------------------
-// Sample total extinction density at a world position and ray distance t.
+// Sample fog and cloud density separately for different scattering treatment.
 //
-// Accumulates:
-//   - Uniform ambient dust (fog_distance.z)
-//   - Height fog if enabled (fog_color.w > 0.5)
-//   - Distance fog if enabled (fog_height.w > 0.5)
+// Returns vec2(fog_density, cloud_density).
+// Fog uses the configurable fog scattering color; clouds use white albedo.
 // ---------------------------------------------------------------------------
-fn sample_density(pos: vec3<f32>, t: f32) -> f32 {
-    // Ambient dust is always accumulated (zero by default = no contribution).
-    var density = params.fog_distance.z;
-
-    // Height fog (exponential above base height).
+fn sample_density_split(pos: vec3<f32>, t: f32) -> vec2<f32> {
+    // Fog: ambient dust + height fog + distance fog.
+    var fog: f32 = params.fog_distance.z;
     if (params.fog_color.w > 0.5) {
-        density += height_fog_density(pos);
+        fog += height_fog_density(pos);
     }
-
-    // Distance fog (increases with camera distance).
     if (params.fog_height.w > 0.5) {
-        density += distance_fog_density(t);
+        fog += distance_fog_density(t);
     }
 
-    return density;
+    // Clouds: FBM noise within altitude band.
+    let cloud = cloud_density(pos);
+
+    return vec2(fog, cloud);
 }
 
 // ---------------------------------------------------------------------------
@@ -220,22 +332,45 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var scatter:      vec3<f32> = vec3<f32>(0.0);
     var transmittance: f32      = 1.0;
 
+    // Cloud scattering: white albedo, low asymmetry to approximate multi-scatter.
+    // Real clouds scatter isotropically after many internal bounces.
+    // Two-lobe: mild forward peak (silver lining) + strong isotropic base.
+    let cloud_albedo = vec3<f32>(1.0, 1.0, 1.0);
+    let cloud_g_forward: f32 = 0.6;  // forward lobe for silver lining
+    let cloud_g_back: f32 = -0.2;    // slight back-scatter lobe
+    let cloud_forward_weight: f32 = 0.3; // 30% directional, 70% isotropic-ish
+    // Ambient sky light illuminates clouds from all directions (multi-scatter approx).
+    let sky_ambient = vec3<f32>(0.4, 0.5, 0.7) * 0.6; // blue-ish sky ambient
+
     for (var i = 0u; i < params.max_steps; i++) {
         let t = params.near + (f32(i) + jitter) * params.step_size;
         if (t >= max_t) { break; }
 
         let pos = params.cam_pos.xyz + ray_dir * t;
 
-        let density = sample_density(pos, t);
-        if (density <= 0.001) { continue; }
+        let densities = sample_density_split(pos, t);
+        let fog_dens   = densities.x;
+        let cloud_dens = densities.y;
+        let total      = fog_dens + cloud_dens;
+        if (total <= 0.001) { continue; }
 
-        // Beer-Lambert extinction over this step.
-        let step_transmittance = exp(-density * params.step_size);
+        // Beer-Lambert extinction over this step (total medium).
+        let step_transmittance = exp(-total * params.step_size);
 
-        // In-scattering from the sun: visibility × phase × sun radiance × fog albedo.
-        let sun_vis    = sample_vol_shadow(pos);
-        let sun_phase  = henyey_greenstein(cos_sun, dust_g);
-        let in_scatter = density * sun_vis * sun_phase * params.sun_color.xyz * scatter_albedo;
+        // In-scattering: fog and clouds use different albedo and phase.
+        let sun_vis = sample_vol_shadow(pos);
+        let fog_in  = fog_dens * sun_vis * henyey_greenstein(cos_sun, dust_g)
+                    * params.sun_color.xyz * scatter_albedo;
+        // Two-lobe HG phase for clouds (multi-scatter approximation).
+        let cloud_phase = mix(
+            henyey_greenstein(cos_sun, cloud_g_back),
+            henyey_greenstein(cos_sun, cloud_g_forward),
+            cloud_forward_weight
+        );
+        let cloud_sun  = cloud_dens * sun_vis * cloud_phase * params.sun_color.xyz * cloud_albedo;
+        let cloud_sky  = cloud_dens * sky_ambient * cloud_albedo;
+        let cloud_in   = cloud_sun + cloud_sky;
+        let in_scatter = fog_in + cloud_in;
 
         // Front-to-back accumulation.
         scatter      += in_scatter * transmittance * params.step_size;

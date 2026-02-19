@@ -48,6 +48,8 @@ use rkf_render::vol_march::{VolMarchPass, VolMarchParams};
 use rkf_render::vol_upscale::VolUpscalePass;
 use rkf_render::vol_composite::VolCompositePass;
 use rkf_render::fog::{FogSettings, FogParams};
+use rkf_render::clouds::{CloudSettings, CloudParams};
+use rkf_render::cloud_shadow::CloudShadowPass;
 use rkf_render::RenderContext;
 
 mod automation;
@@ -465,6 +467,9 @@ struct GpuState {
     vol_upscale: VolUpscalePass,
     vol_composite: VolCompositePass,
     fog_settings: FogSettings,
+    cloud_shadow: CloudShadowPass,
+    cloud_settings: CloudSettings,
+    start_time: Instant,
     dof: DofPass,
     motion_blur: MotionBlurPass,
     history: HistoryBuffers,
@@ -514,7 +519,7 @@ impl GpuState {
         // From +Z side looking toward -Z across the avenue, sun at +X.
         let mut camera = Camera::new(Vec3::new(0.0, 2.5, 8.0));
         camera.yaw = 0.0;  // facing -Z (toward the avenue)
-        camera.pitch = -0.15;  // slightly downward
+        camera.pitch = 0.2;  // slightly upward to see clouds
         camera.fov_degrees = 70.0;
 
         let camera_uniforms = camera.uniforms(INTERNAL_WIDTH, INTERNAL_HEIGHT, 0, [[0.0; 4]; 4]);
@@ -624,21 +629,27 @@ impl GpuState {
             ambient_dust_g: 0.82,          // strong forward scattering toward sun
         };
 
-        // Phase 10: Temporal upscaling pipeline
-        log::info!("Upscale backend: Custom Temporal ({}×{} → {}×{})",
-            INTERNAL_WIDTH, INTERNAL_HEIGHT, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+        // Phase 11: Cloud shadow pass
+        let cloud_shadow = CloudShadowPass::new(&context.device);
 
-        let history = HistoryBuffers::new(
-            &context.device, DISPLAY_WIDTH, DISPLAY_HEIGHT, INTERNAL_WIDTH, INTERNAL_HEIGHT,
-        );
-        let upscale = UpscalePass::new(
-            &context.device, &shading, &gbuffer, &history,
-            DISPLAY_WIDTH, DISPLAY_HEIGHT, INTERNAL_WIDTH, INTERNAL_HEIGHT,
-        );
-        let sharpen = SharpenPass::new(
-            &context.device, &upscale.output_view, &gbuffer,
-            DISPLAY_WIDTH, DISPLAY_HEIGHT,
-        );
+        // Cloud settings — low altitude for testbed validation (march far=60m).
+        // Default cloud altitudes are 1000-3000m which is way beyond march range.
+        // Use 5-15m so clouds are visible in the volumetric march.
+        let cloud_settings = CloudSettings {
+            procedural_enabled: true,
+            cloud_min: 6.0,              // cloud base above objects
+            cloud_max: 22.0,             // tall altitude band
+            cloud_threshold: 0.06,       // balance: good coverage with some gaps
+            cloud_density_scale: 4.0,    // opaque in thick areas, translucent at edges
+            shape_frequency: 0.1,        // defined cloud shapes
+            detail_frequency: 0.45,      // detail erosion for wispy edges
+            detail_weight: 0.3,          // more erosion for distinct cloud edges
+            weather_scale: 80.0,         // broad weather coverage
+            wind_direction: [1.0, 0.3],
+            wind_speed: 0.3,
+            shadow_enabled: true,
+            ..Default::default()
+        };
 
         // Phase 10: DoF (pre-upscale) — reads composited HDR + gbuffer depth
         let dof = DofPass::new(
@@ -658,6 +669,22 @@ impl GpuState {
         let bloom = BloomPass::new(
             &context.device, &motion_blur.output_view,
             INTERNAL_WIDTH, INTERNAL_HEIGHT,
+        );
+
+        // Phase 10: Temporal upscaling pipeline — reads from end of pre-upscale chain
+        log::info!("Upscale backend: Custom Temporal ({}×{} → {}×{})",
+            INTERNAL_WIDTH, INTERNAL_HEIGHT, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+
+        let history = HistoryBuffers::new(
+            &context.device, DISPLAY_WIDTH, DISPLAY_HEIGHT, INTERNAL_WIDTH, INTERNAL_HEIGHT,
+        );
+        let upscale = UpscalePass::new(
+            &context.device, &motion_blur.output_view, &gbuffer, &history,
+            DISPLAY_WIDTH, DISPLAY_HEIGHT, INTERNAL_WIDTH, INTERNAL_HEIGHT,
+        );
+        let sharpen = SharpenPass::new(
+            &context.device, &upscale.output_view, &gbuffer,
+            DISPLAY_WIDTH, DISPLAY_HEIGHT,
         );
 
         // Phase 10: Bloom composite (post-upscale) — blend bloom onto sharpened HDR
@@ -736,6 +763,9 @@ impl GpuState {
             vol_upscale: vol_upscale_pass,
             vol_composite,
             fog_settings,
+            cloud_shadow,
+            cloud_settings,
+            start_time: Instant::now(),
             dof,
             motion_blur,
             history,
@@ -894,6 +924,17 @@ impl GpuState {
             [cam_pos.x, cam_pos.y, cam_pos.z], sun_dir_n,
             &self.scene.bind_group,
         );
+
+        // Cloud shadow map
+        self.cloud_shadow.dispatch(
+            &mut encoder, &self.context.queue,
+            [cam_pos.x, cam_pos.y, cam_pos.z], sun_dir_n,
+        );
+
+        // Update cloud params (time drives wind scrolling)
+        let elapsed = self.start_time.elapsed().as_secs_f32();
+        let cloud_gpu = CloudParams::from_settings(&self.cloud_settings, elapsed);
+        self.vol_march.set_cloud_params(&self.context.queue, &cloud_gpu);
 
         // Volumetric march (half-res)
         let cam_right = self.camera.right();

@@ -160,6 +160,7 @@ pub struct VolMarchPass {
     bind_group_layout: wgpu::BindGroupLayout,
     bind_group: wgpu::BindGroup,
     params_buffer: wgpu::Buffer,
+    cloud_params_buffer: wgpu::Buffer,
     sampler: wgpu::Sampler,
     /// Half-res output texture (Rgba16Float): scatter RGB + transmittance.
     pub output_texture: wgpu::Texture,
@@ -262,6 +263,19 @@ impl VolMarchPass {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
+        // Default cloud params — disabled (flags.x = 0.0).
+        let default_cloud_params = crate::clouds::CloudParams {
+            altitude: [1000.0, 3000.0, 0.4, 1.0],
+            noise: [0.0003, 0.002, 0.3, 10000.0],
+            wind: [1.0, 0.0, 5.0, 0.0],
+            flags: [0.0, 4000.0, 1024.0, 0.0], // procedural disabled
+        };
+        let cloud_params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vol march cloud params"),
+            contents: bytemuck::bytes_of(&default_cloud_params),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
         // --- Bind group layout ---
         // binding 0: uniform buffer (VolMarchParams)
         // binding 1: texture_2d<f32> depth (non-filterable)
@@ -322,6 +336,17 @@ impl VolMarchPass {
                         },
                         count: None,
                     },
+                    // Cloud parameters uniform (CloudParams, 64 bytes)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
                 ],
             });
 
@@ -350,6 +375,10 @@ impl VolMarchPass {
                     binding: 4,
                     resource: wgpu::BindingResource::TextureView(&output_view),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: cloud_params_buffer.as_entire_binding(),
+                },
             ],
         });
 
@@ -375,6 +404,7 @@ impl VolMarchPass {
             bind_group_layout,
             bind_group,
             params_buffer,
+            cloud_params_buffer,
             sampler,
             output_texture,
             output_view,
@@ -441,6 +471,15 @@ impl VolMarchPass {
         // FogParams is 64 bytes total; we only upload the first 48 (skip _pad).
         let fog_bytes = bytemuck::bytes_of(fog);
         queue.write_buffer(&self.params_buffer, 128, &fog_bytes[..48]);
+    }
+
+    /// Update procedural cloud parameters.
+    ///
+    /// Writes the full 64-byte [`crate::clouds::CloudParams`] to the cloud
+    /// params uniform buffer (binding 5). Call once per frame with updated
+    /// time for wind animation.
+    pub fn set_cloud_params(&self, queue: &wgpu::Queue, cloud: &crate::clouds::CloudParams) {
+        queue.write_buffer(&self.cloud_params_buffer, 0, bytemuck::bytes_of(cloud));
     }
 }
 
