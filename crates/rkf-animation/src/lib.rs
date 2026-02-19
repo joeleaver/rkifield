@@ -14,3 +14,6 @@
 //! - Skeleton definition and bone hierarchy types
 
 #![warn(missing_docs)]
+
+pub mod clip;
+pub mod skeleton;
