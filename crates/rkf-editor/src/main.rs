@@ -27,7 +27,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::PhysicalKey;
 use winit::window::{Window, WindowId};
 
-use rinch::embed::{RinchContext, RinchContextConfig};
+use rinch::embed::{RinchContext, RinchContextConfig, RinchOverlayRenderer};
 use rinch::prelude::*;
 use rinch_platform::{
     KeyCode as PlatformKeyCode, Modifiers as PlatformModifiers,
@@ -36,6 +36,29 @@ use rinch_platform::{
 
 use automation::{EditorAutomationApi, SharedState};
 use engine_viewport::{EngineState, DISPLAY_HEIGHT, DISPLAY_WIDTH};
+
+// ---------------------------------------------------------------------------
+// Blit shader — fullscreen triangle compositing overlay onto surface
+// ---------------------------------------------------------------------------
+
+const BLIT_WGSL: &str = "
+@group(0) @binding(0) var t: texture_2d<f32>;
+@group(0) @binding(1) var s: sampler;
+
+struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> }
+
+@vertex fn vs(@builtin(vertex_index) i: u32) -> VsOut {
+    let x = f32(i32(i) / 2) * 4.0 - 1.0;
+    let y = f32(i32(i) % 2) * 4.0 - 1.0;
+    var o: VsOut;
+    o.pos = vec4(x, y, 0.0, 1.0);
+    o.uv = vec2((x + 1.0) / 2.0, 1.0 - (y + 1.0) / 2.0);
+    return o;
+}
+@fragment fn fs(in: VsOut) -> @location(0) vec4<f32> {
+    return textureSample(t, s, in.uv);
+}
+";
 
 // ---------------------------------------------------------------------------
 // Key translation (winit → rinch platform)
@@ -324,13 +347,18 @@ struct App {
     surface_width: u32,
     surface_height: u32,
 
-    // Rinch embed (headless — overlay rendering deferred to wgpu 27 upgrade)
-    // When overlay is available, set this to true to enable UI input routing.
+    // Rinch embed
     rinch_ctx: Option<RinchContext>,
+    overlay: Option<RinchOverlayRenderer>,
     ui_visible: bool,
 
     // Engine
     engine: Option<EngineState>,
+
+    // Blit pipeline (composites rinch overlay onto surface)
+    blit_pipeline: Option<wgpu::RenderPipeline>,
+    blit_layout: Option<wgpu::BindGroupLayout>,
+    blit_sampler: Option<wgpu::Sampler>,
 
     // Input
     cam_input: InputState,
@@ -361,8 +389,12 @@ impl App {
             surface_width: DISPLAY_WIDTH,
             surface_height: DISPLAY_HEIGHT,
             rinch_ctx: None,
-            ui_visible: false, // No overlay until wgpu 27 upgrade
+            overlay: None,
+            ui_visible: true,
             engine: None,
+            blit_pipeline: None,
+            blit_layout: None,
+            blit_sampler: None,
             cam_input: InputState::new(),
             mouse_phys: (0.0, 0.0),
             prev_mouse: (0.0, 0.0),
@@ -437,11 +469,74 @@ impl App {
         self.surface_width = w;
         self.surface_height = h;
 
-        // ── Rinch embed (headless UI for input routing) ────────────────────
-        // NOTE: RinchOverlayRenderer requires wgpu 27 (rinch's version) but
-        // our workspace uses wgpu 24. The RinchContext is headless and doesn't
-        // cross the wgpu boundary, so input routing works. Visual overlay
-        // compositing is deferred until we upgrade wgpu to 27.
+        // ── Blit pipeline (composites rinch overlay onto surface) ───────────
+
+        let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("overlay blit"),
+            source: wgpu::ShaderSource::Wgsl(BLIT_WGSL.into()),
+        });
+
+        let blit_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        let blit_pipe_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: &[&blit_layout],
+            push_constant_ranges: &[],
+        });
+
+        let blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("overlay blit"),
+            layout: Some(&blit_pipe_layout),
+            vertex: wgpu::VertexState {
+                module: &blit_shader,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &blit_shader,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview: None,
+            cache: None,
+        });
+
+        let blit_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        // ── Rinch embed ────────────────────────────────────────────────────
 
         let rinch_ctx = RinchContext::new(
             RinchContextConfig {
@@ -457,6 +552,8 @@ impl App {
             editor_ui,
         );
 
+        let overlay = RinchOverlayRenderer::new(&device, w, h, wgpu::TextureFormat::Rgba8Unorm);
+
         // ── Engine ─────────────────────────────────────────────────────────
 
         let engine = EngineState::new(
@@ -470,7 +567,11 @@ impl App {
         self.surface = Some(surface);
         self.device = Some(device);
         self.queue = Some(queue);
+        self.blit_pipeline = Some(blit_pipeline);
+        self.blit_layout = Some(blit_layout);
+        self.blit_sampler = Some(blit_sampler);
         self.rinch_ctx = Some(rinch_ctx);
+        self.overlay = Some(overlay);
         self.engine = Some(engine);
 
         // Spawn MCP IPC server
@@ -510,7 +611,10 @@ impl App {
         self.last_frame = now;
         self.frame_count += 1;
 
-        // Update rinch context (headless — for input routing only)
+        let device = self.device.as_ref().unwrap();
+        let queue = self.queue.as_ref().unwrap();
+
+        // Update rinch context
         if let Some(ctx) = &mut self.rinch_ctx {
             let events: Vec<_> = self.pending_events.drain(..).collect();
             let _actions = ctx.update(&events);
@@ -521,9 +625,55 @@ impl App {
             self.cam_input.apply_to_camera(&mut engine.camera, dt);
         }
 
-        // Engine renders full pipeline + blits to surface
+        // ── Step 1: Engine renders full pipeline + blits to surface ────────
         if let Some(engine) = &mut self.engine {
             engine.render(&surface_view, dt);
+        }
+
+        // ── Step 2: Render rinch UI overlay + composite onto surface ───────
+        if let (Some(ctx), Some(overlay)) = (&mut self.rinch_ctx, &mut self.overlay) {
+            let scene = ctx.scene();
+            let overlay_view = overlay.render(device, queue, scene);
+
+            let blit_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: self.blit_layout.as_ref().unwrap(),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&overlay_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(
+                            self.blit_sampler.as_ref().unwrap(),
+                        ),
+                    },
+                ],
+            });
+
+            let mut encoder = device.create_command_encoder(&Default::default());
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("overlay blit"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &surface_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load, // preserve engine output
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_pipeline(self.blit_pipeline.as_ref().unwrap());
+                pass.set_bind_group(0, &blit_bg, &[]);
+                pass.draw(0..3, 0..1);
+            }
+            queue.submit(std::iter::once(encoder.finish()));
         }
 
         frame.present();
@@ -563,6 +713,10 @@ impl App {
                 view_formats: vec![],
             };
             surface.configure(device, &config);
+        }
+
+        if let (Some(device), Some(overlay)) = (&self.device, &mut self.overlay) {
+            overlay.resize(device, w, h);
         }
 
         if let Some(ctx) = &mut self.rinch_ctx {
