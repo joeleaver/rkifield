@@ -1,0 +1,117 @@
+(
+    version: 1,
+    name: "Test Scene",
+    entities: [
+        (
+            entity_id: 1,
+            name: "Ground",
+            parent_id: None,
+            position: (0.0, -0.5, 0.0),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            scale: 1.0,
+            components: [
+                SdfObject(
+                    asset_path: "procedural://ground",
+                ),
+            ],
+        ),
+        (
+            entity_id: 2,
+            name: "Pillars",
+            parent_id: None,
+            position: (0.0, 0.0, 0.0),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            scale: 1.0,
+            components: [
+                SdfObject(
+                    asset_path: "procedural://pillars",
+                ),
+            ],
+        ),
+        (
+            entity_id: 3,
+            name: "Monolith Wall",
+            parent_id: None,
+            position: (-7.0, 2.2, 0.0),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            scale: 1.0,
+            components: [
+                SdfObject(
+                    asset_path: "procedural://monolith_wall",
+                ),
+            ],
+        ),
+        (
+            entity_id: 4,
+            name: "Blend Sphere",
+            parent_id: None,
+            position: (0.0, 1.5, -4.5),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            scale: 1.0,
+            components: [
+                SdfObject(
+                    asset_path: "procedural://blend_sphere",
+                ),
+            ],
+        ),
+        (
+            entity_id: 5,
+            name: "Distant Terrain",
+            parent_id: None,
+            position: (0.0, 0.0, 0.0),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            scale: 1.0,
+            components: [
+                SdfObject(
+                    asset_path: "procedural://distant_terrain",
+                ),
+            ],
+        ),
+        (
+            entity_id: 6,
+            name: "Far Monolith",
+            parent_id: None,
+            position: (22.0, 4.0, -5.0),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            scale: 1.0,
+            components: [
+                SdfObject(
+                    asset_path: "procedural://far_monolith",
+                ),
+            ],
+        ),
+        (
+            entity_id: 7,
+            name: "Sun",
+            parent_id: None,
+            position: (0.0, 0.0, 0.0),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            scale: 1.0,
+            components: [
+                Light(
+                    light_type: "directional",
+                    color: (1.0, 0.98, 0.95),
+                    intensity: 3.0,
+                    range: 0.0,
+                ),
+            ],
+        ),
+        (
+            entity_id: 8,
+            name: "Fill Light",
+            parent_id: None,
+            position: (0.0, 0.0, 0.0),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            scale: 1.0,
+            components: [
+                Light(
+                    light_type: "directional",
+                    color: (0.6, 0.65, 0.8),
+                    intensity: 0.4,
+                    range: 0.0,
+                ),
+            ],
+        ),
+    ],
+    environment_ron: "",
+)

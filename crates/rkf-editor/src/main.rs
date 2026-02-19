@@ -2600,6 +2600,9 @@ struct App {
     shared_state: Arc<Mutex<SharedState>>,
     socket_path: Option<String>,
 
+    // Scene
+    scene_path: Option<String>,
+
     // Timing
     last_frame: Instant,
     frame_count: u64,
@@ -2607,7 +2610,7 @@ struct App {
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(scene_path: Option<String>) -> Self {
         let editor_state = Arc::new(Mutex::new(EditorState::new()));
         // Store in global static so rinch UI components can access it.
         let _ = EDITOR_STATE.set(Arc::clone(&editor_state));
@@ -2640,6 +2643,7 @@ impl App {
                 DISPLAY_HEIGHT,
             ))),
             socket_path: None,
+            scene_path,
             last_frame: Instant::now(),
             frame_count: 0,
             last_title_update: Instant::now(),
@@ -2817,6 +2821,24 @@ impl App {
         log::info!("IPC server listening on {socket_path}");
         self.socket_path = Some(socket_path);
 
+        // Load scene file if provided
+        if let Some(path) = &self.scene_path {
+            let path = path.clone();
+            match self.editor_state.lock().unwrap().load_scene(&path) {
+                Ok(scene) => {
+                    log::info!(
+                        "Loaded scene '{}' with {} entities from {}",
+                        scene.name,
+                        scene.entities.len(),
+                        path,
+                    );
+                }
+                Err(e) => {
+                    log::error!("Failed to load scene '{}': {}", path, e);
+                }
+            }
+        }
+
         // Push startup log entries into shared state for MCP read_log
         if let Ok(mut ss) = self.shared_state.lock() {
             ss.push_log(
@@ -2827,6 +2849,12 @@ impl App {
                 rkf_core::automation::LogLevel::Info,
                 format!("IPC server listening on {}", self.socket_path.as_deref().unwrap_or("?")),
             );
+            if let Some(path) = &self.scene_path {
+                ss.push_log(
+                    rkf_core::automation::LogLevel::Info,
+                    format!("Scene loaded: {path}"),
+                );
+            }
         }
         log::info!("Editor initialized — engine viewport active");
     }
@@ -3352,8 +3380,12 @@ impl ApplicationHandler for App {
 
 fn main() {
     env_logger::init();
+
+    // Parse optional scene file argument: `rkf-editor [path.rkscene]`
+    let scene_path = std::env::args().nth(1);
+
     let event_loop = EventLoop::new().unwrap();
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = App::new();
+    let mut app = App::new(scene_path);
     event_loop.run_app(&mut app).unwrap();
 }

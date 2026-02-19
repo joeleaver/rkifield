@@ -64,6 +64,20 @@ pub fn load_scene(ron_str: &str) -> Result<SceneFile, String> {
     ron::from_str(ron_str).map_err(|e| format!("RON deserialization error: {e}"))
 }
 
+/// Load a scene file from disk and return the parsed `SceneFile`.
+pub fn load_scene_from_path(path: &str) -> Result<SceneFile, String> {
+    let contents = std::fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read scene file '{path}': {e}"))?;
+    load_scene(&contents)
+}
+
+/// Save a scene file to disk.
+pub fn save_scene_to_path(scene: &SceneFile, path: &str) -> Result<(), String> {
+    let ron_str = save_scene(scene)?;
+    std::fs::write(path, ron_str)
+        .map_err(|e| format!("Failed to write scene file '{path}': {e}"))
+}
+
 /// An entry in the recent files list.
 #[derive(Debug, Clone)]
 pub struct RecentFileEntry {

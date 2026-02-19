@@ -230,4 +230,88 @@ impl EditorState {
         self.editor_input.mouse_delta = glam::Vec2::ZERO;
         self.editor_input.scroll_delta = 0.0;
     }
+
+    /// Load a scene file and populate the editor state from it.
+    ///
+    /// Populates the scene tree with entities from the file and applies
+    /// environment settings if present. Returns the loaded `SceneFile`
+    /// for further processing (e.g. setting up engine geometry).
+    pub fn load_scene(&mut self, path: &str) -> Result<crate::scene_io::SceneFile, String> {
+        use crate::scene_io::{load_scene_from_path, ComponentData};
+        use crate::scene_tree::SceneNode;
+
+        let scene = load_scene_from_path(path)?;
+
+        // Clear existing scene tree
+        self.scene_tree = crate::scene_tree::SceneTree::new();
+
+        // Populate scene tree from entities
+        for entity in &scene.entities {
+            let mut node = SceneNode::new(entity.entity_id, &entity.name);
+            node.visible = true;
+            self.scene_tree.add_node(node);
+        }
+
+        // Rebuild parent-child relationships
+        for entity in &scene.entities {
+            if let Some(parent_id) = entity.parent_id {
+                // Remove from roots and re-add as child
+                if let Some(child) = self.scene_tree.remove_node(entity.entity_id) {
+                    if let Some(parent) = self.scene_tree.find_node_mut(parent_id) {
+                        parent.children.push(child);
+                    } else {
+                        // Parent not found — keep as root
+                        self.scene_tree.add_node(child);
+                    }
+                }
+            }
+        }
+
+        // Populate light editor from Light components
+        self.light_editor = crate::light_editor::LightEditor::new();
+        for entity in &scene.entities {
+            for comp in &entity.components {
+                if let ComponentData::Light {
+                    light_type,
+                    color,
+                    intensity,
+                    range,
+                } = comp
+                {
+                    use crate::light_editor::EditorLightType;
+                    let lt = match light_type.as_str() {
+                        "point" => EditorLightType::Point,
+                        "spot" => EditorLightType::Spot,
+                        _ => EditorLightType::Directional,
+                    };
+                    let id = self.light_editor.add_light(lt);
+                    self.light_editor.set_position(id, entity.position);
+                    self.light_editor.set_color(
+                        id,
+                        Vec3::new(color[0], color[1], color[2]),
+                    );
+                    self.light_editor.set_intensity(id, *intensity);
+                    if *range > 0.0 {
+                        self.light_editor.set_range(id, *range);
+                    }
+                }
+            }
+        }
+
+        // Apply environment settings if present
+        if !scene.environment_ron.is_empty() {
+            if let Ok(env) =
+                crate::environment::EnvironmentState::deserialize_from_ron(&scene.environment_ron)
+            {
+                self.environment = env;
+                self.environment.mark_dirty();
+            }
+        }
+
+        // Track the current scene path
+        self.current_scene_path = Some(path.to_string());
+        self.unsaved_changes.mark_saved();
+
+        Ok(scene)
+    }
 }
