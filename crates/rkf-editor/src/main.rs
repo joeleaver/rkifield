@@ -2,15 +2,19 @@
 
 mod animation_preview;
 mod camera;
+mod debug_viz;
 mod environment;
 mod gizmo;
 mod input;
 mod light_editor;
+mod overlay;
 mod paint;
 mod placement;
 mod properties;
+mod scene_io;
 mod scene_tree;
 mod sculpt;
+mod undo;
 
 use rinch::prelude::*;
 
