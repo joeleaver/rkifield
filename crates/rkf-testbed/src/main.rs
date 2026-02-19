@@ -21,6 +21,9 @@ use rkf_core::sparse_grid::SparseGrid;
 use rkf_core::voxel::VoxelSample;
 use rkf_core::BrickPool;
 
+use rkf_animation::clip::{AnimationClip, BoneChannel, Keyframe};
+use rkf_animation::skeleton::{Bone, Skeleton};
+
 use rkf_render::auto_exposure::AutoExposurePass;
 use rkf_render::blit::BlitPass;
 use rkf_render::bloom::BloomPass;
@@ -72,6 +75,283 @@ const TEST_TIER: usize = 2;
 const DISPLAY_WIDTH: u32 = 1280;
 /// Display (output) resolution height — the window size.
 const DISPLAY_HEIGHT: u32 = 720;
+
+// ---------------------------------------------------------------------------
+// Phase 17.10 — Animated character demo (static SDF poses)
+// ---------------------------------------------------------------------------
+
+/// Build a 14-bone humanoid skeleton.
+///
+/// Hierarchy:
+///   0: hips (root) — world y=1.0
+///   1: spine — child of hips
+///   2: chest — child of spine
+///   3: head — child of chest
+///   4: upper_arm_l — child of chest
+///   5: lower_arm_l — child of upper_arm_l
+///   6: upper_arm_r — child of chest
+///   7: lower_arm_r — child of upper_arm_r
+///   8: upper_leg_l — child of hips
+///   9: lower_leg_l — child of upper_leg_l
+///  10: foot_l — child of lower_leg_l
+///  11: upper_leg_r — child of hips
+///  12: lower_leg_r — child of upper_leg_r
+///  13: foot_r — child of lower_leg_r
+fn build_humanoid_skeleton() -> Skeleton {
+    // Helper: bone with translation-only bind pose.
+    let bone = |name: &str, t: Vec3| -> Bone {
+        let bind = glam::Mat4::from_translation(t);
+        Bone {
+            name: name.to_string(),
+            bind_transform: bind,
+            inverse_bind: bind.inverse(),
+        }
+    };
+
+    let bones = vec![
+        bone("hips",          Vec3::new(0.0, 1.0, 0.0)),   // 0: root
+        bone("spine",         Vec3::new(0.0, 0.3, 0.0)),   // 1
+        bone("chest",         Vec3::new(0.0, 0.3, 0.0)),   // 2
+        bone("head",          Vec3::new(0.0, 0.35, 0.0)),  // 3
+        bone("upper_arm_l",   Vec3::new(-0.3, 0.1, 0.0)),  // 4
+        bone("lower_arm_l",   Vec3::new(-0.3, 0.0, 0.0)),  // 5
+        bone("upper_arm_r",   Vec3::new(0.3, 0.1, 0.0)),   // 6
+        bone("lower_arm_r",   Vec3::new(0.3, 0.0, 0.0)),   // 7
+        bone("upper_leg_l",   Vec3::new(-0.15, -0.05, 0.0)), // 8
+        bone("lower_leg_l",   Vec3::new(0.0, -0.45, 0.0)), // 9
+        bone("foot_l",        Vec3::new(0.0, -0.45, 0.0)), // 10
+        bone("upper_leg_r",   Vec3::new(0.15, -0.05, 0.0)), // 11
+        bone("lower_leg_r",   Vec3::new(0.0, -0.45, 0.0)), // 12
+        bone("foot_r",        Vec3::new(0.0, -0.45, 0.0)), // 13
+    ];
+
+    let hierarchy = vec![
+        -1, //  0: hips (root)
+         0, //  1: spine -> hips
+         1, //  2: chest -> spine
+         2, //  3: head -> chest
+         2, //  4: upper_arm_l -> chest
+         4, //  5: lower_arm_l -> upper_arm_l
+         2, //  6: upper_arm_r -> chest
+         6, //  7: lower_arm_r -> upper_arm_r
+         0, //  8: upper_leg_l -> hips
+         8, //  9: lower_leg_l -> upper_leg_l
+         9, // 10: foot_l -> lower_leg_l
+         0, // 11: upper_leg_r -> hips
+        11, // 12: lower_leg_r -> upper_leg_r
+        12, // 13: foot_r -> lower_leg_r
+    ];
+
+    Skeleton::new(bones, hierarchy).expect("valid humanoid skeleton")
+}
+
+/// Build a simple walk-cycle animation clip.
+///
+/// At time=0.0 the character is in bind pose (T-pose).
+/// At time=0.5 the character is mid-stride:
+///   - Left leg forward (~25 deg), right leg backward (~-15 deg)
+///   - Lower legs bent at knee
+///   - Arms swing opposite to legs
+///   - Slight spine twist
+fn build_walk_clip() -> AnimationClip {
+    use std::f32::consts::PI;
+
+    let kf = |time: f32, pos: Vec3, rot: Quat| -> Keyframe {
+        Keyframe { time, position: pos, rotation: rot, scale: Vec3::ONE }
+    };
+
+    // Bone 0: hips — stays put
+    let ch_hips = BoneChannel {
+        bone_index: 0,
+        keyframes: vec![
+            kf(0.0, Vec3::new(0.0, 1.0, 0.0), Quat::IDENTITY),
+            kf(0.5, Vec3::new(0.0, 1.0, 0.0), Quat::IDENTITY),
+        ],
+    };
+
+    // Bone 1: spine — slight forward lean
+    let ch_spine = BoneChannel {
+        bone_index: 1,
+        keyframes: vec![
+            kf(0.0, Vec3::new(0.0, 0.3, 0.0), Quat::IDENTITY),
+            kf(0.5, Vec3::new(0.0, 0.3, 0.0), Quat::from_rotation_x(5.0 * PI / 180.0)),
+        ],
+    };
+
+    // Bone 4: upper_arm_l — swings backward (opposite to left leg forward)
+    let ch_upper_arm_l = BoneChannel {
+        bone_index: 4,
+        keyframes: vec![
+            kf(0.0, Vec3::new(-0.3, 0.1, 0.0), Quat::IDENTITY),
+            kf(0.5, Vec3::new(-0.3, 0.1, 0.0), Quat::from_rotation_x(-20.0 * PI / 180.0)),
+        ],
+    };
+
+    // Bone 5: lower_arm_l — slight elbow bend
+    let ch_lower_arm_l = BoneChannel {
+        bone_index: 5,
+        keyframes: vec![
+            kf(0.0, Vec3::new(-0.3, 0.0, 0.0), Quat::IDENTITY),
+            kf(0.5, Vec3::new(-0.3, 0.0, 0.0), Quat::from_rotation_x(-15.0 * PI / 180.0)),
+        ],
+    };
+
+    // Bone 6: upper_arm_r — swings forward (opposite to right leg backward)
+    let ch_upper_arm_r = BoneChannel {
+        bone_index: 6,
+        keyframes: vec![
+            kf(0.0, Vec3::new(0.3, 0.1, 0.0), Quat::IDENTITY),
+            kf(0.5, Vec3::new(0.3, 0.1, 0.0), Quat::from_rotation_x(20.0 * PI / 180.0)),
+        ],
+    };
+
+    // Bone 7: lower_arm_r — slight elbow bend
+    let ch_lower_arm_r = BoneChannel {
+        bone_index: 7,
+        keyframes: vec![
+            kf(0.0, Vec3::new(0.3, 0.0, 0.0), Quat::IDENTITY),
+            kf(0.5, Vec3::new(0.3, 0.0, 0.0), Quat::from_rotation_x(-10.0 * PI / 180.0)),
+        ],
+    };
+
+    // Bone 8: upper_leg_l — swings forward (~25 deg)
+    let ch_upper_leg_l = BoneChannel {
+        bone_index: 8,
+        keyframes: vec![
+            kf(0.0, Vec3::new(-0.15, -0.05, 0.0), Quat::IDENTITY),
+            kf(0.5, Vec3::new(-0.15, -0.05, 0.0), Quat::from_rotation_x(25.0 * PI / 180.0)),
+        ],
+    };
+
+    // Bone 9: lower_leg_l — knee bend (~-30 deg, bends backward)
+    let ch_lower_leg_l = BoneChannel {
+        bone_index: 9,
+        keyframes: vec![
+            kf(0.0, Vec3::new(0.0, -0.45, 0.0), Quat::IDENTITY),
+            kf(0.5, Vec3::new(0.0, -0.45, 0.0), Quat::from_rotation_x(-30.0 * PI / 180.0)),
+        ],
+    };
+
+    // Bone 11: upper_leg_r — swings backward (~-15 deg)
+    let ch_upper_leg_r = BoneChannel {
+        bone_index: 11,
+        keyframes: vec![
+            kf(0.0, Vec3::new(0.15, -0.05, 0.0), Quat::IDENTITY),
+            kf(0.5, Vec3::new(0.15, -0.05, 0.0), Quat::from_rotation_x(-15.0 * PI / 180.0)),
+        ],
+    };
+
+    // Bone 12: lower_leg_r — slight knee bend
+    let ch_lower_leg_r = BoneChannel {
+        bone_index: 12,
+        keyframes: vec![
+            kf(0.0, Vec3::new(0.0, -0.45, 0.0), Quat::IDENTITY),
+            kf(0.5, Vec3::new(0.0, -0.45, 0.0), Quat::from_rotation_x(-10.0 * PI / 180.0)),
+        ],
+    };
+
+    AnimationClip::new(
+        "walk".to_string(),
+        1.0,
+        vec![
+            ch_hips, ch_spine,
+            ch_upper_arm_l, ch_lower_arm_l,
+            ch_upper_arm_r, ch_lower_arm_r,
+            ch_upper_leg_l, ch_lower_leg_l,
+            ch_upper_leg_r, ch_lower_leg_r,
+        ],
+    )
+}
+
+/// Compute world-space bone positions from a skeleton and animation clip at a given time.
+///
+/// This walks the hierarchy to accumulate world transforms (not skinning matrices),
+/// then extracts the translation column from each.
+fn compute_bone_world_positions(skeleton: &Skeleton, clip: &AnimationClip, time: f32) -> Vec<Vec3> {
+    let bone_count = skeleton.bone_count();
+    let mut world_transforms = vec![glam::Mat4::IDENTITY; bone_count];
+
+    for i in 0..bone_count {
+        // Get local transform: from clip channel if present, else bind pose.
+        let local = if let Some(channel) = clip.channel_for_bone(i as u32) {
+            let (pos, rot, scl) = channel.sample(time);
+            glam::Mat4::from_scale_rotation_translation(scl, rot, pos)
+        } else {
+            skeleton.bones[i].bind_transform
+        };
+
+        let parent = skeleton.hierarchy[i];
+        world_transforms[i] = if parent >= 0 {
+            world_transforms[parent as usize] * local
+        } else {
+            local
+        };
+    }
+
+    world_transforms.iter().map(|m| m.col(3).truncate()).collect()
+}
+
+/// Generate a humanoid character as SDF capsules into the brick pool.
+///
+/// Each body part is a capsule between two bone world positions.
+/// The head is a sphere. All parts are smoothly blended with `smin`
+/// for organic-looking joints.
+fn generate_humanoid_sdf(
+    pool: &mut BrickPool,
+    grid: &mut SparseGrid,
+    aabb: &Aabb,
+    tier: usize,
+    bone_positions: &[Vec3],
+    offset: Vec3,
+    material_id: u16,
+) {
+    // Body parts: (bone_a_index, bone_b_index, radius)
+    let body_parts: Vec<(usize, usize, f32)> = vec![
+        (0, 1, 0.12),   // hips -> spine (lower torso)
+        (1, 2, 0.11),   // spine -> chest (upper torso)
+        (2, 3, 0.07),   // chest -> head (neck)
+        (2, 4, 0.06),   // chest -> upper_arm_l (shoulder)
+        (4, 5, 0.05),   // upper_arm_l -> lower_arm_l
+        (2, 6, 0.06),   // chest -> upper_arm_r (shoulder)
+        (6, 7, 0.05),   // upper_arm_r -> lower_arm_r
+        (0, 8, 0.07),   // hips -> upper_leg_l (hip joint)
+        (8, 9, 0.06),   // upper_leg_l -> lower_leg_l
+        (9, 10, 0.05),  // lower_leg_l -> foot_l
+        (0, 11, 0.07),  // hips -> upper_leg_r (hip joint)
+        (11, 12, 0.06), // upper_leg_r -> lower_leg_r
+        (12, 13, 0.05), // lower_leg_r -> foot_r
+    ];
+
+    let head_pos = offset + bone_positions[3] + Vec3::new(0.0, 0.15, 0.0);
+    let head_radius = 0.13f32;
+    let blend_k = 0.06f32; // smooth blending radius for organic joints
+
+    // Clone data for the closure (must be 'static / move).
+    let parts = body_parts;
+    let positions: Vec<Vec3> = bone_positions.to_vec();
+    let off = offset;
+
+    let _ = populate_grid_with_material(
+        pool,
+        grid,
+        move |p| {
+            // Head sphere
+            let mut d = sphere_sdf(head_pos, head_radius, p);
+
+            // Body capsules, smoothly blended
+            for &(a, b, r) in &parts {
+                let pos_a = off + positions[a];
+                let pos_b = off + positions[b];
+                let cap = capsule_sdf(pos_a, pos_b, r, p);
+                d = smin(d, cap, blend_k);
+            }
+            d
+        },
+        tier,
+        aabb,
+        material_id,
+    );
+}
 
 /// Create a large outdoor scene for volumetric fog / god ray validation.
 ///
@@ -419,6 +699,36 @@ fn create_clipmap_scene() -> (BrickPool, ClipmapGridSet, ClipmapConfig, Aabb) {
             };
             apply_edit_cpu(&mut pool, grid, aabb, tier, &paint_op);
             log::info!("Edit 3 (paint dirt patch): applied");
+        }
+
+        // === Animated Character Demo (Phase 17.10) ===
+        // Two static humanoid poses proving skeleton evaluation works:
+        //   1) Bind pose (T-pose) at x=-5, z=3
+        //   2) Walk pose (mid-stride) at x=-3, z=3
+        {
+            let skeleton = build_humanoid_skeleton();
+            let walk_clip = build_walk_clip();
+            let empty_clip = AnimationClip::new("bind".into(), 1.0, vec![]);
+
+            // Bind pose — no animation channels, uses bind transforms directly.
+            let bind_positions = compute_bone_world_positions(&skeleton, &empty_clip, 0.0);
+            let bind_offset = Vec3::new(-5.0, 0.0, 3.0);
+            generate_humanoid_sdf(
+                &mut pool, grid, aabb, tier,
+                &bind_positions, bind_offset, 11, // gold material
+            );
+            log::info!("Animated character (bind pose / T-pose) at ({}, {}, {})",
+                bind_offset.x, bind_offset.y, bind_offset.z);
+
+            // Walk pose — sample at t=0.5 (peak of stride).
+            let walk_positions = compute_bone_world_positions(&skeleton, &walk_clip, 0.5);
+            let walk_offset = Vec3::new(-3.0, 0.0, 3.0);
+            generate_humanoid_sdf(
+                &mut pool, grid, aabb, tier,
+                &walk_positions, walk_offset, 2, // metal material
+            );
+            log::info!("Animated character (walk pose) at ({}, {}, {})",
+                walk_offset.x, walk_offset.y, walk_offset.z);
         }
 
         log::info!("Level 0 (tier 2, 8cm): {} bricks", pool.allocated_count());
