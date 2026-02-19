@@ -151,8 +151,10 @@ impl EditorCamera {
     /// Rotate the fly-mode camera by a mouse delta.
     ///
     /// `dx` rotates yaw, `dy` rotates pitch. Pitch is clamped.
+    /// Yaw is subtracted so that dragging right → looking right (matches
+    /// the render camera's forward convention where yaw=0 faces -Z).
     pub fn fly_rotate(&mut self, dx: f32, dy: f32) {
-        self.fly_yaw += dx * self.orbit_speed;
+        self.fly_yaw -= dx * self.orbit_speed;
         self.fly_pitch = (self.fly_pitch - dy * self.orbit_speed)
             .clamp(self.min_pitch, self.max_pitch);
 
@@ -287,11 +289,14 @@ impl EditorCamera {
 }
 
 /// Compute a direction vector from yaw and pitch angles.
+///
+/// Matches the render camera convention: yaw=0, pitch=0 → facing -Z.
+/// This is the standard OpenGL/wgpu convention where -Z is "into the screen."
 fn fly_direction(yaw: f32, pitch: f32) -> Vec3 {
     Vec3::new(
-        pitch.cos() * yaw.sin(),
+        -yaw.sin() * pitch.cos(),
         pitch.sin(),
-        pitch.cos() * yaw.cos(),
+        -yaw.cos() * pitch.cos(),
     )
     .normalize()
 }
@@ -471,13 +476,13 @@ mod tests {
 
         let initial_pos = cam.position;
 
-        // Move forward (fly_yaw=0, fly_pitch=0 means looking along +Z)
+        // Move forward (fly_yaw=0, fly_pitch=0 means looking along -Z)
         cam.fly_move(1.0, 0.0, 0.0, 1.0);
 
         let delta = cam.position - initial_pos;
         assert!(
-            delta.z > 0.0,
-            "moving forward at yaw=0 should increase Z: delta = {delta:?}"
+            delta.z < 0.0,
+            "moving forward at yaw=0 should decrease Z (camera faces -Z): delta = {delta:?}"
         );
     }
 
@@ -494,7 +499,7 @@ mod tests {
         cam.fly_move(0.0, 1.0, 0.0, 1.0);
 
         let delta = cam.position - initial_pos;
-        // At yaw=0 looking along +Z, right should be +X direction
+        // At yaw=0 looking along -Z, right should be +X direction
         assert!(
             delta.x.abs() > 0.01,
             "moving right should change X position: delta = {delta:?}"
