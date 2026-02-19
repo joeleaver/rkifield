@@ -53,6 +53,10 @@ thread_local! {
     static ENV_REFRESH: Cell<Option<Signal<u32>>> = const { Cell::new(None) };
     /// Bumped when light list/properties change, to re-read values in UI.
     static LIGHT_REFRESH: Cell<Option<Signal<u32>>> = const { Cell::new(None) };
+    /// Bumped when sculpt brush settings change.
+    static SCULPT_REFRESH: Cell<Option<Signal<u32>>> = const { Cell::new(None) };
+    /// Bumped when paint brush settings change.
+    static PAINT_REFRESH: Cell<Option<Signal<u32>>> = const { Cell::new(None) };
 }
 
 // ---------------------------------------------------------------------------
@@ -984,6 +988,385 @@ fn build_light_panel(scope: &mut RenderScope, light_refresh: Signal<u32>) -> Nod
     panel
 }
 
+// ── Sculpt panel ─────────────────────────────────────────────────────────
+
+const ENUM_BTN_STYLE: &str = "border: 1px solid #444; background: #333; color: #bbb; \
+    padding: 2px 8px; font-size: 10px; cursor: pointer; border-radius: 3px; \
+    font-family: inherit; line-height: 16px;";
+const ENUM_BTN_SEL_STYLE: &str = "border: 1px solid #5a8abf; background: #3a5a80; color: #fff; \
+    padding: 2px 8px; font-size: 10px; cursor: pointer; border-radius: 3px; \
+    font-family: inherit; line-height: 16px;";
+
+fn build_sculpt_panel(scope: &mut RenderScope, sculpt_refresh: Signal<u32>) -> NodeHandle {
+    let panel = scope.create_element("div");
+    panel.set_attribute("style", "display: flex; flex-direction: column; gap: 2px;");
+
+    // ── Brush Type ───────────────────────────────────────────────────────
+    build_env_section_header(scope, &panel, "Brush Type");
+    let type_row = scope.create_element("div");
+    type_row.set_attribute("style", "display: flex; flex-wrap: wrap; gap: 3px; padding: 2px;");
+    for (label, bt) in [
+        ("Add", sculpt::BrushType::Add),
+        ("Sub", sculpt::BrushType::Subtract),
+        ("Smooth", sculpt::BrushType::Smooth),
+        ("Flatten", sculpt::BrushType::Flatten),
+        ("Sharp", sculpt::BrushType::Sharpen),
+    ] {
+        let btn = scope.create_element("button");
+        btn.set_text(label);
+        scope.create_effect({
+            let btn = btn.clone();
+            move || {
+                let _ = sculpt_refresh.get();
+                let active = EDITOR_STATE
+                    .get()
+                    .and_then(|es| {
+                        es.lock()
+                            .ok()
+                            .map(|s| s.sculpt.current_settings.brush_type == bt)
+                    })
+                    .unwrap_or(false);
+                btn.set_attribute(
+                    "style",
+                    if active { ENUM_BTN_SEL_STYLE } else { ENUM_BTN_STYLE },
+                );
+            }
+        });
+        let h = scope.register_handler(move || {
+            if let Some(es) = EDITOR_STATE.get() {
+                if let Ok(mut state) = es.lock() {
+                    state.sculpt.set_brush_type(bt);
+                }
+            }
+            sculpt_refresh.update(|v| *v = v.wrapping_add(1));
+        });
+        btn.set_attribute("data-rid", &h.0.to_string());
+        type_row.append_child(&btn);
+    }
+    panel.append_child(&type_row);
+
+    // ── Brush Shape ──────────────────────────────────────────────────────
+    build_env_section_header(scope, &panel, "Brush Shape");
+    let shape_row = scope.create_element("div");
+    shape_row.set_attribute("style", "display: flex; gap: 3px; padding: 2px;");
+    for (label, bs) in [
+        ("Sphere", sculpt::BrushShape::Sphere),
+        ("Cube", sculpt::BrushShape::Cube),
+        ("Cylinder", sculpt::BrushShape::Cylinder),
+    ] {
+        let btn = scope.create_element("button");
+        btn.set_text(label);
+        scope.create_effect({
+            let btn = btn.clone();
+            move || {
+                let _ = sculpt_refresh.get();
+                let active = EDITOR_STATE
+                    .get()
+                    .and_then(|es| {
+                        es.lock()
+                            .ok()
+                            .map(|s| s.sculpt.current_settings.shape == bs)
+                    })
+                    .unwrap_or(false);
+                btn.set_attribute(
+                    "style",
+                    if active { ENUM_BTN_SEL_STYLE } else { ENUM_BTN_STYLE },
+                );
+            }
+        });
+        let h = scope.register_handler(move || {
+            if let Some(es) = EDITOR_STATE.get() {
+                if let Ok(mut state) = es.lock() {
+                    state.sculpt.current_settings.shape = bs;
+                }
+            }
+            sculpt_refresh.update(|v| *v = v.wrapping_add(1));
+        });
+        btn.set_attribute("data-rid", &h.0.to_string());
+        shape_row.append_child(&btn);
+    }
+    panel.append_child(&shape_row);
+
+    // ── Brush Settings ───────────────────────────────────────────────────
+    build_env_section_header(scope, &panel, "Settings");
+    build_sculpt_slider(
+        scope, &panel, "Radius", sculpt_refresh,
+        |s| s.current_settings.radius,
+        |s, v| s.current_settings.radius = v.max(0.01),
+        0.1, 0.01, 50.0, 2,
+    );
+    build_sculpt_slider(
+        scope, &panel, "Strength", sculpt_refresh,
+        |s| s.current_settings.strength,
+        |s, v| s.current_settings.strength = v,
+        0.05, 0.0, 1.0, 2,
+    );
+    build_sculpt_slider(
+        scope, &panel, "Falloff", sculpt_refresh,
+        |s| s.current_settings.falloff,
+        |s, v| s.current_settings.falloff = v,
+        0.05, 0.0, 1.0, 2,
+    );
+
+    // Material ID (integer steps)
+    build_sculpt_slider(
+        scope, &panel, "Material", sculpt_refresh,
+        |s| s.current_settings.material_id as f32,
+        |s, v| s.current_settings.material_id = v as u16,
+        1.0, 0.0, 13.0, 0,
+    );
+
+    panel
+}
+
+fn build_sculpt_slider(
+    scope: &mut RenderScope,
+    parent: &NodeHandle,
+    label: &str,
+    refresh: Signal<u32>,
+    get: impl Fn(&sculpt::SculptState) -> f32 + 'static + Copy,
+    set: impl Fn(&mut sculpt::SculptState, f32) + 'static + Copy,
+    step: f32,
+    min: f32,
+    max: f32,
+    decimals: usize,
+) {
+    let row = scope.create_element("div");
+    row.set_attribute("style", ENV_ROW_STYLE);
+
+    let lbl = scope.create_element("span");
+    lbl.set_attribute("style", ENV_LABEL_STYLE);
+    lbl.set_text(label);
+    row.append_child(&lbl);
+
+    let val_span = scope.create_element("span");
+    val_span.set_attribute("style", ENV_VALUE_STYLE);
+    scope.create_effect({
+        let val_span = val_span.clone();
+        move || {
+            let _ = refresh.get();
+            let val = EDITOR_STATE
+                .get()
+                .and_then(|es| es.lock().ok().map(|s| get(&s.sculpt)))
+                .unwrap_or(0.0);
+            val_span.set_text(&format!("{:.prec$}", val, prec = decimals));
+        }
+    });
+    row.append_child(&val_span);
+
+    let minus_btn = scope.create_element("button");
+    minus_btn.set_attribute("style", ENV_BTN_STYLE);
+    minus_btn.set_text("-");
+    let h = scope.register_handler(move || {
+        if let Some(es) = EDITOR_STATE.get() {
+            if let Ok(mut state) = es.lock() {
+                let cur = get(&state.sculpt);
+                set(&mut state.sculpt, (cur - step).clamp(min, max));
+            }
+        }
+        refresh.update(|v| *v = v.wrapping_add(1));
+    });
+    minus_btn.set_attribute("data-rid", &h.0.to_string());
+    row.append_child(&minus_btn);
+
+    let plus_btn = scope.create_element("button");
+    plus_btn.set_attribute("style", ENV_BTN_STYLE);
+    plus_btn.set_text("+");
+    let h = scope.register_handler(move || {
+        if let Some(es) = EDITOR_STATE.get() {
+            if let Ok(mut state) = es.lock() {
+                let cur = get(&state.sculpt);
+                set(&mut state.sculpt, (cur + step).clamp(min, max));
+            }
+        }
+        refresh.update(|v| *v = v.wrapping_add(1));
+    });
+    plus_btn.set_attribute("data-rid", &h.0.to_string());
+    row.append_child(&plus_btn);
+
+    parent.append_child(&row);
+}
+
+fn build_paint_slider(
+    scope: &mut RenderScope,
+    parent: &NodeHandle,
+    label: &str,
+    refresh: Signal<u32>,
+    get: impl Fn(&paint::PaintState) -> f32 + 'static + Copy,
+    set: impl Fn(&mut paint::PaintState, f32) + 'static + Copy,
+    step: f32,
+    min: f32,
+    max: f32,
+    decimals: usize,
+) {
+    let row = scope.create_element("div");
+    row.set_attribute("style", ENV_ROW_STYLE);
+
+    let lbl = scope.create_element("span");
+    lbl.set_attribute("style", ENV_LABEL_STYLE);
+    lbl.set_text(label);
+    row.append_child(&lbl);
+
+    let val_span = scope.create_element("span");
+    val_span.set_attribute("style", ENV_VALUE_STYLE);
+    scope.create_effect({
+        let val_span = val_span.clone();
+        move || {
+            let _ = refresh.get();
+            let val = EDITOR_STATE
+                .get()
+                .and_then(|es| es.lock().ok().map(|s| get(&s.paint)))
+                .unwrap_or(0.0);
+            val_span.set_text(&format!("{:.prec$}", val, prec = decimals));
+        }
+    });
+    row.append_child(&val_span);
+
+    let minus_btn = scope.create_element("button");
+    minus_btn.set_attribute("style", ENV_BTN_STYLE);
+    minus_btn.set_text("-");
+    let h = scope.register_handler(move || {
+        if let Some(es) = EDITOR_STATE.get() {
+            if let Ok(mut state) = es.lock() {
+                let cur = get(&state.paint);
+                set(&mut state.paint, (cur - step).clamp(min, max));
+            }
+        }
+        refresh.update(|v| *v = v.wrapping_add(1));
+    });
+    minus_btn.set_attribute("data-rid", &h.0.to_string());
+    row.append_child(&minus_btn);
+
+    let plus_btn = scope.create_element("button");
+    plus_btn.set_attribute("style", ENV_BTN_STYLE);
+    plus_btn.set_text("+");
+    let h = scope.register_handler(move || {
+        if let Some(es) = EDITOR_STATE.get() {
+            if let Ok(mut state) = es.lock() {
+                let cur = get(&state.paint);
+                set(&mut state.paint, (cur + step).clamp(min, max));
+            }
+        }
+        refresh.update(|v| *v = v.wrapping_add(1));
+    });
+    plus_btn.set_attribute("data-rid", &h.0.to_string());
+    row.append_child(&plus_btn);
+
+    parent.append_child(&row);
+}
+
+fn build_paint_panel(scope: &mut RenderScope, paint_refresh: Signal<u32>) -> NodeHandle {
+    let panel = scope.create_element("div");
+    panel.set_attribute("style", "display: flex; flex-direction: column; gap: 2px;");
+
+    // ── Paint Mode ───────────────────────────────────────────────────────
+    build_env_section_header(scope, &panel, "Paint Mode");
+    let mode_row = scope.create_element("div");
+    mode_row.set_attribute("style", "display: flex; gap: 3px; padding: 2px;");
+    for (label, pm) in [
+        ("Material", paint::PaintMode::Material),
+        ("Color", paint::PaintMode::Color),
+        ("Blend", paint::PaintMode::Blend),
+    ] {
+        let btn = scope.create_element("button");
+        btn.set_text(label);
+        scope.create_effect({
+            let btn = btn.clone();
+            move || {
+                let _ = paint_refresh.get();
+                let active = EDITOR_STATE
+                    .get()
+                    .and_then(|es| {
+                        es.lock()
+                            .ok()
+                            .map(|s| s.paint.current_settings.mode == pm)
+                    })
+                    .unwrap_or(false);
+                btn.set_attribute(
+                    "style",
+                    if active { ENUM_BTN_SEL_STYLE } else { ENUM_BTN_STYLE },
+                );
+            }
+        });
+        let h = scope.register_handler(move || {
+            if let Some(es) = EDITOR_STATE.get() {
+                if let Ok(mut state) = es.lock() {
+                    state.paint.current_settings.mode = pm;
+                }
+            }
+            paint_refresh.update(|v| *v = v.wrapping_add(1));
+        });
+        btn.set_attribute("data-rid", &h.0.to_string());
+        mode_row.append_child(&btn);
+    }
+    panel.append_child(&mode_row);
+
+    // ── Brush Settings ───────────────────────────────────────────────────
+    build_env_section_header(scope, &panel, "Brush");
+    build_paint_slider(
+        scope, &panel, "Radius", paint_refresh,
+        |s| s.current_settings.radius,
+        |s, v| s.current_settings.radius = v.max(0.01),
+        0.1, 0.01, 50.0, 2,
+    );
+    build_paint_slider(
+        scope, &panel, "Strength", paint_refresh,
+        |s| s.current_settings.strength,
+        |s, v| s.current_settings.strength = v,
+        0.05, 0.0, 1.0, 2,
+    );
+    build_paint_slider(
+        scope, &panel, "Falloff", paint_refresh,
+        |s| s.current_settings.falloff,
+        |s, v| s.current_settings.falloff = v,
+        0.05, 0.0, 1.0, 2,
+    );
+
+    // ── Material ─────────────────────────────────────────────────────────
+    build_env_section_header(scope, &panel, "Material");
+    build_paint_slider(
+        scope, &panel, "Primary", paint_refresh,
+        |s| s.current_settings.material_id as f32,
+        |s, v| s.current_settings.material_id = v as u16,
+        1.0, 0.0, 13.0, 0,
+    );
+    build_paint_slider(
+        scope, &panel, "Secondary", paint_refresh,
+        |s| s.current_settings.secondary_material_id as f32,
+        |s, v| s.current_settings.secondary_material_id = v as u16,
+        1.0, 0.0, 13.0, 0,
+    );
+    build_paint_slider(
+        scope, &panel, "Blend Grad.", paint_refresh,
+        |s| s.current_settings.blend_gradient,
+        |s, v| s.current_settings.blend_gradient = v,
+        0.05, 0.0, 1.0, 2,
+    );
+
+    // ── Color ────────────────────────────────────────────────────────────
+    build_env_section_header(scope, &panel, "Color");
+    build_paint_slider(
+        scope, &panel, "R", paint_refresh,
+        |s| s.current_settings.color.x,
+        |s, v| s.current_settings.color.x = v,
+        0.05, 0.0, 1.0, 2,
+    );
+    build_paint_slider(
+        scope, &panel, "G", paint_refresh,
+        |s| s.current_settings.color.y,
+        |s, v| s.current_settings.color.y = v,
+        0.05, 0.0, 1.0, 2,
+    );
+    build_paint_slider(
+        scope, &panel, "B", paint_refresh,
+        |s| s.current_settings.color.z,
+        |s, v| s.current_settings.color.z = v,
+        0.05, 0.0, 1.0, 2,
+    );
+
+    panel
+}
+
 // ── Editor UI component ─────────────────────────────────────────────────
 
 #[component]
@@ -1344,7 +1727,11 @@ fn editor_ui() -> NodeHandle {
         &right_panel,
         move || {
             let idx = mode_signal.get();
-            idx != EditorMode::Environment.index() && idx != EditorMode::Light.index()
+            !matches!(
+                EditorMode::from_index(idx),
+                EditorMode::Environment | EditorMode::Light
+                    | EditorMode::Sculpt | EditorMode::Paint
+            )
         },
         move |scope| {
             let hint_div = scope.create_element("div");
@@ -1359,16 +1746,42 @@ fn editor_ui() -> NodeHandle {
                         EditorMode::Navigate => "Use right-click + WASD to fly camera",
                         EditorMode::Select => "Click entities in viewport to select",
                         EditorMode::Place => "Choose an asset to place in the scene",
-                        EditorMode::Sculpt => "Left-click + drag to sculpt terrain",
-                        EditorMode::Paint => "Left-click + drag to paint materials",
                         EditorMode::Animate => "Select an entity to preview animations",
-                        EditorMode::Light | EditorMode::Environment => "",
+                        _ => "",
                     };
                     hint_text.set_text(hint);
                 }
             });
             hint_div.append_child(&hint_text);
             hint_div
+        },
+        None::<fn(&mut RenderScope) -> NodeHandle>,
+    );
+
+    // Sculpt panel (shown only in Sculpt mode)
+    let sculpt_refresh = Signal::new(0u32);
+    SCULPT_REFRESH.with(|cell| cell.set(Some(sculpt_refresh)));
+
+    show_dom(
+        __scope,
+        &right_panel,
+        move || mode_signal.get() == EditorMode::Sculpt.index(),
+        move |scope| {
+            build_sculpt_panel(scope, sculpt_refresh)
+        },
+        None::<fn(&mut RenderScope) -> NodeHandle>,
+    );
+
+    // Paint panel (shown only in Paint mode)
+    let paint_refresh = Signal::new(0u32);
+    PAINT_REFRESH.with(|cell| cell.set(Some(paint_refresh)));
+
+    show_dom(
+        __scope,
+        &right_panel,
+        move || mode_signal.get() == EditorMode::Paint.index(),
+        move |scope| {
+            build_paint_panel(scope, paint_refresh)
         },
         None::<fn(&mut RenderScope) -> NodeHandle>,
     );
