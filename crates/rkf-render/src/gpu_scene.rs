@@ -65,21 +65,21 @@ impl GpuScene {
         let brick_pool_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("brick pool"),
             contents: brick_bytes,
-            usage: wgpu::BufferUsages::STORAGE,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
         // Occupancy bitfield (Level 2): array of u32, 2 bits per cell.
         let occupancy_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("occupancy"),
             contents: bytemuck::cast_slice(grid.occupancy_data()),
-            usage: wgpu::BufferUsages::STORAGE,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
         // Slot array (Level 1): array of u32, one per cell.
         let slot_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("slots"),
             contents: bytemuck::cast_slice(grid.slot_data()),
-            usage: wgpu::BufferUsages::STORAGE,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
         // Camera uniforms — updated each frame via queue.write_buffer.
@@ -133,6 +133,57 @@ impl GpuScene {
             scene_buffer,
             bind_group_layout,
             bind_group,
+        }
+    }
+
+    /// Write only the dirty bricks to the GPU brick pool buffer.
+    ///
+    /// Each brick is 4096 bytes (512 voxels * 8 bytes). Only the specified
+    /// slots are uploaded, avoiding a full buffer rewrite.
+    pub fn write_dirty_bricks(&self, queue: &wgpu::Queue, pool: &BrickPool, dirty_slots: &[u32]) {
+        let brick_bytes: &[u8] = bytemuck::cast_slice(pool.as_slice());
+        let brick_size = 4096u64; // 512 VoxelSamples * 8 bytes
+        for &slot in dirty_slots {
+            let offset = slot as u64 * brick_size;
+            let start = offset as usize;
+            let end = start + brick_size as usize;
+            if end <= brick_bytes.len() {
+                queue.write_buffer(&self.brick_pool_buffer, offset, &brick_bytes[start..end]);
+            }
+        }
+    }
+
+    /// Write only the dirty occupancy words to the GPU occupancy buffer.
+    ///
+    /// Each word is 4 bytes (u32), encoding 2 bits per cell for 16 cells per word.
+    pub fn write_dirty_occupancy(&self, queue: &wgpu::Queue, grid: &SparseGrid, dirty_word_indices: &[u32]) {
+        let occ_data = grid.occupancy_data();
+        for &word_idx in dirty_word_indices {
+            if (word_idx as usize) < occ_data.len() {
+                let offset = word_idx as u64 * 4;
+                queue.write_buffer(
+                    &self.occupancy_buffer,
+                    offset,
+                    bytemuck::bytes_of(&occ_data[word_idx as usize]),
+                );
+            }
+        }
+    }
+
+    /// Write only the dirty slot entries to the GPU slot buffer.
+    ///
+    /// Each slot entry is 4 bytes (u32), one per cell.
+    pub fn write_dirty_slots(&self, queue: &wgpu::Queue, grid: &SparseGrid, dirty_cell_indices: &[u32]) {
+        let slot_data = grid.slot_data();
+        for &cell_idx in dirty_cell_indices {
+            if (cell_idx as usize) < slot_data.len() {
+                let offset = cell_idx as u64 * 4;
+                queue.write_buffer(
+                    &self.slot_buffer,
+                    offset,
+                    bytemuck::bytes_of(&slot_data[cell_idx as usize]),
+                );
+            }
         }
     }
 
