@@ -18,6 +18,7 @@
 pub mod blend_shape;
 pub mod character;
 pub mod clip;
+pub mod player;
 pub mod rebake;
 pub mod segment;
 pub mod skeleton;
