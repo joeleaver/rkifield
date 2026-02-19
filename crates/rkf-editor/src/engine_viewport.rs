@@ -434,6 +434,13 @@ pub struct EngineState {
     shared_state: Arc<Mutex<SharedState>>,
     frame_index: u32,
     prev_vp: [[f32; 4]; 4],
+    // Line overlay pipeline (gizmos, wireframes)
+    line_pipeline: wgpu::RenderPipeline,
+    line_vp_buffer: wgpu::Buffer,
+    line_vp_bind_group: wgpu::BindGroup,
+    line_vertex_buffer: wgpu::Buffer,
+    line_vertex_capacity: usize,
+    surface_format: wgpu::TextureFormat,
 }
 
 impl EngineState {
@@ -687,6 +694,107 @@ impl EngineState {
             mapped_at_creation: false,
         });
 
+        // ── Line overlay pipeline (gizmos, wireframes) ──────────────────
+        let line_shader =
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("line shader"),
+                source: wgpu::ShaderSource::Wgsl(
+                    include_str!("line.wgsl").into(),
+                ),
+            });
+
+        let line_vp_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("line VP uniform"),
+            size: 64, // mat4x4<f32>
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let line_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("line bind group layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+
+        let line_vp_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("line VP bind group"),
+            layout: &line_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: line_vp_buffer.as_entire_binding(),
+            }],
+        });
+
+        let line_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("line pipeline layout"),
+                bind_group_layouts: &[&line_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+        let line_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("line pipeline"),
+                layout: Some(&line_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &line_shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[wgpu::VertexBufferLayout {
+                        array_stride: 28, // vec3 (12) + vec4 (16)
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &[
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x3,
+                                offset: 0,
+                                shader_location: 0,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x4,
+                                offset: 12,
+                                shader_location: 1,
+                            },
+                        ],
+                    }],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &line_shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::LineList,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
+
+        // Initial vertex buffer: 1024 vertices (enough for basic gizmo)
+        let line_vertex_capacity = 1024;
+        let line_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("line vertex buffer"),
+            size: (line_vertex_capacity * 28) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         Self {
             device: device.clone(),
             queue: queue.clone(),
@@ -730,6 +838,12 @@ impl EngineState {
             shared_state,
             frame_index: 0,
             prev_vp: [[0.0; 4]; 4],
+            line_pipeline,
+            line_vp_buffer,
+            line_vp_bind_group,
+            line_vertex_buffer,
+            line_vertex_capacity,
+            surface_format,
         }
     }
 
@@ -820,10 +934,16 @@ impl EngineState {
         log::debug!("Lights updated: {} total ({} editor)", count, editor_lights.len());
     }
 
-    /// Render one frame: full SDF pipeline + blit to swapchain.
+    /// Render one frame: full SDF pipeline + line overlay + blit to swapchain.
     ///
+    /// `line_batch` provides optional gizmo/wireframe lines rendered on top.
     /// Submits GPU commands and blocks on staging readback for MCP screenshots.
-    pub fn render(&mut self, swapchain_view: &wgpu::TextureView, dt: f32) {
+    pub fn render(
+        &mut self,
+        swapchain_view: &wgpu::TextureView,
+        dt: f32,
+        line_batch: Option<&crate::overlay::LineBatch>,
+    ) {
         // Check for pending MCP debug mode (camera is consumed in main loop)
         if let Ok(mut state) = self.shared_state.lock() {
             if let Some(mode) = state.pending_debug_mode.take() {
@@ -1009,6 +1129,73 @@ impl EngineState {
             swapchain_view,
         };
         execute_frame(&mut ctx);
+
+        // ── Line overlay pass (gizmos, wireframes) ──────────────────────
+        if let Some(lines) = line_batch {
+            if !lines.is_empty() {
+                // Compute VP at display resolution for line overlay
+                let line_vp = self
+                    .camera
+                    .view_projection(DISPLAY_WIDTH, DISPLAY_HEIGHT);
+                self.queue.write_buffer(
+                    &self.line_vp_buffer,
+                    0,
+                    bytemuck::bytes_of(&line_vp),
+                );
+
+                // Upload vertex data (grow buffer if needed)
+                let vertex_count = lines.vertex_count();
+                let byte_size = vertex_count * 28;
+                if vertex_count > self.line_vertex_capacity {
+                    self.line_vertex_capacity = vertex_count.next_power_of_two();
+                    self.line_vertex_buffer =
+                        self.device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("line vertex buffer"),
+                            size: (self.line_vertex_capacity * 28) as u64,
+                            usage: wgpu::BufferUsages::VERTEX
+                                | wgpu::BufferUsages::COPY_DST,
+                            mapped_at_creation: false,
+                        });
+                }
+
+                // Pack vertices: [f32; 3] position + [f32; 4] color = 28 bytes
+                let mut packed = Vec::with_capacity(byte_size);
+                for v in &lines.vertices {
+                    packed.extend_from_slice(bytemuck::bytes_of(&v.position));
+                    packed.extend_from_slice(bytemuck::bytes_of(&v.color));
+                }
+                self.queue
+                    .write_buffer(&self.line_vertex_buffer, 0, &packed);
+
+                // Render pass on top of swapchain (LoadOp::Load preserves content)
+                {
+                    let mut rpass =
+                        encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("line overlay"),
+                            color_attachments: &[Some(
+                                wgpu::RenderPassColorAttachment {
+                                    view: swapchain_view,
+                                    resolve_target: None,
+                                    ops: wgpu::Operations {
+                                        load: wgpu::LoadOp::Load,
+                                        store: wgpu::StoreOp::Store,
+                                    },
+                                    depth_slice: None,
+                                },
+                            )],
+                            depth_stencil_attachment: None,
+                            ..Default::default()
+                        });
+                    rpass.set_pipeline(&self.line_pipeline);
+                    rpass.set_bind_group(0, &self.line_vp_bind_group, &[]);
+                    rpass.set_vertex_buffer(
+                        0,
+                        self.line_vertex_buffer.slice(..byte_size as u64),
+                    );
+                    rpass.draw(0..vertex_count as u32, 0..1);
+                }
+            }
+        }
 
         // Copy final texture to staging for MCP screenshot readback
         encoder.copy_texture_to_buffer(

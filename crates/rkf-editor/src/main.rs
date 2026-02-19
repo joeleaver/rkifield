@@ -2882,6 +2882,77 @@ impl App {
         log::info!("Editor initialized — engine viewport active");
     }
 
+    // ── Build gizmo / wireframe overlay lines ────────────────────────────
+
+    fn build_gizmo_lines(&self) -> Option<overlay::LineBatch> {
+        let es = self.editor_state.lock().ok()?;
+        let selected = es.scene_tree.selected_entities();
+        let sel_id = *selected.first()?;
+        let node = es.scene_tree.find_node(sel_id)?;
+        let pos = node.position;
+
+        let mut batch = overlay::LineBatch::new();
+
+        // Translate gizmo: three colored axis arrows
+        let gizmo_size = 1.0f32;
+        let red = [1.0, 0.2, 0.2, 1.0];
+        let green = [0.2, 1.0, 0.2, 1.0];
+        let blue = [0.3, 0.3, 1.0, 1.0];
+
+        // X axis (red)
+        batch.add_line(pos, pos + glam::Vec3::X * gizmo_size, red);
+        // Arrowhead
+        batch.add_line(
+            pos + glam::Vec3::X * gizmo_size,
+            pos + glam::Vec3::new(gizmo_size * 0.85, gizmo_size * 0.07, 0.0),
+            red,
+        );
+        batch.add_line(
+            pos + glam::Vec3::X * gizmo_size,
+            pos + glam::Vec3::new(gizmo_size * 0.85, -gizmo_size * 0.07, 0.0),
+            red,
+        );
+
+        // Y axis (green)
+        batch.add_line(pos, pos + glam::Vec3::Y * gizmo_size, green);
+        batch.add_line(
+            pos + glam::Vec3::Y * gizmo_size,
+            pos + glam::Vec3::new(gizmo_size * 0.07, gizmo_size * 0.85, 0.0),
+            green,
+        );
+        batch.add_line(
+            pos + glam::Vec3::Y * gizmo_size,
+            pos + glam::Vec3::new(-gizmo_size * 0.07, gizmo_size * 0.85, 0.0),
+            green,
+        );
+
+        // Z axis (blue)
+        batch.add_line(pos, pos + glam::Vec3::Z * gizmo_size, blue);
+        batch.add_line(
+            pos + glam::Vec3::Z * gizmo_size,
+            pos + glam::Vec3::new(0.0, gizmo_size * 0.07, gizmo_size * 0.85),
+            blue,
+        );
+        batch.add_line(
+            pos + glam::Vec3::Z * gizmo_size,
+            pos + glam::Vec3::new(0.0, -gizmo_size * 0.07, gizmo_size * 0.85),
+            blue,
+        );
+
+        // Selection wireframe (white box around entity)
+        if es.overlay_config.show_selection_outlines {
+            let half = 0.5f32; // approximate entity extent
+            let outline_color = [1.0, 1.0, 1.0, 0.5];
+            batch.add_box_wireframe(
+                pos - glam::Vec3::splat(half),
+                pos + glam::Vec3::splat(half),
+                outline_color,
+            );
+        }
+
+        Some(batch)
+    }
+
     // ── Render one frame ───────────────────────────────────────────────────
 
     fn render(&mut self) {
@@ -2996,8 +3067,11 @@ impl App {
         }
 
         // ── Step 1: Engine renders full pipeline + blits to surface ────────
+        // Build gizmo/wireframe overlay lines for selected entity.
+        let line_batch = self.build_gizmo_lines();
+
         if let Some(engine) = &mut self.engine {
-            engine.render(&surface_view, dt);
+            engine.render(&surface_view, dt, line_batch.as_ref());
         }
 
         // ── Step 2: Render rinch UI overlay + composite onto surface ───────
