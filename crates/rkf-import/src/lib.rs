@@ -20,4 +20,5 @@ pub mod bvh;
 pub mod lod;
 pub mod material_transfer;
 pub mod mesh;
+pub mod skeleton_extract;
 pub mod voxelize;

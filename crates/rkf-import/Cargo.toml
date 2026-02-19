@@ -7,6 +7,7 @@ description = "Mesh-to-SDF conversion library for the RKIField engine"
 
 [dependencies]
 rkf-core = { workspace = true }
+rkf-animation = { workspace = true }
 glam = { workspace = true }
 bytemuck = { workspace = true }
 log = { workspace = true }
