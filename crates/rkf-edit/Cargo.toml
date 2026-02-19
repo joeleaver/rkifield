@@ -7,6 +7,7 @@ description = "Procedural editing operations for the RKIField SDF engine"
 
 [dependencies]
 rkf-core = { workspace = true }
+wgpu = { workspace = true }
 glam = { workspace = true }
 bytemuck = { workspace = true }
 log = { workspace = true }
