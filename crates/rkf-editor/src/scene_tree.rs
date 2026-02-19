@@ -6,6 +6,8 @@
 
 #![allow(dead_code)]
 
+use glam::{Quat, Vec3};
+
 /// A single node in the scene hierarchy tree.
 #[derive(Debug, Clone)]
 pub struct SceneNode {
@@ -21,6 +23,14 @@ pub struct SceneNode {
     pub selected: bool,
     /// Whether the entity is visible in the viewport.
     pub visible: bool,
+    /// World-space position of this entity.
+    pub position: Vec3,
+    /// World-space rotation of this entity.
+    pub rotation: Quat,
+    /// Uniform scale of this entity.
+    pub scale: f32,
+    /// Asset path for SdfObject entities, used to roundtrip scene save/load.
+    pub asset_path: Option<String>,
 }
 
 impl SceneNode {
@@ -33,6 +43,10 @@ impl SceneNode {
             expanded: false,
             selected: false,
             visible: true,
+            position: Vec3::ZERO,
+            rotation: Quat::IDENTITY,
+            scale: 1.0,
+            asset_path: None,
         }
     }
 
@@ -225,6 +239,7 @@ impl SceneTree {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glam::{Quat, Vec3};
 
     fn sample_tree() -> SceneTree {
         let mut tree = SceneTree::new();
@@ -387,6 +402,10 @@ mod tests {
         assert!(!node.expanded);
         assert!(!node.selected);
         assert!(node.visible);
+        assert_eq!(node.position, Vec3::ZERO);
+        assert_eq!(node.rotation, Quat::IDENTITY);
+        assert!((node.scale - 1.0).abs() < 1e-6);
+        assert!(node.asset_path.is_none());
     }
 
     #[test]

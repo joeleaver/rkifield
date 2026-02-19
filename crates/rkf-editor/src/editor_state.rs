@@ -245,15 +245,42 @@ impl EditorState {
         // Clear existing scene tree
         self.scene_tree = crate::scene_tree::SceneTree::new();
 
-        // Populate scene tree from entities
+        // Populate scene tree from entities.
+        // Light-only entities are handled exclusively by the light editor below;
+        // skip them here to avoid double-counting on save.
         for entity in &scene.entities {
+            let is_light_only = !entity.components.is_empty()
+                && entity
+                    .components
+                    .iter()
+                    .all(|c| matches!(c, ComponentData::Light { .. }));
+            if is_light_only {
+                continue;
+            }
+
             let mut node = SceneNode::new(entity.entity_id, &entity.name);
             node.visible = true;
+            node.position = entity.position;
+            node.rotation = entity.rotation;
+            node.scale = entity.scale;
+            for comp in &entity.components {
+                if let ComponentData::SdfObject { asset_path } = comp {
+                    node.asset_path = Some(asset_path.clone());
+                }
+            }
             self.scene_tree.add_node(node);
         }
 
-        // Rebuild parent-child relationships
+        // Rebuild parent-child relationships (only for non-light entities)
         for entity in &scene.entities {
+            let is_light_only = !entity.components.is_empty()
+                && entity
+                    .components
+                    .iter()
+                    .all(|c| matches!(c, ComponentData::Light { .. }));
+            if is_light_only {
+                continue;
+            }
             if let Some(parent_id) = entity.parent_id {
                 // Remove from roots and re-add as child
                 if let Some(child) = self.scene_tree.remove_node(entity.entity_id) {
@@ -313,5 +340,278 @@ impl EditorState {
         self.unsaved_changes.mark_saved();
 
         Ok(scene)
+    }
+
+    /// Construct a [`SceneFile`] from the current editor state.
+    ///
+    /// Walks the scene tree to collect SDF/animated/physics entities (with their
+    /// stored transforms and asset paths), then appends light entities from the
+    /// light editor. The environment is serialized via RON. The resulting
+    /// `SceneFile` can be passed to [`crate::scene_io::save_scene_to_path`].
+    pub fn save_current_scene(&self) -> crate::scene_io::SceneFile {
+        use crate::light_editor::EditorLightType;
+        use crate::scene_io::{ComponentData, SceneEntity, SceneFile};
+        use crate::scene_tree::SceneNode;
+        use glam::Quat;
+
+        let mut entities: Vec<SceneEntity> = Vec::new();
+
+        // Recursively collect scene-tree nodes into flat entity list.
+        fn collect_nodes(
+            node: &SceneNode,
+            parent_id: Option<u64>,
+            out: &mut Vec<SceneEntity>,
+        ) {
+            let mut components = Vec::new();
+            if let Some(ref path) = node.asset_path {
+                components.push(ComponentData::SdfObject {
+                    asset_path: path.clone(),
+                });
+            }
+            out.push(SceneEntity {
+                entity_id: node.entity_id,
+                name: node.name.clone(),
+                parent_id,
+                position: node.position,
+                rotation: node.rotation,
+                scale: node.scale,
+                components,
+            });
+            for child in &node.children {
+                collect_nodes(child, Some(node.entity_id), out);
+            }
+        }
+
+        for root in &self.scene_tree.roots {
+            collect_nodes(root, None, &mut entities);
+        }
+
+        // Append light entities from the light editor.
+        for (idx, light) in self.light_editor.all_lights().iter().enumerate() {
+            let light_type_str = match light.light_type {
+                EditorLightType::Point => "point",
+                EditorLightType::Spot => "spot",
+                EditorLightType::Directional => "directional",
+            };
+            let name = format!(
+                "{} Light {}",
+                match light.light_type {
+                    EditorLightType::Point => "Point",
+                    EditorLightType::Spot => "Spot",
+                    EditorLightType::Directional => "Directional",
+                },
+                idx + 1
+            );
+            let range = if light.range.is_infinite() {
+                0.0
+            } else {
+                light.range
+            };
+            entities.push(SceneEntity {
+                entity_id: light.id,
+                name,
+                parent_id: None,
+                position: light.position,
+                rotation: Quat::IDENTITY,
+                scale: 1.0,
+                components: vec![ComponentData::Light {
+                    light_type: light_type_str.to_string(),
+                    color: [light.color.x, light.color.y, light.color.z],
+                    intensity: light.intensity,
+                    range,
+                }],
+            });
+        }
+
+        let environment_ron = self.environment.serialize_to_ron().unwrap_or_default();
+
+        let name = self
+            .current_scene_path
+            .as_ref()
+            .and_then(|p| std::path::Path::new(p).file_stem())
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Untitled".to_string());
+
+        SceneFile {
+            version: 1,
+            name,
+            entities,
+            environment_ron,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scene_io::{save_scene, ComponentData, SceneEntity, SceneFile};
+    use glam::{Quat, Vec3};
+
+    fn write_test_scene(path: &str) {
+        let scene = SceneFile {
+            version: 1,
+            name: "Test".to_string(),
+            entities: vec![
+                SceneEntity {
+                    entity_id: 1,
+                    name: "Ground".to_string(),
+                    parent_id: None,
+                    position: Vec3::new(0.0, -0.5, 0.0),
+                    rotation: Quat::IDENTITY,
+                    scale: 1.0,
+                    components: vec![ComponentData::SdfObject {
+                        asset_path: "procedural://ground".to_string(),
+                    }],
+                },
+                SceneEntity {
+                    entity_id: 2,
+                    name: "Child".to_string(),
+                    parent_id: Some(1),
+                    position: Vec3::new(1.0, 2.0, 3.0),
+                    rotation: Quat::from_rotation_y(1.0),
+                    scale: 0.5,
+                    components: vec![ComponentData::SdfObject {
+                        asset_path: "procedural://pillar".to_string(),
+                    }],
+                },
+                SceneEntity {
+                    entity_id: 3,
+                    name: "Sun".to_string(),
+                    parent_id: None,
+                    position: Vec3::ZERO,
+                    rotation: Quat::IDENTITY,
+                    scale: 1.0,
+                    components: vec![ComponentData::Light {
+                        light_type: "directional".to_string(),
+                        color: [1.0, 0.95, 0.8],
+                        intensity: 3.0,
+                        range: 0.0,
+                    }],
+                },
+            ],
+            environment_ron: String::new(),
+        };
+        let ron_str = save_scene(&scene).unwrap();
+        std::fs::write(path, ron_str).unwrap();
+    }
+
+    #[test]
+    fn test_load_scene_populates_scene_tree() {
+        let path = "/tmp/rkf_test_load_tree.rkscene";
+        write_test_scene(path);
+        let mut state = EditorState::new();
+        let scene = state.load_scene(path).unwrap();
+        assert_eq!(scene.entities.len(), 3);
+        // Only SDF entities go in scene tree (lights go to light_editor)
+        assert_eq!(state.scene_tree.roots.len(), 1); // "Ground" root
+        assert_eq!(state.scene_tree.roots[0].name, "Ground");
+        // "Child" is reparented under "Ground"
+        assert_eq!(state.scene_tree.roots[0].children.len(), 1);
+        assert_eq!(state.scene_tree.roots[0].children[0].name, "Child");
+    }
+
+    #[test]
+    fn test_load_scene_stores_transform_and_asset_path() {
+        let path = "/tmp/rkf_test_load_xform.rkscene";
+        write_test_scene(path);
+        let mut state = EditorState::new();
+        state.load_scene(path).unwrap();
+        let ground = &state.scene_tree.roots[0];
+        assert_eq!(ground.position, Vec3::new(0.0, -0.5, 0.0));
+        assert_eq!(
+            ground.asset_path.as_deref(),
+            Some("procedural://ground")
+        );
+        let child = &ground.children[0];
+        assert_eq!(child.position, Vec3::new(1.0, 2.0, 3.0));
+        assert!((child.scale - 0.5).abs() < 1e-6);
+        assert_eq!(
+            child.asset_path.as_deref(),
+            Some("procedural://pillar")
+        );
+    }
+
+    #[test]
+    fn test_load_scene_populates_light_editor() {
+        let path = "/tmp/rkf_test_load_lights.rkscene";
+        write_test_scene(path);
+        let mut state = EditorState::new();
+        state.load_scene(path).unwrap();
+        assert_eq!(state.light_editor.all_lights().len(), 1);
+        let light = &state.light_editor.all_lights()[0];
+        assert_eq!(light.intensity, 3.0);
+    }
+
+    #[test]
+    fn test_load_scene_sets_path_and_clears_dirty() {
+        let path = "/tmp/rkf_test_load_path.rkscene";
+        write_test_scene(path);
+        let mut state = EditorState::new();
+        state.unsaved_changes.mark_changed();
+        state.load_scene(path).unwrap();
+        assert_eq!(state.current_scene_path.as_deref(), Some(path));
+        assert!(!state.unsaved_changes.needs_save());
+    }
+
+    #[test]
+    fn test_load_nonexistent_file() {
+        let mut state = EditorState::new();
+        let result = state.load_scene("/nonexistent/path.rkscene");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_save_empty_scene() {
+        let state = EditorState::new();
+        let saved = state.save_current_scene();
+        assert_eq!(saved.version, 1);
+        assert_eq!(saved.name, "Untitled");
+        assert!(saved.entities.is_empty());
+    }
+
+    #[test]
+    fn test_save_roundtrip_preserves_entities() {
+        let path = "/tmp/rkf_test_save_rt.rkscene";
+        write_test_scene(path);
+        let mut state = EditorState::new();
+        state.load_scene(path).unwrap();
+
+        let saved = state.save_current_scene();
+        assert_eq!(saved.version, 1);
+        // 2 SDF entities (Ground + Child) + 1 light = 3
+        assert_eq!(saved.entities.len(), 3);
+
+        // Check SDF entities
+        let ground = saved.entities.iter().find(|e| e.name == "Ground").unwrap();
+        assert_eq!(ground.position, Vec3::new(0.0, -0.5, 0.0));
+        assert!(ground.components.iter().any(|c| matches!(
+            c,
+            ComponentData::SdfObject { asset_path } if asset_path == "procedural://ground"
+        )));
+
+        let child = saved.entities.iter().find(|e| e.name == "Child").unwrap();
+        assert_eq!(child.parent_id, Some(1));
+        assert!((child.scale - 0.5).abs() < 1e-6);
+
+        // Check light entity
+        let light_ent = saved
+            .entities
+            .iter()
+            .find(|e| e.components.iter().any(|c| matches!(c, ComponentData::Light { .. })))
+            .unwrap();
+        assert!(light_ent
+            .components
+            .iter()
+            .any(|c| matches!(c, ComponentData::Light { intensity, .. } if (*intensity - 3.0).abs() < 1e-6)));
+    }
+
+    #[test]
+    fn test_save_scene_name_from_path() {
+        let path = "/tmp/rkf_test_save_name.rkscene";
+        write_test_scene(path);
+        let mut state = EditorState::new();
+        state.load_scene(path).unwrap();
+        let saved = state.save_current_scene();
+        assert_eq!(saved.name, "rkf_test_save_name");
     }
 }

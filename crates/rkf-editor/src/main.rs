@@ -1000,93 +1000,8 @@ fn build_select_panel(scope: &mut RenderScope, select_refresh: Signal<u32>) -> N
     let panel = scope.create_element("div");
     panel.set_attribute("style", "display: flex; flex-direction: column; gap: 2px;");
 
-    // ── Scene Tree ───────────────────────────────────────────────────────
-    build_env_section_header(scope, &panel, "Scene Tree");
-
-    // Pre-allocate 32 node slots
-    const MAX_NODES: usize = 32;
-    let mut slot_handles = Vec::with_capacity(MAX_NODES);
-    for _ in 0..MAX_NODES {
-        let row = scope.create_element("div");
-        row.set_attribute("style", ENV_ROW_STYLE);
-
-        let name_btn = scope.create_element("button");
-        name_btn.set_attribute(
-            "style",
-            "flex: 1; text-align: left; background: transparent; border: none; \
-             color: #ccc; font-size: 11px; cursor: pointer; padding: 0 2px; \
-             font-family: inherit; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
-        );
-        row.append_child(&name_btn);
-        panel.append_child(&row);
-        slot_handles.push((row, name_btn));
-    }
-
-    // Effect: populate slots from scene tree roots (flattened, roots only)
-    scope.create_effect({
-        let slot_handles = slot_handles.clone();
-        move || {
-            let _ = select_refresh.get();
-
-            // Collect root nodes info
-            let nodes: Vec<(u64, String, bool)> = EDITOR_STATE
-                .get()
-                .and_then(|es| {
-                    es.lock().ok().map(|s| {
-                        s.scene_tree
-                            .roots
-                            .iter()
-                            .take(MAX_NODES)
-                            .map(|n| (n.entity_id, n.name.clone(), n.selected))
-                            .collect()
-                    })
-                })
-                .unwrap_or_default();
-
-            for (i, (row, name_btn)) in slot_handles.iter().enumerate() {
-                if i < nodes.len() {
-                    let (_eid, name, selected) = &nodes[i];
-                    row.set_attribute("style", ENV_ROW_STYLE);
-                    name_btn.set_text(name);
-                    name_btn.set_attribute(
-                        "style",
-                        if *selected {
-                            "flex: 1; text-align: left; background: #3a5a80; border: none; \
-                             color: #fff; font-size: 11px; cursor: pointer; padding: 0 2px; \
-                             font-family: inherit; overflow: hidden; text-overflow: ellipsis; \
-                             white-space: nowrap; border-radius: 2px;"
-                        } else {
-                            "flex: 1; text-align: left; background: transparent; border: none; \
-                             color: #ccc; font-size: 11px; cursor: pointer; padding: 0 2px; \
-                             font-family: inherit; overflow: hidden; text-overflow: ellipsis; \
-                             white-space: nowrap;"
-                        },
-                    );
-                } else {
-                    row.set_attribute("style", "display: none;");
-                }
-            }
-        }
-    });
-
-    // Register click handlers for each slot
-    for (i, (_row, name_btn)) in slot_handles.iter().enumerate() {
-        let h = scope.register_handler(move || {
-            if let Some(es) = EDITOR_STATE.get() {
-                if let Ok(mut state) = es.lock() {
-                    if let Some(node) = state.scene_tree.roots.get(i) {
-                        let eid = node.entity_id;
-                        state.scene_tree.select_node(eid);
-                    }
-                }
-            }
-            select_refresh.update(|v| *v = v.wrapping_add(1));
-        });
-        name_btn.set_attribute("data-rid", &h.0.to_string());
-    }
-
-    // ── Properties (shown when a node is selected) ───────────────────────
-    build_env_section_header(scope, &panel, "Properties");
+    // ── Properties of selected entity ────────────────────────────────────
+    build_env_section_header(scope, &panel, "Selected Entity");
 
     let props_div = scope.create_element("div");
     props_div.set_attribute("style", "display: flex; flex-direction: column; gap: 2px;");
@@ -2002,7 +1917,29 @@ fn editor_ui() -> NodeHandle {
 
             build_menu_item_disabled(scope, &dd, "New Scene", "");
             build_menu_item_disabled(scope, &dd, "Open...", "Ctrl+O");
-            build_menu_item_disabled(scope, &dd, "Save", "Ctrl+S");
+            build_menu_item(scope, &dd, "Save", "Ctrl+S", menu_open, move || {
+                if let Some(es) = EDITOR_STATE.get() {
+                    if let Ok(state) = es.lock() {
+                        if let Some(ref path) = state.current_scene_path {
+                            let scene = state.save_current_scene();
+                            let path = path.clone();
+                            drop(state); // release lock before I/O
+                            match crate::scene_io::save_scene_to_path(&scene, &path) {
+                                Ok(()) => {
+                                    log::info!("Saved scene to {path}");
+                                    // Mark saved
+                                    if let Ok(mut s) = es.lock() {
+                                        s.unsaved_changes.mark_saved();
+                                    }
+                                }
+                                Err(e) => log::error!("Failed to save scene: {e}"),
+                            }
+                        } else {
+                            log::warn!("No scene path set — use Save As");
+                        }
+                    }
+                }
+            });
             build_menu_item_disabled(scope, &dd, "Save As...", "Ctrl+Shift+S");
             build_menu_separator(scope, &dd);
             build_menu_item(scope, &dd, "Quit", "Esc", menu_open, move || {
@@ -2223,7 +2160,7 @@ fn editor_ui() -> NodeHandle {
         "display: flex; flex-direction: row; flex: 1; overflow: hidden;",
     );
 
-    // ── Left panel: Scene Hierarchy ──────────────────────────────────
+    // ── Left panel: Scene Hierarchy (always visible) ───────────────
     let left_panel = __scope.create_element("div");
     left_panel.set_attribute(
         "style",
@@ -2238,18 +2175,107 @@ fn editor_ui() -> NodeHandle {
     left_title.set_text("Scene Hierarchy");
     left_panel.append_child(&left_title);
 
-    // Scene tree content — shows entities from EditorState.scene_tree.
-    // Currently empty; will populate as entities are added.
-    let tree_container = __scope.create_element("div");
-    tree_container.set_attribute(
-        "style",
-        "flex: 1; display: flex; flex-direction: column;",
-    );
+    // Reactive scene tree from EditorState.scene_tree
+    let select_refresh = Signal::new(0u32);
+    SELECT_REFRESH.with(|cell| cell.set(Some(select_refresh)));
+
     let empty_msg = __scope.create_element("span");
     empty_msg.set_attribute("style", "color: #555; font-size: 12px; font-style: italic;");
     empty_msg.set_text("No entities in scene");
-    tree_container.append_child(&empty_msg);
-    left_panel.append_child(&tree_container);
+    left_panel.append_child(&empty_msg);
+
+    // Pre-allocate 32 entity slots
+    const MAX_TREE_NODES: usize = 32;
+    let mut tree_slots = Vec::with_capacity(MAX_TREE_NODES);
+    for _ in 0..MAX_TREE_NODES {
+        let row = __scope.create_element("div");
+        row.set_attribute("style", "display: none;");
+
+        let name_btn = __scope.create_element("button");
+        name_btn.set_attribute(
+            "style",
+            "width: 100%; text-align: left; background: transparent; border: none; \
+             color: #ccc; font-size: 11px; cursor: pointer; padding: 2px 4px; \
+             font-family: inherit; overflow: hidden; text-overflow: ellipsis; \
+             white-space: nowrap; border-radius: 2px;",
+        );
+        row.append_child(&name_btn);
+        left_panel.append_child(&row);
+        tree_slots.push((row, name_btn));
+    }
+
+    // Effect: populate slots from scene_tree roots when select_refresh changes
+    __scope.create_effect({
+        let tree_slots = tree_slots.clone();
+        let empty_msg = empty_msg.clone();
+        move || {
+            let _ = select_refresh.get();
+
+            let nodes: Vec<(u64, String, bool)> = EDITOR_STATE
+                .get()
+                .and_then(|es| {
+                    es.lock().ok().map(|s| {
+                        s.scene_tree
+                            .roots
+                            .iter()
+                            .take(MAX_TREE_NODES)
+                            .map(|n| (n.entity_id, n.name.clone(), n.selected))
+                            .collect()
+                    })
+                })
+                .unwrap_or_default();
+
+            // Show/hide empty message
+            if nodes.is_empty() {
+                empty_msg.set_attribute("style", "color: #555; font-size: 12px; font-style: italic;");
+            } else {
+                empty_msg.set_attribute("style", "display: none;");
+            }
+
+            for (i, (row, name_btn)) in tree_slots.iter().enumerate() {
+                if i < nodes.len() {
+                    let (_eid, name, selected) = &nodes[i];
+                    row.set_attribute(
+                        "style",
+                        "display: flex; flex-direction: row; align-items: center;",
+                    );
+                    name_btn.set_text(name);
+                    name_btn.set_attribute(
+                        "style",
+                        if *selected {
+                            "width: 100%; text-align: left; background: #3a5a80; border: none; \
+                             color: #fff; font-size: 11px; cursor: pointer; padding: 2px 4px; \
+                             font-family: inherit; overflow: hidden; text-overflow: ellipsis; \
+                             white-space: nowrap; border-radius: 2px;"
+                        } else {
+                            "width: 100%; text-align: left; background: transparent; border: none; \
+                             color: #ccc; font-size: 11px; cursor: pointer; padding: 2px 4px; \
+                             font-family: inherit; overflow: hidden; text-overflow: ellipsis; \
+                             white-space: nowrap; border-radius: 2px;"
+                        },
+                    );
+                } else {
+                    row.set_attribute("style", "display: none;");
+                }
+            }
+        }
+    });
+
+    // Click handlers for each slot — select the entity
+    for (i, (_row, name_btn)) in tree_slots.iter().enumerate() {
+        let h = __scope.register_handler(move || {
+            if let Some(es) = EDITOR_STATE.get() {
+                if let Ok(mut state) = es.lock() {
+                    if let Some(node) = state.scene_tree.roots.get(i) {
+                        let eid = node.entity_id;
+                        state.scene_tree.select_node(eid);
+                    }
+                }
+            }
+            select_refresh.update(|v| *v = v.wrapping_add(1));
+        });
+        name_btn.set_attribute("data-rid", &h.0.to_string());
+    }
 
     content.append_child(&left_panel);
 
@@ -2319,10 +2345,7 @@ fn editor_ui() -> NodeHandle {
         None::<fn(&mut RenderScope) -> NodeHandle>,
     );
 
-    // Select panel (shown in Select mode)
-    let select_refresh = Signal::new(0u32);
-    SELECT_REFRESH.with(|cell| cell.set(Some(select_refresh)));
-
+    // Select panel (shown in Select mode) — reuses select_refresh from left panel
     show_dom(
         __scope,
         &right_panel,
@@ -2602,6 +2625,8 @@ struct App {
 
     // Scene
     scene_path: Option<String>,
+    /// Set after scene load; consumed on first render frame to bump UI signals.
+    pending_ui_refresh: bool,
 
     // Timing
     last_frame: Instant,
@@ -2644,6 +2669,7 @@ impl App {
             ))),
             socket_path: None,
             scene_path,
+            pending_ui_refresh: false,
             last_frame: Instant::now(),
             frame_count: 0,
             last_title_update: Instant::now(),
@@ -2824,7 +2850,10 @@ impl App {
         // Load scene file if provided
         if let Some(path) = &self.scene_path {
             let path = path.clone();
-            match self.editor_state.lock().unwrap().load_scene(&path) {
+            // Lock, load, then drop the lock before triggering signals
+            // (signal updates may trigger rinch effects that re-lock editor_state)
+            let load_result = self.editor_state.lock().unwrap().load_scene(&path);
+            match load_result {
                 Ok(scene) => {
                     log::info!(
                         "Loaded scene '{}' with {} entities from {}",
@@ -2832,6 +2861,10 @@ impl App {
                         scene.entities.len(),
                         path,
                     );
+                    // Defer UI refresh to the first render frame
+                    // (signal updates during init_gpu may not trigger effects
+                    // until rinch processes its next tick)
+                    self.pending_ui_refresh = true;
                 }
                 Err(e) => {
                     log::error!("Failed to load scene '{}': {}", path, e);
@@ -2888,6 +2921,27 @@ impl App {
 
         let device = self.device.as_ref().unwrap();
         let queue = self.queue.as_ref().unwrap();
+
+        // One-shot UI refresh after scene load — deferred to render loop
+        // so rinch effects have been initialised and can react to signals.
+        if self.pending_ui_refresh {
+            self.pending_ui_refresh = false;
+            SELECT_REFRESH.with(|cell| {
+                if let Some(sig) = cell.get() {
+                    sig.update(|v| *v = v.wrapping_add(1));
+                }
+            });
+            LIGHT_REFRESH.with(|cell| {
+                if let Some(sig) = cell.get() {
+                    sig.update(|v| *v = v.wrapping_add(1));
+                }
+            });
+            ENV_REFRESH.with(|cell| {
+                if let Some(sig) = cell.get() {
+                    sig.update(|v| *v = v.wrapping_add(1));
+                }
+            });
+        }
 
         // Update rinch context
         if let Some(ctx) = &mut self.rinch_ctx {
@@ -3274,6 +3328,28 @@ impl ApplicationHandler for App {
                             if let Ok(mut es) = self.editor_state.lock() {
                                 if let Some(action) = es.undo.redo() {
                                     log::info!("Redo: {}", action.description);
+                                }
+                            }
+                            return;
+                        }
+                        KeyCode::KeyS if !shift => {
+                            // Ctrl+S — Save
+                            if let Ok(state) = self.editor_state.lock() {
+                                if let Some(ref path) = state.current_scene_path {
+                                    let scene = state.save_current_scene();
+                                    let path = path.clone();
+                                    drop(state);
+                                    match crate::scene_io::save_scene_to_path(&scene, &path) {
+                                        Ok(()) => {
+                                            log::info!("Saved scene to {path}");
+                                            if let Ok(mut s) = self.editor_state.lock() {
+                                                s.unsaved_changes.mark_saved();
+                                            }
+                                        }
+                                        Err(e) => log::error!("Failed to save: {e}"),
+                                    }
+                                } else {
+                                    log::warn!("No scene path set — use Save As");
                                 }
                             }
                             return;
