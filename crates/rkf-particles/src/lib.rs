@@ -16,6 +16,8 @@
 
 pub mod binning;
 pub mod emitter;
+pub mod micro_object;
 pub mod particle;
+pub mod screen_space;
 pub mod simulate;
 pub mod volumetric;
