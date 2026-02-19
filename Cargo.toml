@@ -47,6 +47,7 @@ rayon = "1"
 tobj = "4"
 base64 = "0.22"
 pollster = "0.4"
+rinch = { git = "https://github.com/joeleaver/rinch.git", features = ["desktop", "components", "theme"] }
 
 # Internal crate cross-references
 rkf-core = { path = "crates/rkf-core" }
