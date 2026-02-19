@@ -56,6 +56,10 @@ use rkf_render::vol_upscale::VolUpscalePass;
 
 use rkf_runtime::frame::{execute_frame, FrameContext, FrameSettings};
 
+use rkf_edit::transform_ops::{
+    self, ObjectTransform, SdfObjectRegistry, SdfPrimitive, SdfRecipe,
+};
+
 use crate::automation::SharedState;
 use crate::environment::EnvironmentState;
 use crate::light_editor::{EditorLight, EditorLightType};
@@ -143,7 +147,7 @@ fn apply_material_blend(
 /// Two LOD levels sharing the same brick pool:
 /// - Level 0: Tier 2 (8cm voxels), 8m radius — fine detail
 /// - Level 1: Tier 3 (32cm voxels), 32m radius — distant/coarse
-fn create_clipmap_scene() -> (BrickPool, ClipmapGridSet, ClipmapConfig, Aabb) {
+fn create_clipmap_scene() -> (BrickPool, ClipmapGridSet, ClipmapConfig, Aabb, Vec<Aabb>, SdfObjectRegistry) {
     let config = ClipmapConfig::new(vec![
         ClipmapLevel {
             voxel_size: 0.08,
@@ -369,12 +373,154 @@ fn create_clipmap_scene() -> (BrickPool, ClipmapGridSet, ClipmapConfig, Aabb) {
         ),
     );
 
+    // ── Register SDF objects for transform tracking ────────────────────
+    let mut registry = SdfObjectRegistry::new();
+    let pillar_positions_vec: Vec<(SdfPrimitive, Vec3)> = pillar_positions
+        .iter()
+        .map(|base| {
+            let bottom = Vec3::new(base.x, -0.3, base.z);
+            let top = Vec3::new(base.x, 3.5, base.z);
+            (
+                SdfPrimitive::Capsule {
+                    a: bottom,
+                    b: top,
+                    radius: 0.25,
+                },
+                Vec3::ZERO,
+            )
+        })
+        .chain([
+            (
+                SdfPrimitive::Box {
+                    half_extents: Vec3::new(0.3, 0.2, 1.8),
+                },
+                Vec3::new(-1.5, 3.6, 0.0),
+            ),
+            (
+                SdfPrimitive::Box {
+                    half_extents: Vec3::new(0.3, 0.2, 1.8),
+                },
+                Vec3::new(1.5, 3.6, 0.0),
+            ),
+            (
+                SdfPrimitive::Sphere { radius: 0.8 },
+                Vec3::new(3.0, 0.2, -3.5),
+            ),
+        ])
+        .collect();
+
+    // Entity 1: Ground
+    registry.register_with_id(
+        1,
+        SdfRecipe {
+            primitive: SdfPrimitive::Box {
+                half_extents: Vec3::new(8.0, 0.5, 8.0),
+            },
+            material_id: 8,
+        },
+        ObjectTransform {
+            position: Vec3::new(0.0, -0.5, 0.0),
+            ..Default::default()
+        },
+        0,
+    );
+
+    // Entity 2: Pillars + lintels + boulder
+    registry.register_with_id(
+        2,
+        SdfRecipe {
+            primitive: SdfPrimitive::Union(pillar_positions_vec),
+            material_id: 1,
+        },
+        ObjectTransform::default(),
+        0,
+    );
+
+    // Entity 3: Monolith wall
+    registry.register_with_id(
+        3,
+        SdfRecipe {
+            primitive: SdfPrimitive::Box {
+                half_extents: Vec3::new(0.3, 2.5, 3.0),
+            },
+            material_id: 2,
+        },
+        ObjectTransform {
+            position: Vec3::new(-7.0, 2.2, 0.0),
+            ..Default::default()
+        },
+        0,
+    );
+
+    // Entity 4: Blend sphere
+    registry.register_with_id(
+        4,
+        SdfRecipe {
+            primitive: SdfPrimitive::Sphere { radius: 1.2 },
+            material_id: 1,
+        },
+        ObjectTransform {
+            position: Vec3::new(0.0, 1.5, -4.5),
+            ..Default::default()
+        },
+        0,
+    );
+
+    // Entity 5: Distant terrain (level 1)
+    registry.register_with_id(
+        5,
+        SdfRecipe {
+            primitive: SdfPrimitive::SmoothUnion {
+                children: vec![
+                    (
+                        SdfPrimitive::Box {
+                            half_extents: Vec3::new(30.0, 0.5, 30.0),
+                        },
+                        Vec3::new(0.0, -0.5, 0.0),
+                    ),
+                    (SdfPrimitive::Sphere { radius: 4.0 }, Vec3::new(16.0, -1.0, -14.0)),
+                    (SdfPrimitive::Sphere { radius: 5.0 }, Vec3::new(-18.0, -1.0, 12.0)),
+                    (SdfPrimitive::Sphere { radius: 3.5 }, Vec3::new(10.0, -1.0, 20.0)),
+                ],
+                k: 1.0,
+            },
+            material_id: 8,
+        },
+        ObjectTransform::default(),
+        1,
+    );
+
+    // Entity 6: Far monolith + wall (level 1)
+    registry.register_with_id(
+        6,
+        SdfRecipe {
+            primitive: SdfPrimitive::Union(vec![
+                (
+                    SdfPrimitive::Box {
+                        half_extents: Vec3::new(1.5, 8.0, 1.5),
+                    },
+                    Vec3::new(22.0, 4.0, -5.0),
+                ),
+                (
+                    SdfPrimitive::Box {
+                        half_extents: Vec3::new(8.0, 3.0, 0.5),
+                    },
+                    Vec3::new(0.0, 1.5, -20.0),
+                ),
+            ]),
+            material_id: 2,
+        },
+        ObjectTransform::default(),
+        1,
+    );
+
     log::info!(
-        "Clipmap scene: {} levels, {} total bricks",
+        "Clipmap scene: {} levels, {} total bricks, {} registered objects",
         config.num_levels(),
         pool.allocated_count(),
+        registry.len(),
     );
-    (pool, grid_set, config, scene_aabb)
+    (pool, grid_set, config, scene_aabb, aabbs, registry)
 }
 
 /// Overhead lighting: white sun + cool fill.
@@ -441,6 +587,12 @@ pub struct EngineState {
     line_vertex_buffer: wgpu::Buffer,
     line_vertex_capacity: usize,
     surface_format: wgpu::TextureFormat,
+    // CPU-side voxel data for transform operations
+    cpu_pool: BrickPool,
+    cpu_grid_set: ClipmapGridSet,
+    level_aabbs: Vec<Aabb>,
+    /// Registry of SDF objects for transform tracking.
+    pub object_registry: SdfObjectRegistry,
 }
 
 impl EngineState {
@@ -454,7 +606,8 @@ impl EngineState {
         shared_state: Arc<Mutex<SharedState>>,
     ) -> Self {
         // Scene
-        let (pool, grid_set, clipmap_config, aabb) = create_clipmap_scene();
+        let (pool, grid_set, clipmap_config, aabb, level_aabbs, object_registry) =
+            create_clipmap_scene();
         let grid = grid_set.grid(0);
 
         // Update shared state with pool info
@@ -777,7 +930,7 @@ impl EngineState {
                     })],
                 }),
                 primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::LineList,
+                    topology: wgpu::PrimitiveTopology::TriangleList,
                     ..Default::default()
                 },
                 depth_stencil: None,
@@ -844,6 +997,10 @@ impl EngineState {
             line_vertex_buffer,
             line_vertex_capacity,
             surface_format,
+            cpu_pool: pool,
+            cpu_grid_set: grid_set,
+            level_aabbs,
+            object_registry,
         }
     }
 
@@ -932,6 +1089,85 @@ impl EngineState {
             .update_inject_uniforms(&self.queue, count as u32, 2);
 
         log::debug!("Lights updated: {} total ({} editor)", count, editor_lights.len());
+    }
+
+    /// Apply a transform change to an SDF object and upload dirty voxels to GPU.
+    ///
+    /// Looks up the object's clipmap level, clears+re-voxelizes the affected
+    /// region on the CPU-side pool/grid, then incrementally uploads only the
+    /// changed bricks, occupancy words, and slot entries to the GPU.
+    ///
+    /// Returns `true` on success.
+    pub fn apply_object_transform(&mut self, object_id: u64, new_transform: ObjectTransform) -> bool {
+        let obj = match self.object_registry.get(object_id) {
+            Some(o) => o,
+            None => {
+                log::warn!("apply_object_transform: unknown object {object_id}");
+                return false;
+            }
+        };
+        let level = obj.clipmap_level;
+
+        // Determine the tier for this level (same mapping as create_clipmap_scene)
+        let tiers = [2usize, 3usize];
+        let tier = if level < tiers.len() { tiers[level] } else { return false };
+        let grid_aabb = match self.level_aabbs.get(level) {
+            Some(a) => *a,
+            None => return false,
+        };
+
+        let grid = self.cpu_grid_set.grid_mut(level);
+        let result = transform_ops::apply_transform_change(
+            &mut self.cpu_pool,
+            grid,
+            &grid_aabb,
+            tier,
+            &self.object_registry,
+            object_id,
+            &new_transform,
+        );
+
+        let result = match result {
+            Some(r) => r,
+            None => return false,
+        };
+
+        // Upload dirty bricks
+        self.scene.write_dirty_bricks(&self.queue, &self.cpu_pool, &result.dirty_brick_slots);
+
+        // Upload dirty occupancy words and slot entries
+        let grid = self.cpu_grid_set.grid(level);
+
+        // Compute occupancy word indices from dirty cell indices
+        // flat_index = x + y * dim_x + z * dim_x * dim_y
+        // occupancy word = flat_index / 16 (2 bits per cell, 32 bits per word)
+        let mut dirty_occ_words: Vec<u32> = result
+            .dirty_cell_indices
+            .iter()
+            .map(|&idx| idx / 16)
+            .collect();
+        dirty_occ_words.sort_unstable();
+        dirty_occ_words.dedup();
+
+        self.scene.write_dirty_occupancy(&self.queue, grid, &dirty_occ_words);
+        self.scene.write_dirty_slots(&self.queue, grid, &result.dirty_cell_indices);
+
+        // Update the registry with the new transform
+        if let Some(obj) = self.object_registry.get_mut(object_id) {
+            obj.transform = new_transform;
+        }
+
+        // Update shared state pool info
+        if let Ok(mut state) = self.shared_state.lock() {
+            state.pool_allocated = self.cpu_pool.allocated_count() as u64;
+        }
+
+        log::info!(
+            "Object {object_id} transform applied: {} dirty bricks, {} dirty cells",
+            result.dirty_brick_slots.len(),
+            result.dirty_cell_indices.len(),
+        );
+        true
     }
 
     /// Render one frame: full SDF pipeline + line overlay + blit to swapchain.
@@ -1143,11 +1379,16 @@ impl EngineState {
                     bytemuck::bytes_of(&line_vp),
                 );
 
-                // Upload vertex data (grow buffer if needed)
-                let vertex_count = lines.vertex_count();
-                let byte_size = vertex_count * 28;
-                if vertex_count > self.line_vertex_capacity {
-                    self.line_vertex_capacity = vertex_count.next_power_of_two();
+                // Billboard quad generation: each segment → 6 GPU vertices
+                let cam_pos = self.camera.position;
+                let fov_half_tan =
+                    (self.camera.fov_degrees.to_radians() / 2.0).tan();
+                let vh = DISPLAY_HEIGHT as f32;
+
+                let gpu_verts = lines.segments.len() * 6;
+                let byte_size = gpu_verts * 28;
+                if gpu_verts > self.line_vertex_capacity {
+                    self.line_vertex_capacity = gpu_verts.next_power_of_two();
                     self.line_vertex_buffer =
                         self.device.create_buffer(&wgpu::BufferDescriptor {
                             label: Some("line vertex buffer"),
@@ -1158,11 +1399,40 @@ impl EngineState {
                         });
                 }
 
-                // Pack vertices: [f32; 3] position + [f32; 4] color = 28 bytes
+                // Generate camera-facing quads for each line segment
                 let mut packed = Vec::with_capacity(byte_size);
-                for v in &lines.vertices {
-                    packed.extend_from_slice(bytemuck::bytes_of(&v.position));
-                    packed.extend_from_slice(bytemuck::bytes_of(&v.color));
+                for seg in &lines.segments {
+                    let p0 = seg.start;
+                    let p1 = seg.end;
+                    let mid = (p0 + p1) * 0.5;
+                    let dist = (cam_pos - mid).length().max(0.01);
+                    let whw = seg.width * dist * fov_half_tan / vh;
+
+                    let ld = p1 - p0;
+                    let ld_n = if ld.length_squared() > 1e-12 {
+                        ld.normalize()
+                    } else {
+                        glam::Vec3::X
+                    };
+                    let to_cam = (cam_pos - mid).normalize();
+                    let mut side = ld_n.cross(to_cam);
+                    if side.length_squared() < 1e-6 {
+                        side = if ld_n.dot(glam::Vec3::Y).abs() < 0.99 {
+                            ld_n.cross(glam::Vec3::Y)
+                        } else {
+                            ld_n.cross(glam::Vec3::X)
+                        };
+                    }
+                    side = side.normalize() * whw;
+
+                    let c = [p0 - side, p0 + side, p1 + side, p1 - side];
+                    for &idx in &[0u8, 1, 2, 0, 2, 3] {
+                        packed.extend_from_slice(bytemuck::bytes_of(
+                            &c[idx as usize],
+                        ));
+                        packed
+                            .extend_from_slice(bytemuck::bytes_of(&seg.color));
+                    }
                 }
                 self.queue
                     .write_buffer(&self.line_vertex_buffer, 0, &packed);
@@ -1192,7 +1462,7 @@ impl EngineState {
                         0,
                         self.line_vertex_buffer.slice(..byte_size as u64),
                     );
-                    rpass.draw(0..vertex_count as u32, 0..1);
+                    rpass.draw(0..gpu_verts as u32, 0..1);
                 }
             }
         }
