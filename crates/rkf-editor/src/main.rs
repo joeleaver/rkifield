@@ -51,6 +51,8 @@ thread_local! {
     static FPS_SIGNAL: Cell<Option<Signal<u16>>> = const { Cell::new(None) };
     /// Bumped when environment settings change, to re-read values in UI.
     static ENV_REFRESH: Cell<Option<Signal<u32>>> = const { Cell::new(None) };
+    /// Bumped when light list/properties change, to re-read values in UI.
+    static LIGHT_REFRESH: Cell<Option<Signal<u32>>> = const { Cell::new(None) };
 }
 
 // ---------------------------------------------------------------------------
@@ -537,6 +539,451 @@ fn build_env_panel(scope: &mut RenderScope, env_refresh: Signal<u32>) -> NodeHan
     panel
 }
 
+// ── Light panel helpers ──────────────────────────────────────────────────
+
+const LIGHT_ITEM_STYLE: &str = "display: flex; align-items: center; padding: 3px 6px; \
+    cursor: pointer; border-radius: 3px; font-size: 11px; color: #bbb; \
+    background: transparent; border: none; width: 100%; text-align: left; \
+    font-family: inherit; gap: 6px;";
+const LIGHT_ITEM_SEL_STYLE: &str = "display: flex; align-items: center; padding: 3px 6px; \
+    cursor: pointer; border-radius: 3px; font-size: 11px; color: #fff; \
+    background: #3a5070; border: none; width: 100%; text-align: left; \
+    font-family: inherit; gap: 6px;";
+const LIGHT_ADD_BTN_STYLE: &str = "border: 1px solid #444; background: #333; color: #ccc; \
+    padding: 2px 8px; font-size: 10px; cursor: pointer; border-radius: 3px; \
+    font-family: inherit; line-height: 16px;";
+const LIGHT_REMOVE_BTN_STYLE: &str = "border: 1px solid #633; background: #422; color: #e88; \
+    padding: 2px 10px; font-size: 10px; cursor: pointer; border-radius: 3px; \
+    font-family: inherit; line-height: 16px; margin-top: 4px;";
+
+fn build_light_toggle(
+    scope: &mut RenderScope,
+    parent: &NodeHandle,
+    label: &str,
+    light_refresh: Signal<u32>,
+    get: impl Fn(&light_editor::EditorLight) -> bool + 'static + Copy,
+    set: impl Fn(&mut light_editor::EditorLight, bool) + 'static + Copy,
+) {
+    let row = scope.create_element("div");
+    row.set_attribute("style", ENV_ROW_STYLE);
+
+    let lbl = scope.create_element("span");
+    lbl.set_attribute("style", ENV_LABEL_STYLE);
+    lbl.set_text(label);
+    row.append_child(&lbl);
+
+    let btn = scope.create_element("button");
+    scope.create_effect({
+        let btn = btn.clone();
+        move || {
+            let _ = light_refresh.get();
+            let val = EDITOR_STATE
+                .get()
+                .and_then(|es| {
+                    es.lock().ok().and_then(|s| {
+                        s.light_editor.selected().map(|l| get(l))
+                    })
+                })
+                .unwrap_or(false);
+            if val {
+                btn.set_attribute("style", ENV_TOGGLE_ON_STYLE);
+                btn.set_text("ON");
+            } else {
+                btn.set_attribute("style", ENV_TOGGLE_OFF_STYLE);
+                btn.set_text("OFF");
+            }
+        }
+    });
+    let h = scope.register_handler(move || {
+        if let Some(es) = EDITOR_STATE.get() {
+            if let Ok(mut state) = es.lock() {
+                if let Some(id) = state.light_editor.selected().map(|l| l.id) {
+                    if let Some(light) = state.light_editor.get_light_mut(id) {
+                        let cur = get(light);
+                        set(light, !cur);
+                    }
+                    state.light_editor.mark_dirty();
+                }
+            }
+        }
+        light_refresh.update(|v| *v = v.wrapping_add(1));
+    });
+    btn.set_attribute("data-rid", &h.0.to_string());
+    row.append_child(&btn);
+
+    parent.append_child(&row);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_light_slider(
+    scope: &mut RenderScope,
+    parent: &NodeHandle,
+    label: &str,
+    light_refresh: Signal<u32>,
+    get: impl Fn(&light_editor::EditorLight) -> f32 + 'static + Copy,
+    set: impl Fn(&mut light_editor::EditorLight, f32) + 'static + Copy,
+    step: f32,
+    min: f32,
+    max: f32,
+    decimals: usize,
+) {
+    let row = scope.create_element("div");
+    row.set_attribute("style", ENV_ROW_STYLE);
+
+    let lbl = scope.create_element("span");
+    lbl.set_attribute("style", ENV_LABEL_STYLE);
+    lbl.set_text(label);
+    row.append_child(&lbl);
+
+    let val_span = scope.create_element("span");
+    val_span.set_attribute("style", ENV_VALUE_STYLE);
+    scope.create_effect({
+        let val_span = val_span.clone();
+        move || {
+            let _ = light_refresh.get();
+            let val = EDITOR_STATE
+                .get()
+                .and_then(|es| {
+                    es.lock().ok().and_then(|s| {
+                        s.light_editor.selected().map(|l| get(l))
+                    })
+                })
+                .unwrap_or(0.0);
+            val_span.set_text(&format!("{:.prec$}", val, prec = decimals));
+        }
+    });
+    row.append_child(&val_span);
+
+    let minus_btn = scope.create_element("button");
+    minus_btn.set_attribute("style", ENV_BTN_STYLE);
+    minus_btn.set_text("-");
+    let h = scope.register_handler(move || {
+        if let Some(es) = EDITOR_STATE.get() {
+            if let Ok(mut state) = es.lock() {
+                if let Some(id) = state.light_editor.selected().map(|l| l.id) {
+                    if let Some(light) = state.light_editor.get_light_mut(id) {
+                        let cur = get(light);
+                        set(light, (cur - step).clamp(min, max));
+                    }
+                    state.light_editor.mark_dirty();
+                }
+            }
+        }
+        light_refresh.update(|v| *v = v.wrapping_add(1));
+    });
+    minus_btn.set_attribute("data-rid", &h.0.to_string());
+    row.append_child(&minus_btn);
+
+    let plus_btn = scope.create_element("button");
+    plus_btn.set_attribute("style", ENV_BTN_STYLE);
+    plus_btn.set_text("+");
+    let h = scope.register_handler(move || {
+        if let Some(es) = EDITOR_STATE.get() {
+            if let Ok(mut state) = es.lock() {
+                if let Some(id) = state.light_editor.selected().map(|l| l.id) {
+                    if let Some(light) = state.light_editor.get_light_mut(id) {
+                        let cur = get(light);
+                        set(light, (cur + step).clamp(min, max));
+                    }
+                    state.light_editor.mark_dirty();
+                }
+            }
+        }
+        light_refresh.update(|v| *v = v.wrapping_add(1));
+    });
+    plus_btn.set_attribute("data-rid", &h.0.to_string());
+    row.append_child(&plus_btn);
+
+    parent.append_child(&row);
+}
+
+fn build_light_panel(scope: &mut RenderScope, light_refresh: Signal<u32>) -> NodeHandle {
+    let panel = scope.create_element("div");
+    panel.set_attribute("style", "display: flex; flex-direction: column; gap: 2px;");
+
+    // ── Add buttons ──────────────────────────────────────────────────────
+    let add_row = scope.create_element("div");
+    add_row.set_attribute(
+        "style",
+        "display: flex; gap: 4px; margin-bottom: 4px;",
+    );
+    for (label, lt) in [
+        ("+ Point", light_editor::EditorLightType::Point),
+        ("+ Spot", light_editor::EditorLightType::Spot),
+        ("+ Dir", light_editor::EditorLightType::Directional),
+    ] {
+        let btn = scope.create_element("button");
+        btn.set_attribute("style", LIGHT_ADD_BTN_STYLE);
+        btn.set_text(label);
+        let h = scope.register_handler(move || {
+            if let Some(es) = EDITOR_STATE.get() {
+                if let Ok(mut state) = es.lock() {
+                    let id = state.light_editor.add_light(lt);
+                    state.light_editor.select(id);
+                }
+            }
+            light_refresh.update(|v| *v = v.wrapping_add(1));
+        });
+        btn.set_attribute("data-rid", &h.0.to_string());
+        add_row.append_child(&btn);
+    }
+    panel.append_child(&add_row);
+
+    // ── Light list ───────────────────────────────────────────────────────
+    build_env_section_header(scope, &panel, "Lights");
+
+    let list_container = scope.create_element("div");
+    list_container.set_attribute(
+        "style",
+        "display: flex; flex-direction: column; gap: 1px; max-height: 150px; overflow-y: auto;",
+    );
+
+    // Reactive list: rebuilds when light_refresh changes.
+    // We use a simple approach: on each refresh, clear and rebuild the list.
+    scope.create_effect({
+        let list_container = list_container.clone();
+        move || {
+            let _ = light_refresh.get();
+            // Clear existing children by setting innerHTML equivalent
+            list_container.set_attribute(
+                "style",
+                "display: flex; flex-direction: column; gap: 1px; max-height: 150px; overflow-y: auto;",
+            );
+            // We can't easily clear children in rinch without a clear API,
+            // so we'll rely on the effect re-running and creating new elements.
+            // For now, show a count summary instead of individual items.
+        }
+    });
+
+    // Static list rendering — we'll create items that react to light_refresh
+    // Using a flat approach: create max 16 "slots" that show/hide based on data
+    for slot in 0..16u32 {
+        let item_btn = scope.create_element("button");
+        scope.create_effect({
+            let item_btn = item_btn.clone();
+            move || {
+                let _ = light_refresh.get();
+                let info = EDITOR_STATE.get().and_then(|es| {
+                    es.lock().ok().and_then(|s| {
+                        let lights = s.light_editor.all_lights();
+                        lights.get(slot as usize).map(|l| {
+                            let sel_id = s.light_editor.selected().map(|sl| sl.id);
+                            let type_name = match l.light_type {
+                                light_editor::EditorLightType::Point => "Point",
+                                light_editor::EditorLightType::Spot => "Spot",
+                                light_editor::EditorLightType::Directional => "Dir",
+                            };
+                            (l.id, format!("{type_name} #{}", l.id), sel_id == Some(l.id))
+                        })
+                    })
+                });
+                match info {
+                    Some((_id, label, selected)) => {
+                        let style = if selected { LIGHT_ITEM_SEL_STYLE } else { LIGHT_ITEM_STYLE };
+                        item_btn.set_attribute("style", style);
+                        item_btn.set_text(&label);
+                    }
+                    None => {
+                        item_btn.set_attribute("style", "display: none;");
+                        item_btn.set_text("");
+                    }
+                }
+            }
+        });
+        let h = scope.register_handler(move || {
+            if let Some(es) = EDITOR_STATE.get() {
+                if let Ok(mut state) = es.lock() {
+                    let id = state
+                        .light_editor
+                        .all_lights()
+                        .get(slot as usize)
+                        .map(|l| l.id);
+                    if let Some(id) = id {
+                        state.light_editor.select(id);
+                    }
+                }
+            }
+            light_refresh.update(|v| *v = v.wrapping_add(1));
+        });
+        item_btn.set_attribute("data-rid", &h.0.to_string());
+        list_container.append_child(&item_btn);
+    }
+    panel.append_child(&list_container);
+
+    // ── Empty state message ──────────────────────────────────────────────
+    let empty_msg = scope.create_element("span");
+    empty_msg.set_attribute("style", "color: #555; font-size: 11px; font-style: italic; padding: 4px;");
+    scope.create_effect({
+        let empty_msg = empty_msg.clone();
+        move || {
+            let _ = light_refresh.get();
+            let count = EDITOR_STATE
+                .get()
+                .and_then(|es| es.lock().ok().map(|s| s.light_editor.all_lights().len()))
+                .unwrap_or(0);
+            if count == 0 {
+                empty_msg.set_attribute("style", "color: #555; font-size: 11px; font-style: italic; padding: 4px;");
+                empty_msg.set_text("No lights — click + to add one");
+            } else {
+                empty_msg.set_attribute("style", "display: none;");
+            }
+        }
+    });
+    panel.append_child(&empty_msg);
+
+    // ── Selected light properties ────────────────────────────────────────
+    build_env_section_header(scope, &panel, "Properties");
+
+    // "No selection" hint
+    let no_sel_hint = scope.create_element("span");
+    no_sel_hint.set_attribute("style", "color: #555; font-size: 11px; font-style: italic; padding: 4px;");
+    scope.create_effect({
+        let no_sel_hint = no_sel_hint.clone();
+        move || {
+            let _ = light_refresh.get();
+            let has_sel = EDITOR_STATE
+                .get()
+                .and_then(|es| es.lock().ok().map(|s| s.light_editor.selected().is_some()))
+                .unwrap_or(false);
+            if has_sel {
+                no_sel_hint.set_attribute("style", "display: none;");
+            } else {
+                no_sel_hint.set_attribute("style", "color: #555; font-size: 11px; font-style: italic; padding: 4px;");
+                no_sel_hint.set_text("Select a light to edit");
+            }
+        }
+    });
+    panel.append_child(&no_sel_hint);
+
+    // Property rows — always present, hidden via effect when no selection
+    let props_container = scope.create_element("div");
+    props_container.set_attribute("style", "display: flex; flex-direction: column; gap: 2px;");
+    scope.create_effect({
+        let props_container = props_container.clone();
+        move || {
+            let _ = light_refresh.get();
+            let has_sel = EDITOR_STATE
+                .get()
+                .and_then(|es| es.lock().ok().map(|s| s.light_editor.selected().is_some()))
+                .unwrap_or(false);
+            if has_sel {
+                props_container.set_attribute("style", "display: flex; flex-direction: column; gap: 2px;");
+            } else {
+                props_container.set_attribute("style", "display: none;");
+            }
+        }
+    });
+
+    // Position
+    build_light_slider(
+        scope, &props_container, "Pos X", light_refresh,
+        |l| l.position.x, |l, v| l.position.x = v,
+        0.5, -1000.0, 1000.0, 1,
+    );
+    build_light_slider(
+        scope, &props_container, "Pos Y", light_refresh,
+        |l| l.position.y, |l, v| l.position.y = v,
+        0.5, -1000.0, 1000.0, 1,
+    );
+    build_light_slider(
+        scope, &props_container, "Pos Z", light_refresh,
+        |l| l.position.z, |l, v| l.position.z = v,
+        0.5, -1000.0, 1000.0, 1,
+    );
+
+    // Color
+    build_light_slider(
+        scope, &props_container, "Color R", light_refresh,
+        |l| l.color.x, |l, v| l.color.x = v,
+        0.05, 0.0, 1.0, 2,
+    );
+    build_light_slider(
+        scope, &props_container, "Color G", light_refresh,
+        |l| l.color.y, |l, v| l.color.y = v,
+        0.05, 0.0, 1.0, 2,
+    );
+    build_light_slider(
+        scope, &props_container, "Color B", light_refresh,
+        |l| l.color.z, |l, v| l.color.z = v,
+        0.05, 0.0, 1.0, 2,
+    );
+
+    // Intensity & Range
+    build_light_slider(
+        scope, &props_container, "Intensity", light_refresh,
+        |l| l.intensity, |l, v| l.intensity = v,
+        0.1, 0.0, 100.0, 1,
+    );
+    build_light_slider(
+        scope, &props_container, "Range", light_refresh,
+        |l| l.range, |l, v| l.range = v,
+        1.0, 0.1, 1000.0, 1,
+    );
+
+    // Spot angles (always rendered, hidden for non-spot lights via effect)
+    let spot_section = scope.create_element("div");
+    spot_section.set_attribute("style", "display: none;");
+    scope.create_effect({
+        let spot_section = spot_section.clone();
+        move || {
+            let _ = light_refresh.get();
+            let is_spot = EDITOR_STATE
+                .get()
+                .and_then(|es| {
+                    es.lock().ok().and_then(|s| {
+                        s.light_editor
+                            .selected()
+                            .map(|l| l.light_type == light_editor::EditorLightType::Spot)
+                    })
+                })
+                .unwrap_or(false);
+            if is_spot {
+                spot_section.set_attribute("style", "display: flex; flex-direction: column; gap: 2px;");
+            } else {
+                spot_section.set_attribute("style", "display: none;");
+            }
+        }
+    });
+    build_light_slider(
+        scope, &spot_section, "Inner Angle", light_refresh,
+        |l| l.spot_inner_angle, |l, v| l.spot_inner_angle = v,
+        0.05, 0.0, 1.57, 2,
+    );
+    build_light_slider(
+        scope, &spot_section, "Outer Angle", light_refresh,
+        |l| l.spot_outer_angle, |l, v| l.spot_outer_angle = v,
+        0.05, 0.0, 1.57, 2,
+    );
+    props_container.append_child(&spot_section);
+
+    // Shadows toggle
+    build_light_toggle(
+        scope, &props_container, "Shadows", light_refresh,
+        |l| l.cast_shadows, |l, v| l.cast_shadows = v,
+    );
+
+    // Remove button
+    let remove_btn = scope.create_element("button");
+    remove_btn.set_attribute("style", LIGHT_REMOVE_BTN_STYLE);
+    remove_btn.set_text("Remove Light");
+    let h = scope.register_handler(move || {
+        if let Some(es) = EDITOR_STATE.get() {
+            if let Ok(mut state) = es.lock() {
+                if let Some(id) = state.light_editor.selected().map(|l| l.id) {
+                    state.light_editor.remove_light(id);
+                }
+            }
+        }
+        light_refresh.update(|v| *v = v.wrapping_add(1));
+    });
+    remove_btn.set_attribute("data-rid", &h.0.to_string());
+    props_container.append_child(&remove_btn);
+
+    panel.append_child(&props_container);
+
+    panel
+}
+
 // ── Editor UI component ─────────────────────────────────────────────────
 
 #[component]
@@ -891,11 +1338,14 @@ fn editor_ui() -> NodeHandle {
     });
     right_panel.append_child(&right_title);
 
-    // Mode hint (shown for non-Environment modes)
+    // Mode hint (shown for modes without a dedicated panel)
     show_dom(
         __scope,
         &right_panel,
-        move || mode_signal.get() != EditorMode::Environment.index(),
+        move || {
+            let idx = mode_signal.get();
+            idx != EditorMode::Environment.index() && idx != EditorMode::Light.index()
+        },
         move |scope| {
             let hint_div = scope.create_element("div");
             hint_div.set_attribute("style", "color: #666; font-size: 12px; font-style: italic;");
@@ -911,15 +1361,28 @@ fn editor_ui() -> NodeHandle {
                         EditorMode::Place => "Choose an asset to place in the scene",
                         EditorMode::Sculpt => "Left-click + drag to sculpt terrain",
                         EditorMode::Paint => "Left-click + drag to paint materials",
-                        EditorMode::Light => "Select a light to edit its properties",
                         EditorMode::Animate => "Select an entity to preview animations",
-                        EditorMode::Environment => "",
+                        EditorMode::Light | EditorMode::Environment => "",
                     };
                     hint_text.set_text(hint);
                 }
             });
             hint_div.append_child(&hint_text);
             hint_div
+        },
+        None::<fn(&mut RenderScope) -> NodeHandle>,
+    );
+
+    // Light panel (shown only in Light mode)
+    let light_refresh = Signal::new(0u32);
+    LIGHT_REFRESH.with(|cell| cell.set(Some(light_refresh)));
+
+    show_dom(
+        __scope,
+        &right_panel,
+        move || mode_signal.get() == EditorMode::Light.index(),
+        move |scope| {
+            build_light_panel(scope, light_refresh)
         },
         None::<fn(&mut RenderScope) -> NodeHandle>,
     );

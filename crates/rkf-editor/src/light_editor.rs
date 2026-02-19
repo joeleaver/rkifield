@@ -82,6 +82,11 @@ impl LightEditor {
         self.dirty
     }
 
+    /// Mark the state as dirty (needs re-upload to engine).
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
     /// Clear the dirty flag after the runtime has consumed the changes.
     pub fn clear_dirty(&mut self) {
         self.dirty = false;
