@@ -52,6 +52,20 @@ pub fn box_sdf(half_extents: Vec3, point: Vec3) -> f32 {
     outside + inside
 }
 
+/// Polynomial smooth-min (smooth union) of two SDF distances.
+///
+/// Produces a C1-continuous blend between `a` and `b` within a radius of `k`.
+/// When `|a - b| >= k`, returns `min(a, b)` exactly.
+/// When `|a - b| < k`, returns a smoothly interpolated value below `min(a, b)`.
+///
+/// Use this instead of `f32::min` to avoid gradient discontinuities at SDF
+/// intersections, which cause black shading artifacts from bad normals.
+#[inline]
+pub fn smin(a: f32, b: f32, k: f32) -> f32 {
+    let h = (k - (a - b).abs()).max(0.0) / k;
+    a.min(b) - h * h * k * 0.25
+}
+
 /// Voxelize an analytic SDF into a sparse grid and brick array.
 ///
 /// # Parameters

@@ -161,7 +161,7 @@ const MAX_SHADOW_STEPS: u32 = 64u;
 const SHADOW_EPSILON: f32 = 0.005;
 const SHADOW_K: f32 = 16.0; // Penumbra softness (higher = sharper)
 const SHADOW_MAX_DIST: f32 = 50.0;
-const SHADOW_BIAS: f32 = 0.02; // Normal-direction bias to avoid self-shadowing
+const SHADOW_BIAS: f32 = 0.05; // Normal-direction bias to avoid self-shadowing
 
 // Atmospheric shadow softening — simulates scattered light filling in shadows
 // at distance. Near shadows stay sharp; far shadows fade toward ambient.
@@ -169,8 +169,8 @@ const SHADOW_ATMO_DENSITY: f32 = 0.04;  // atmospheric extinction for shadow fad
 const SHADOW_ATMO_MAX_FILL: f32 = 0.65; // max amount shadow can lighten (0=off, 1=full)
 
 // Ambient occlusion parameters
-const AO_STEP_SIZE: f32 = 0.03; // Distance between AO samples along normal
-const AO_STRENGTH: f32 = 1.5;   // AO intensity multiplier
+const AO_STEP_SIZE: f32 = 0.08; // Distance between AO samples along normal
+const AO_STRENGTH: f32 = 0.7;   // AO intensity multiplier
 
 // Subsurface scattering parameters
 const SSS_MAX_THICKNESS: f32 = 0.3;  // Maximum probed thickness
@@ -950,12 +950,10 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
 
     // SDF junction contact shadow: the gradient magnitude from the ray marcher
     // detects min()-union fillets. Clean surfaces have grad_mag ≈ 1.0, while
-    // perpendicular junctions have grad_mag ≈ 0.707. Darken direct lighting
-    // at junctions to simulate contact shadows / micro-AO.
-    // Wide range (0.8–0.99) ensures the entire fillet transition zone is darkened,
-    // not just the crease center.
+    // perpendicular junctions have grad_mag ≈ 0.707. With smin() smooth unions,
+    // grad_mag stays close to 1.0 at fillets, so only darken at truly hard junctions.
     let grad_mag = textureLoad(gbuf_motion, coord, 0).z;
-    let contact = smoothstep(0.8, 0.99, grad_mag);
+    let contact = smoothstep(0.5, 0.8, grad_mag);
 
     // Final color = direct + indirect GI (diffuse + specular) + SSS + ambient + emission
     // contact shadow applied to all lighting terms at SDF junction fillets

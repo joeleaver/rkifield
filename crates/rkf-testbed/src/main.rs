@@ -15,7 +15,7 @@ use rkf_core::brick_pool::Pool;
 use rkf_core::clipmap::{ClipmapConfig, ClipmapGridSet, ClipmapLevel};
 use rkf_core::constants::RESOLUTION_TIERS;
 use rkf_core::populate::populate_grid_with_material;
-use rkf_core::sdf::{box_sdf, capsule_sdf, sphere_sdf};
+use rkf_core::sdf::{box_sdf, capsule_sdf, smin, sphere_sdf};
 use rkf_core::sparse_grid::SparseGrid;
 use rkf_core::BrickPool;
 
@@ -185,82 +185,105 @@ fn create_clipmap_scene() -> (BrickPool, ClipmapGridSet, ClipmapConfig, Aabb) {
     let mut grid_set = ClipmapGridSet::from_config(config.clone(), 64);
     let mut pool: BrickPool = Pool::new(65536);
 
-    let tiers = [2usize, 3usize]; // Level 0 -> Tier 2, Level 1 -> Tier 3
+    let tiers = [2usize, 3usize];
 
-    for level_idx in 0..config.num_levels() {
-        let level = config.level(level_idx);
-        let tier = tiers[level_idx];
+    // Pre-compute AABBs for both levels (avoids borrow conflict with grid_mut).
+    let aabbs: Vec<Aabb> = (0..config.num_levels()).map(|i| {
+        let level = config.level(i);
+        let tier = tiers[i];
         let brick_ext = RESOLUTION_TIERS[tier].brick_extent;
-        let dims = grid_set.grid(level_idx).dimensions();
+        let dims = grid_set.grid(i).dimensions();
         let half = level.radius;
-        let aabb = Aabb::new(
+        Aabb::new(
             Vec3::new(-half, -half, -half),
             Vec3::new(
                 -half + dims.x as f32 * brick_ext,
                 -half + dims.y as f32 * brick_ext,
                 -half + dims.z as f32 * brick_ext,
             ),
-        );
+        )
+    }).collect();
 
-        let grid = grid_set.grid_mut(level_idx);
+    // Shared pillar layout for both levels.
+    let pillar_positions = [
+        Vec3::new(-4.0, 0.0, -1.5), Vec3::new(-1.5, 0.0, -1.5),
+        Vec3::new( 1.5, 0.0, -1.5), Vec3::new( 4.0, 0.0, -1.5),
+        Vec3::new(-4.0, 0.0,  1.5), Vec3::new(-1.5, 0.0,  1.5),
+        Vec3::new( 1.5, 0.0,  1.5), Vec3::new( 4.0, 0.0,  1.5),
+    ];
 
-        // Ground plane
-        let _ = populate_grid_with_material(
-            &mut pool, grid,
-            |p| box_sdf(Vec3::new(7.0, 0.1, 7.0), p - Vec3::new(0.0, -0.5, 0.0)),
-            tier, &aabb, 1,
-        );
+    // === Level 0 (fine, 8cm voxels, 8m radius) — detailed nearby objects ===
+    {
+        let aabb = &aabbs[0];
+        let grid = grid_set.grid_mut(0);
+        let tier = tiers[0];
 
-        // Pillar avenue
-        let pillar_positions = [
-            Vec3::new(-4.0, 0.0, -1.5), Vec3::new(-1.5, 0.0, -1.5),
-            Vec3::new( 1.5, 0.0, -1.5), Vec3::new( 4.0, 0.0, -1.5),
-            Vec3::new(-4.0, 0.0,  1.5), Vec3::new(-1.5, 0.0,  1.5),
-            Vec3::new( 1.5, 0.0,  1.5), Vec3::new( 4.0, 0.0,  1.5),
-        ];
-        for base in &pillar_positions {
-            let bottom = Vec3::new(base.x, -0.4, base.z);
-            let top = Vec3::new(base.x, 3.5, base.z);
-            let _ = populate_grid_with_material(
-                &mut pool, grid,
-                |p| capsule_sdf(bottom, top, 0.25, p),
-                tier, &aabb, 1,
-            );
-        }
+        // Ground — grass green (material 8)
+        let _ = populate_grid_with_material(&mut pool, grid,
+            |p| box_sdf(Vec3::new(8.0, 0.5, 8.0), p - Vec3::new(0.0, -0.5, 0.0)),
+            tier, aabb, 8);
 
-        // Lintels
-        let _ = populate_grid_with_material(
-            &mut pool, grid,
-            |p| box_sdf(Vec3::new(0.3, 0.2, 1.8), p - Vec3::new(-1.5, 3.6, 0.0)),
-            tier, &aabb, 1,
-        );
-        let _ = populate_grid_with_material(
-            &mut pool, grid,
-            |p| box_sdf(Vec3::new(0.3, 0.2, 1.8), p - Vec3::new(1.5, 3.6, 0.0)),
-            tier, &aabb, 1,
-        );
+        // Pillars + lintels + boulder — warm sandstone (material 1)
+        // Pillars embedded into ground (bottom at y=-0.3) for seamless contact.
+        let pillars = pillar_positions.clone();
+        let _ = populate_grid_with_material(&mut pool, grid,
+            |p| {
+                let mut d = f32::MAX;
+                for base in &pillars {
+                    let bottom = Vec3::new(base.x, -0.3, base.z);
+                    let top = Vec3::new(base.x, 3.5, base.z);
+                    d = d.min(capsule_sdf(bottom, top, 0.25, p));
+                }
+                // Lintels
+                d = d.min(box_sdf(Vec3::new(0.3, 0.2, 1.8), p - Vec3::new(-1.5, 3.6, 0.0)));
+                d = d.min(box_sdf(Vec3::new(0.3, 0.2, 1.8), p - Vec3::new( 1.5, 3.6, 0.0)));
+                // Boulder
+                d = d.min(sphere_sdf(Vec3::new(3.0, 0.2, -3.5), 0.8, p));
+                d
+            },
+            tier, aabb, 1);
 
-        // Monolith wall
-        let _ = populate_grid_with_material(
-            &mut pool, grid,
-            |p| box_sdf(Vec3::new(0.3, 2.5, 3.0), p - Vec3::new(-7.0, 2.0, 0.0)),
-            tier, &aabb, 2,
-        );
+        // Monolith wall (material 2 — metal) — separate pass, different material
+        let _ = populate_grid_with_material(&mut pool, grid,
+            |p| box_sdf(Vec3::new(0.3, 2.5, 3.0), p - Vec3::new(-7.0, 2.2, 0.0)),
+            tier, aabb, 2);
 
-        // Boulders
-        let _ = populate_grid_with_material(
-            &mut pool, grid,
-            |p| sphere_sdf(Vec3::new(3.0, 0.0, -3.5), 0.8, p),
-            tier, &aabb, 1,
-        );
-        let _ = populate_grid_with_material(
-            &mut pool, grid,
-            |p| sphere_sdf(Vec3::new(-2.5, -0.1, 4.0), 0.6, p),
-            tier, &aabb, 1,
-        );
+        log::info!("Level 0 (tier 2, 8cm): {} bricks", pool.allocated_count());
+    }
 
-        let count = pool.allocated_count();
-        log::info!("Clipmap level {level_idx} (tier {tier}): populated, total pool bricks so far: {count}");
+    // === Level 1 (coarse, 32cm voxels, 32m radius) — extended terrain + distant objects ===
+    let level0_count = pool.allocated_count();
+    {
+        let aabb = &aabbs[1];
+        let grid = grid_set.grid_mut(1);
+        let tier = tiers[1];
+
+        // Material 8 (grass): ground + hills as single combined SDF
+        // Hills use smooth-min to blend into ground naturally
+        let blend_k = 1.0; // larger blend for coarse geometry
+        let _ = populate_grid_with_material(&mut pool, grid,
+            |p| {
+                // Ground plane (top at y=0, 0.5m thick, 30m extent)
+                let mut d = box_sdf(Vec3::new(30.0, 0.5, 30.0), p - Vec3::new(0.0, -0.5, 0.0));
+                // Distant hills merge smoothly into ground
+                d = smin(d, sphere_sdf(Vec3::new(16.0, -1.0, -14.0), 4.0, p), blend_k);
+                d = smin(d, sphere_sdf(Vec3::new(-18.0, -1.0, 12.0), 5.0, p), blend_k);
+                d = smin(d, sphere_sdf(Vec3::new(10.0, -1.0, 20.0), 3.5, p), blend_k);
+                d
+            },
+            tier, aabb, 8);
+
+        // Material 2 (metal): distant structures as single combined SDF
+        let _ = populate_grid_with_material(&mut pool, grid,
+            |p| {
+                let monolith = box_sdf(Vec3::new(1.5, 8.0, 1.5), p - Vec3::new(22.0, 4.0, -5.0));
+                let wall = box_sdf(Vec3::new(8.0, 3.0, 0.5), p - Vec3::new(0.0, 1.5, -20.0));
+                monolith.min(wall)
+            },
+            tier, aabb, 2);
+
+        log::info!("Level 1 (tier 3, 32cm): {} bricks ({} new)",
+            pool.allocated_count(), pool.allocated_count() - level0_count);
     }
 
     // Use the finest level's AABB for GpuScene (single-grid fallback uses this)
@@ -284,24 +307,22 @@ fn create_clipmap_scene() -> (BrickPool, ClipmapGridSet, ClipmapConfig, Aabb) {
     (pool, grid_set, config, scene_aabb)
 }
 
-/// Single directional sun at low angle for volumetric god ray validation.
-/// No point lights, no spots — just a sunrise sun and a very dim fill.
-fn create_volumetric_lights(_cam_pos: Vec3) -> Vec<Light> {
+/// Clean overhead lighting for clipmap LOD validation.
+/// White sun from above-right for clear shadows, warm fill from opposite side.
+fn create_clipmap_lights() -> Vec<Light> {
     vec![
-        // 0: Main sun — low angle (sunrise from +X direction), warm, shadow-casting
-        // Direction points FROM the sun toward the scene (light travels this way)
-        // Sun ~15 degrees above horizon — dir points TOWARD the sun
+        // 0: Main sun — overhead from right-front, white, shadow-casting
         Light::directional(
-            [0.9, 0.26, 0.15],    // sun in +X direction, above horizon
-            [1.0, 0.85, 0.6],      // warm sunrise color
-            2.5,                    // strong intensity
+            [0.5, 0.7, 0.3],       // above-right-front
+            [1.0, 0.98, 0.95],     // near-white, very slight warm
+            3.0,                    // strong intensity
             true,
         ),
-        // 1: Very dim cool fill from opposite side (no shadows)
+        // 1: Fill from opposite side (no shadows) — prevents pure black
         Light::directional(
-            [-0.3, 0.8, -0.2],    // opposite side, above horizon
-            [0.3, 0.35, 0.5],
-            0.08,
+            [-0.3, 0.6, -0.5],    // above-left-back
+            [0.6, 0.65, 0.8],     // cool fill
+            0.4,                    // visible fill, not dim
             false,
         ),
     ]
@@ -638,8 +659,8 @@ impl GpuState {
             state.pool_allocated = pool.allocated_count() as u64;
         }
 
-        // Camera — inside the pillar avenue, sun to the right.
-        // Positioned at scene center so fine clipmap level covers the area well.
+        // Camera — inside the pillar avenue looking down the avenue.
+        // Offset from grid center; level 1 provides ground/objects beyond 8m.
         let mut camera = Camera::new(Vec3::new(0.0, 2.5, 5.0));
         camera.yaw = 0.0;  // facing -Z (toward the avenue)
         camera.pitch = -0.15;  // slightly downward to see ground + pillars
@@ -664,15 +685,22 @@ impl GpuState {
         // Upload scene to GPU
         let scene = GpuScene::upload(&context.device, &pool, grid, camera_bytes, &scene_uniforms);
 
-        // Materials
-        let materials = material_table::create_test_materials();
+        // Materials — override colors for clipmap validation
+        let mut materials = material_table::create_test_materials();
+        // Material 1: warm sandstone for pillars/structures
+        materials[1].albedo = [0.72, 0.52, 0.35];
+        materials[1].roughness = 0.75;
+        // Material 8: natural grass green for ground
+        materials[8].albedo = [0.22, 0.42, 0.12];
+        materials[8].roughness = 0.95;
+        materials[8].metallic = 0.0;
         let material_table = MaterialTable::upload(&context.device, &materials);
 
         // G-buffer
         let gbuffer = GBuffer::new(&context.device, INTERNAL_WIDTH, INTERNAL_HEIGHT);
 
-        // Volumetric validation lights — single directional sun
-        let lights = create_volumetric_lights(camera.position);
+        // Clean overhead lighting for clipmap LOD validation
+        let lights = create_clipmap_lights();
         log::info!("Volumetric scene: {} lights", lights.len());
         let light_buffer = LightBuffer::upload(&context.device, &lights);
 
@@ -747,37 +775,25 @@ impl GpuState {
             INTERNAL_WIDTH, INTERNAL_HEIGHT,
         );
 
-        // Fog settings — lighter fog so sun reads clearly through clouds
+        // Fog disabled for clean shading validation
         let fog_settings = FogSettings {
-            height_fog_enabled: true,
-            fog_base_density: 0.008,
+            height_fog_enabled: false,
+            fog_base_density: 0.0,
             fog_base_height: -0.3,
             fog_height_falloff: 0.12,
-            fog_color: [0.9, 0.7, 0.5],  // warm sunrise fog
-            distance_fog_enabled: true,
-            fog_distance_density: 0.005,
+            fog_color: [0.9, 0.7, 0.5],
+            distance_fog_enabled: false,
+            fog_distance_density: 0.0,
             fog_distance_falloff: 0.02,
-            ambient_dust_density: 0.015,   // moderate dust for god rays
-            ambient_dust_g: 0.82,          // strong forward scattering toward sun
+            ambient_dust_density: 0.0,
+            ambient_dust_g: 0.82,
         };
 
-        // Cloud settings — low altitude for testbed validation (march far=60m).
-        // Default cloud altitudes are 1000-3000m which is way beyond march range.
-        // Use 5-15m so clouds are visible in the volumetric march.
+        // Clouds disabled for clean shading validation
         let cloud_settings = CloudSettings {
-            procedural_enabled: true,
-            cloud_min: 6.0,              // cloud base above objects
-            cloud_max: 22.0,             // tall altitude band
-            cloud_threshold: 0.1,        // more gaps for sun visibility
-            cloud_density_scale: 2.5,    // lighter, more translucent clouds
-            shape_frequency: 0.1,        // defined cloud shapes
-            detail_frequency: 0.45,      // detail erosion for wispy edges
-            detail_weight: 0.3,          // more erosion for distinct cloud edges
-            weather_scale: 80.0,         // broad weather coverage
-            wind_direction: [1.0, 0.3],
-            wind_speed: 0.3,
-            shadow_enabled: true,
-            shadow_coverage: 120.0,  // 120m covers the 30m scene with margin
+            procedural_enabled: false,
+            cloud_density_scale: 0.0,
+            shadow_enabled: false,
             ..Default::default()
         };
 
@@ -786,14 +802,16 @@ impl GpuState {
             &context.device, &vol_composite.output_view, &gbuffer.position_view,
             INTERNAL_WIDTH, INTERNAL_HEIGHT,
         );
-        // Gentle DoF: focus at 5m, wide range for subtle background softening
-        dof.update_focus(&context.queue, 5.0, 8.0, 6.0);
+        // DoF disabled for clean shading validation (max_coc=0 = no blur)
+        dof.update_focus(&context.queue, 5.0, 100.0, 0.0);
 
         // Phase 10: Motion blur (pre-upscale) — reads DoF output + gbuffer motion vectors
         let motion_blur = MotionBlurPass::new(
             &context.device, &dof.output_view, &gbuffer.motion_view,
             INTERNAL_WIDTH, INTERNAL_HEIGHT,
         );
+        // Motion blur disabled for clean shading validation
+        motion_blur.set_intensity(&context.queue, 0.0);
 
         // Phase 10: Bloom (pre-upscale) — extract bright pixels from motion-blurred HDR
         let bloom = BloomPass::new(
@@ -852,11 +870,11 @@ impl GpuState {
             &color_grade.output_view,
             DISPLAY_WIDTH, DISPLAY_HEIGHT,
         );
-        // Phase 10: tasteful post-process defaults
+        // Post-processing disabled for clean shading validation
         bloom.set_threshold(&context.queue, 0.8, 0.4);
-        bloom_composite.set_intensity(&context.queue, 0.4);
-        cosmetics.set_vignette(&context.queue, 0.3);
-        cosmetics.set_chromatic_aberration(&context.queue, 0.002);
+        bloom_composite.set_intensity(&context.queue, 0.0);
+        cosmetics.set_vignette(&context.queue, 0.0);
+        cosmetics.set_chromatic_aberration(&context.queue, 0.0);
 
         // Blit reads from final cosmetics output
         let blit = BlitPass::new(&context.device, &cosmetics.output_view, surface_format);

@@ -193,10 +193,13 @@ fn cm_cell_flat_index(cell: vec3<u32>, level: u32) -> u32 {
 }
 
 /// Get cell state from the combined clipmap occupancy buffer.
+///
+/// `offsets.x` is the u32 word offset into the combined buffer (not a cell offset).
+/// Each u32 word packs 16 cells at 2 bits each.
 fn cm_get_cell_state(flat: u32, level: u32) -> u32 {
-    let base = clipmap.levels[level].offsets.x;
-    let word_idx = (base + flat) / 16u;
-    let bit_offset = ((base + flat) % 16u) * 2u;
+    let base_words = clipmap.levels[level].offsets.x;
+    let word_idx = base_words + flat / 16u;
+    let bit_offset = (flat % 16u) * 2u;
     return (cm_occupancy[word_idx] >> bit_offset) & 3u;
 }
 
@@ -532,13 +535,11 @@ fn ray_march_dda_level(origin: vec3<f32>, dir: vec3<f32>,
             if result.hit {
                 return result;
             }
-        } else if state == CELL_EMPTY && level + 1u < clipmap.num_levels {
-            // Finest level has no data here — check coarser levels for surface data.
-            let fallback = probe_coarser_levels(origin, safe_dir, inv_dir, t, level);
-            if fallback.hit {
-                return fallback;
-            }
         }
+        // EMPTY and INTERIOR cells are simply skipped — the ray continues
+        // through this level's grid. If nothing is hit, ray_march_clipmap()
+        // advances to the next coarser level which covers the annular region
+        // beyond this level's grid.
 
         if t_max_axis.x < t_max_axis.y && t_max_axis.x < t_max_axis.z {
             t = t_max_axis.x;
@@ -595,13 +596,31 @@ fn probe_coarser_levels(origin: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
 /// Multi-level clipmap ray march.
 ///
 /// Iterates LOD levels from finest (0) to coarsest. Each level covers
-/// a distance band from the previous level's radius to its own radius.
-/// Level 0 starts at t=0. Returns on the first hit.
+/// the region inside its grid AABB that is not already covered by a finer
+/// level. The transition between levels follows the actual grid boundary
+/// for this specific ray (per-ray AABB intersection), not a fixed radius.
+/// This correctly handles cameras that are off-center relative to the grid.
 fn ray_march_clipmap(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
+    let safe_dir = select(dir, vec3<f32>(1e-10), abs(dir) < vec3<f32>(1e-10));
+    let inv_dir = 1.0 / safe_dir;
+
     var t_start = 0.0;
 
     for (var lvl = 0u; lvl < clipmap.num_levels; lvl++) {
-        let t_end = cm_radius(lvl);
+        let be = cm_brick_extent(lvl);
+        let dims_f = vec3<f32>(cm_grid_dims(lvl));
+        let g_origin = cm_grid_origin(lvl);
+        let grid_max = g_origin + dims_f * be;
+
+        let aabb_t = ray_aabb_intersect(origin, inv_dir, g_origin, grid_max);
+
+        // Skip levels whose grid this ray doesn't intersect.
+        if aabb_t.x > aabb_t.y || aabb_t.y < 0.0 {
+            continue;
+        }
+
+        // This level handles from t_start to its grid AABB exit.
+        let t_end = aabb_t.y;
 
         if t_start < t_end {
             let result = ray_march_dda_level(origin, dir, lvl, t_start, t_end);
@@ -610,7 +629,8 @@ fn ray_march_clipmap(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
             }
         }
 
-        t_start = t_end;
+        // Next level starts where this level's grid ends.
+        t_start = max(t_start, t_end);
     }
 
     return MarchResult(-1.0, false, 0u, 0u, 0.0, 0u);
@@ -760,10 +780,10 @@ fn compute_normal_finest(pos: vec3<f32>, hit_level: u32) -> vec4<f32> {
 
 /// Compute normal with LOD transition blending near level boundaries.
 ///
-/// Near a clipmap level boundary (within LOD_BLEND_FRACTION of the radius),
-/// blends between the finest-available normal and the next coarser level's
-/// normal. This smooths visual discontinuities at LOD transitions.
-/// Outside the transition band, returns the finest-available normal.
+/// Near a clipmap level grid boundary, blends between the finest-available
+/// normal and the next coarser level's normal. Uses distance to the grid
+/// AABB faces (not a fixed radius) so blending works correctly regardless
+/// of camera position relative to the grid center.
 /// Returns vec4(normal.xyz, grad_magnitude) with LOD blending.
 /// The grad_magnitude comes from the finest level (not blended).
 fn compute_normal_blended(pos: vec3<f32>, hit_level: u32, t: f32) -> vec4<f32> {
@@ -776,9 +796,19 @@ fn compute_normal_blended(pos: vec3<f32>, hit_level: u32, t: f32) -> vec4<f32> {
         return vec4<f32>(n_fine, grad_mag);
     }
 
-    let radius = cm_radius(hit_level);
-    let blend_width = radius * LOD_BLEND_FRACTION;
-    let dist_to_boundary = radius - t;
+    // Distance from hit position to the nearest face of this level's grid AABB.
+    let g_origin = cm_grid_origin(hit_level);
+    let be = cm_brick_extent(hit_level);
+    let dims_f = vec3<f32>(cm_grid_dims(hit_level));
+    let grid_max = g_origin + dims_f * be;
+    let to_min = pos - g_origin;
+    let to_max = grid_max - pos;
+    let dist_to_boundary = min(
+        min(min(to_min.x, to_min.y), to_min.z),
+        min(min(to_max.x, to_max.y), to_max.z)
+    );
+
+    let blend_width = cm_radius(hit_level) * LOD_BLEND_FRACTION;
 
     // Outside transition band — use fine normal only.
     if dist_to_boundary > blend_width || dist_to_boundary < 0.0 {
