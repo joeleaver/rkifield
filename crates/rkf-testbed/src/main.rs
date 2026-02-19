@@ -12,11 +12,13 @@ use winit::window::{CursorGrabMode, Window, WindowAttributes, WindowId};
 
 use rkf_core::aabb::Aabb;
 use rkf_core::brick_pool::Pool;
+use rkf_core::cell_state::CellState;
 use rkf_core::clipmap::{ClipmapConfig, ClipmapGridSet, ClipmapLevel};
-use rkf_core::constants::RESOLUTION_TIERS;
+use rkf_core::constants::{BRICK_DIM, RESOLUTION_TIERS};
 use rkf_core::populate::populate_grid_with_material;
 use rkf_core::sdf::{box_sdf, capsule_sdf, smin, sphere_sdf};
 use rkf_core::sparse_grid::SparseGrid;
+use rkf_core::voxel::VoxelSample;
 use rkf_core::BrickPool;
 
 use rkf_render::auto_exposure::AutoExposurePass;
@@ -169,6 +171,70 @@ fn create_volumetric_scene() -> (BrickPool, SparseGrid, Aabb) {
     (pool, grid, aabb)
 }
 
+/// Apply material blending to existing voxels based on a position-to-weight function.
+///
+/// For each surface voxel in the grid, if `selector(world_pos)` returns `Some(weight)`,
+/// sets the secondary_id and blend_weight on that voxel. Weight is 0.0–1.0.
+fn apply_material_blend(
+    pool: &mut BrickPool,
+    grid: &SparseGrid,
+    tier: usize,
+    aabb: &Aabb,
+    secondary_id: u8,
+    selector: impl Fn(Vec3) -> Option<f32>,
+) {
+    let voxel_size = RESOLUTION_TIERS[tier].voxel_size;
+    let brick_ext = RESOLUTION_TIERS[tier].brick_extent;
+    let dims = grid.dimensions();
+
+    for cz in 0..dims.z {
+        for cy in 0..dims.y {
+            for cx in 0..dims.x {
+                if grid.cell_state(cx, cy, cz) != CellState::Surface {
+                    continue;
+                }
+                let slot = match grid.brick_slot(cx, cy, cz) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                let brick_min = aabb.min + Vec3::new(
+                    cx as f32 * brick_ext,
+                    cy as f32 * brick_ext,
+                    cz as f32 * brick_ext,
+                );
+                let brick = pool.get_mut(slot);
+                for vz in 0..BRICK_DIM {
+                    for vy in 0..BRICK_DIM {
+                        for vx in 0..BRICK_DIM {
+                            let existing = brick.sample(vx, vy, vz);
+                            // Only modify surface-adjacent voxels (small distance)
+                            let dist = existing.distance_f32();
+                            if dist.abs() > voxel_size * 2.0 {
+                                continue;
+                            }
+                            let world_pos = brick_min + Vec3::new(
+                                (vx as f32 + 0.5) * voxel_size,
+                                (vy as f32 + 0.5) * voxel_size,
+                                (vz as f32 + 0.5) * voxel_size,
+                            );
+                            if let Some(weight) = selector(world_pos) {
+                                let w = (weight.clamp(0.0, 1.0) * 255.0) as u8;
+                                brick.set(vx, vy, vz, VoxelSample::new(
+                                    dist,
+                                    existing.material_id(),
+                                    w,
+                                    secondary_id,
+                                    existing.flags(),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Create a multi-LOD clipmap scene for Phase 13 validation.
 ///
 /// Two LOD levels sharing the same brick pool:
@@ -247,6 +313,48 @@ fn create_clipmap_scene() -> (BrickPool, ClipmapGridSet, ClipmapConfig, Aabb) {
         let _ = populate_grid_with_material(&mut pool, grid,
             |p| box_sdf(Vec3::new(0.3, 2.5, 3.0), p - Vec3::new(-7.0, 2.2, 0.0)),
             tier, aabb, 2);
+
+        // === Material Blending Demos ===
+
+        // 1) Blend sphere: sandstone (mat 1) base → gold (mat 11) top, height gradient
+        let blend_sphere_center = Vec3::new(0.0, 1.5, -4.5);
+        let blend_sphere_radius = 1.2;
+        let _ = populate_grid_with_material(&mut pool, grid,
+            |p| sphere_sdf(blend_sphere_center, blend_sphere_radius, p),
+            tier, aabb, 1);
+        apply_material_blend(&mut pool, grid, tier, aabb, 11, |pos| {
+            // Only within the sphere's bounding region
+            let d = (pos - blend_sphere_center).length();
+            if d > blend_sphere_radius + 0.2 { return None; }
+            // Blend from 0 at bottom (y=0.3) to 1 at top (y=2.7)
+            let t = ((pos.y - 0.3) / 2.4).clamp(0.0, 1.0);
+            Some(t)
+        });
+
+        // 2) Dirt (mat 10) blended onto pillar bases — height gradient near ground
+        apply_material_blend(&mut pool, grid, tier, aabb, 10, |pos| {
+            // Only near pillar positions, blend dirt at base (y < 0.8)
+            let near_pillar = pillar_positions.iter().any(|b| {
+                let dx = pos.x - b.x;
+                let dz = pos.z - b.z;
+                (dx * dx + dz * dz).sqrt() < 0.6
+            });
+            if !near_pillar { return None; }
+            let t = 1.0 - (pos.y / 0.8).clamp(0.0, 1.0);
+            if t < 0.01 { None } else { Some(t) }
+        });
+
+        // 3) Gold (mat 11) blend on monolith wall top
+        apply_material_blend(&mut pool, grid, tier, aabb, 11, |pos| {
+            // Only within monolith AABB
+            let center = Vec3::new(-7.0, 2.2, 0.0);
+            let half = Vec3::new(0.5, 2.7, 3.2);
+            if (pos.x - center.x).abs() > half.x
+                || (pos.z - center.z).abs() > half.z { return None; }
+            // Blend from 0 at y=3.0 to 1 at y=4.7
+            let t = ((pos.y - 3.0) / 1.7).clamp(0.0, 1.0);
+            if t < 0.01 { None } else { Some(t) }
+        });
 
         log::info!("Level 0 (tier 2, 8cm): {} bricks", pool.allocated_count());
     }
@@ -694,6 +802,14 @@ impl GpuState {
         materials[8].albedo = [0.22, 0.42, 0.12];
         materials[8].roughness = 0.95;
         materials[8].metallic = 0.0;
+        // Material 10: dirt (earthy brown) — blend target for pillar bases
+        materials[10].albedo = [0.4, 0.28, 0.15];
+        materials[10].roughness = 0.95;
+        materials[10].metallic = 0.0;
+        // Material 11: gold — blend target for sphere top and monolith cap
+        materials[11].albedo = [1.0, 0.84, 0.0];
+        materials[11].roughness = 0.25;
+        materials[11].metallic = 1.0;
         let material_table = MaterialTable::upload(&context.device, &materials);
 
         // G-buffer
