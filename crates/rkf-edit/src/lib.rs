@@ -18,8 +18,12 @@
 //!
 //! - [`types`] — Edit operation enums and GPU-compatible [`types::EditParams`] struct
 //! - [`pipeline`] — [`pipeline::CsgEditPipeline`] GPU compute pipeline for CSG edits
+//! - [`brush`] — Sculpting [`brush::Brush`] with type, shape, and parameter presets
+//! - [`edit_op`] — CPU-side orchestration: AABB overlap, brick allocation, GPU dispatch prep
 
 #![warn(missing_docs)]
 
+pub mod brush;
+pub mod edit_op;
 pub mod pipeline;
 pub mod types;
