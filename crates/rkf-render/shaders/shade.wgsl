@@ -163,6 +163,11 @@ const SHADOW_K: f32 = 16.0; // Penumbra softness (higher = sharper)
 const SHADOW_MAX_DIST: f32 = 50.0;
 const SHADOW_BIAS: f32 = 0.02; // Normal-direction bias to avoid self-shadowing
 
+// Atmospheric shadow softening — simulates scattered light filling in shadows
+// at distance. Near shadows stay sharp; far shadows fade toward ambient.
+const SHADOW_ATMO_DENSITY: f32 = 0.04;  // atmospheric extinction for shadow fade
+const SHADOW_ATMO_MAX_FILL: f32 = 0.65; // max amount shadow can lighten (0=off, 1=full)
+
 // Ambient occlusion parameters
 const AO_STEP_SIZE: f32 = 0.03; // Distance between AO samples along normal
 const AO_STRENGTH: f32 = 1.5;   // AO intensity multiplier
@@ -776,6 +781,10 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
     var shadow_count = 0u;
     let shadow_budget = shade_uniforms.shadow_budget_k;
 
+    // Atmospheric shadow softening: scattered light fills in shadows at distance.
+    let cam_dist = length(world_pos - shade_uniforms.camera_pos.xyz);
+    let atmo_shadow_fill = (1.0 - exp(-SHADOW_ATMO_DENSITY * cam_dist)) * SHADOW_ATMO_MAX_FILL;
+
     for (var li = 0u; li < tile_count; li++) {
         let light_idx = tile_light_indices[tile_base + li];
         let light = lights[light_idx];
@@ -809,6 +818,8 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
                 shadow = soft_shadow(shadow_origin, light_dir, SHADOW_MAX_DIST, SHADOW_K);
                 shadow_count += 1u;
             }
+            // Atmospheric fill: lighten shadows at distance.
+            shadow = mix(shadow, 1.0, atmo_shadow_fill);
 
             total_diffuse += diffuse_brdf * radiance * n_dot_l * shadow;
             total_specular += specular_brdf * radiance * n_dot_l * shadow;
@@ -848,6 +859,7 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
                     shadow = soft_shadow(shadow_origin, light_dir, min(dist, SHADOW_MAX_DIST), SHADOW_K);
                     shadow_count += 1u;
                 }
+                shadow = mix(shadow, 1.0, atmo_shadow_fill);
 
                 let attenuated_radiance = radiance * atten;
                 total_diffuse += diffuse_brdf * attenuated_radiance * n_dot_l * shadow;
@@ -895,6 +907,7 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
                     let shadow_origin = world_pos + normal * SHADOW_BIAS + light_dir * SHADOW_BIAS * 0.5;
                     shadow = soft_shadow(shadow_origin, light_dir, min(dist, SHADOW_MAX_DIST), SHADOW_K);
                     shadow_count += 1u;
+                    shadow = mix(shadow, 1.0, atmo_shadow_fill);
                 }
 
                 let attenuated_radiance = radiance * atten;

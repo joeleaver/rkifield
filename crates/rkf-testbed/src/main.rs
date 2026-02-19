@@ -617,17 +617,17 @@ impl GpuState {
             INTERNAL_WIDTH, INTERNAL_HEIGHT,
         );
 
-        // Fog settings — height fog + strong ambient dust for god rays
+        // Fog settings — lighter fog so sun reads clearly through clouds
         let fog_settings = FogSettings {
             height_fog_enabled: true,
-            fog_base_density: 0.015,
+            fog_base_density: 0.008,
             fog_base_height: -0.3,
             fog_height_falloff: 0.12,
             fog_color: [0.9, 0.7, 0.5],  // warm sunrise fog
             distance_fog_enabled: true,
-            fog_distance_density: 0.008,
+            fog_distance_density: 0.005,
             fog_distance_falloff: 0.02,
-            ambient_dust_density: 0.025,   // strong dust for visible god rays
+            ambient_dust_density: 0.015,   // moderate dust for god rays
             ambient_dust_g: 0.82,          // strong forward scattering toward sun
         };
 
@@ -638,8 +638,8 @@ impl GpuState {
             procedural_enabled: true,
             cloud_min: 6.0,              // cloud base above objects
             cloud_max: 22.0,             // tall altitude band
-            cloud_threshold: 0.06,       // balance: good coverage with some gaps
-            cloud_density_scale: 4.0,    // opaque in thick areas, translucent at edges
+            cloud_threshold: 0.1,        // more gaps for sun visibility
+            cloud_density_scale: 2.5,    // lighter, more translucent clouds
             shape_frequency: 0.1,        // defined cloud shapes
             detail_frequency: 0.45,      // detail erosion for wispy edges
             detail_weight: 0.3,          // more erosion for distinct cloud edges
