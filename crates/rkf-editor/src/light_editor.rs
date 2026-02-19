@@ -56,6 +56,8 @@ pub struct LightEditor {
     selected_id: Option<u64>,
     /// Monotonically increasing id counter.
     next_id: u64,
+    /// Whether lights have changed since last `clear_dirty()`.
+    dirty: bool,
 }
 
 impl Default for LightEditor {
@@ -64,6 +66,7 @@ impl Default for LightEditor {
             lights: Vec::new(),
             selected_id: None,
             next_id: 1,
+            dirty: false,
         }
     }
 }
@@ -72,6 +75,16 @@ impl LightEditor {
     /// Create a new empty light editor.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Whether any light has been added, removed, or modified since the last `clear_dirty()`.
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    /// Clear the dirty flag after the runtime has consumed the changes.
+    pub fn clear_dirty(&mut self) {
+        self.dirty = false;
     }
 
     /// Add a light of the given type with sensible defaults. Returns its id.
@@ -122,6 +135,7 @@ impl LightEditor {
         };
 
         self.lights.push(light);
+        self.dirty = true;
         id
     }
 
@@ -136,6 +150,9 @@ impl LightEditor {
             self.selected_id = None;
         }
 
+        if removed {
+            self.dirty = true;
+        }
         removed
     }
 
@@ -173,6 +190,7 @@ impl LightEditor {
     pub fn set_position(&mut self, id: u64, pos: Vec3) {
         if let Some(light) = self.get_light_mut(id) {
             light.position = pos;
+            self.dirty = true;
         }
     }
 
@@ -180,6 +198,7 @@ impl LightEditor {
     pub fn set_color(&mut self, id: u64, color: Vec3) {
         if let Some(light) = self.get_light_mut(id) {
             light.color = color;
+            self.dirty = true;
         }
     }
 
@@ -187,6 +206,7 @@ impl LightEditor {
     pub fn set_intensity(&mut self, id: u64, intensity: f32) {
         if let Some(light) = self.get_light_mut(id) {
             light.intensity = intensity;
+            self.dirty = true;
         }
     }
 
@@ -194,6 +214,7 @@ impl LightEditor {
     pub fn set_range(&mut self, id: u64, range: f32) {
         if let Some(light) = self.get_light_mut(id) {
             light.range = range;
+            self.dirty = true;
         }
     }
 
@@ -206,6 +227,7 @@ impl LightEditor {
             let clamped_inner = if inner > outer { outer } else { inner };
             light.spot_inner_angle = clamped_inner;
             light.spot_outer_angle = outer;
+            self.dirty = true;
         }
     }
 }

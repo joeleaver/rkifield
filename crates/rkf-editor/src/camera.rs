@@ -260,7 +260,7 @@ impl EditorCamera {
                 if input.is_key_pressed(KeyCode::A) {
                     right -= 1.0;
                 }
-                if input.is_key_pressed(KeyCode::E) {
+                if input.is_key_pressed(KeyCode::E) || input.is_key_pressed(KeyCode::Space) {
                     up += 1.0;
                 }
                 if input.is_key_pressed(KeyCode::Q) {
@@ -269,6 +269,13 @@ impl EditorCamera {
 
                 if forward != 0.0 || right != 0.0 || up != 0.0 {
                     self.fly_move(forward, right, up, dt);
+                }
+
+                // Scroll wheel: nudge camera forward/backward
+                if input.scroll_delta.abs() > f32::EPSILON {
+                    let dir = fly_direction(self.fly_yaw, self.fly_pitch);
+                    self.position += dir * input.scroll_delta * self.zoom_speed;
+                    self.target = self.position + dir;
                 }
             }
             CameraMode::Follow { .. } => {

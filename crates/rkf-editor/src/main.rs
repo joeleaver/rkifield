@@ -4,6 +4,7 @@ mod animation_preview;
 mod automation;
 mod camera;
 mod debug_viz;
+mod editor_state;
 mod engine_viewport;
 mod environment;
 mod gizmo;
@@ -18,7 +19,8 @@ mod scene_tree;
 mod sculpt;
 mod undo;
 
-use std::sync::{Arc, Mutex};
+use std::cell::Cell;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use winit::application::ApplicationHandler;
@@ -35,7 +37,19 @@ use rinch_platform::{
 };
 
 use automation::{EditorAutomationApi, SharedState};
+use editor_state::{EditorMode, EditorState};
 use engine_viewport::{EngineState, DISPLAY_HEIGHT, DISPLAY_WIDTH};
+
+/// Global editor state accessible by rinch UI components.
+static EDITOR_STATE: OnceLock<Arc<Mutex<EditorState>>> = OnceLock::new();
+
+// Thread-locals to share signals between the rinch component tree
+// and the winit event handler. Both run on the same (main) thread.
+thread_local! {
+    static MODE_SIGNAL: Cell<Option<Signal<u8>>> = const { Cell::new(None) };
+    static MENU_SIGNAL: Cell<Option<Signal<u8>>> = const { Cell::new(None) };
+    static FPS_SIGNAL: Cell<Option<Signal<u16>>> = const { Cell::new(None) };
+}
 
 // ---------------------------------------------------------------------------
 // Blit shader — fullscreen triangle compositing overlay onto surface
@@ -144,12 +158,126 @@ fn translate_modifiers(m: winit::keyboard::ModifiersState) -> PlatformModifiers 
     }
 }
 
+/// Translate winit key codes to editor input key codes (for camera/tool input).
+fn translate_to_editor_key(key: winit::keyboard::KeyCode) -> Option<input::KeyCode> {
+    use winit::keyboard::KeyCode as WK;
+    match key {
+        WK::KeyW => Some(input::KeyCode::W),
+        WK::KeyA => Some(input::KeyCode::A),
+        WK::KeyS => Some(input::KeyCode::S),
+        WK::KeyD => Some(input::KeyCode::D),
+        WK::KeyQ => Some(input::KeyCode::Q),
+        WK::KeyE => Some(input::KeyCode::E),
+        WK::KeyG => Some(input::KeyCode::G),
+        WK::KeyR => Some(input::KeyCode::R),
+        WK::KeyT => Some(input::KeyCode::T),
+        WK::KeyX => Some(input::KeyCode::X),
+        WK::KeyY => Some(input::KeyCode::Y),
+        WK::KeyZ => Some(input::KeyCode::Z),
+        WK::KeyF => Some(input::KeyCode::F),
+        WK::Delete => Some(input::KeyCode::Delete),
+        WK::Escape => Some(input::KeyCode::Escape),
+        WK::Space => Some(input::KeyCode::Space),
+        WK::Tab => Some(input::KeyCode::Tab),
+        WK::Enter | WK::NumpadEnter => Some(input::KeyCode::Return),
+        WK::Digit1 => Some(input::KeyCode::Num1),
+        WK::Digit2 => Some(input::KeyCode::Num2),
+        WK::Digit3 => Some(input::KeyCode::Num3),
+        WK::F5 => Some(input::KeyCode::F5),
+        WK::F12 => Some(input::KeyCode::F12),
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Editor UI component
 // ---------------------------------------------------------------------------
 
+// ── Menu helper ──────────────────────────────────────────────────────────
+// Shared styles for dropdown menus and items.
+
+const MENU_LABEL_STYLE: &str = "color: #888; cursor: pointer; padding: 2px 6px; \
+    border-radius: 3px; font-size: 13px; user-select: none;";
+const MENU_LABEL_ACTIVE_STYLE: &str = "color: #ccc; cursor: pointer; padding: 2px 6px; \
+    border-radius: 3px; font-size: 13px; user-select: none; background: #3a3a3a;";
+const MENU_DROPDOWN_STYLE: &str = "position: absolute; top: 100%; left: 0; z-index: 100; \
+    min-width: 180px; background: #2d2d2d; border: 1px solid #444; border-radius: 4px; \
+    padding: 4px 0; box-shadow: 0 4px 12px rgba(0,0,0,0.4);";
+const MENU_ITEM_STYLE: &str = "display: flex; align-items: center; width: 100%; border: none; \
+    background: transparent; color: #ccc; padding: 4px 12px; font-size: 12px; \
+    cursor: pointer; text-align: left; font-family: inherit; gap: 8px;";
+const MENU_ITEM_DIM_STYLE: &str = "display: flex; align-items: center; width: 100%; border: none; \
+    background: transparent; color: #666; padding: 4px 12px; font-size: 12px; \
+    cursor: default; text-align: left; font-family: inherit; gap: 8px;";
+const MENU_SEPARATOR_STYLE: &str = "height: 1px; background: #444; margin: 4px 8px;";
+const MENU_SHORTCUT_STYLE: &str = "color: #666; font-size: 11px; margin-left: auto;";
+
+/// Create a menu item button that closes the menu and runs an action.
+fn build_menu_item(
+    scope: &mut RenderScope,
+    parent: &NodeHandle,
+    label: &str,
+    shortcut: &str,
+    menu_open: Signal<u8>,
+    action: impl Fn() + 'static,
+) {
+    let btn = scope.create_element("button");
+    btn.set_attribute("style", MENU_ITEM_STYLE);
+    let lbl = scope.create_text(label);
+    btn.append_child(&lbl);
+    if !shortcut.is_empty() {
+        let sc = scope.create_element("span");
+        sc.set_attribute("style", MENU_SHORTCUT_STYLE);
+        sc.set_text(shortcut);
+        btn.append_child(&sc);
+    }
+    let handler = scope.register_handler(move || {
+        menu_open.set(0);
+        action();
+    });
+    btn.set_attribute("data-rid", &handler.0.to_string());
+    parent.append_child(&btn);
+}
+
+/// Create a disabled (grayed out) menu item.
+fn build_menu_item_disabled(
+    scope: &mut RenderScope,
+    parent: &NodeHandle,
+    label: &str,
+    shortcut: &str,
+) {
+    let btn = scope.create_element("button");
+    btn.set_attribute("style", MENU_ITEM_DIM_STYLE);
+    btn.set_attribute("disabled", "");
+    let lbl = scope.create_text(label);
+    btn.append_child(&lbl);
+    if !shortcut.is_empty() {
+        let sc = scope.create_element("span");
+        sc.set_attribute("style", MENU_SHORTCUT_STYLE);
+        sc.set_text(shortcut);
+        btn.append_child(&sc);
+    }
+    parent.append_child(&btn);
+}
+
+/// Create a separator line in a menu.
+fn build_menu_separator(scope: &mut RenderScope, parent: &NodeHandle) {
+    let sep = scope.create_element("div");
+    sep.set_attribute("style", MENU_SEPARATOR_STYLE);
+    parent.append_child(&sep);
+}
+
+// ── Editor UI component ─────────────────────────────────────────────────
+
 #[component]
 fn editor_ui() -> NodeHandle {
+    // ── Signals ──────────────────────────────────────────────────────
+    let mode_signal = Signal::new(EditorMode::Navigate.index());
+    MODE_SIGNAL.with(|cell| cell.set(Some(mode_signal)));
+
+    let menu_open = Signal::new(0u8); // 0=closed, 1=File, 2=Edit, 3=View, 4=Tools
+    MENU_SIGNAL.with(|cell| cell.set(Some(menu_open)));
+
     // Root fills the entire window
     let root = __scope.create_element("div");
     root.set_attribute(
@@ -157,70 +285,420 @@ fn editor_ui() -> NodeHandle {
         "display: flex; flex-direction: column; width: 100%; height: 100%;",
     );
 
-    // Menu bar
-    let menu = rsx! {
-        div {
-            style: "display: flex; flex-direction: row; height: 32px; background: #2b2b2b; \
-                    align-items: center; padding: 0 8px; gap: 12px; \
-                    border-bottom: 1px solid #333;",
-            span { style: "color: #aaa; font-weight: bold;", "RKIField Editor" }
-            span { style: "color: #888; cursor: pointer;", "File" }
-            span { style: "color: #888; cursor: pointer;", "Edit" }
-            span { style: "color: #888; cursor: pointer;", "View" }
-            span { style: "color: #888; cursor: pointer;", "Tools" }
-        }
-    };
-    root.append_child(&menu);
+    // ═══════════════════════════════════════════════════════════════════
+    // MENU BAR
+    // ═══════════════════════════════════════════════════════════════════
+    let menu_bar = __scope.create_element("div");
+    menu_bar.set_attribute(
+        "style",
+        "display: flex; flex-direction: row; height: 32px; background: #2b2b2b; \
+         align-items: center; padding: 0 8px; gap: 4px; \
+         border-bottom: 1px solid #333;",
+    );
 
-    // Main content area
+    // App title
+    let title = __scope.create_element("span");
+    title.set_attribute("style", "color: #aaa; font-weight: bold; margin-right: 12px;");
+    title.set_text("RKIField Editor");
+    menu_bar.append_child(&title);
+
+    // ── File menu ────────────────────────────────────────────────────
+    let file_wrap = __scope.create_element("div");
+    file_wrap.set_attribute("style", "position: relative;");
+    let file_label = __scope.create_element("span");
+    file_label.set_text("File");
+    // Reactive style for active menu label
+    __scope.create_effect({
+        let file_label = file_label.clone();
+        move || {
+            let style = if menu_open.get() == 1 { MENU_LABEL_ACTIVE_STYLE } else { MENU_LABEL_STYLE };
+            file_label.set_attribute("style", style);
+        }
+    });
+    let h = __scope.register_handler(move || {
+        menu_open.update(|v| *v = if *v == 1 { 0 } else { 1 });
+    });
+    file_label.set_attribute("data-rid", &h.0.to_string());
+    file_wrap.append_child(&file_label);
+
+    show_dom(
+        __scope,
+        &file_wrap,
+        move || menu_open.get() == 1,
+        move |scope| {
+            let dd = scope.create_element("div");
+            dd.set_attribute("style", MENU_DROPDOWN_STYLE);
+
+            build_menu_item_disabled(scope, &dd, "New Scene", "");
+            build_menu_item_disabled(scope, &dd, "Open...", "Ctrl+O");
+            build_menu_item_disabled(scope, &dd, "Save", "Ctrl+S");
+            build_menu_item_disabled(scope, &dd, "Save As...", "Ctrl+Shift+S");
+            build_menu_separator(scope, &dd);
+            build_menu_item(scope, &dd, "Quit", "Esc", menu_open, move || {
+                if let Some(es) = EDITOR_STATE.get() {
+                    if let Ok(mut state) = es.lock() {
+                        state.wants_exit = true;
+                    }
+                }
+            });
+
+            dd
+        },
+        None::<fn(&mut RenderScope) -> NodeHandle>,
+    );
+    menu_bar.append_child(&file_wrap);
+
+    // ── Edit menu ────────────────────────────────────────────────────
+    let edit_wrap = __scope.create_element("div");
+    edit_wrap.set_attribute("style", "position: relative;");
+    let edit_label = __scope.create_element("span");
+    edit_label.set_text("Edit");
+    __scope.create_effect({
+        let edit_label = edit_label.clone();
+        move || {
+            let style = if menu_open.get() == 2 { MENU_LABEL_ACTIVE_STYLE } else { MENU_LABEL_STYLE };
+            edit_label.set_attribute("style", style);
+        }
+    });
+    let h = __scope.register_handler(move || {
+        menu_open.update(|v| *v = if *v == 2 { 0 } else { 2 });
+    });
+    edit_label.set_attribute("data-rid", &h.0.to_string());
+    edit_wrap.append_child(&edit_label);
+
+    show_dom(
+        __scope,
+        &edit_wrap,
+        move || menu_open.get() == 2,
+        move |scope| {
+            let dd = scope.create_element("div");
+            dd.set_attribute("style", MENU_DROPDOWN_STYLE);
+
+            build_menu_item(scope, &dd, "Undo", "Ctrl+Z", menu_open, move || {
+                if let Some(es) = EDITOR_STATE.get() {
+                    if let Ok(mut state) = es.lock() {
+                        let _ = state.undo.undo();
+                    }
+                }
+            });
+            build_menu_item(scope, &dd, "Redo", "Ctrl+Y", menu_open, move || {
+                if let Some(es) = EDITOR_STATE.get() {
+                    if let Ok(mut state) = es.lock() {
+                        let _ = state.undo.redo();
+                    }
+                }
+            });
+            build_menu_separator(scope, &dd);
+            build_menu_item_disabled(scope, &dd, "Delete", "Del");
+            build_menu_item_disabled(scope, &dd, "Duplicate", "Ctrl+D");
+            build_menu_item_disabled(scope, &dd, "Select All", "Ctrl+A");
+
+            dd
+        },
+        None::<fn(&mut RenderScope) -> NodeHandle>,
+    );
+    menu_bar.append_child(&edit_wrap);
+
+    // ── View menu ────────────────────────────────────────────────────
+    let view_wrap = __scope.create_element("div");
+    view_wrap.set_attribute("style", "position: relative;");
+    let view_label = __scope.create_element("span");
+    view_label.set_text("View");
+    __scope.create_effect({
+        let view_label = view_label.clone();
+        move || {
+            let style = if menu_open.get() == 3 { MENU_LABEL_ACTIVE_STYLE } else { MENU_LABEL_STYLE };
+            view_label.set_attribute("style", style);
+        }
+    });
+    let h = __scope.register_handler(move || {
+        menu_open.update(|v| *v = if *v == 3 { 0 } else { 3 });
+    });
+    view_label.set_attribute("data-rid", &h.0.to_string());
+    view_wrap.append_child(&view_label);
+
+    show_dom(
+        __scope,
+        &view_wrap,
+        move || menu_open.get() == 3,
+        move |scope| {
+            let dd = scope.create_element("div");
+            dd.set_attribute("style", MENU_DROPDOWN_STYLE);
+
+            let debug_modes: &[(&str, u32)] = &[
+                ("Normal", 0),
+                ("Normals", 1),
+                ("Positions", 2),
+                ("Material IDs", 3),
+                ("Diffuse Only", 4),
+                ("Specular Only", 5),
+                ("GI Only", 6),
+            ];
+            for &(label, dm) in debug_modes {
+                let shortcut = dm.to_string();
+                build_menu_item(scope, &dd, label, &shortcut, menu_open, move || {
+                    if let Some(es) = EDITOR_STATE.get() {
+                        if let Ok(mut state) = es.lock() {
+                            state.pending_debug_mode = Some(dm);
+                        }
+                    }
+                });
+            }
+
+            dd
+        },
+        None::<fn(&mut RenderScope) -> NodeHandle>,
+    );
+    menu_bar.append_child(&view_wrap);
+
+    // ── Tools menu ───────────────────────────────────────────────────
+    let tools_wrap = __scope.create_element("div");
+    tools_wrap.set_attribute("style", "position: relative;");
+    let tools_label = __scope.create_element("span");
+    tools_label.set_text("Tools");
+    __scope.create_effect({
+        let tools_label = tools_label.clone();
+        move || {
+            let style = if menu_open.get() == 4 { MENU_LABEL_ACTIVE_STYLE } else { MENU_LABEL_STYLE };
+            tools_label.set_attribute("style", style);
+        }
+    });
+    let h = __scope.register_handler(move || {
+        menu_open.update(|v| *v = if *v == 4 { 0 } else { 4 });
+    });
+    tools_label.set_attribute("data-rid", &h.0.to_string());
+    tools_wrap.append_child(&tools_label);
+
+    show_dom(
+        __scope,
+        &tools_wrap,
+        move || menu_open.get() == 4,
+        move |scope| {
+            let dd = scope.create_element("div");
+            dd.set_attribute("style", MENU_DROPDOWN_STYLE);
+
+            build_menu_item_disabled(scope, &dd, "Grid Snap", "");
+            build_menu_item_disabled(scope, &dd, "Surface Snap", "");
+
+            dd
+        },
+        None::<fn(&mut RenderScope) -> NodeHandle>,
+    );
+    menu_bar.append_child(&tools_wrap);
+
+    root.append_child(&menu_bar);
+
+    // ═══════════════════════════════════════════════════════════════════
+    // MODE TOOLBAR
+    // ═══════════════════════════════════════════════════════════════════
+    let toolbar = __scope.create_element("div");
+    toolbar.set_attribute(
+        "style",
+        "display: flex; flex-direction: row; height: 28px; background: #252525; \
+         align-items: center; padding: 0 4px; gap: 2px; \
+         border-bottom: 1px solid #333;",
+    );
+
+    for mode in EditorMode::ALL {
+        let idx = mode.index();
+        let label = mode.short_name();
+
+        let btn = __scope.create_element("button");
+        btn.set_text(label);
+
+        __scope.create_effect({
+            let btn = btn.clone();
+            move || {
+                let active = mode_signal.get() == idx;
+                if active {
+                    btn.set_attribute(
+                        "style",
+                        "border: none; padding: 2px 10px; font-size: 11px; cursor: pointer; \
+                         border-radius: 3px; background: #4a6fa5; color: #fff; \
+                         font-family: inherit; line-height: 20px;",
+                    );
+                } else {
+                    btn.set_attribute(
+                        "style",
+                        "border: none; padding: 2px 10px; font-size: 11px; cursor: pointer; \
+                         border-radius: 3px; background: transparent; color: #999; \
+                         font-family: inherit; line-height: 20px;",
+                    );
+                }
+            }
+        });
+
+        let handler_id = __scope.register_handler(move || {
+            mode_signal.set(idx);
+            if let Some(es) = EDITOR_STATE.get() {
+                if let Ok(mut state) = es.lock() {
+                    state.mode = EditorMode::from_index(idx);
+                }
+            }
+        });
+        btn.set_attribute("data-rid", &handler_id.0.to_string());
+
+        toolbar.append_child(&btn);
+    }
+
+    root.append_child(&toolbar);
+
+    // ═══════════════════════════════════════════════════════════════════
+    // MAIN CONTENT AREA
+    // ═══════════════════════════════════════════════════════════════════
     let content = __scope.create_element("div");
     content.set_attribute(
         "style",
         "display: flex; flex-direction: row; flex: 1; overflow: hidden;",
     );
 
-    // Left panel (scene hierarchy)
-    let left_panel = rsx! {
-        div {
-            style: "width: 250px; background: #1e1e1e; border-right: 1px solid #333; \
-                    overflow-y: auto; padding: 8px;",
-            span { style: "color: #ccc; font-weight: bold;", "Scene Hierarchy" }
-        }
-    };
+    // ── Left panel: Scene Hierarchy ──────────────────────────────────
+    let left_panel = __scope.create_element("div");
+    left_panel.set_attribute(
+        "style",
+        "width: 250px; background: #1e1e1e; border-right: 1px solid #333; \
+         overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 4px;",
+    );
+    let left_title = __scope.create_element("span");
+    left_title.set_attribute(
+        "style",
+        "color: #ccc; font-weight: bold; font-size: 13px; margin-bottom: 4px;",
+    );
+    left_title.set_text("Scene Hierarchy");
+    left_panel.append_child(&left_title);
+
+    // Scene tree content — shows entities from EditorState.scene_tree.
+    // Currently empty; will populate as entities are added.
+    let tree_container = __scope.create_element("div");
+    tree_container.set_attribute(
+        "style",
+        "flex: 1; display: flex; flex-direction: column;",
+    );
+    let empty_msg = __scope.create_element("span");
+    empty_msg.set_attribute("style", "color: #555; font-size: 12px; font-style: italic;");
+    empty_msg.set_text("No entities in scene");
+    tree_container.append_child(&empty_msg);
+    left_panel.append_child(&tree_container);
+
     content.append_child(&left_panel);
 
-    // Engine viewport — transparent hole with data-viewport for input routing.
-    // NOTE: Do NOT use `pointer-events: none` — rinch's hit-test needs to find
-    // this element so `wants_mouse()` can detect `data-viewport` and return false.
+    // ── Engine viewport ──────────────────────────────────────────────
     let viewport = __scope.create_element("div");
     viewport.set_attribute("data-viewport", "main");
-    viewport.set_attribute(
-        "style",
-        "flex: 1; background: transparent;",
-    );
+    viewport.set_attribute("style", "flex: 1; background: transparent;");
     content.append_child(&viewport);
 
-    // Right panel (properties)
-    let right_panel = rsx! {
-        div {
-            style: "width: 300px; background: #1e1e1e; border-left: 1px solid #333; \
-                    overflow-y: auto; padding: 8px;",
-            span { style: "color: #ccc; font-weight: bold;", "Properties" }
-        }
-    };
-    content.append_child(&right_panel);
+    // ── Right panel: Properties / Tool settings ──────────────────────
+    let right_panel = __scope.create_element("div");
+    right_panel.set_attribute(
+        "style",
+        "width: 300px; background: #1e1e1e; border-left: 1px solid #333; \
+         overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 8px;",
+    );
 
+    // Reactive title
+    let right_title = __scope.create_element("span");
+    right_title.set_attribute(
+        "style",
+        "color: #ccc; font-weight: bold; font-size: 13px; margin-bottom: 4px;",
+    );
+    __scope.create_effect({
+        let right_title = right_title.clone();
+        move || {
+            let idx = mode_signal.get();
+            let mode = EditorMode::from_index(idx);
+            let title = match mode {
+                EditorMode::Navigate | EditorMode::Select => "Properties",
+                EditorMode::Place => "Asset Browser",
+                EditorMode::Sculpt => "Sculpt Tools",
+                EditorMode::Paint => "Paint Tools",
+                EditorMode::Light => "Light Properties",
+                EditorMode::Animate => "Animation",
+                EditorMode::Environment => "Environment",
+            };
+            right_title.set_text(title);
+        }
+    });
+    right_panel.append_child(&right_title);
+
+    // Mode-specific content placeholder
+    let right_content = __scope.create_element("div");
+    right_content.set_attribute(
+        "style",
+        "color: #666; font-size: 12px; font-style: italic;",
+    );
+    __scope.create_effect({
+        let right_content = right_content.clone();
+        move || {
+            let idx = mode_signal.get();
+            let mode = EditorMode::from_index(idx);
+            let hint = match mode {
+                EditorMode::Navigate => "Use right-click + WASD to fly camera",
+                EditorMode::Select => "Click entities in viewport to select",
+                EditorMode::Place => "Choose an asset to place in the scene",
+                EditorMode::Sculpt => "Left-click + drag to sculpt terrain",
+                EditorMode::Paint => "Left-click + drag to paint materials",
+                EditorMode::Light => "Select a light to edit its properties",
+                EditorMode::Animate => "Select an entity to preview animations",
+                EditorMode::Environment => "Adjust fog, clouds, and post-processing",
+            };
+            right_content.set_text(hint);
+        }
+    });
+    right_panel.append_child(&right_content);
+
+    content.append_child(&right_panel);
     root.append_child(&content);
 
-    // Status bar
-    let status = rsx! {
-        div {
-            style: "height: 24px; background: #2b2b2b; display: flex; align-items: center; \
-                    padding: 0 8px; border-top: 1px solid #333;",
-            span { style: "color: #666; font-size: 12px;", "Ready" }
+    // ═══════════════════════════════════════════════════════════════════
+    // STATUS BAR
+    // ═══════════════════════════════════════════════════════════════════
+    let fps_signal = Signal::new(0u16);
+    FPS_SIGNAL.with(|cell| cell.set(Some(fps_signal)));
+
+    let status_bar = __scope.create_element("div");
+    status_bar.set_attribute(
+        "style",
+        "height: 24px; background: #2b2b2b; display: flex; align-items: center; \
+         padding: 0 8px; border-top: 1px solid #333; gap: 12px;",
+    );
+
+    // Mode name
+    let status_mode = __scope.create_element("span");
+    status_mode.set_attribute("style", "color: #888; font-size: 12px;");
+    __scope.create_effect({
+        let status_mode = status_mode.clone();
+        move || {
+            let idx = mode_signal.get();
+            let mode = EditorMode::from_index(idx);
+            status_mode.set_text(mode.name());
         }
-    };
-    root.append_child(&status);
+    });
+    status_bar.append_child(&status_mode);
+
+    // Separator
+    let sep = __scope.create_element("span");
+    sep.set_attribute("style", "color: #444; font-size: 12px;");
+    sep.set_text("|");
+    status_bar.append_child(&sep);
+
+    // FPS counter
+    let status_fps = __scope.create_element("span");
+    status_fps.set_attribute("style", "color: #666; font-size: 12px;");
+    __scope.create_effect({
+        let status_fps = status_fps.clone();
+        move || {
+            let fps = fps_signal.get();
+            if fps > 0 {
+                status_fps.set_text(&format!("{fps} fps"));
+            } else {
+                status_fps.set_text("Ready");
+            }
+        }
+    });
+    status_bar.append_child(&status_fps);
+
+    root.append_child(&status_bar);
 
     root
 }
@@ -263,73 +741,24 @@ fn spawn_ipc_server(api: Arc<dyn rkf_core::automation::AutomationApi>) -> String
 }
 
 // ---------------------------------------------------------------------------
-// Camera input state
+// Debug mode from number keys (0-6)
 // ---------------------------------------------------------------------------
 
-struct InputState {
-    forward: bool,
-    backward: bool,
-    left: bool,
-    right: bool,
-    up: bool,
-    down: bool,
-}
-
-impl InputState {
-    fn new() -> Self {
-        Self {
-            forward: false,
-            backward: false,
-            left: false,
-            right: false,
-            up: false,
-            down: false,
-        }
+/// Check if a number key was pressed, returning the debug mode index.
+fn debug_mode_from_key(key: winit::keyboard::KeyCode, pressed: bool) -> Option<u32> {
+    if !pressed {
+        return None;
     }
-
-    /// Process a key event for camera movement. Returns Some(debug_mode) if a
-    /// number key was pressed.
-    fn process_key(&mut self, key: winit::keyboard::KeyCode, pressed: bool) -> Option<u32> {
-        use winit::keyboard::KeyCode;
-        match key {
-            KeyCode::KeyW => self.forward = pressed,
-            KeyCode::KeyS => self.backward = pressed,
-            KeyCode::KeyA => self.left = pressed,
-            KeyCode::KeyD => self.right = pressed,
-            KeyCode::Space => self.up = pressed,
-            KeyCode::ShiftLeft | KeyCode::ShiftRight => self.down = pressed,
-            KeyCode::Digit0 if pressed => return Some(0),
-            KeyCode::Digit1 if pressed => return Some(1),
-            KeyCode::Digit2 if pressed => return Some(2),
-            KeyCode::Digit3 if pressed => return Some(3),
-            KeyCode::Digit4 if pressed => return Some(4),
-            KeyCode::Digit5 if pressed => return Some(5),
-            KeyCode::Digit6 if pressed => return Some(6),
-            _ => {}
-        }
-        None
-    }
-
-    fn apply_to_camera(&self, cam: &mut rkf_render::camera::Camera, dt: f32) {
-        let speed = cam.move_speed * dt;
-        if self.forward {
-            cam.translate_forward(speed);
-        }
-        if self.backward {
-            cam.translate_forward(-speed);
-        }
-        if self.right {
-            cam.translate_right(speed);
-        }
-        if self.left {
-            cam.translate_right(-speed);
-        }
-        if self.up {
-            cam.translate_up(speed);
-        }
-        if self.down {
-            cam.translate_up(-speed);
-        }
+    use winit::keyboard::KeyCode;
+    match key {
+        KeyCode::Digit0 => Some(0),
+        KeyCode::Digit1 => Some(1),
+        KeyCode::Digit2 => Some(2),
+        KeyCode::Digit3 => Some(3),
+        KeyCode::Digit4 => Some(4),
+        KeyCode::Digit5 => Some(5),
+        KeyCode::Digit6 => Some(6),
+        _ => None,
     }
 }
 
@@ -362,11 +791,13 @@ struct App {
     blit_layout: Option<wgpu::BindGroupLayout>,
     blit_sampler: Option<wgpu::Sampler>,
 
-    // Input
-    cam_input: InputState,
+    // Editor state (shared with UI components via EDITOR_STATE static)
+    editor_state: Arc<Mutex<EditorState>>,
+
+    // Input routing
     mouse_phys: (f32, f32),
     prev_mouse: (f32, f32),
-    dragging: bool,
+    viewport_dragging: bool,
     modifiers: winit::keyboard::ModifiersState,
     pending_events: Vec<PlatformEvent>,
 
@@ -382,6 +813,10 @@ struct App {
 
 impl App {
     fn new() -> Self {
+        let editor_state = Arc::new(Mutex::new(EditorState::new()));
+        // Store in global static so rinch UI components can access it.
+        let _ = EDITOR_STATE.set(Arc::clone(&editor_state));
+
         Self {
             window: None,
             device: None,
@@ -397,10 +832,10 @@ impl App {
             blit_pipeline: None,
             blit_layout: None,
             blit_sampler: None,
-            cam_input: InputState::new(),
+            editor_state,
             mouse_phys: (0.0, 0.0),
             prev_mouse: (0.0, 0.0),
-            dragging: false,
+            viewport_dragging: false,
             modifiers: winit::keyboard::ModifiersState::empty(),
             pending_events: Vec::new(),
             shared_state: Arc::new(Mutex::new(SharedState::new(
@@ -622,9 +1057,40 @@ impl App {
             let _actions = ctx.update(&events);
         }
 
-        // Apply camera movement from keyboard input
-        if let Some(engine) = &mut self.engine {
-            self.cam_input.apply_to_camera(&mut engine.camera, dt);
+        // Update editor camera from input, then sync to engine camera
+        {
+            let mut es = self.editor_state.lock().unwrap();
+            es.update_camera(dt);
+            es.frame_time_history.push(dt * 1000.0);
+            if let Some(engine) = &mut self.engine {
+                es.sync_to_engine_camera(&mut engine.camera);
+            }
+
+            // Consume pending debug mode from UI menus
+            if let Some(dm) = es.pending_debug_mode.take() {
+                if let Some(engine) = &self.engine {
+                    engine.shading.set_debug_mode(queue, dm);
+                    log::info!("Debug mode (from menu): {dm}");
+                }
+            }
+
+            // Sync environment settings when dirty
+            if es.environment.is_dirty() {
+                if let Some(engine) = &mut self.engine {
+                    engine.apply_environment(&es.environment);
+                }
+                es.environment.clear_dirty();
+            }
+
+            // Sync lights when dirty
+            if es.light_editor.is_dirty() {
+                if let Some(engine) = &mut self.engine {
+                    engine.apply_lights(es.light_editor.all_lights());
+                }
+                es.light_editor.clear_dirty();
+            }
+
+            es.reset_frame_deltas();
         }
 
         // ── Step 1: Engine renders full pipeline + blits to surface ────────
@@ -680,18 +1146,27 @@ impl App {
 
         frame.present();
 
-        // Update title bar with FPS every 500ms
+        // Update title bar and status bar FPS every 500ms
         if now.duration_since(self.last_title_update).as_millis() > 500 {
+            let elapsed = now.duration_since(self.last_title_update).as_secs_f64();
+            let fps = self.frame_count as f64 / elapsed;
+
             if let Some(window) = &self.window {
-                let elapsed = now.duration_since(self.last_title_update).as_secs_f64();
-                let fps = self.frame_count as f64 / elapsed;
                 window.set_title(&format!(
                     "RKIField Editor — {fps:.0} fps ({:.2} ms)",
                     1000.0 / fps
                 ));
-                self.frame_count = 0;
-                self.last_title_update = now;
             }
+
+            // Push FPS to reactive signal for status bar
+            FPS_SIGNAL.with(|cell| {
+                if let Some(sig) = cell.get() {
+                    sig.set(fps as u16);
+                }
+            });
+
+            self.frame_count = 0;
+            self.last_title_update = now;
         }
     }
 
@@ -781,15 +1256,13 @@ impl ApplicationHandler for App {
                 let px = position.x as f32;
                 let py = position.y as f32;
 
-                // Right-drag rotates camera in viewport
-                if self.dragging {
-                    let dx = px - self.prev_mouse.0;
-                    let dy = py - self.prev_mouse.1;
-                    if let Some(engine) = &mut self.engine {
-                        engine.camera.yaw -= dx * 0.003;
-                        engine.camera.pitch -= dy * 0.003;
-                        engine.camera.pitch = engine.camera.pitch.clamp(-1.5, 1.5);
-                    }
+                // Accumulate mouse delta for editor camera
+                let dx = px - self.mouse_phys.0;
+                let dy = py - self.mouse_phys.1;
+                if let Ok(mut es) = self.editor_state.lock() {
+                    es.editor_input.mouse_pos = glam::Vec2::new(px, py);
+                    es.editor_input.mouse_delta.x += dx;
+                    es.editor_input.mouse_delta.y += dy;
                 }
 
                 self.prev_mouse = self.mouse_phys;
@@ -806,6 +1279,11 @@ impl ApplicationHandler for App {
                     winit::event::MouseButton::Right => PlatformMouseButton::Right,
                     winit::event::MouseButton::Middle => PlatformMouseButton::Middle,
                     _ => return,
+                };
+                let btn_idx = match platform_btn {
+                    PlatformMouseButton::Left => 0usize,
+                    PlatformMouseButton::Right => 1,
+                    PlatformMouseButton::Middle => 2,
                 };
                 let (px, py) = self.mouse_phys;
 
@@ -825,14 +1303,30 @@ impl ApplicationHandler for App {
                                 y: py,
                                 button: platform_btn,
                             });
-                        } else if platform_btn == PlatformMouseButton::Right {
-                            // Right-drag for camera rotation in viewport
-                            self.dragging = true;
+                        } else {
+                            // Viewport interaction — feed into editor input
+                            if let Ok(mut es) = self.editor_state.lock() {
+                                es.editor_input.mouse_buttons[btn_idx] = true;
+                            }
+                            self.viewport_dragging = true;
                         }
                     }
                     ElementState::Released => {
-                        if self.dragging && platform_btn == PlatformMouseButton::Right {
-                            self.dragging = false;
+                        // Always clear the button in editor input
+                        if let Ok(mut es) = self.editor_state.lock() {
+                            es.editor_input.mouse_buttons[btn_idx] = false;
+                        }
+
+                        if self.viewport_dragging {
+                            // Check if any viewport buttons still held
+                            let any_held = self
+                                .editor_state
+                                .lock()
+                                .map(|es| es.editor_input.mouse_buttons.iter().any(|&b| b))
+                                .unwrap_or(false);
+                            if !any_held {
+                                self.viewport_dragging = false;
+                            }
                         } else {
                             self.pending_events.push(PlatformEvent::MouseUp {
                                 x: px,
@@ -865,9 +1359,9 @@ impl ApplicationHandler for App {
                         delta_y: scroll_y,
                     });
                 } else {
-                    // Scroll to move camera forward/backward
-                    if let Some(engine) = &mut self.engine {
-                        engine.camera.translate_forward(scroll_y as f32 * 0.02);
+                    // Feed scroll into editor input for camera zoom/move
+                    if let Ok(mut es) = self.editor_state.lock() {
+                        es.editor_input.scroll_delta += scroll_y as f32;
                     }
                 }
             }
@@ -879,10 +1373,51 @@ impl ApplicationHandler for App {
                     _ => return,
                 };
 
-                // Escape always exits
+                // Escape: close menus first, then exit
                 if key_code == winit::keyboard::KeyCode::Escape && pressed {
-                    event_loop.exit();
+                    let menu_was_open = MENU_SIGNAL.with(|cell| {
+                        cell.get().is_some_and(|sig| {
+                            if sig.get() != 0 {
+                                sig.set(0);
+                                true
+                            } else {
+                                false
+                            }
+                        })
+                    });
+                    if !menu_was_open {
+                        event_loop.exit();
+                    }
                     return;
+                }
+
+                // Global shortcuts (work regardless of UI focus)
+                let ctrl = self.modifiers.control_key();
+                let shift = self.modifiers.shift_key();
+
+                if pressed && ctrl {
+                    use winit::keyboard::KeyCode;
+                    match key_code {
+                        KeyCode::KeyZ if !shift => {
+                            // Ctrl+Z — Undo
+                            if let Ok(mut es) = self.editor_state.lock() {
+                                if let Some(action) = es.undo.undo() {
+                                    log::info!("Undo: {}", action.description);
+                                }
+                            }
+                            return;
+                        }
+                        KeyCode::KeyY | KeyCode::KeyZ if shift => {
+                            // Ctrl+Y or Ctrl+Shift+Z — Redo
+                            if let Ok(mut es) = self.editor_state.lock() {
+                                if let Some(action) = es.undo.redo() {
+                                    log::info!("Redo: {}", action.description);
+                                }
+                            }
+                            return;
+                        }
+                        _ => {}
+                    }
                 }
 
                 let wants_kb = self.ui_visible
@@ -904,8 +1439,19 @@ impl ApplicationHandler for App {
                         });
                     }
                 } else {
-                    // Camera movement + debug shortcuts
-                    if let Some(debug_mode) = self.cam_input.process_key(key_code, pressed) {
+                    // Feed key state into editor input for camera/tools
+                    if let Some(editor_key) = translate_to_editor_key(key_code) {
+                        if let Ok(mut es) = self.editor_state.lock() {
+                            if pressed {
+                                es.editor_input.keys_pressed.insert(editor_key);
+                            } else {
+                                es.editor_input.keys_pressed.remove(&editor_key);
+                            }
+                        }
+                    }
+
+                    // Debug mode shortcuts (0-6)
+                    if let Some(debug_mode) = debug_mode_from_key(key_code, pressed) {
                         if let Some(engine) = &self.engine {
                             engine.shading.set_debug_mode(
                                 self.queue.as_ref().unwrap(),
@@ -925,7 +1471,15 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Check if UI requested exit (File > Quit)
+        if let Ok(es) = self.editor_state.lock() {
+            if es.wants_exit {
+                event_loop.exit();
+                return;
+            }
+        }
+
         if let Some(window) = &self.window {
             window.request_redraw();
         }

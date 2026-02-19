@@ -57,6 +57,8 @@ use rkf_render::vol_upscale::VolUpscalePass;
 use rkf_runtime::frame::{execute_frame, FrameContext, FrameSettings};
 
 use crate::automation::SharedState;
+use crate::environment::EnvironmentState;
+use crate::light_editor::{EditorLight, EditorLightType};
 
 /// Display (output) resolution.
 pub const DISPLAY_WIDTH: u32 = 1280;
@@ -729,6 +731,93 @@ impl EngineState {
             frame_index: 0,
             prev_vp: [[0.0; 4]; 4],
         }
+    }
+
+    /// Apply editor environment settings to engine render state.
+    ///
+    /// Maps the editor's `EnvironmentState` (pure data model) to the engine's
+    /// fog, cloud, and post-process parameters. Called when `is_dirty()` is true.
+    pub fn apply_environment(&mut self, env: &EnvironmentState) {
+        // Fog
+        self.fog_settings.height_fog_enabled = env.fog.enabled;
+        self.fog_settings.fog_base_density = env.fog.density;
+        self.fog_settings.fog_height_falloff = env.fog.height_falloff;
+        self.fog_settings.fog_color = [env.fog.color.x, env.fog.color.y, env.fog.color.z];
+        self.fog_settings.distance_fog_enabled = env.fog.enabled;
+        self.fog_settings.fog_distance_density = env.fog.density * 0.5;
+        self.fog_settings.fog_distance_falloff = 1.0 / env.fog.end_distance.max(1.0);
+
+        // Clouds
+        self.cloud_settings.procedural_enabled = env.clouds.enabled;
+        self.cloud_settings.cloud_density_scale = env.clouds.density;
+        self.cloud_settings.shadow_enabled = env.clouds.enabled;
+        self.cloud_settings.cloud_min = env.clouds.altitude;
+        self.cloud_settings.cloud_max = env.clouds.altitude + env.clouds.thickness;
+        self.cloud_settings.shadow_coverage = env.clouds.coverage;
+        self.cloud_settings.wind_speed = env.clouds.wind_speed;
+
+        // Post-process
+        self.bloom_composite
+            .set_intensity(&self.queue, if env.post_process.bloom_enabled { env.post_process.bloom_intensity } else { 0.0 });
+        self.bloom
+            .set_threshold(&self.queue, env.post_process.bloom_threshold, 0.4);
+        self.cosmetics
+            .set_vignette(&self.queue, env.post_process.vignette_intensity);
+
+        log::debug!("Environment settings applied to engine");
+    }
+
+    /// Apply editor lights to the engine, merging with base scene lights.
+    ///
+    /// Converts `EditorLight` → `rkf_render::light::Light`, appends to the
+    /// base scene lights, and writes the combined array to the GPU buffer.
+    pub fn apply_lights(&mut self, editor_lights: &[EditorLight]) {
+        // Start with the base scene lights
+        let mut combined = create_clipmap_lights();
+
+        // Append editor-defined lights
+        for el in editor_lights {
+            let pos = [el.position.x, el.position.y, el.position.z];
+            let dir = [el.direction.x, el.direction.y, el.direction.z];
+            let color = [el.color.x, el.color.y, el.color.z];
+            let light = match el.light_type {
+                EditorLightType::Point => {
+                    Light::point(pos, color, el.intensity, el.range, el.cast_shadows)
+                }
+                EditorLightType::Spot => Light::spot(
+                    pos,
+                    dir,
+                    color,
+                    el.intensity,
+                    el.range,
+                    el.spot_inner_angle,
+                    el.spot_outer_angle,
+                    el.cast_shadows,
+                ),
+                EditorLightType::Directional => {
+                    Light::directional(dir, color, el.intensity, el.cast_shadows)
+                }
+            };
+            combined.push(light);
+        }
+
+        // Write to buffer (truncate to existing buffer capacity)
+        let max_lights = self.light_buffer.buffer.size() as usize / std::mem::size_of::<Light>();
+        let count = combined.len().min(max_lights);
+        let data = &combined[..count];
+        self.queue.write_buffer(
+            &self.light_buffer.buffer,
+            0,
+            bytemuck::cast_slice(data),
+        );
+        self.light_buffer.count = count as u32;
+        self.lights = combined;
+
+        // Update radiance inject with new light count
+        self.radiance_inject
+            .update_inject_uniforms(&self.queue, count as u32, 2);
+
+        log::debug!("Lights updated: {} total ({} editor)", count, editor_lights.len());
     }
 
     /// Render one frame: full SDF pipeline + blit to swapchain.
