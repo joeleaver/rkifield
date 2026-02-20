@@ -6,7 +6,31 @@
 #![allow(dead_code)]
 
 use glam::{Quat, Vec3};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+/// Serde helper: deserialize scale as either a single f32 (uniform → Vec3::splat)
+/// or a Vec3 tuple `(x, y, z)`. Serializes always as Vec3.
+mod scale_serde {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(v: &Vec3, s: S) -> Result<S::Ok, S::Error> {
+        v.serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec3, D::Error> {
+        // Try Vec3 first, then fall back to f32 → Vec3::splat
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum ScaleValue {
+            Vec3(Vec3),
+            Uniform(f32),
+        }
+        match ScaleValue::deserialize(d)? {
+            ScaleValue::Vec3(v) => Ok(v),
+            ScaleValue::Uniform(f) => Ok(Vec3::splat(f)),
+        }
+    }
+}
 
 /// A component attached to a scene entity.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -34,7 +58,8 @@ pub struct SceneEntity {
     pub parent_id: Option<u64>,
     pub position: Vec3,
     pub rotation: Quat,
-    pub scale: f32,
+    #[serde(with = "scale_serde")]
+    pub scale: Vec3,
     pub components: Vec<ComponentData>,
 }
 
@@ -202,7 +227,7 @@ mod tests {
                     parent_id: None,
                     position: Vec3::ZERO,
                     rotation: Quat::IDENTITY,
-                    scale: 1.0,
+                    scale: Vec3::ONE,
                     components: vec![ComponentData::SdfObject {
                         asset_path: "assets/ground.rkf".to_string(),
                     }],
@@ -213,7 +238,7 @@ mod tests {
                     parent_id: None,
                     position: Vec3::new(0.0, 10.0, 0.0),
                     rotation: Quat::from_rotation_x(-0.5),
-                    scale: 1.0,
+                    scale: Vec3::ONE,
                     components: vec![ComponentData::Light {
                         light_type: "directional".to_string(),
                         color: [1.0, 0.95, 0.8],
@@ -259,7 +284,7 @@ mod tests {
                     parent_id: None,
                     position: Vec3::ZERO,
                     rotation: Quat::IDENTITY,
-                    scale: 1.0,
+                    scale: Vec3::ONE,
                     components: vec![],
                 },
                 SceneEntity {
@@ -268,7 +293,7 @@ mod tests {
                     parent_id: Some(1),
                     position: Vec3::new(1.0, 2.0, 3.0),
                     rotation: Quat::from_rotation_y(1.57),
-                    scale: 0.5,
+                    scale: Vec3::splat(0.5),
                     components: vec![
                         ComponentData::SdfObject {
                             asset_path: "rock.rkf".to_string(),
@@ -285,7 +310,7 @@ mod tests {
                     parent_id: Some(1),
                     position: Vec3::Y,
                     rotation: Quat::IDENTITY,
-                    scale: 1.0,
+                    scale: Vec3::ONE,
                     components: vec![ComponentData::AnimatedEntity {
                         animation_path: "walk.rkanim".to_string(),
                     }],
@@ -313,7 +338,7 @@ mod tests {
                 parent_id: None,
                 position: Vec3::ZERO,
                 rotation: Quat::IDENTITY,
-                scale: 1.0,
+                scale: Vec3::ONE,
                 components: vec![
                     ComponentData::SdfObject {
                         asset_path: "mesh.rkf".to_string(),

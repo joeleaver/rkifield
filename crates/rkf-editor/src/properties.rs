@@ -172,7 +172,7 @@ impl PropertySheet {
 ///
 /// Creates properties for position (x/y/z), rotation as Euler angles (x/y/z in degrees),
 /// and uniform scale.
-pub fn build_transform_properties(entity_id: u64, pos: Vec3, rot: Quat, scale: f32) -> PropertySheet {
+pub fn build_transform_properties(entity_id: u64, pos: Vec3, rot: Quat, scale: Vec3) -> PropertySheet {
     let euler = rot.to_euler(glam::EulerRot::XYZ);
 
     let mut sheet = PropertySheet::new(entity_id);
@@ -195,8 +195,20 @@ pub fn build_transform_properties(entity_id: u64, pos: Vec3, rot: Quat, scale: f
     );
 
     sheet.add_property_def(PropertyDef::with_bounds(
-        "scale",
-        PropertyValue::Float(scale),
+        "scale.x",
+        PropertyValue::Float(scale.x),
+        0.001,
+        1000.0,
+    ));
+    sheet.add_property_def(PropertyDef::with_bounds(
+        "scale.y",
+        PropertyValue::Float(scale.y),
+        0.001,
+        1000.0,
+    ));
+    sheet.add_property_def(PropertyDef::with_bounds(
+        "scale.z",
+        PropertyValue::Float(scale.z),
         0.001,
         1000.0,
     ));
@@ -293,7 +305,7 @@ mod tests {
 
     #[test]
     fn test_build_transform_properties_identity() {
-        let sheet = build_transform_properties(42, Vec3::ZERO, Quat::IDENTITY, 1.0);
+        let sheet = build_transform_properties(42, Vec3::ZERO, Quat::IDENTITY, Vec3::ONE);
         assert_eq!(sheet.entity_id, 42);
 
         assert_eq!(
@@ -317,7 +329,15 @@ mod tests {
         }
 
         assert_eq!(
-            sheet.get_property("scale"),
+            sheet.get_property("scale.x"),
+            Some(&PropertyValue::Float(1.0))
+        );
+        assert_eq!(
+            sheet.get_property("scale.y"),
+            Some(&PropertyValue::Float(1.0))
+        );
+        assert_eq!(
+            sheet.get_property("scale.z"),
             Some(&PropertyValue::Float(1.0))
         );
     }
@@ -325,7 +345,7 @@ mod tests {
     #[test]
     fn test_build_transform_properties_with_rotation() {
         let rot = Quat::from_rotation_y(FRAC_PI_2);
-        let sheet = build_transform_properties(1, Vec3::new(1.0, 2.0, 3.0), rot, 2.0);
+        let sheet = build_transform_properties(1, Vec3::new(1.0, 2.0, 3.0), rot, Vec3::splat(2.0));
 
         assert_eq!(
             sheet.get_property("position.x"),
@@ -347,22 +367,22 @@ mod tests {
         }
 
         assert_eq!(
-            sheet.get_property("scale"),
+            sheet.get_property("scale.x"),
             Some(&PropertyValue::Float(2.0))
         );
     }
 
     #[test]
-    fn test_build_transform_has_seven_properties() {
-        let sheet = build_transform_properties(1, Vec3::ZERO, Quat::IDENTITY, 1.0);
-        assert_eq!(sheet.property_names().len(), 7);
-        // pos x/y/z + rot x/y/z + scale = 7
+    fn test_build_transform_has_nine_properties() {
+        let sheet = build_transform_properties(1, Vec3::ZERO, Quat::IDENTITY, Vec3::ONE);
+        assert_eq!(sheet.property_names().len(), 9);
+        // pos x/y/z + rot x/y/z + scale x/y/z = 9
     }
 
     #[test]
     fn test_scale_has_bounds() {
-        let sheet = build_transform_properties(1, Vec3::ZERO, Quat::IDENTITY, 1.0);
-        let scale_prop = sheet.properties.iter().find(|p| p.name == "scale").unwrap();
+        let sheet = build_transform_properties(1, Vec3::ZERO, Quat::IDENTITY, Vec3::ONE);
+        let scale_prop = sheet.properties.iter().find(|p| p.name == "scale.x").unwrap();
         assert_eq!(scale_prop.min, Some(0.001));
         assert_eq!(scale_prop.max, Some(1000.0));
     }

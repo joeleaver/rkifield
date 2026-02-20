@@ -27,8 +27,11 @@ pub struct SceneNode {
     pub position: Vec3,
     /// World-space rotation of this entity.
     pub rotation: Quat,
-    /// Uniform scale of this entity.
-    pub scale: f32,
+    /// Per-axis scale of this entity.
+    pub scale: Vec3,
+    /// Half-extents of the object's bounding box for ray picking.
+    /// Defaults to (1,1,1); should be set from the SDF recipe's local AABB.
+    pub bounds_half: Vec3,
     /// Asset path for SdfObject entities, used to roundtrip scene save/load.
     pub asset_path: Option<String>,
 }
@@ -45,7 +48,8 @@ impl SceneNode {
             visible: true,
             position: Vec3::ZERO,
             rotation: Quat::IDENTITY,
-            scale: 1.0,
+            scale: Vec3::ONE,
+            bounds_half: Vec3::splat(1.0),
             asset_path: None,
         }
     }
@@ -404,7 +408,7 @@ mod tests {
         assert!(node.visible);
         assert_eq!(node.position, Vec3::ZERO);
         assert_eq!(node.rotation, Quat::IDENTITY);
-        assert!((node.scale - 1.0).abs() < 1e-6);
+        assert_eq!(node.scale, Vec3::ONE);
         assert!(node.asset_path.is_none());
     }
 

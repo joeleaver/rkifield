@@ -54,7 +54,9 @@ impl SdfPrimitive {
     /// the local SDF and scales the result back.
     pub fn eval(&self, point: Vec3, transform: &ObjectTransform) -> f32 {
         let local = transform.world_to_local(point);
-        self.eval_local(local) * transform.scale
+        // Conservative distance: scale by smallest axis to avoid underestimating
+        // (non-uniform scale distorts distances; min_element is always safe)
+        self.eval_local(local) * transform.scale.min_element()
     }
 
     /// Evaluate the SDF at a point already in local (untransformed) space.
@@ -140,8 +142,10 @@ pub struct ObjectTransform {
     pub position: Vec3,
     /// Rotation quaternion.
     pub rotation: Quat,
-    /// Uniform scale factor (per engine rule 3: uniform only).
-    pub scale: f32,
+    /// Per-axis scale. For SDF correctness, prefer uniform (all components equal).
+    /// Non-uniform scale is supported via conservative distance estimation during
+    /// sphere tracing, and exact voxelization at bake time.
+    pub scale: Vec3,
 }
 
 impl Default for ObjectTransform {
@@ -149,7 +153,7 @@ impl Default for ObjectTransform {
         Self {
             position: Vec3::ZERO,
             rotation: Quat::IDENTITY,
-            scale: 1.0,
+            scale: Vec3::ONE,
         }
     }
 }
@@ -159,6 +163,15 @@ impl ObjectTransform {
     #[inline]
     pub fn world_to_local(&self, point: Vec3) -> Vec3 {
         self.rotation.inverse() * ((point - self.position) / self.scale)
+    }
+
+    /// Create a transform with uniform scale.
+    pub fn with_uniform_scale(position: Vec3, rotation: Quat, scale: f32) -> Self {
+        Self {
+            position,
+            rotation,
+            scale: Vec3::splat(scale),
+        }
     }
 }
 
@@ -202,6 +215,7 @@ impl SdfObject {
         for corner in &corners {
             let world = self.transform.rotation * (*corner * self.transform.scale)
                 + self.transform.position;
+
             min = min.min(world);
             max = max.max(world);
         }
@@ -307,6 +321,254 @@ impl SdfObjectRegistry {
     pub fn is_empty(&self) -> bool {
         self.objects.is_empty()
     }
+
+    /// Iterate over all registered objects.
+    pub fn objects(&self) -> &[SdfObject] {
+        &self.objects
+    }
+
+    /// All objects at a given clipmap level.
+    pub fn objects_in_level(&self, level: usize) -> Vec<&SdfObject> {
+        self.objects
+            .iter()
+            .filter(|o| o.clipmap_level == level)
+            .collect()
+    }
+
+    /// Union of all objects' world AABBs in a given level.
+    ///
+    /// Returns `None` if the level has no objects.
+    pub fn level_bounds(&self, level: usize) -> Option<Aabb> {
+        let mut result: Option<Aabb> = None;
+        for obj in self.objects.iter().filter(|o| o.clipmap_level == level) {
+            let aabb = obj.world_aabb();
+            result = Some(match result {
+                Some(r) => r.expand_aabb(&aabb),
+                None => aabb,
+            });
+        }
+        result
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Ray-SDF picking
+// ---------------------------------------------------------------------------
+
+/// Result of a ray pick against the SDF object registry.
+#[derive(Debug, Clone)]
+pub struct RayPickResult {
+    /// Entity/object ID of the hit object.
+    pub object_id: u64,
+    /// World-space position of the surface hit.
+    pub hit_position: Vec3,
+    /// Distance along the ray from origin to hit.
+    pub hit_distance: f32,
+}
+
+/// Sphere-trace a ray against a single SDF object.
+///
+/// Returns the hit distance along the ray, or `None` if no surface is hit
+/// within `max_dist` steps.
+fn sphere_trace_object(
+    ray_origin: Vec3,
+    ray_dir: Vec3,
+    obj: &SdfObject,
+    max_dist: f32,
+    max_steps: u32,
+) -> Option<f32> {
+    // Early-out: ray-AABB test with generous margin against the object's world bounding box
+    let aabb = obj.world_aabb();
+    let margin = Vec3::splat(0.5); // padding for SDF imprecision at distance
+    if !ray_aabb_intersect_range(
+        ray_origin, ray_dir, aabb.min - margin, aabb.max + margin, 0.0, max_dist,
+    ) {
+        return None;
+    }
+
+    let mut t = 0.0f32;
+    // Advance t to the AABB entry point for efficiency
+    if let Some(t_enter) = ray_aabb_t(ray_origin, ray_dir, aabb.min - margin, aabb.max + margin) {
+        if t_enter > 0.0 {
+            t = (t_enter - 0.05).max(0.0); // step back slightly to not miss the surface
+        }
+    }
+
+    for _ in 0..max_steps {
+        if t > max_dist {
+            return None;
+        }
+        let p = ray_origin + ray_dir * t;
+        let d = obj.recipe.primitive.eval(p, &obj.transform);
+        // Distance-proportional hit threshold: tighter up close, relaxed at range
+        let hit_eps = 0.001 + t * 0.0002;
+        if d < hit_eps {
+            return Some(t);
+        }
+        // Conservative step (SDF might not be exact for compounds)
+        t += d.max(0.002);
+    }
+    None
+}
+
+/// Cast a ray against all objects in the registry and return the closest hit.
+///
+/// This performs per-object sphere tracing on the CPU, so each object is
+/// tested independently — correctly handles overlapping objects.
+pub fn ray_pick(
+    registry: &SdfObjectRegistry,
+    ray_origin: Vec3,
+    ray_dir: Vec3,
+    max_dist: f32,
+) -> Option<RayPickResult> {
+    let ray_dir = ray_dir.normalize();
+    let mut best: Option<RayPickResult> = None;
+
+    for obj in registry.objects() {
+        if let Some(t) = sphere_trace_object(ray_origin, ray_dir, obj, max_dist, 256) {
+            let dominated = best.as_ref().map_or(false, |b| t >= b.hit_distance);
+            if !dominated {
+                best = Some(RayPickResult {
+                    object_id: obj.id,
+                    hit_position: ray_origin + ray_dir * t,
+                    hit_distance: t,
+                });
+            }
+        }
+    }
+
+    best
+}
+
+/// Ray-AABB slab intersection: returns true if the ray hits the box within [t_min, t_max].
+fn ray_aabb_intersect_range(
+    origin: Vec3,
+    dir: Vec3,
+    min: Vec3,
+    max: Vec3,
+    t_min: f32,
+    t_max: f32,
+) -> bool {
+    let inv = Vec3::new(
+        if dir.x.abs() > 1e-8 { 1.0 / dir.x } else { f32::MAX.copysign(dir.x) },
+        if dir.y.abs() > 1e-8 { 1.0 / dir.y } else { f32::MAX.copysign(dir.y) },
+        if dir.z.abs() > 1e-8 { 1.0 / dir.z } else { f32::MAX.copysign(dir.z) },
+    );
+    let t1 = (min - origin) * inv;
+    let t2 = (max - origin) * inv;
+    let t_lo = t1.min(t2);
+    let t_hi = t1.max(t2);
+    let enter = t_lo.x.max(t_lo.y).max(t_lo.z).max(t_min);
+    let exit = t_hi.x.min(t_hi.y).min(t_hi.z).min(t_max);
+    exit >= enter
+}
+
+/// Ray-AABB intersection: returns the entry t value (or None if miss/behind).
+fn ray_aabb_t(origin: Vec3, dir: Vec3, min: Vec3, max: Vec3) -> Option<f32> {
+    let inv = Vec3::new(
+        if dir.x.abs() > 1e-8 { 1.0 / dir.x } else { f32::MAX.copysign(dir.x) },
+        if dir.y.abs() > 1e-8 { 1.0 / dir.y } else { f32::MAX.copysign(dir.y) },
+        if dir.z.abs() > 1e-8 { 1.0 / dir.z } else { f32::MAX.copysign(dir.z) },
+    );
+    let t1 = (min - origin) * inv;
+    let t2 = (max - origin) * inv;
+    let t_lo = t1.min(t2);
+    let t_hi = t1.max(t2);
+    let enter = t_lo.x.max(t_lo.y).max(t_lo.z);
+    let exit = t_hi.x.min(t_hi.y).min(t_hi.z);
+    if exit >= enter.max(0.0) {
+        Some(enter.max(0.0))
+    } else {
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bulk operations (for grid expansion)
+// ---------------------------------------------------------------------------
+
+/// Deallocate all bricks owned by a grid, returning them to the pool.
+///
+/// After this call, every cell in the grid with a brick slot will have that
+/// slot freed. Cell states and slots are **not** reset — the caller should
+/// replace the grid with a fresh `SparseGrid::new()`.
+pub fn free_level_bricks(pool: &mut BrickPool, grid: &SparseGrid) {
+    for &slot in grid.slot_data() {
+        if slot != rkf_core::sparse_grid::EMPTY_SLOT {
+            pool.deallocate(slot);
+        }
+    }
+}
+
+/// Re-voxelize every registered object for a given clipmap level into a grid.
+///
+/// Iterates all objects in `registry` at `level`, converts each object's
+/// world AABB to a cell range, and calls the internal `revoxelize_region`
+/// to fill the grid with SDF samples.
+///
+/// Returns the total list of dirty brick slots.
+pub fn voxelize_all_objects(
+    pool: &mut BrickPool,
+    grid: &mut SparseGrid,
+    grid_aabb: &Aabb,
+    tier: usize,
+    registry: &SdfObjectRegistry,
+    level: usize,
+) -> Vec<u32> {
+    let res = &RESOLUTION_TIERS[tier];
+    let brick_extent = res.brick_extent;
+    let dims = grid.dimensions();
+    let mut all_dirty = Vec::new();
+
+    for obj in registry.objects_in_level(level) {
+        let obj_aabb = obj.world_aabb();
+        let (cell_min, cell_max) = aabb_to_cell_range(&obj_aabb, grid_aabb, brick_extent, dims);
+        let dirty = revoxelize_region(
+            pool,
+            grid,
+            grid_aabb,
+            tier,
+            &obj.recipe.primitive,
+            &obj.transform,
+            obj.recipe.material_id,
+            cell_min,
+            cell_max,
+        );
+        for s in dirty {
+            if !all_dirty.contains(&s) {
+                all_dirty.push(s);
+            }
+        }
+    }
+
+    // Post-pass: prune bricks that have no surface crossing after all objects
+    // are unioned.  Large thin objects (e.g. a scaled ground plane) can allocate
+    // interior-only bricks that consume pool capacity without contributing any
+    // visible surface.  Freeing them prevents pool exhaustion that would cause
+    // later objects to lose geometry.
+    let voxel_size = res.voxel_size;
+    let mut pruned = 0u32;
+    for cz in 0..dims.z {
+        for cy in 0..dims.y {
+            for cx in 0..dims.x {
+                if grid.cell_state(cx, cy, cz) == CellState::Surface {
+                    let slot = grid.brick_slot(cx, cy, cz).unwrap();
+                    if !brick_has_surface(pool, slot, voxel_size) {
+                        pool.deallocate(slot);
+                        grid.set_cell_state(cx, cy, cz, CellState::Empty);
+                        grid.clear_brick_slot(cx, cy, cz);
+                        all_dirty.retain(|&s| s != slot);
+                        pruned += 1;
+                    }
+                }
+            }
+        }
+    }
+    if pruned > 0 {
+        log::debug!("Pruned {pruned} interior-only bricks after voxelization");
+    }
+
+    all_dirty
 }
 
 // ---------------------------------------------------------------------------
@@ -409,7 +671,10 @@ fn revoxelize_region(
                 } else {
                     let s = match pool.allocate() {
                         Some(s) => s,
-                        None => continue, // Pool exhausted, skip
+                        None => {
+                            log::warn!("Brick pool exhausted during voxelization at cell ({cx},{cy},{cz})");
+                            continue;
+                        }
                     };
                     // Initialize new brick to default (far distance)
                     let brick = pool.get_mut(s);
@@ -633,10 +898,10 @@ mod tests {
     fn sphere_eval_scaled() {
         let prim = SdfPrimitive::Sphere { radius: 1.0 };
         let xf = ObjectTransform {
-            scale: 2.0,
+            scale: Vec3::splat(2.0),
             ..Default::default()
         };
-        // Scaled sphere has effective radius 2.0
+        // Uniformly scaled sphere has effective radius 2.0
         assert!(approx(prim.eval(Vec3::ZERO, &xf), -2.0));
         assert!(approx(prim.eval(Vec3::X * 2.0, &xf), 0.0));
     }
@@ -991,5 +1256,116 @@ mod tests {
         );
         assert!(reg.get(42).is_some());
         assert_eq!(reg.len(), 1);
+    }
+
+    // ── objects_in_level / level_bounds ──────────────────────────────────
+
+    #[test]
+    fn objects_in_level_filters_correctly() {
+        let mut reg = SdfObjectRegistry::new();
+        reg.register(
+            SdfRecipe { primitive: SdfPrimitive::Sphere { radius: 1.0 }, material_id: 1 },
+            ObjectTransform::default(),
+            0,
+        );
+        reg.register(
+            SdfRecipe { primitive: SdfPrimitive::Sphere { radius: 1.0 }, material_id: 2 },
+            ObjectTransform::default(),
+            1,
+        );
+        reg.register(
+            SdfRecipe { primitive: SdfPrimitive::Sphere { radius: 1.0 }, material_id: 3 },
+            ObjectTransform { position: Vec3::new(5.0, 0.0, 0.0), ..Default::default() },
+            0,
+        );
+        assert_eq!(reg.objects_in_level(0).len(), 2);
+        assert_eq!(reg.objects_in_level(1).len(), 1);
+        assert_eq!(reg.objects_in_level(2).len(), 0);
+    }
+
+    #[test]
+    fn level_bounds_union_of_objects() {
+        let mut reg = SdfObjectRegistry::new();
+        reg.register(
+            SdfRecipe { primitive: SdfPrimitive::Sphere { radius: 1.0 }, material_id: 1 },
+            ObjectTransform::default(),
+            0,
+        );
+        reg.register(
+            SdfRecipe { primitive: SdfPrimitive::Sphere { radius: 1.0 }, material_id: 2 },
+            ObjectTransform { position: Vec3::new(10.0, 0.0, 0.0), ..Default::default() },
+            0,
+        );
+        let bounds = reg.level_bounds(0).expect("should have bounds");
+        // Should span from about -1.64 to about 11.64 on X (sphere radius + margin)
+        assert!(bounds.min.x < -1.0);
+        assert!(bounds.max.x > 11.0);
+        // Empty level returns None
+        assert!(reg.level_bounds(5).is_none());
+    }
+
+    // ── free_level_bricks ───────────────────────────────────────────────
+
+    #[test]
+    fn free_level_bricks_empties_pool() {
+        use super::free_level_bricks;
+        use rkf_core::populate::populate_grid_with_material;
+
+        let tier = 2;
+        let grid_aabb = Aabb::new(Vec3::splat(-2.0), Vec3::splat(2.0));
+        let res = &RESOLUTION_TIERS[tier];
+        let size = grid_aabb.size();
+        let dims = UVec3::new(
+            (size.x / res.brick_extent).ceil() as u32,
+            (size.y / res.brick_extent).ceil() as u32,
+            (size.z / res.brick_extent).ceil() as u32,
+        );
+        let mut grid = SparseGrid::new(dims);
+        let mut pool: BrickPool = Pool::new(4096);
+
+        let _ = populate_grid_with_material(
+            &mut pool, &mut grid,
+            |p| sphere_sdf(Vec3::ZERO, 1.0, p),
+            tier, &grid_aabb, 1,
+        );
+        assert!(pool.allocated_count() > 0);
+
+        free_level_bricks(&mut pool, &grid);
+        assert_eq!(pool.allocated_count(), 0, "all bricks should be freed");
+    }
+
+    // ── voxelize_all_objects ────────────────────────────────────────────
+
+    #[test]
+    fn voxelize_all_objects_fills_grid() {
+        use super::voxelize_all_objects;
+
+        let tier = 2;
+        let grid_aabb = Aabb::new(Vec3::splat(-4.0), Vec3::splat(4.0));
+        let res = &RESOLUTION_TIERS[tier];
+        let size = grid_aabb.size();
+        let dims = UVec3::new(
+            (size.x / res.brick_extent).ceil() as u32,
+            (size.y / res.brick_extent).ceil() as u32,
+            (size.z / res.brick_extent).ceil() as u32,
+        );
+        let mut grid = SparseGrid::new(dims);
+        let mut pool: BrickPool = Pool::new(4096);
+
+        let mut registry = SdfObjectRegistry::new();
+        registry.register(
+            SdfRecipe { primitive: SdfPrimitive::Sphere { radius: 0.5 }, material_id: 1 },
+            ObjectTransform { position: Vec3::new(-2.0, 0.0, 0.0), ..Default::default() },
+            0,
+        );
+        registry.register(
+            SdfRecipe { primitive: SdfPrimitive::Sphere { radius: 0.5 }, material_id: 2 },
+            ObjectTransform { position: Vec3::new(2.0, 0.0, 0.0), ..Default::default() },
+            0,
+        );
+
+        let dirty = voxelize_all_objects(&mut pool, &mut grid, &grid_aabb, tier, &registry, 0);
+        assert!(!dirty.is_empty(), "should have dirty bricks");
+        assert!(pool.allocated_count() > 0, "should have allocated bricks");
     }
 }

@@ -318,6 +318,62 @@ impl ClipmapGpuData {
         }
     }
 
+    /// Write dirty occupancy words to the combined clipmap occupancy buffer.
+    ///
+    /// `level` selects which clipmap level's offset to use.
+    /// `dirty_word_indices` are relative to that level's occupancy data.
+    pub fn write_dirty_occupancy(
+        &self,
+        queue: &wgpu::Queue,
+        grid: &rkf_core::sparse_grid::SparseGrid,
+        level: usize,
+        dirty_word_indices: &[u32],
+    ) {
+        if level >= self.uniforms.num_levels as usize {
+            return;
+        }
+        let base_offset = self.uniforms.levels[level].offsets[0] as u64; // element offset
+        let occ_data = grid.occupancy_data();
+        for &word_idx in dirty_word_indices {
+            if (word_idx as usize) < occ_data.len() {
+                let byte_offset = (base_offset + word_idx as u64) * 4;
+                queue.write_buffer(
+                    &self.occupancy_buffer,
+                    byte_offset,
+                    bytemuck::bytes_of(&occ_data[word_idx as usize]),
+                );
+            }
+        }
+    }
+
+    /// Write dirty slot entries to the combined clipmap slot buffer.
+    ///
+    /// `level` selects which clipmap level's offset to use.
+    /// `dirty_cell_indices` are flat cell indices relative to that level's grid.
+    pub fn write_dirty_slots(
+        &self,
+        queue: &wgpu::Queue,
+        grid: &rkf_core::sparse_grid::SparseGrid,
+        level: usize,
+        dirty_cell_indices: &[u32],
+    ) {
+        if level >= self.uniforms.num_levels as usize {
+            return;
+        }
+        let base_offset = self.uniforms.levels[level].offsets[1] as u64; // element offset
+        let slot_data = grid.slot_data();
+        for &cell_idx in dirty_cell_indices {
+            if (cell_idx as usize) < slot_data.len() {
+                let byte_offset = (base_offset + cell_idx as u64) * 4;
+                queue.write_buffer(
+                    &self.slot_buffer,
+                    byte_offset,
+                    bytemuck::bytes_of(&slot_data[cell_idx as usize]),
+                );
+            }
+        }
+    }
+
     /// Update grid origins in the uniform buffer when the camera moves.
     ///
     /// Re-centres each level's grid on `camera_pos` and writes the updated

@@ -80,6 +80,19 @@ impl LineBatch {
         color: [f32; 4],
         segments: u32,
     ) {
+        self.add_thick_circle(center, normal, radius, color, segments, 1.5);
+    }
+
+    /// Add a circle with a specified line width.
+    pub fn add_thick_circle(
+        &mut self,
+        center: Vec3,
+        normal: Vec3,
+        radius: f32,
+        color: [f32; 4],
+        segments: u32,
+        width: f32,
+    ) {
         let normal = normal.normalize();
         // Build an orthonormal basis in the circle plane.
         let tangent = if normal.dot(Vec3::Y).abs() < 0.99 {
@@ -95,7 +108,7 @@ impl LineBatch {
             let a1 = step * ((i + 1) % segments) as f32;
             let p0 = center + (tangent * a0.cos() + bitangent * a0.sin()) * radius;
             let p1 = center + (tangent * a1.cos() + bitangent * a1.sin()) * radius;
-            self.add_line(p0, p1, color);
+            self.add_thick_line(p0, p1, color, width);
         }
     }
 

@@ -173,6 +173,9 @@ pub struct FrameContext<'a> {
     pub sun_dir: [f32; 3],
     /// Swapchain texture view to blit the final image into.
     pub swapchain_view: &'a wgpu::TextureView,
+    /// Optional viewport rect (x, y, w, h) for set_viewport on the blit pass.
+    /// When `Some`, the blit draws only to this sub-region of the swapchain.
+    pub viewport_rect: Option<(f32, f32, f32, f32)>,
 }
 
 /// Execute a complete render frame following the engine's static pass order.
@@ -292,7 +295,11 @@ pub fn execute_frame(ctx: &mut FrameContext) {
     }
 
     // ── 21. Blit to swapchain ─────────────────────────────────────────────────
-    ctx.blit.draw(ctx.encoder, ctx.swapchain_view);
+    if let Some(vp) = ctx.viewport_rect {
+        ctx.blit.draw_viewport(ctx.encoder, ctx.swapchain_view, vp);
+    } else {
+        ctx.blit.draw(ctx.encoder, ctx.swapchain_view);
+    }
 }
 
 #[cfg(test)]

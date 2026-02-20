@@ -197,6 +197,7 @@ fn translate_to_editor_key(key: winit::keyboard::KeyCode) -> Option<input::KeyCo
         WK::Digit1 => Some(input::KeyCode::Num1),
         WK::Digit2 => Some(input::KeyCode::Num2),
         WK::Digit3 => Some(input::KeyCode::Num3),
+        WK::ShiftLeft | WK::ShiftRight => Some(input::KeyCode::ShiftLeft),
         WK::F5 => Some(input::KeyCode::F5),
         WK::F12 => Some(input::KeyCode::F12),
         _ => None,
@@ -2575,23 +2576,39 @@ fn debug_mode_from_key(key: winit::keyboard::KeyCode, pressed: bool) -> Option<u
 // ---------------------------------------------------------------------------
 
 /// Unproject a pixel coordinate to a world-space ray (origin, direction).
-fn unproject_ray(cam: &camera::EditorCamera, px: f32, py: f32) -> (glam::Vec3, glam::Vec3) {
-    let aspect = DISPLAY_WIDTH as f32 / DISPLAY_HEIGHT as f32;
-    let view = cam.view_matrix();
-    let proj = cam.projection_matrix(aspect);
-    let vp_inv = (proj * view).inverse();
+///
+/// `px`/`py` are in window-pixel coordinates. The viewport rect is used to
+/// subtract the viewport origin and compute NDC within the viewport area.
+fn unproject_ray(
+    cam: &camera::EditorCamera,
+    px: f32,
+    py: f32,
+    vp: &editor_state::ViewportRect,
+) -> (glam::Vec3, glam::Vec3) {
+    // Use the same ray-generation formula as the GPU ray marcher (ray_march.wgsl)
+    // to guarantee pixel-perfect agreement between picking and rendering.
+    let fov_half_tan = (cam.fov_y * 0.5).tan();
+    let aspect = vp.width as f32 / vp.height as f32;
 
-    // Pixel → NDC (wgpu: Y down in pixels, Y up in NDC; depth 0..1)
-    let ndc_x = (px / DISPLAY_WIDTH as f32) * 2.0 - 1.0;
-    let ndc_y = 1.0 - (py / DISPLAY_HEIGHT as f32) * 2.0;
+    // Camera basis from fly_yaw/fly_pitch (matches render Camera::forward/right/up)
+    let (sy, cy) = cam.fly_yaw.sin_cos();
+    let (sp, cp) = cam.fly_pitch.sin_cos();
+    let forward = glam::Vec3::new(-sy * cp, sp, -cy * cp);
+    let right = glam::Vec3::new(cy, 0.0, -sy);
+    let up = right.cross(forward).normalize();
 
-    let near_world = vp_inv * glam::Vec4::new(ndc_x, ndc_y, 0.0, 1.0);
-    let far_world = vp_inv * glam::Vec4::new(ndc_x, ndc_y, 1.0, 1.0);
+    // Pre-scale by FOV and aspect (matches CameraUniforms.right/up)
+    let right_scaled = right * fov_half_tan * aspect;
+    let up_scaled = up * fov_half_tan;
 
-    let near = near_world.truncate() / near_world.w;
-    let far = far_world.truncate() / far_world.w;
+    // Window pixel → viewport-local → NDC (matches ray_march.wgsl)
+    let local_x = px - vp.x as f32;
+    let local_y = py - vp.y as f32;
+    let ndc_x = (local_x / vp.width as f32) * 2.0 - 1.0;
+    let ndc_y = 1.0 - (local_y / vp.height as f32) * 2.0;
 
-    (near, (far - near).normalize())
+    let dir = (forward + ndc_x * right_scaled + ndc_y * up_scaled).normalize();
+    (cam.position, dir)
 }
 
 /// Ray-AABB intersection. Returns hit distance or None.
@@ -2623,7 +2640,7 @@ fn pick_entity(
     best_id: &mut Option<u64>,
     best_t: &mut f32,
 ) {
-    let half = glam::Vec3::splat(node.scale * 0.5);
+    let half = node.bounds_half * node.scale;
     if let Some(t) = ray_aabb_intersect(origin, dir, node.position - half, node.position + half) {
         if t < *best_t {
             *best_t = t;
@@ -2877,12 +2894,22 @@ impl App {
 
         // ── Engine ─────────────────────────────────────────────────────────
 
-        let engine = EngineState::new(
+        // Compute initial viewport from window size and default panel widths
+        {
+            let mut es = self.editor_state.lock().unwrap();
+            es.compute_viewport(w, h);
+        }
+        let vp = self.editor_state.lock().unwrap().viewport;
+
+        let mut engine = EngineState::new(
             &device,
             &queue,
             format,
             Arc::clone(&self.shared_state),
+            vp.width,
+            vp.height,
         );
+        engine.viewport_rect = Some((vp.x, vp.y, vp.width, vp.height));
 
         // Store everything
         self.surface = Some(surface);
@@ -2920,6 +2947,19 @@ impl App {
                         scene.entities.len(),
                         path,
                     );
+                    // Set bounds_half on scene tree nodes from SDF registry
+                    if let Some(engine) = &self.engine {
+                        if let Ok(mut es) = self.editor_state.lock() {
+                            for obj in engine.object_registry.objects() {
+                                let aabb = obj.recipe.primitive.local_aabb();
+                                let half = aabb.half_extents();
+                                if let Some(node) = es.scene_tree.find_node_mut(obj.id) {
+                                    node.bounds_half = half;
+                                }
+                            }
+                        }
+                    }
+
                     // Defer UI refresh to the first render frame
                     // (signal updates during init_gpu may not trigger effects
                     // until rinch processes its next tick)
@@ -2929,6 +2969,37 @@ impl App {
                     log::error!("Failed to load scene '{}': {}", path, e);
                 }
             }
+        } else {
+            // No scene file — populate scene tree from the demo object registry
+            use crate::scene_tree::SceneNode;
+
+            let demo_names: &[(u64, &str)] = &[
+                (1, "Ground"), (2, "Pillar 1"), (3, "Pillar 2"), (4, "Pillar 3"),
+                (5, "Pillar 4"), (6, "Pillar 5"), (7, "Pillar 6"), (8, "Pillar 7"),
+                (9, "Pillar 8"), (10, "Left Lintel"), (11, "Right Lintel"),
+                (12, "Boulder"), (13, "Monolith Wall"), (14, "Sphere"),
+            ];
+
+            if let Some(engine) = &self.engine {
+                if let Ok(mut es) = self.editor_state.lock() {
+                    for obj in engine.object_registry.objects() {
+                        let name = demo_names
+                            .iter()
+                            .find(|(id, _)| *id == obj.id)
+                            .map(|(_, n)| *n)
+                            .unwrap_or("Object");
+                        let mut node = SceneNode::new(obj.id, name);
+                        node.visible = true;
+                        node.position = obj.transform.position;
+                        node.rotation = obj.transform.rotation;
+                        node.scale = obj.transform.scale;
+                        let aabb = obj.recipe.primitive.local_aabb();
+                        node.bounds_half = aabb.half_extents();
+                        es.scene_tree.add_node(node);
+                    }
+                }
+            }
+            self.pending_ui_refresh = true;
         }
 
         // Push startup log entries into shared state for MCP read_log
@@ -2968,8 +3039,8 @@ impl App {
 
         let mut batch = overlay::LineBatch::new();
 
-        // Translate gizmo: three colored axis arrows with hover/drag feedback
         let gizmo_size = 1.0f32;
+        let mode = es.gizmo.mode;
         let axes: [(gizmo::GizmoAxis, glam::Vec3, [f32; 4]); 3] = [
             (gizmo::GizmoAxis::X, glam::Vec3::X, [1.0, 0.2, 0.2, 1.0]),
             (gizmo::GizmoAxis::Y, glam::Vec3::Y, [0.2, 1.0, 0.2, 1.0]),
@@ -2998,36 +3069,70 @@ impl App {
                 4.0
             };
 
-            // Shaft
-            batch.add_thick_line(pos, pos + axis_dir * gizmo_size, color, width);
-
-            // Arrowhead: 4 barbs forming a cross
-            let tip = pos + axis_dir * gizmo_size;
-            let perp1 = if axis_dir.dot(glam::Vec3::Y).abs() < 0.99 {
-                axis_dir.cross(glam::Vec3::Y).normalize()
-            } else {
-                axis_dir.cross(glam::Vec3::X).normalize()
-            };
-            let perp2 = axis_dir.cross(perp1).normalize();
-            let barb = gizmo_size * 0.12;
-            let back = gizmo_size * 0.15;
-            for &p in &[perp1, -perp1, perp2, -perp2] {
-                batch.add_thick_line(
-                    tip,
-                    tip - axis_dir * back + p * barb,
-                    color,
-                    width,
-                );
+            match mode {
+                gizmo::GizmoMode::Translate => {
+                    // Shaft + arrowhead
+                    batch.add_thick_line(pos, pos + axis_dir * gizmo_size, color, width);
+                    let tip = pos + axis_dir * gizmo_size;
+                    let perp1 = if axis_dir.dot(glam::Vec3::Y).abs() < 0.99 {
+                        axis_dir.cross(glam::Vec3::Y).normalize()
+                    } else {
+                        axis_dir.cross(glam::Vec3::X).normalize()
+                    };
+                    let perp2 = axis_dir.cross(perp1).normalize();
+                    let barb = gizmo_size * 0.12;
+                    let back = gizmo_size * 0.15;
+                    for &p in &[perp1, -perp1, perp2, -perp2] {
+                        batch.add_thick_line(
+                            tip,
+                            tip - axis_dir * back + p * barb,
+                            color,
+                            width,
+                        );
+                    }
+                }
+                gizmo::GizmoMode::Rotate => {
+                    // Ring around the axis
+                    batch.add_thick_circle(pos, axis_dir, gizmo_size, color, 32, width);
+                }
+                gizmo::GizmoMode::Scale => {
+                    // Shaft + cube endpoint
+                    batch.add_thick_line(pos, pos + axis_dir * gizmo_size, color, width);
+                    let tip = pos + axis_dir * gizmo_size;
+                    let cube_half = gizmo_size * 0.06;
+                    batch.add_box_wireframe(
+                        tip - glam::Vec3::splat(cube_half),
+                        tip + glam::Vec3::splat(cube_half),
+                        color,
+                    );
+                }
             }
         }
 
-        // Selection wireframe (white box around entity)
+        // Scale mode: center box for uniform scaling
+        if mode == gizmo::GizmoMode::Scale {
+            let center_active = dragging_axis == gizmo::GizmoAxis::View;
+            let center_hovered = hovered == gizmo::GizmoAxis::View && !es.gizmo.dragging;
+            let center_color = if center_active || center_hovered {
+                [1.0, 1.0, 1.0, 1.0]
+            } else {
+                [0.8, 0.8, 0.8, 0.8]
+            };
+            let center_half = gizmo_size * 0.08;
+            batch.add_box_wireframe(
+                pos - glam::Vec3::splat(center_half),
+                pos + glam::Vec3::splat(center_half),
+                center_color,
+            );
+        }
+
+        // Selection wireframe (white box around entity bounds)
         if es.overlay_config.show_selection_outlines {
-            let half = 0.5f32;
+            let half = node.bounds_half * node.scale;
             let outline_color = [1.0, 1.0, 1.0, 0.5];
             batch.add_box_wireframe(
-                pos - glam::Vec3::splat(half),
-                pos + glam::Vec3::splat(half),
+                pos - half,
+                pos + half,
                 outline_color,
             );
         }
@@ -3264,6 +3369,19 @@ impl App {
         if let Some(ctx) = &mut self.rinch_ctx {
             ctx.resize(w, h);
         }
+
+        // Recompute viewport and rebuild engine passes if viewport changed
+        let vp_changed = {
+            let mut es = self.editor_state.lock().unwrap();
+            es.compute_viewport(w, h)
+        };
+        if vp_changed {
+            let vp = self.editor_state.lock().unwrap().viewport;
+            if let Some(engine) = &mut self.engine {
+                engine.rebuild_display_passes(vp.width, vp.height);
+                engine.viewport_rect = Some((vp.x, vp.y, vp.width, vp.height));
+            }
+        }
     }
 }
 
@@ -3334,7 +3452,7 @@ impl ApplicationHandler for App {
 
                     // Gizmo drag: update entity transform in real time
                     if es.gizmo.dragging {
-                        let (ro, rd) = unproject_ray(&es.editor_camera, px, py);
+                        let (ro, rd) = unproject_ray(&es.editor_camera, px, py, &es.viewport);
                         // Copy gizmo state before mutable borrow of scene_tree
                         let mode = es.gizmo.mode;
                         let gizmo_snap = es.gizmo.clone();
@@ -3361,11 +3479,23 @@ impl ApplicationHandler for App {
                                 gizmo::GizmoMode::Scale => {
                                     let factor =
                                         gizmo::compute_scale_delta(&gizmo_snap, ro, rd);
-                                    let new_scale = gizmo_snap.initial_scale * factor;
+                                    let new_scale = (gizmo_snap.initial_scale * factor)
+                                        .max(glam::Vec3::splat(0.05));
                                     if let Some(node) = es.scene_tree.find_node_mut(sel_id) {
                                         node.scale = new_scale;
                                     }
                                 }
+                            }
+                            // Trigger real-time voxel rebuild during drag
+                            if let Some(node) = es.scene_tree.find_node(sel_id) {
+                                self.pending_transform = Some((
+                                    sel_id,
+                                    rkf_edit::transform_ops::ObjectTransform {
+                                        position: node.position,
+                                        rotation: node.rotation,
+                                        scale: node.scale,
+                                    },
+                                ));
                             }
                         }
                     } else {
@@ -3375,12 +3505,13 @@ impl ApplicationHandler for App {
                             if let Some(node) = es.scene_tree.find_node(sel_id)
                             {
                                 let (ro, rd) =
-                                    unproject_ray(&es.editor_camera, px, py);
-                                let axis = gizmo::pick_gizmo_axis(
+                                    unproject_ray(&es.editor_camera, px, py, &es.viewport);
+                                let axis = gizmo::pick_gizmo_axis_for_mode(
                                     ro,
                                     rd,
                                     node.position,
                                     1.0,
+                                    es.gizmo.mode,
                                 );
                                 es.gizmo.hovered_axis = axis;
                             }
@@ -3436,7 +3567,7 @@ impl ApplicationHandler for App {
                                 // Left click: gizmo pick → entity pick
                                 if btn_idx == 0 {
                                     let (ro, rd) =
-                                        unproject_ray(&es.editor_camera, px, py);
+                                        unproject_ray(&es.editor_camera, px, py, &es.viewport);
                                     let mut picked_gizmo = false;
 
                                     // Try gizmo axis hit if something is selected
@@ -3448,17 +3579,35 @@ impl ApplicationHandler for App {
                                             let center = node.position;
                                             let rot = node.rotation;
                                             let scl = node.scale;
-                                            let axis = gizmo::pick_gizmo_axis(
-                                                ro, rd, center, 1.0,
+                                            let axis = gizmo::pick_gizmo_axis_for_mode(
+                                                ro, rd, center, 1.0, es.gizmo.mode,
                                             );
                                             if axis != gizmo::GizmoAxis::None {
                                                 let ad = axis.direction();
-                                                let t = gizmo::ray_axis_closest_point(
-                                                    ro, rd, center, ad,
-                                                );
-                                                let sp = center + ad * t;
+                                                let sp = match (es.gizmo.mode, axis) {
+                                                    (gizmo::GizmoMode::Rotate, _) => {
+                                                        // For rotation, drag_start is the ray-plane intersection
+                                                        // on the plane perpendicular to the rotation axis
+                                                        gizmo::project_to_plane(ro, rd, center, ad)
+                                                            .unwrap_or(center + ad)
+                                                    }
+                                                    (_, gizmo::GizmoAxis::View) => {
+                                                        // Center handle: use view-plane intersection
+                                                        let view_normal = -rd.normalize();
+                                                        gizmo::project_to_plane(ro, rd, center, view_normal)
+                                                            .unwrap_or(center)
+                                                    }
+                                                    _ => {
+                                                        // For translate/scale, closest point on axis line
+                                                        let t = gizmo::ray_axis_closest_point(
+                                                            ro, rd, center, ad,
+                                                        );
+                                                        center + ad * t
+                                                    }
+                                                };
+                                                let view_normal = rd.normalize();
                                                 es.gizmo.begin_drag(
-                                                    axis, sp, center, rot, scl,
+                                                    axis, sp, center, rot, scl, view_normal,
                                                 );
                                                 picked_gizmo = true;
                                             }
@@ -3466,16 +3615,27 @@ impl ApplicationHandler for App {
                                     }
 
                                     if !picked_gizmo {
-                                        // Entity picking via ray-AABB
-                                        let mut best_id: Option<u64> = None;
-                                        let mut best_t = f32::MAX;
-                                        for root in &es.scene_tree.roots {
-                                            pick_entity(
-                                                root, ro, rd, &mut best_id,
-                                                &mut best_t,
-                                            );
+                                        // Entity picking via SDF ray tracing (preferred)
+                                        // Falls back to AABB if no engine/registry
+                                        let mut picked_id: Option<u64> = None;
+                                        if let Some(engine) = &self.engine {
+                                            if let Some(hit) = rkf_edit::transform_ops::ray_pick(
+                                                &engine.object_registry,
+                                                ro, rd, 500.0,
+                                            ) {
+                                                picked_id = Some(hit.object_id);
+                                            }
+                                        } else {
+                                            // Fallback: AABB picking
+                                            let mut best_t = f32::MAX;
+                                            for root in &es.scene_tree.roots {
+                                                pick_entity(
+                                                    root, ro, rd, &mut picked_id,
+                                                    &mut best_t,
+                                                );
+                                            }
                                         }
-                                        if let Some(id) = best_id {
+                                        if let Some(id) = picked_id {
                                             es.scene_tree.select_node(id);
                                         } else {
                                             es.scene_tree.clear_selection();
@@ -3640,6 +3800,29 @@ impl ApplicationHandler for App {
                                 }
                             }
                             return;
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Gizmo mode shortcuts: G=Grab/Translate, R=Rotate, L=Scale
+                if pressed && !ctrl {
+                    use winit::keyboard::KeyCode;
+                    match key_code {
+                        KeyCode::KeyG => {
+                            if let Ok(mut es) = self.editor_state.lock() {
+                                es.gizmo.mode = gizmo::GizmoMode::Translate;
+                            }
+                        }
+                        KeyCode::KeyR => {
+                            if let Ok(mut es) = self.editor_state.lock() {
+                                es.gizmo.mode = gizmo::GizmoMode::Rotate;
+                            }
+                        }
+                        KeyCode::KeyL => {
+                            if let Ok(mut es) = self.editor_state.lock() {
+                                es.gizmo.mode = gizmo::GizmoMode::Scale;
+                            }
                         }
                         _ => {}
                     }

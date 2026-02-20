@@ -7,7 +7,6 @@
 #![allow(dead_code)]
 
 use glam::{Quat, Vec3};
-use log::warn;
 
 /// Which transform operation the gizmo performs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,7 +76,9 @@ pub struct GizmoState {
     /// Rotation of the object when the drag began.
     pub initial_rotation: Quat,
     /// Scale of the object when the drag began.
-    pub initial_scale: f32,
+    pub initial_scale: Vec3,
+    /// View-plane normal captured at drag start (for uniform scale center handle).
+    pub drag_view_normal: Vec3,
     /// Which axis the mouse is currently hovering over (for visual feedback).
     pub hovered_axis: GizmoAxis,
 }
@@ -99,7 +100,8 @@ impl GizmoState {
             drag_current: Vec3::ZERO,
             initial_position: Vec3::ZERO,
             initial_rotation: Quat::IDENTITY,
-            initial_scale: 1.0,
+            initial_scale: Vec3::ONE,
+            drag_view_normal: Vec3::Z,
             hovered_axis: GizmoAxis::None,
         }
     }
@@ -111,7 +113,8 @@ impl GizmoState {
         start_point: Vec3,
         position: Vec3,
         rotation: Quat,
-        scale: f32,
+        scale: Vec3,
+        view_normal: Vec3,
     ) {
         self.active_axis = axis;
         self.dragging = true;
@@ -120,6 +123,7 @@ impl GizmoState {
         self.initial_position = position;
         self.initial_rotation = rotation;
         self.initial_scale = scale;
+        self.drag_view_normal = view_normal;
     }
 
     /// End the current drag operation.
@@ -197,14 +201,34 @@ pub fn project_to_plane(
 /// Tests the three primary axes (X, Y, Z) emanating from `gizmo_center`,
 /// each with length `gizmo_size`. Returns the axis whose line is closest
 /// to the pick ray, provided the distance is within a screen-space-like threshold.
+///
+/// In `Rotate` mode, tests against rings (circles) instead of lines.
+/// The threshold scales with camera distance for consistent screen-space feel.
 pub fn pick_gizmo_axis(
     ray_origin: Vec3,
     ray_dir: Vec3,
     gizmo_center: Vec3,
     gizmo_size: f32,
 ) -> GizmoAxis {
-    let threshold = gizmo_size * 0.3; // 30% of gizmo size as pick tolerance
+    pick_gizmo_axis_for_mode(ray_origin, ray_dir, gizmo_center, gizmo_size, GizmoMode::Translate)
+}
+
+/// Mode-aware gizmo axis picking.
+///
+/// For `Translate`/`Scale`, tests against axis lines.
+/// For `Rotate`, tests against rings (circles) in the plane perpendicular to each axis.
+pub fn pick_gizmo_axis_for_mode(
+    ray_origin: Vec3,
+    ray_dir: Vec3,
+    gizmo_center: Vec3,
+    gizmo_size: f32,
+    mode: GizmoMode,
+) -> GizmoAxis {
     let ray_dir = ray_dir.normalize();
+
+    // Camera-distance-proportional threshold for consistent screen-space feel.
+    let cam_dist = (gizmo_center - ray_origin).length().max(0.1);
+    let threshold = cam_dist * 0.04; // ~4% of camera distance ≈ generous screen-space band
 
     let axes = [
         (GizmoAxis::X, Vec3::X),
@@ -215,28 +239,120 @@ pub fn pick_gizmo_axis(
     let mut best_axis = GizmoAxis::None;
     let mut best_dist = f32::MAX;
 
-    for (axis_id, axis_dir) in &axes {
-        let t = ray_axis_closest_point(ray_origin, ray_dir, gizmo_center, *axis_dir);
-
-        // Clamp t to the visible portion of the axis [0, gizmo_size].
-        let t_clamped = t.clamp(0.0, gizmo_size);
-        let axis_point = gizmo_center + *axis_dir * t_clamped;
-
-        // Find the closest point on the ray to this axis point.
-        let ray_t = (axis_point - ray_origin).dot(ray_dir);
-        if ray_t < 0.0 {
-            continue; // Behind camera
+    // Scale mode: test center box first (uniform scaling)
+    if mode == GizmoMode::Scale {
+        let center_half = gizmo_size * 0.12; // slightly larger than visual for easy picking
+        let min = gizmo_center - Vec3::splat(center_half);
+        let max = gizmo_center + Vec3::splat(center_half);
+        if ray_aabb_hit(ray_origin, ray_dir, min, max) {
+            // Center box takes priority at distance 0
+            best_axis = GizmoAxis::View; // View = uniform/center
+            best_dist = 0.0;
         }
-        let ray_point = ray_origin + ray_dir * ray_t;
-        let dist = (ray_point - axis_point).length();
+    }
 
-        if dist < threshold && dist < best_dist {
-            best_dist = dist;
-            best_axis = *axis_id;
+    for (axis_id, axis_dir) in &axes {
+        let dist = match mode {
+            GizmoMode::Rotate => {
+                // Test against a ring: intersect ray with the plane, check distance to circle
+                ring_pick_distance(ray_origin, ray_dir, gizmo_center, *axis_dir, gizmo_size)
+            }
+            _ => {
+                // Test against axis line segment [0, gizmo_size]
+                line_pick_distance(ray_origin, ray_dir, gizmo_center, *axis_dir, gizmo_size)
+            }
+        };
+
+        if let Some(d) = dist {
+            if d < threshold && d < best_dist {
+                best_dist = d;
+                best_axis = *axis_id;
+            }
         }
     }
 
     best_axis
+}
+
+/// Simple ray-AABB intersection test (slab method). Returns true if the ray hits the box.
+fn ray_aabb_hit(ray_origin: Vec3, ray_dir: Vec3, min: Vec3, max: Vec3) -> bool {
+    let inv_dir = Vec3::new(
+        if ray_dir.x.abs() > 1e-8 { 1.0 / ray_dir.x } else { f32::MAX.copysign(ray_dir.x) },
+        if ray_dir.y.abs() > 1e-8 { 1.0 / ray_dir.y } else { f32::MAX.copysign(ray_dir.y) },
+        if ray_dir.z.abs() > 1e-8 { 1.0 / ray_dir.z } else { f32::MAX.copysign(ray_dir.z) },
+    );
+    let t1 = (min - ray_origin) * inv_dir;
+    let t2 = (max - ray_origin) * inv_dir;
+    let t_min = t1.min(t2);
+    let t_max = t1.max(t2);
+    let t_enter = t_min.x.max(t_min.y).max(t_min.z);
+    let t_exit = t_max.x.min(t_max.y).min(t_max.z);
+    t_exit >= t_enter.max(0.0)
+}
+
+/// Distance from a ray to an axis line segment [0, gizmo_size].
+/// Returns `None` if the closest point is behind the camera.
+fn line_pick_distance(
+    ray_origin: Vec3,
+    ray_dir: Vec3,
+    center: Vec3,
+    axis_dir: Vec3,
+    gizmo_size: f32,
+) -> Option<f32> {
+    let t = ray_axis_closest_point(ray_origin, ray_dir, center, axis_dir);
+    let t_clamped = t.clamp(0.0, gizmo_size);
+    let axis_point = center + axis_dir * t_clamped;
+
+    let ray_t = (axis_point - ray_origin).dot(ray_dir);
+    if ray_t < 0.0 {
+        return None; // Behind camera
+    }
+    let ray_point = ray_origin + ray_dir * ray_t;
+    Some((ray_point - axis_point).length())
+}
+
+/// Distance from a ray to a ring (circle) of radius `gizmo_size` in the plane
+/// perpendicular to `axis_dir` at `center`.
+/// Returns `None` if the ray doesn't intersect near the plane or is behind camera.
+fn ring_pick_distance(
+    ray_origin: Vec3,
+    ray_dir: Vec3,
+    center: Vec3,
+    axis_dir: Vec3,
+    radius: f32,
+) -> Option<f32> {
+    // Intersect ray with the ring's plane
+    let denom = ray_dir.dot(axis_dir);
+
+    // If ray is nearly parallel to the plane, use closest-approach fallback
+    if denom.abs() < 1e-4 {
+        // Project ray onto plane via closest point, then check ring distance
+        let t = ray_axis_closest_point(ray_origin, ray_dir, center, axis_dir);
+        let closest_on_axis = center + axis_dir * t;
+        let ray_t = (closest_on_axis - ray_origin).dot(ray_dir);
+        if ray_t < 0.0 {
+            return None;
+        }
+        let ray_point = ray_origin + ray_dir * ray_t;
+        let to_point = ray_point - center;
+        let in_plane = to_point - axis_dir * to_point.dot(axis_dir);
+        let dist_from_ring = (in_plane.length() - radius).abs();
+        return Some(dist_from_ring);
+    }
+
+    let t = (center - ray_origin).dot(axis_dir) / denom;
+    if t < 0.0 {
+        return None; // Behind camera
+    }
+
+    let hit = ray_origin + ray_dir * t;
+    let offset = hit - center;
+    // Project onto the plane (should already be in-plane, but be safe)
+    let in_plane = offset - axis_dir * offset.dot(axis_dir);
+    let dist_from_center = in_plane.length();
+
+    // Distance from hit point to the ring circumference
+    Some((dist_from_center - radius).abs())
 }
 
 /// Compute the translation delta constrained to the active axis.
@@ -329,53 +445,80 @@ pub fn compute_rotate_delta(
     Quat::from_axis_angle(axis, angle)
 }
 
-/// Compute the uniform scale factor from a drag operation.
+/// Compute the scale delta from a drag operation.
 ///
-/// Measures how much the ray has moved along the active axis relative to
-/// the drag start, and converts that to a multiplicative scale factor.
-///
-/// Per engine rule 3 (uniform scale only), this always returns a uniform
-/// factor regardless of axis. The axis merely determines the drag direction.
+/// Returns a `Vec3` scale factor. Per-axis handles (X/Y/Z) scale only
+/// the corresponding axis. The center handle (`View`) scales uniformly.
 pub fn compute_scale_delta(
     state: &GizmoState,
     ray_origin: Vec3,
     ray_dir: Vec3,
-) -> f32 {
+) -> Vec3 {
     if state.active_axis == GizmoAxis::None {
-        return 1.0;
-    }
-
-    // Warn if non-uniform scale is attempted (per rule 3).
-    if matches!(
-        state.active_axis,
-        GizmoAxis::XY | GizmoAxis::XZ | GizmoAxis::YZ
-    ) {
-        warn!(
-            "Non-uniform scale attempted via plane axis {:?}. \
-             SDF engine requires uniform scale only (rule 3). Using uniform factor.",
-            state.active_axis
-        );
+        return Vec3::ONE;
     }
 
     let ray_dir = ray_dir.normalize();
 
-    // Use the primary axis direction for the drag, or camera direction for View.
-    let drag_axis = match state.active_axis {
-        GizmoAxis::X | GizmoAxis::Y | GizmoAxis::Z => state.active_axis.direction(),
-        GizmoAxis::View => -ray_dir,
-        _ => Vec3::Y, // Fallback to Y for plane axes (uniform anyway)
+    // Determine drag axis direction and which components to scale.
+    let per_axis = match state.active_axis {
+        GizmoAxis::X => Some(0),
+        GizmoAxis::Y => Some(1),
+        GizmoAxis::Z => Some(2),
+        _ => None, // View or fallback = uniform
     };
 
-    let t_current =
-        ray_axis_closest_point(ray_origin, ray_dir, state.initial_position, drag_axis);
-    let start_offset = (state.drag_start - state.initial_position).dot(drag_axis);
+    // Unity-style ratio-based scaling:
+    // factor = current_distance_from_center / initial_distance_from_center
+    // This gives the same visual drag rate regardless of current scale.
+    let factor = if per_axis.is_some() {
+        // Per-axis: project onto the world axis line
+        let drag_axis = match state.active_axis {
+            GizmoAxis::X => Vec3::X,
+            GizmoAxis::Y => Vec3::Y,
+            GizmoAxis::Z => Vec3::Z,
+            _ => unreachable!(),
+        };
+        let initial_dist = (state.drag_start - state.initial_position).dot(drag_axis);
+        let current_dist =
+            ray_axis_closest_point(ray_origin, ray_dir, state.initial_position, drag_axis);
 
-    // Scale sensitivity: each gizmo_size unit of drag = 1x scale change.
-    let delta = t_current - start_offset;
-    let sensitivity = 0.01;
+        if initial_dist.abs() < 0.001 {
+            let delta = current_dist - initial_dist;
+            (1.0 + delta * 0.5).clamp(0.01, 100.0)
+        } else {
+            (current_dist / initial_dist).clamp(0.01, 100.0)
+        }
+    } else {
+        // Uniform scale: intersect ray with the view plane through center,
+        // measure distance from center in that plane.
+        let normal = state.drag_view_normal;
+        let initial_dist = (state.drag_start - state.initial_position).length();
+        let current_point =
+            project_to_plane(ray_origin, ray_dir, state.initial_position, normal)
+                .unwrap_or(state.drag_start);
+        let current_dist = (current_point - state.initial_position).length();
 
-    // Convert linear delta to multiplicative factor, clamped to reasonable range.
-    (1.0 + delta * sensitivity).clamp(0.01, 100.0)
+        if initial_dist < 0.001 {
+            let delta = current_dist - initial_dist;
+            (1.0 + delta * 0.5).clamp(0.01, 100.0)
+        } else {
+            (current_dist / initial_dist).clamp(0.01, 100.0)
+        }
+    };
+
+    match per_axis {
+        Some(axis_idx) => {
+            // Per-axis scale: only affect the dragged axis
+            let mut scale = Vec3::ONE;
+            scale[axis_idx] = factor;
+            scale
+        }
+        None => {
+            // Uniform scale
+            Vec3::splat(factor)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -640,20 +783,22 @@ mod tests {
         state.initial_position = Vec3::ZERO;
         state.drag_start = Vec3::ZERO;
 
-        // Ray at origin along X — t=0, start_offset=0, so delta=0 → scale=1.0
+        // Ray at origin along X — t=0, start_offset=0, so delta=0 → scale=(1,1,1)
         let scale = compute_scale_delta(&state, Vec3::new(0.0, 0.0, 5.0), -Vec3::Z);
-        // With no effective movement along X, scale should be ~1.0
+        // X-axis drag with no movement: X should be ~1.0, Y/Z stay 1.0
         assert!(
-            approx_eq(scale, 1.0),
-            "no movement should give scale ~1.0: {scale}"
+            approx_eq(scale.x, 1.0),
+            "no movement should give x scale ~1.0: {:?}",
+            scale
         );
+        assert!(approx_eq(scale.y, 1.0) && approx_eq(scale.z, 1.0));
     }
 
     #[test]
     fn test_scale_delta_none_axis() {
         let state = GizmoState::new();
         let scale = compute_scale_delta(&state, Vec3::ZERO, Vec3::Z);
-        assert!(approx_eq(scale, 1.0));
+        assert!(vec3_approx_eq(scale, Vec3::ONE));
     }
 
     #[test]
@@ -664,13 +809,29 @@ mod tests {
         state.initial_position = Vec3::ZERO;
         state.drag_start = Vec3::ZERO;
 
-        // Extreme negative scale should be clamped to 0.01
+        // Extreme negative scale should be clamped to 0.01 on Y axis
         let scale = compute_scale_delta(&state, Vec3::new(0.0, -100000.0, 5.0), -Vec3::Z);
-        assert!(scale >= 0.01, "scale should be clamped: {scale}");
+        assert!(scale.y >= 0.01, "scale.y should be clamped: {:?}", scale);
+        assert!(approx_eq(scale.x, 1.0), "x should be 1.0: {:?}", scale);
 
-        // Extreme positive scale should be clamped to 100.0
+        // Extreme positive scale should be clamped to 100.0 on Y axis
         let scale = compute_scale_delta(&state, Vec3::new(0.0, 100000.0, 5.0), -Vec3::Z);
-        assert!(scale <= 100.0, "scale should be clamped: {scale}");
+        assert!(scale.y <= 100.0, "scale.y should be clamped: {:?}", scale);
+    }
+
+    #[test]
+    fn test_scale_delta_per_axis() {
+        let mut state = GizmoState::new();
+        state.active_axis = GizmoAxis::X;
+        state.dragging = true;
+        state.initial_position = Vec3::ZERO;
+        state.drag_start = Vec3::ZERO;
+
+        // Drag along +X: only X component should change
+        let scale = compute_scale_delta(&state, Vec3::new(5.0, 0.0, 5.0), -Vec3::Z);
+        assert!(scale.x != 1.0, "x should have changed: {:?}", scale);
+        assert!(approx_eq(scale.y, 1.0), "y should be 1.0: {:?}", scale);
+        assert!(approx_eq(scale.z, 1.0), "z should be 1.0: {:?}", scale);
     }
 
     // --- GizmoState tests ---
@@ -691,13 +852,14 @@ mod tests {
             Vec3::new(1.0, 0.0, 0.0),
             Vec3::ZERO,
             Quat::IDENTITY,
-            1.0,
+            Vec3::ONE,
+            Vec3::Z,
         );
 
         assert!(state.dragging);
         assert_eq!(state.active_axis, GizmoAxis::X);
         assert_eq!(state.drag_start, Vec3::new(1.0, 0.0, 0.0));
-        assert_eq!(state.initial_scale, 1.0);
+        assert_eq!(state.initial_scale, Vec3::ONE);
 
         state.end_drag();
         assert!(!state.dragging);

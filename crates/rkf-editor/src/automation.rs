@@ -246,7 +246,7 @@ impl AutomationApi for EditorAutomationApi {
                 name: node.name.clone(),
                 parent: parent_id,
                 entity_type: entity_type.to_string(),
-                transform: [p.x, p.y, p.z, r.x, r.y, r.z, r.w, node.scale, 0.0, 0.0],
+                transform: [p.x, p.y, p.z, r.x, r.y, r.z, r.w, node.scale.x, node.scale.y, node.scale.z],
             });
             for child in &node.children {
                 collect_nodes(child, Some(node.entity_id), out);

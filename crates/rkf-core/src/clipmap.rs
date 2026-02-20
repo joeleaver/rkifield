@@ -104,6 +104,14 @@ impl ClipmapConfig {
         &self.levels
     }
 
+    /// Replace a single level's configuration.
+    ///
+    /// Does **not** validate sort order — the caller is responsible for
+    /// ensuring the levels remain sorted by voxel size and radius.
+    pub fn set_level(&mut self, index: usize, level: ClipmapLevel) {
+        self.levels[index] = level;
+    }
+
     /// Determine which LOD level a given distance from camera falls into.
     ///
     /// Returns the finest level whose radius encompasses the distance.
@@ -196,6 +204,15 @@ impl ClipmapGridSet {
     /// Iterate over all `(level_index, grid)` pairs.
     pub fn iter(&self) -> impl Iterator<Item = (usize, &SparseGrid)> {
         self.grids.iter().enumerate()
+    }
+
+    /// Replace one level's config and grid (for dynamic expansion).
+    ///
+    /// Swaps the grid and updates the config entry. The caller is responsible
+    /// for ensuring the new grid's dimensions match the new config's radius.
+    pub fn replace_level(&mut self, level: usize, new_config: ClipmapLevel, new_grid: SparseGrid) {
+        self.config.set_level(level, new_config);
+        self.grids[level] = new_grid;
     }
 
     /// Total cells across all levels.
@@ -384,6 +401,25 @@ mod tests {
         let grid = set.grid_mut(0);
         grid.set_cell_state(0, 0, 0, crate::cell_state::CellState::Surface);
         assert_eq!(set.grid(0).cell_state(0, 0, 0), crate::cell_state::CellState::Surface);
+    }
+
+    #[test]
+    fn replace_level_swaps_grid_and_config() {
+        let cfg = small_test_config();
+        let mut set = ClipmapGridSet::from_config(cfg, 1024);
+        let old_dims = set.grid(0).dimensions();
+
+        // Replace level 0 with a larger grid and updated config
+        let new_config = ClipmapLevel { voxel_size: 0.02, radius: 8.0 };
+        let new_dims = UVec3::splat(100);
+        let new_grid = SparseGrid::new(new_dims);
+        set.replace_level(0, new_config, new_grid);
+
+        assert_eq!(set.grid(0).dimensions(), new_dims);
+        assert_ne!(set.grid(0).dimensions(), old_dims);
+        assert!((set.config().level(0).radius - 8.0).abs() < 1e-6);
+        // Level 1 should be untouched
+        assert!((set.config().level(1).radius - 16.0).abs() < 1e-6);
     }
 
     #[test]

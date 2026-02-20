@@ -17,19 +17,149 @@
         ),
         (
             entity_id: 2,
-            name: "Pillars",
+            name: "Pillar 1",
             parent_id: None,
-            position: (0.0, 0.0, 0.0),
+            position: (-4.0, 0.0, -1.5),
             rotation: (0.0, 0.0, 0.0, 1.0),
             scale: 1.0,
             components: [
                 SdfObject(
-                    asset_path: "procedural://pillars",
+                    asset_path: "procedural://pillar",
                 ),
             ],
         ),
         (
             entity_id: 3,
+            name: "Pillar 2",
+            parent_id: None,
+            position: (-1.5, 0.0, -1.5),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            scale: 1.0,
+            components: [
+                SdfObject(
+                    asset_path: "procedural://pillar",
+                ),
+            ],
+        ),
+        (
+            entity_id: 4,
+            name: "Pillar 3",
+            parent_id: None,
+            position: (1.5, 0.0, -1.5),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            scale: 1.0,
+            components: [
+                SdfObject(
+                    asset_path: "procedural://pillar",
+                ),
+            ],
+        ),
+        (
+            entity_id: 5,
+            name: "Pillar 4",
+            parent_id: None,
+            position: (4.0, 0.0, -1.5),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            scale: 1.0,
+            components: [
+                SdfObject(
+                    asset_path: "procedural://pillar",
+                ),
+            ],
+        ),
+        (
+            entity_id: 6,
+            name: "Pillar 5",
+            parent_id: None,
+            position: (-4.0, 0.0, 1.5),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            scale: 1.0,
+            components: [
+                SdfObject(
+                    asset_path: "procedural://pillar",
+                ),
+            ],
+        ),
+        (
+            entity_id: 7,
+            name: "Pillar 6",
+            parent_id: None,
+            position: (-1.5, 0.0, 1.5),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            scale: 1.0,
+            components: [
+                SdfObject(
+                    asset_path: "procedural://pillar",
+                ),
+            ],
+        ),
+        (
+            entity_id: 8,
+            name: "Pillar 7",
+            parent_id: None,
+            position: (1.5, 0.0, 1.5),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            scale: 1.0,
+            components: [
+                SdfObject(
+                    asset_path: "procedural://pillar",
+                ),
+            ],
+        ),
+        (
+            entity_id: 9,
+            name: "Pillar 8",
+            parent_id: None,
+            position: (4.0, 0.0, 1.5),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            scale: 1.0,
+            components: [
+                SdfObject(
+                    asset_path: "procedural://pillar",
+                ),
+            ],
+        ),
+        (
+            entity_id: 10,
+            name: "Left Lintel",
+            parent_id: None,
+            position: (-1.5, 3.6, 0.0),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            scale: 1.0,
+            components: [
+                SdfObject(
+                    asset_path: "procedural://lintel",
+                ),
+            ],
+        ),
+        (
+            entity_id: 11,
+            name: "Right Lintel",
+            parent_id: None,
+            position: (1.5, 3.6, 0.0),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            scale: 1.0,
+            components: [
+                SdfObject(
+                    asset_path: "procedural://lintel",
+                ),
+            ],
+        ),
+        (
+            entity_id: 12,
+            name: "Boulder",
+            parent_id: None,
+            position: (3.0, 0.2, -3.5),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            scale: 1.0,
+            components: [
+                SdfObject(
+                    asset_path: "procedural://boulder",
+                ),
+            ],
+        ),
+        (
+            entity_id: 13,
             name: "Monolith Wall",
             parent_id: None,
             position: (-7.0, 2.2, 0.0),
@@ -42,46 +172,20 @@
             ],
         ),
         (
-            entity_id: 4,
-            name: "Blend Sphere",
+            entity_id: 14,
+            name: "Sphere",
             parent_id: None,
             position: (0.0, 1.5, -4.5),
             rotation: (0.0, 0.0, 0.0, 1.0),
             scale: 1.0,
             components: [
                 SdfObject(
-                    asset_path: "procedural://blend_sphere",
+                    asset_path: "procedural://sphere",
                 ),
             ],
         ),
         (
-            entity_id: 5,
-            name: "Distant Terrain",
-            parent_id: None,
-            position: (0.0, 0.0, 0.0),
-            rotation: (0.0, 0.0, 0.0, 1.0),
-            scale: 1.0,
-            components: [
-                SdfObject(
-                    asset_path: "procedural://distant_terrain",
-                ),
-            ],
-        ),
-        (
-            entity_id: 6,
-            name: "Far Monolith",
-            parent_id: None,
-            position: (22.0, 4.0, -5.0),
-            rotation: (0.0, 0.0, 0.0, 1.0),
-            scale: 1.0,
-            components: [
-                SdfObject(
-                    asset_path: "procedural://far_monolith",
-                ),
-            ],
-        ),
-        (
-            entity_id: 7,
+            entity_id: 15,
             name: "Sun",
             parent_id: None,
             position: (0.0, 0.0, 0.0),
@@ -97,7 +201,7 @@
             ],
         ),
         (
-            entity_id: 8,
+            entity_id: 16,
             name: "Fill Light",
             parent_id: None,
             position: (0.0, 0.0, 0.0),

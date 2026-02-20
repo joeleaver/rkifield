@@ -1651,6 +1651,7 @@ impl GpuState {
             camera_pos: [cam_pos.x, cam_pos.y, cam_pos.z],
             sun_dir: sun_dir_n,
             swapchain_view: &view,
+            viewport_rect: None,
         };
         execute_frame(&mut ctx);
 

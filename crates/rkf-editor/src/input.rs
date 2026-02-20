@@ -56,6 +56,8 @@ pub enum KeyCode {
     Num1,
     Num2,
     Num3,
+    // Modifiers (used as movement keys)
+    ShiftLeft,
     // Function keys
     F5,
     F12,

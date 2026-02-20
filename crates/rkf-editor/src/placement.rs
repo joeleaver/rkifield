@@ -140,8 +140,8 @@ pub struct PlacementRequest {
     pub position: Vec3,
     /// Rotation of the placed entity.
     pub rotation: Quat,
-    /// Uniform scale of the placed entity.
-    pub scale: f32,
+    /// Scale of the placed entity.
+    pub scale: Vec3,
 }
 
 impl PlacementRequest {
@@ -151,7 +151,7 @@ impl PlacementRequest {
             asset_path: asset_path.into(),
             position,
             rotation: Quat::IDENTITY,
-            scale: 1.0,
+            scale: Vec3::ONE,
         }
     }
 }
@@ -423,7 +423,7 @@ mod tests {
         assert_eq!(req.asset_path, "assets/tree.rkf");
         assert!(vec3_approx_eq(req.position, Vec3::new(1.0, 0.0, 2.0)));
         assert!(approx_eq(req.rotation.w, 1.0)); // identity quat
-        assert!(approx_eq(req.scale, 1.0));
+        assert!(vec3_approx_eq(req.scale, Vec3::ONE));
     }
 
     // --- PlacementQueue tests ---

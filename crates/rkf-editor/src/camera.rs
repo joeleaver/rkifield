@@ -193,6 +193,12 @@ impl EditorCamera {
         ) * self.orbit_distance;
 
         self.position = self.target + offset;
+
+        // Keep fly_yaw/fly_pitch in sync so sync_to_engine_camera
+        // gives the render camera the correct view direction.
+        let dir = (self.target - self.position).normalize();
+        self.fly_pitch = dir.y.asin();
+        self.fly_yaw = (-dir.x).atan2(-dir.z);
     }
 
     /// Compute the right-handed view matrix (world → camera space).
@@ -265,7 +271,7 @@ impl EditorCamera {
                 if input.is_key_pressed(KeyCode::E) || input.is_key_pressed(KeyCode::Space) {
                     up += 1.0;
                 }
-                if input.is_key_pressed(KeyCode::Q) {
+                if input.is_key_pressed(KeyCode::Q) || input.is_key_pressed(KeyCode::ShiftLeft) {
                     up -= 1.0;
                 }
 

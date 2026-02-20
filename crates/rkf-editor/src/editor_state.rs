@@ -21,6 +21,30 @@ use crate::undo::UndoStack;
 
 use glam::Vec3;
 
+/// Region of the window occupied by the engine viewport (excludes UI panels).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ViewportRect {
+    /// Left edge in window pixels.
+    pub x: u32,
+    /// Top edge in window pixels.
+    pub y: u32,
+    /// Viewport width in pixels.
+    pub width: u32,
+    /// Viewport height in pixels.
+    pub height: u32,
+}
+
+impl Default for ViewportRect {
+    fn default() -> Self {
+        Self {
+            x: 0,
+            y: 0,
+            width: 1280,
+            height: 720,
+        }
+    }
+}
+
 /// Editor tool mode — determines viewport interaction, right-panel content,
 /// and active keyboard shortcuts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,6 +182,18 @@ pub struct EditorState {
     pub recent_files: RecentFiles,
     pub current_scene_path: Option<String>,
 
+    // ── Viewport layout ──────────────────────────────────────
+    /// Current viewport area (engine output region).
+    pub viewport: ViewportRect,
+    /// Left panel width in pixels.
+    pub left_panel_width: u32,
+    /// Right panel width in pixels.
+    pub right_panel_width: u32,
+    /// Top bar height in pixels (menu + toolbar).
+    pub top_bar_height: u32,
+    /// Bottom bar height in pixels (status bar).
+    pub bottom_bar_height: u32,
+
     // ── Pending commands (UI → render loop) ──────────────────
     /// Set by UI menus, consumed by the render loop.
     pub pending_debug_mode: Option<u32>,
@@ -199,9 +235,33 @@ impl EditorState {
             unsaved_changes: UnsavedChangesState::new(),
             recent_files: RecentFiles::new(),
             current_scene_path: None,
+            viewport: ViewportRect::default(),
+            left_panel_width: 251,  // 250px content + 1px border-right
+            right_panel_width: 301, // 300px content + 1px border-left
+            top_bar_height: 62,    // menu 32+1px border + toolbar 28+1px border
+            bottom_bar_height: 25, // status bar 24px + 1px border-top
             pending_debug_mode: None,
             wants_exit: false,
         }
+    }
+
+    /// Recompute the viewport rect from current panel sizes and window dimensions.
+    ///
+    /// Returns `true` if the viewport changed (callers should rebuild GPU passes).
+    pub fn compute_viewport(&mut self, window_width: u32, window_height: u32) -> bool {
+        let new = ViewportRect {
+            x: self.left_panel_width,
+            y: self.top_bar_height,
+            width: window_width
+                .saturating_sub(self.left_panel_width + self.right_panel_width)
+                .max(64),
+            height: window_height
+                .saturating_sub(self.top_bar_height + self.bottom_bar_height)
+                .max(64),
+        };
+        let changed = new != self.viewport;
+        self.viewport = new;
+        changed
     }
 
     /// Update camera from current input state.
@@ -413,7 +473,7 @@ impl EditorState {
                 parent_id: None,
                 position: light.position,
                 rotation: Quat::IDENTITY,
-                scale: 1.0,
+                scale: Vec3::ONE,
                 components: vec![ComponentData::Light {
                     light_type: light_type_str.to_string(),
                     color: [light.color.x, light.color.y, light.color.z],
@@ -458,7 +518,7 @@ mod tests {
                     parent_id: None,
                     position: Vec3::new(0.0, -0.5, 0.0),
                     rotation: Quat::IDENTITY,
-                    scale: 1.0,
+                    scale: Vec3::ONE,
                     components: vec![ComponentData::SdfObject {
                         asset_path: "procedural://ground".to_string(),
                     }],
@@ -469,7 +529,7 @@ mod tests {
                     parent_id: Some(1),
                     position: Vec3::new(1.0, 2.0, 3.0),
                     rotation: Quat::from_rotation_y(1.0),
-                    scale: 0.5,
+                    scale: Vec3::splat(0.5),
                     components: vec![ComponentData::SdfObject {
                         asset_path: "procedural://pillar".to_string(),
                     }],
@@ -480,7 +540,7 @@ mod tests {
                     parent_id: None,
                     position: Vec3::ZERO,
                     rotation: Quat::IDENTITY,
-                    scale: 1.0,
+                    scale: Vec3::ONE,
                     components: vec![ComponentData::Light {
                         light_type: "directional".to_string(),
                         color: [1.0, 0.95, 0.8],
@@ -524,7 +584,7 @@ mod tests {
         );
         let child = &ground.children[0];
         assert_eq!(child.position, Vec3::new(1.0, 2.0, 3.0));
-        assert!((child.scale - 0.5).abs() < 1e-6);
+        assert!(child.scale.abs_diff_eq(Vec3::splat(0.5), 1e-6));
         assert_eq!(
             child.asset_path.as_deref(),
             Some("procedural://pillar")
@@ -591,7 +651,7 @@ mod tests {
 
         let child = saved.entities.iter().find(|e| e.name == "Child").unwrap();
         assert_eq!(child.parent_id, Some(1));
-        assert!((child.scale - 0.5).abs() < 1e-6);
+        assert!(child.scale.abs_diff_eq(Vec3::splat(0.5), 1e-6));
 
         // Check light entity
         let light_ent = saved
