@@ -17,8 +17,6 @@
 pub mod context;
 /// Camera system for ray generation.
 pub mod camera;
-/// GPU buffer upload for scene data.
-pub mod gpu_scene;
 
 /// Blit pass — fullscreen copy to swapchain.
 pub mod blit;
@@ -28,11 +26,11 @@ pub mod gbuffer;
 pub mod material_table;
 /// GPU color pool for per-voxel color companion data.
 pub mod gpu_color_pool;
-/// Ray march compute pass.
+/// Ray march compute pass (stub — pending v2 rewrite).
 pub mod ray_march;
 /// Light types and GPU light buffer.
 pub mod light;
-/// PBR shading compute pass.
+/// PBR shading compute pass (stub — pending v2 rewrite).
 pub mod shading;
 /// Tiled light culling compute pass.
 pub mod tile_cull;
@@ -40,7 +38,7 @@ pub mod tile_cull;
 pub mod tone_map;
 /// Radiance volume for voxel cone tracing global illumination.
 pub mod radiance_volume;
-/// Radiance injection compute pass for GI.
+/// Radiance injection compute pass for GI (stub — pending v2 rewrite).
 pub mod radiance_inject;
 /// Radiance mip generation pass (downsample L0 → L1 → L2 → L3).
 pub mod radiance_mip;
@@ -90,13 +88,10 @@ pub mod clouds;
 pub mod cloud_shadow;
 /// Brick-backed low-altitude cloud configuration.
 pub mod brick_clouds;
-/// GPU clipmap LOD system — multi-level buffers and uniforms for the ray marcher.
-pub mod clipmap_gpu;
 
 pub use camera::{Camera, CameraUniforms};
 pub use context::RenderContext;
 pub use gbuffer::GBuffer;
-pub use gpu_scene::{GpuScene, SceneUniforms};
 pub use material_table::MaterialTable;
 pub use gpu_color_pool::GpuColorPool;
 pub use blit::BlitPass;
@@ -131,4 +126,3 @@ pub use god_rays::{GodRaySettings, DEFAULT_GOD_RAY_DUST, DEFAULT_GOD_RAY_G, MIN_
 pub use clouds::{CloudSettings, CloudParams, DEFAULT_CLOUD_MIN, DEFAULT_CLOUD_MAX, DEFAULT_CLOUD_THRESHOLD, DEFAULT_CLOUD_DENSITY_SCALE, DEFAULT_CLOUD_SHADOW_RESOLUTION, DEFAULT_CLOUD_SHADOW_COVERAGE};
 pub use cloud_shadow::{CloudShadowPass, CloudShadowParams, DEFAULT_CLOUD_SHADOW_RES, CLOUD_SHADOW_FORMAT};
 pub use brick_clouds::{BrickCloudRegion, BrickCloudType, DEFAULT_BRICK_CLOUD_MIN, DEFAULT_BRICK_CLOUD_MAX, DEFAULT_BRICK_CLOUD_DENSITY, DEFAULT_BRICK_CLOUD_COLOR};
-pub use clipmap_gpu::{ClipmapGpuData, GpuClipmapLevel, GpuClipmapUniforms, GPU_MAX_CLIPMAP_LEVELS};
