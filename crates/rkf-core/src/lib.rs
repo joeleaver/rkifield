@@ -34,6 +34,8 @@ pub mod scene_node;
 pub mod sdf;
 /// v2 transform flattening — depth-first traversal producing GPU-ready flat nodes.
 pub mod transform_flatten;
+/// Per-object voxelization — SDF to brick map conversion.
+pub mod voxelize_object;
 /// Voxel sample type and flag constants for GPU-packed voxel data.
 pub mod voxel;
 pub mod world_position;
