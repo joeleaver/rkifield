@@ -10,10 +10,10 @@
 //! | 2 | Storage (read) | Object metadata — `array<GpuObject>` |
 //! | 3 | Uniform | Camera uniforms |
 //! | 4 | Uniform | Scene uniforms (num_objects, max_steps, max_distance) |
-//!
-//! BVH buffer (binding 5) is added in Phase 4.
+//! | 5 | Storage (read) | BVH nodes — `array<BvhNode>` |
 
 use crate::camera::CameraUniforms;
+use crate::gpu_bvh::GpuBvh;
 use crate::gpu_brick_maps::GpuBrickMaps;
 use crate::gpu_object::GpuObject;
 
@@ -60,6 +60,9 @@ pub struct GpuSceneV2 {
     /// Number of active objects.
     num_objects: u32,
 
+    /// BVH node storage buffer.
+    pub bvh: GpuBvh,
+
     /// Camera uniform buffer.
     pub camera_buffer: wgpu::Buffer,
     /// Scene uniform buffer.
@@ -82,6 +85,7 @@ impl GpuSceneV2 {
     /// (array of VoxelSample). It is borrowed — the scene does not own it.
     pub fn new(device: &wgpu::Device, brick_pool_buffer: wgpu::Buffer) -> Self {
         let brick_maps = GpuBrickMaps::new(device, DEFAULT_BRICK_MAP_CAPACITY);
+        let bvh = GpuBvh::new(device);
 
         let object_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("object_metadata"),
@@ -113,6 +117,7 @@ impl GpuSceneV2 {
             &object_buffer,
             &camera_buffer,
             &scene_buffer,
+            &bvh.buffer,
         );
 
         Self {
@@ -120,6 +125,7 @@ impl GpuSceneV2 {
             object_buffer,
             object_capacity: DEFAULT_OBJECT_CAPACITY,
             num_objects: 0,
+            bvh,
             camera_buffer,
             scene_buffer,
             bind_group_layout,
@@ -170,6 +176,20 @@ impl GpuSceneV2 {
         let old_cap = self.brick_maps.capacity();
         self.brick_maps.upload(device, queue, data);
         if self.brick_maps.capacity() != old_cap {
+            self.rebuild_bind_group(device);
+        }
+    }
+
+    /// Upload BVH to the GPU.
+    ///
+    /// Rebuilds the bind group if the buffer is resized.
+    pub fn upload_bvh(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        bvh: &rkf_core::Bvh,
+    ) {
+        if self.bvh.upload(device, queue, bvh) {
             self.rebuild_bind_group(device);
         }
     }
@@ -257,10 +277,22 @@ impl GpuSceneV2 {
                     },
                     count: None,
                 },
+                // 5: BVH nodes (storage, read-only)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn create_bind_group(
         device: &wgpu::Device,
         layout: &wgpu::BindGroupLayout,
@@ -269,6 +301,7 @@ impl GpuSceneV2 {
         objects: &wgpu::Buffer,
         camera: &wgpu::Buffer,
         scene: &wgpu::Buffer,
+        bvh: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("gpu_scene_v2"),
@@ -294,6 +327,10 @@ impl GpuSceneV2 {
                     binding: 4,
                     resource: scene.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: bvh.as_entire_binding(),
+                },
             ],
         })
     }
@@ -307,6 +344,7 @@ impl GpuSceneV2 {
             &self.object_buffer,
             &self.camera_buffer,
             &self.scene_buffer,
+            &self.bvh.buffer,
         );
     }
 }
