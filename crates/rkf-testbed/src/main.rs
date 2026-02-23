@@ -24,7 +24,7 @@ use rkf_core::{
 };
 use rkf_render::{
     BlitPass, Camera, DebugMode, DebugViewPass, GBuffer, GpuObject,
-    GpuSceneV2, RayMarchPass, RenderContext, SceneUniforms,
+    GpuSceneV2, RayMarchPass, RenderContext, SceneUniforms, TileObjectCullPass,
 };
 
 mod automation;
@@ -195,6 +195,7 @@ struct EngineState {
     surface_format: wgpu::TextureFormat,
     gpu_scene: GpuSceneV2,
     gbuffer: GBuffer,
+    tile_cull: TileObjectCullPass,
     ray_march: RayMarchPass,
     debug_view: DebugViewPass,
     blit: BlitPass,
@@ -246,7 +247,10 @@ impl EngineState {
         }
 
         let gbuffer = GBuffer::new(&ctx.device, INTERNAL_WIDTH, INTERNAL_HEIGHT);
-        let ray_march = RayMarchPass::new(&ctx.device, &gpu_scene, &gbuffer);
+        let tile_cull = TileObjectCullPass::new(
+            &ctx.device, &gpu_scene, INTERNAL_WIDTH, INTERNAL_HEIGHT,
+        );
+        let ray_march = RayMarchPass::new(&ctx.device, &gpu_scene, &gbuffer, &tile_cull);
         let debug_view = DebugViewPass::new(&ctx.device, &gbuffer);
         let blit = BlitPass::new(&ctx.device, &debug_view.output_view, surface_format);
 
@@ -272,6 +276,7 @@ impl EngineState {
             surface_format,
             gpu_scene,
             gbuffer,
+            tile_cull,
             ray_march,
             debug_view,
             blit,
@@ -362,14 +367,16 @@ impl EngineState {
             label: Some("frame"),
         });
 
-        // 1. Ray march → G-buffer
-        self.ray_march.dispatch(&mut encoder, &self.gpu_scene, &self.gbuffer);
-        // 2. Debug view → display texture
+        // 1. Tile object culling → per-tile object lists
+        self.tile_cull.dispatch(&mut encoder, &self.gpu_scene);
+        // 2. Ray march → G-buffer (reads tile lists from step 1)
+        self.ray_march.dispatch(&mut encoder, &self.gpu_scene, &self.gbuffer, &self.tile_cull);
+        // 3. Debug view → display texture
         self.debug_view.dispatch(&mut encoder, INTERNAL_WIDTH, INTERNAL_HEIGHT);
-        // 3. Blit → swapchain
+        // 4. Blit → swapchain
         self.blit.draw(&mut encoder, &target_view);
 
-        // 4. If MCP screenshot requested, copy debug_view output to readback buffer.
+        // 5. If MCP screenshot requested, copy debug_view output to readback buffer.
         let do_readback = self.shared_state.lock()
             .map(|s| s.screenshot_requested)
             .unwrap_or(false);
@@ -405,7 +412,7 @@ impl EngineState {
         self.ctx.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
 
-        // 5. Read back pixels for MCP screenshots (only when requested).
+        // 6. Read back pixels for MCP screenshots (only when requested).
         if do_readback {
             let buffer_slice = self.readback_buffer.slice(..);
             let (tx, rx) = std::sync::mpsc::channel();

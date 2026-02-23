@@ -31,6 +31,10 @@ const MIN_STEP: f32 = 0.0005;
 // BVH traversal stack depth.
 const BVH_STACK_SIZE: u32 = 32u;
 
+// Tile culling constants (must match tile_object_cull.wgsl and Rust TileObjectCullPass).
+const OBJECT_TILE_SIZE: u32 = 16u;
+const TILE_MAX_OBJECTS: u32 = 32u;
+
 // ---------- GPU Structs ----------
 
 struct VoxelSample {
@@ -123,6 +127,10 @@ struct MarchResult {
 @group(1) @binding(1) var gbuf_normal:   texture_storage_2d<rgba16float, write>;
 @group(1) @binding(2) var gbuf_material: texture_storage_2d<r32uint, write>;
 @group(1) @binding(3) var gbuf_motion:   texture_storage_2d<rgba32float, write>;
+
+// Group 2: per-tile object lists (from tile_object_cull pass, read-only)
+@group(2) @binding(0) var<storage, read> tile_object_indices: array<u32>;
+@group(2) @binding(1) var<storage, read> tile_object_counts: array<u32>;
 
 // ---------- VoxelSample Helpers ----------
 
@@ -558,6 +566,77 @@ fn ray_march_brute(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
     return result;
 }
 
+/// Tiled ray march — only evaluates objects in the pixel's tile list.
+/// The tile_object_cull pass projects object AABBs and writes per-tile object
+/// index lists. This function reads the list for the current pixel's tile and
+/// only evaluates those objects, typically 3-5 instead of all scene objects.
+fn ray_march_tiled(origin: vec3<f32>, dir: vec3<f32>, pixel: vec2<u32>) -> MarchResult {
+    var result: MarchResult;
+    result.t = MAX_FLOAT;
+    result.hit = false;
+    result.material_id = 0u;
+    result.object_id = 0u;
+    result.obj_idx = 0u;
+    result.normal = vec3<f32>(0.0, 1.0, 0.0);
+
+    // Compute tile ID from pixel coordinates.
+    let tile_x = pixel.x / OBJECT_TILE_SIZE;
+    let tile_y = pixel.y / OBJECT_TILE_SIZE;
+    let dims = vec2<u32>(textureDimensions(gbuf_position));
+    let num_tiles_x = (dims.x + OBJECT_TILE_SIZE - 1u) / OBJECT_TILE_SIZE;
+    let tile_id = tile_y * num_tiles_x + tile_x;
+
+    let count = tile_object_counts[tile_id];
+    if count == 0u {
+        return result; // No objects in this tile — sky.
+    }
+
+    let base = tile_id * TILE_MAX_OBJECTS;
+    let safe_dir = select(dir, vec3<f32>(1e-10), abs(dir) < vec3<f32>(1e-10));
+    let cam_pos = camera.position.xyz;
+
+    var t = 0.0;
+
+    for (var step = 0u; step < scene.max_steps; step++) {
+        if t > scene.max_distance {
+            break;
+        }
+
+        let pos = origin + safe_dir * t;
+        let cam_rel = pos - cam_pos;
+
+        var min_dist = MAX_FLOAT;
+        var best_mat = 0u;
+        var best_obj_id = 0u;
+        var best_obj_idx = 0u;
+
+        // Only evaluate objects in this tile's list.
+        for (var i = 0u; i < count; i++) {
+            let obj_idx = tile_object_indices[base + i];
+            let eval = evaluate_object(cam_rel, obj_idx);
+            if eval.x < min_dist {
+                min_dist = eval.x;
+                best_mat = u32(eval.y);
+                best_obj_id = objects[obj_idx].object_id;
+                best_obj_idx = obj_idx;
+            }
+        }
+
+        if min_dist < scene.hit_threshold {
+            result.t = t;
+            result.hit = true;
+            result.material_id = best_mat;
+            result.object_id = best_obj_id;
+            result.obj_idx = best_obj_idx;
+            return result;
+        }
+
+        t += max(min_dist, MIN_STEP);
+    }
+
+    return result;
+}
+
 // ---------- Normal Computation ----------
 
 /// Evaluate a single object's SDF at a world-space position.
@@ -613,9 +692,11 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
         camera.forward.xyz + ndc.x * camera.right.xyz + ndc.y * camera.up.xyz
     );
 
-    // Choose march strategy.
+    // Choose march strategy: prefer tiled > BVH > brute.
     var result: MarchResult;
-    if arrayLength(&bvh_nodes) > 0u {
+    if arrayLength(&tile_object_counts) > 0u {
+        result = ray_march_tiled(ray_origin, ray_dir, pixel.xy);
+    } else if arrayLength(&bvh_nodes) > 0u {
         result = ray_march_bvh(ray_origin, ray_dir);
     } else {
         result = ray_march_brute(ray_origin, ray_dir);
