@@ -15,6 +15,8 @@ pub mod aabb;
 pub mod automation;
 /// 8×8×8 voxel brick — the fundamental unit of SDF storage.
 pub mod brick;
+/// Per-object brick maps — flat 3D arrays mapping brick coordinates to pool slots.
+pub mod brick_map;
 /// CPU-side brick pool with free-list allocation.
 pub mod brick_pool;
 /// Companion brick types: bone, volumetric, and color data pools.
@@ -42,6 +44,7 @@ pub use scene_node::{
     BlendMode, BrickMapHandle, NodeMetadata, SceneNode, SdfPrimitive, SdfSource, Transform,
 };
 pub use brick::Brick;
+pub use brick_map::{BrickMap, BrickMapAllocator, EMPTY_SLOT};
 pub use brick_pool::{BonePool, BrickPool, ColorPool, Pool, VolumetricPool};
 pub use companion::{BoneBrick, BoneVoxel, ColorBrick, ColorVoxel, VolumetricBrick, VolumetricVoxel};
 pub use material::Material;
