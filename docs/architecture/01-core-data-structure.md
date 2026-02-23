@@ -1,3 +1,5 @@
+> **SUPERSEDED** by [v2 Architecture](../v2/ARCHITECTURE.md) — this document describes the v1 chunk-based engine.
+
 # Core Data Structure: Multi-Level Sparse Grid with Clipmap LOD
 
 > **Status: DECIDED**

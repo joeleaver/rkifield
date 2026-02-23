@@ -1,3 +1,5 @@
+> **SUPERSEDED** by [v2 Architecture](../v2/ARCHITECTURE.md) — this document describes the v1 chunk-based engine.
+
 # Rendering Pipeline
 
 > **Status: DECIDED**

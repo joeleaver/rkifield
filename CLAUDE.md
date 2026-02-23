@@ -236,7 +236,12 @@ MCP server is configured in `.mcp.json` at the project root:
 
 ## Architecture Reference
 
-Full design docs with all decisions, code snippets, data layouts, and upgrade paths:
+**v2 (current):** Object-centric SDF engine — the authoritative design:
+
+- [v2 Architecture](docs/v2/ARCHITECTURE.md) — object-centric scene hierarchy, per-object SDF, BVH acceleration, transform-at-march-time
+- [v2 Implementation Plan](docs/v2/IMPLEMENTATION_PLAN.md) — 16 phases, 82 tasks, dependency graph
+
+**v1 (superseded):** Chunk-based engine — retained for reference only:
 
 - [Architecture Hub](docs/ARCHITECTURE.md) — overview, dependencies, crate map
 - [Core Data Structure](docs/architecture/01-core-data-structure.md) — sparse grid, clipmap, brick pool
@@ -251,7 +256,7 @@ Full design docs with all decisions, code snippets, data layouts, and upgrade pa
 - [Physics](docs/architecture/10-physics.md) — Rapier adapter, character controller
 - [Engine Architecture](docs/architecture/11-engine-architecture.md) — ECS, streaming, editor, config
 - [MCP Integration](docs/architecture/12-mcp-integration.md) — agent-native engine, tool discovery, automation API
-- [Implementation Plan](docs/IMPLEMENTATION_PLAN.md) — 24 phases, ~160 tasks, dependency graph
+- [v1 Implementation Plan](docs/IMPLEMENTATION_PLAN.md) — 24 phases, ~160 tasks
 
 ## Coding Conventions
 
