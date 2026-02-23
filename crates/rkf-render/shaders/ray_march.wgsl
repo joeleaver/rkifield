@@ -1,70 +1,121 @@
-// Ray march compute shader — Phase 6+ (G-buffer output, clipmap LOD).
+// Ray march compute shader — v2 object-centric ray marcher.
 //
 // One thread per pixel at internal resolution. Generates a camera ray,
-// marches through the sparse grid via Amanatides & Woo 3D DDA,
-// sphere-traces within occupied bricks, and writes G-buffer data
-// (position, normal, material ID, motion vectors) to 4 output textures.
-//
-// When clipmap.num_levels > 0, uses multi-level LOD traversal instead
-// of the single-grid path.
+// traverses the BVH to find candidate objects, sphere-traces each object's
+// SDF (analytical or voxelized), and writes G-buffer data.
 
-// ---------- Types ----------
+// ---------- Type Constants ----------
+
+const SDF_TYPE_NONE: u32       = 0u;
+const SDF_TYPE_ANALYTICAL: u32 = 1u;
+const SDF_TYPE_VOXELIZED: u32  = 2u;
+
+const BLEND_SMOOTH_UNION: u32 = 0u;
+const BLEND_UNION: u32        = 1u;
+const BLEND_SUBTRACT: u32     = 2u;
+const BLEND_INTERSECT: u32    = 3u;
+
+const PRIM_SPHERE: u32   = 0u;
+const PRIM_BOX: u32      = 1u;
+const PRIM_CAPSULE: u32  = 2u;
+const PRIM_TORUS: u32    = 3u;
+const PRIM_CYLINDER: u32 = 4u;
+const PRIM_PLANE: u32    = 5u;
+
+const EMPTY_SLOT: u32 = 0xFFFFFFFFu;
+const BVH_INVALID: u32 = 0xFFFFFFFFu;
+const MAX_FLOAT: f32 = 3.402823e+38;
+const HIT_EPSILON: f32 = 0.001;
+const MIN_STEP: f32 = 0.0005;
+
+// BVH traversal stack depth.
+const BVH_STACK_SIZE: u32 = 32u;
+
+// ---------- GPU Structs ----------
 
 struct VoxelSample {
-    word0: u32, // lower 16 = f16 distance, upper 16 = u16 material_id
-    word1: u32, // byte0 = blend_weight, byte1 = secondary_id, byte2 = flags, byte3 = reserved
+    word0: u32,
+    word1: u32,
+}
+
+// GpuObject: 256 bytes, must match Rust #[repr(C)] layout exactly.
+// WGSL vec4<f32> has 16-byte alignment, but Rust [f32; 4] has 4-byte alignment.
+// So we use scalar fields for fields not naturally aligned to 16.
+struct GpuObject {
+    inverse_world: mat4x4<f32>,  // 64 bytes @ offset 0 (mat4 = 16-byte aligned)
+    aabb_min: vec4<f32>,         // 16 bytes @ offset 64 (16-byte aligned ✓)
+    aabb_max: vec4<f32>,         // 16 bytes @ offset 80 (16-byte aligned ✓)
+    brick_map_offset: u32,       // 4 bytes @ offset 96
+    brick_map_dims_x: u32,       // 4 bytes @ offset 100
+    brick_map_dims_y: u32,       // 4 bytes @ offset 104
+    brick_map_dims_z: u32,       // 4 bytes @ offset 108
+    voxel_size: f32,             // 4 bytes @ offset 112
+    material_id: u32,            // 4 bytes @ offset 116
+    sdf_type: u32,               // 4 bytes @ offset 120
+    blend_mode: u32,             // 4 bytes @ offset 124
+    blend_radius: f32,           // 4 bytes @ offset 128
+    sdf_param_0: f32,            // 4 bytes @ offset 132 (scalar, no alignment issue)
+    sdf_param_1: f32,            // 4 bytes @ offset 136
+    sdf_param_2: f32,            // 4 bytes @ offset 140
+    sdf_param_3: f32,            // 4 bytes @ offset 144
+    accumulated_scale: f32,      // 4 bytes @ offset 148
+    lod_level: u32,              // 4 bytes @ offset 152
+    object_id: u32,              // 4 bytes @ offset 156
+    primitive_type: u32,         // 4 bytes @ offset 160
+    // 92 bytes of padding (23 × f32)
+    _pad0: f32, _pad1: f32, _pad2: f32, _pad3: f32,
+    _pad4: f32, _pad5: f32, _pad6: f32, _pad7: f32,
+    _pad8: f32, _pad9: f32, _pad10: f32, _pad11: f32,
+    _pad12: f32, _pad13: f32, _pad14: f32, _pad15: f32,
+    _pad16: f32, _pad17: f32, _pad18: f32, _pad19: f32,
+    _pad20: f32, _pad21: f32, _pad22: f32,
+}
+
+struct BvhNode {
+    aabb_min_x: f32,
+    aabb_min_y: f32,
+    aabb_min_z: f32,
+    left: u32,
+    aabb_max_x: f32,
+    aabb_max_y: f32,
+    aabb_max_z: f32,
+    right_or_object: u32,
 }
 
 struct CameraUniforms {
-    position: vec4<f32>,   // xyz + pad
-    forward:  vec4<f32>,   // xyz + pad  (unit)
-    right:    vec4<f32>,   // xyz + pad  (scaled by fov * aspect)
-    up:       vec4<f32>,   // xyz + pad  (scaled by fov)
-    resolution: vec2<f32>, // width, height
-    jitter: vec2<f32>,     // sub-pixel jitter in pixel units
-    prev_vp: mat4x4<f32>, // previous frame view-projection
+    position: vec4<f32>,
+    forward:  vec4<f32>,
+    right:    vec4<f32>,
+    up:       vec4<f32>,
+    resolution: vec2<f32>,
+    jitter: vec2<f32>,
+    prev_vp: mat4x4<f32>,
 }
 
 struct SceneUniforms {
-    grid_dims:    vec4<u32>,   // xyz = dimensions, w = unused
-    grid_origin:  vec4<f32>,   // xyz = origin, w = brick_extent
-    params:       vec4<f32>,   // x = voxel_size, yzw = unused
+    num_objects: u32,
+    max_steps: u32,
+    max_distance: f32,
+    hit_threshold: f32,
 }
 
 struct MarchResult {
     t: f32,
     hit: bool,
     material_id: u32,
-    secondary_id_and_flags: u32,
-    blend_weight: f32,
-    level: u32,
-}
-
-// ---------- Clipmap types ----------
-
-struct ClipmapLevel {
-    params: vec4<f32>,      // voxel_size, brick_extent, radius, 0
-    grid_dims: vec4<u32>,   // dim_x, dim_y, dim_z, total_cells
-    grid_origin: vec4<f32>, // origin_x, origin_y, origin_z, 0
-    offsets: vec4<u32>,     // occupancy_offset, slot_offset, 0, 0
-}
-
-struct ClipmapUniforms {
-    num_levels: u32,
-    _pad0: u32,
-    _pad1: u32,
-    _pad2: u32,
-    levels: array<ClipmapLevel, 5>,
+    object_id: u32,
+    normal: vec3<f32>,
 }
 
 // ---------- Bindings ----------
 
-// Group 0: scene data
+// Group 0: scene data (v2 object-centric layout)
 @group(0) @binding(0) var<storage, read> brick_pool: array<VoxelSample>;
-@group(0) @binding(1) var<storage, read> occupancy:  array<u32>;
-@group(0) @binding(2) var<storage, read> slots:      array<u32>;
-@group(0) @binding(3) var<uniform>       camera:     CameraUniforms;
-@group(0) @binding(4) var<uniform>       scene:      SceneUniforms;
+@group(0) @binding(1) var<storage, read> brick_maps: array<u32>;
+@group(0) @binding(2) var<storage, read> objects: array<GpuObject>;
+@group(0) @binding(3) var<uniform>       camera: CameraUniforms;
+@group(0) @binding(4) var<uniform>       scene: SceneUniforms;
+@group(0) @binding(5) var<storage, read> bvh_nodes: array<BvhNode>;
 
 // Group 1: G-buffer output textures
 @group(1) @binding(0) var gbuf_position: texture_storage_2d<rgba32float, write>;
@@ -72,146 +123,48 @@ struct ClipmapUniforms {
 @group(1) @binding(2) var gbuf_material: texture_storage_2d<r32uint, write>;
 @group(1) @binding(3) var gbuf_motion:   texture_storage_2d<rgba32float, write>;
 
-// Group 2: Clipmap data
-@group(2) @binding(0) var<storage, read> cm_occupancy: array<u32>;
-@group(2) @binding(1) var<storage, read> cm_slots:     array<u32>;
-@group(2) @binding(2) var<uniform>       clipmap:      ClipmapUniforms;
+// ---------- VoxelSample Helpers ----------
 
-// ---------- Constants ----------
-
-const MAX_DDA_STEPS: u32 = 256u;
-const MAX_BRICK_STEPS: u32 = 64u;
-const MAX_DISTANCE: f32 = 100.0;
-const MAX_FLOAT: f32 = 3.402823e+38;
-const HIT_EPSILON: f32 = 0.001;
-const MIN_STEP: f32 = 0.0005;
-const EMPTY_SLOT: u32 = 0xFFFFFFFFu;
-
-// LOD transition blending: fraction of level radius used as transition band.
-// Normals are blended between adjacent levels within this band.
-const LOD_BLEND_FRACTION: f32 = 0.1;
-
-// CellState values (2-bit, matching Rust CellState enum)
-const CELL_EMPTY: u32      = 0u;
-const CELL_SURFACE: u32    = 1u;
-const CELL_INTERIOR: u32   = 2u;
-const CELL_VOLUMETRIC: u32 = 3u;
-
-// ---------- Helpers ----------
-
-/// Extract f16 distance from word0 of a VoxelSample.
 fn extract_distance(word0: u32) -> f32 {
     return unpack2x16float(word0).x;
 }
 
-/// Extract u16 material_id from word0 of a VoxelSample.
 fn extract_material_id(word0: u32) -> u32 {
     return word0 >> 16u;
 }
 
-/// Extract blend_weight (byte 0 of word1) as f32 in [0, 1].
-fn extract_blend_weight(word1: u32) -> f32 {
-    return f32(word1 & 0xFFu) / 255.0;
+// ---------- SDF Primitives ----------
+
+fn sdf_sphere(p: vec3<f32>, radius: f32) -> f32 {
+    return length(p) - radius;
 }
 
-/// Extract secondary_id (byte 1 of word1).
-fn extract_secondary_id(word1: u32) -> u32 {
-    return (word1 >> 8u) & 0xFFu;
+fn sdf_box(p: vec3<f32>, half_extents: vec3<f32>) -> f32 {
+    let q = abs(p) - half_extents;
+    return length(max(q, vec3<f32>(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0);
 }
 
-/// Extract flags (byte 2 of word1).
-fn extract_flags(word1: u32) -> u32 {
-    return (word1 >> 16u) & 0xFFu;
+fn sdf_capsule(p: vec3<f32>, radius: f32, half_height: f32) -> f32 {
+    let q = vec3<f32>(p.x, max(abs(p.y) - half_height, 0.0), p.z);
+    return length(q) - radius;
 }
 
-// Accessor helpers for packed SceneUniforms (single-grid path).
-fn grid_dims() -> vec3<u32>  { return scene.grid_dims.xyz; }
-fn grid_origin() -> vec3<f32> { return scene.grid_origin.xyz; }
-fn brick_extent() -> f32     { return scene.grid_origin.w; }
-fn voxel_size() -> f32       { return scene.params.x; }
-
-/// Convert a world-space position to grid cell coordinates.
-fn world_to_cell(pos: vec3<f32>) -> vec3<i32> {
-    let local = pos - grid_origin();
-    return vec3<i32>(floor(local / brick_extent()));
+fn sdf_torus(p: vec3<f32>, major_radius: f32, minor_radius: f32) -> f32 {
+    let q = vec2<f32>(length(p.xz) - major_radius, p.y);
+    return length(q) - minor_radius;
 }
 
-/// Check if cell coordinates are within grid bounds.
-fn cell_in_bounds(cell: vec3<i32>) -> bool {
-    return all(cell >= vec3<i32>(0)) && all(vec3<u32>(cell) < grid_dims());
+fn sdf_cylinder(p: vec3<f32>, radius: f32, half_height: f32) -> f32 {
+    let d = vec2<f32>(length(p.xz) - radius, abs(p.y) - half_height);
+    return min(max(d.x, d.y), 0.0) + length(max(d, vec2<f32>(0.0)));
 }
 
-/// Get the cell state (2-bit) for a flat cell index.
-fn get_cell_state(flat: u32) -> u32 {
-    let word_idx = flat / 16u;
-    let bit_offset = (flat % 16u) * 2u;
-    return (occupancy[word_idx] >> bit_offset) & 3u;
+fn sdf_plane(p: vec3<f32>, normal: vec3<f32>, dist: f32) -> f32 {
+    return dot(p, normal) + dist;
 }
 
-/// Flat index from cell coordinates.
-fn cell_flat_index(cell: vec3<u32>) -> u32 {
-    let d = grid_dims();
-    return cell.x + cell.y * d.x + cell.z * d.x * d.y;
-}
+// ---------- Ray-AABB Intersection ----------
 
-// ---------- Clipmap accessor helpers ----------
-
-/// Grid dimensions for a clipmap level.
-fn cm_grid_dims(level: u32) -> vec3<u32> {
-    return clipmap.levels[level].grid_dims.xyz;
-}
-
-/// Grid origin for a clipmap level.
-fn cm_grid_origin(level: u32) -> vec3<f32> {
-    return clipmap.levels[level].grid_origin.xyz;
-}
-
-/// Brick extent (world-space size of one brick) for a clipmap level.
-fn cm_brick_extent(level: u32) -> f32 {
-    return clipmap.levels[level].params.y;
-}
-
-/// Voxel size for a clipmap level.
-fn cm_voxel_size(level: u32) -> f32 {
-    return clipmap.levels[level].params.x;
-}
-
-/// Radius (half-extent of the level's coverage) for a clipmap level.
-fn cm_radius(level: u32) -> f32 {
-    return clipmap.levels[level].params.z;
-}
-
-/// Check if cell coordinates are within bounds for a clipmap level.
-fn cm_cell_in_bounds(cell: vec3<i32>, level: u32) -> bool {
-    return all(cell >= vec3<i32>(0)) && all(vec3<u32>(cell) < cm_grid_dims(level));
-}
-
-/// Flat index from cell coordinates for a clipmap level.
-fn cm_cell_flat_index(cell: vec3<u32>, level: u32) -> u32 {
-    let d = cm_grid_dims(level);
-    return cell.x + cell.y * d.x + cell.z * d.x * d.y;
-}
-
-/// Get cell state from the combined clipmap occupancy buffer.
-///
-/// `offsets.x` is the u32 word offset into the combined buffer (not a cell offset).
-/// Each u32 word packs 16 cells at 2 bits each.
-fn cm_get_cell_state(flat: u32, level: u32) -> u32 {
-    let base_words = clipmap.levels[level].offsets.x;
-    let word_idx = base_words + flat / 16u;
-    let bit_offset = (flat % 16u) * 2u;
-    return (cm_occupancy[word_idx] >> bit_offset) & 3u;
-}
-
-/// Get slot index from the combined clipmap slot buffer.
-fn cm_get_slot(flat: u32, level: u32) -> u32 {
-    let base = clipmap.levels[level].offsets.y;
-    return cm_slots[base + flat];
-}
-
-// ---------- DDA Ray March ----------
-
-/// Ray-AABB intersection using the slab method.
 fn ray_aabb_intersect(origin: vec3<f32>, inv_dir: vec3<f32>,
                       box_min: vec3<f32>, box_max: vec3<f32>) -> vec2<f32> {
     let t1 = (box_min - origin) * inv_dir;
@@ -223,19 +176,63 @@ fn ray_aabb_intersect(origin: vec3<f32>, inv_dir: vec3<f32>,
     return vec2<f32>(t_near, t_far);
 }
 
-/// Read the full VoxelSample at a world position within a brick.
-/// Returns the flat index into brick_pool for the sample.
-fn sample_brick_full(pos: vec3<f32>, brick_min: vec3<f32>, slot: u32) -> u32 {
-    let brick_local = (pos - brick_min) / voxel_size();
-    let voxel = clamp(vec3<u32>(floor(brick_local)), vec3<u32>(0u), vec3<u32>(7u));
-    let voxel_idx = voxel.x + voxel.y * 8u + voxel.z * 64u;
-    return slot * 512u + voxel_idx;
+// ---------- Object Evaluation ----------
+
+/// Evaluate an analytical SDF primitive at a local-space position.
+fn evaluate_analytical(local_pos: vec3<f32>, obj: GpuObject) -> f32 {
+    switch obj.primitive_type {
+        case PRIM_SPHERE: {
+            return sdf_sphere(local_pos, obj.sdf_param_0);
+        }
+        case PRIM_BOX: {
+            return sdf_box(local_pos, vec3<f32>(obj.sdf_param_0, obj.sdf_param_1, obj.sdf_param_2));
+        }
+        case PRIM_CAPSULE: {
+            return sdf_capsule(local_pos, obj.sdf_param_0, obj.sdf_param_1);
+        }
+        case PRIM_TORUS: {
+            return sdf_torus(local_pos, obj.sdf_param_0, obj.sdf_param_1);
+        }
+        case PRIM_CYLINDER: {
+            return sdf_cylinder(local_pos, obj.sdf_param_0, obj.sdf_param_1);
+        }
+        case PRIM_PLANE: {
+            return sdf_plane(local_pos, normalize(vec3<f32>(obj.sdf_param_0, obj.sdf_param_1, obj.sdf_param_2)), 0.0);
+        }
+        default: {
+            return MAX_FLOAT;
+        }
+    }
 }
 
-/// Read SDF distance from a specific brick slot at a world position (trilinear).
-fn sample_brick(pos: vec3<f32>, brick_min: vec3<f32>, slot: u32) -> f32 {
-    let vs = voxel_size();
-    let brick_local = (pos - brick_min) / vs - vec3<f32>(0.5);
+/// Sample a voxelized object's brick map at a local-space position.
+/// Returns the SDF distance, or MAX_FLOAT if outside the brick map.
+fn sample_voxelized(local_pos: vec3<f32>, obj: GpuObject) -> f32 {
+    let vs = obj.voxel_size;
+    let brick_extent = vs * 8.0;
+    let dims = vec3<u32>(obj.brick_map_dims_x, obj.brick_map_dims_y, obj.brick_map_dims_z);
+    let grid_size = vec3<f32>(dims) * brick_extent;
+
+    // Grid starts at -grid_size/2 (object origin = center of grid).
+    let grid_pos = local_pos + grid_size * 0.5;
+
+    if any(grid_pos < vec3<f32>(0.0)) || any(grid_pos >= grid_size) {
+        return MAX_FLOAT;
+    }
+
+    let brick_coord = vec3<u32>(floor(grid_pos / brick_extent));
+    let flat_brick = brick_coord.x + brick_coord.y * dims.x + brick_coord.z * dims.x * dims.y;
+
+    let slot = brick_maps[obj.brick_map_offset + flat_brick];
+    if slot == EMPTY_SLOT {
+        return MAX_FLOAT;
+    }
+
+    // Brick minimum in local space.
+    let brick_min = vec3<f32>(brick_coord) * brick_extent - grid_size * 0.5;
+
+    // Trilinear interpolation within brick.
+    let brick_local = (local_pos - brick_min) / vs - vec3<f32>(0.5);
     let f = clamp(brick_local, vec3<f32>(0.0), vec3<f32>(6.9999));
     let i0 = vec3<u32>(floor(f));
     let i1 = min(i0 + vec3<u32>(1u), vec3<u32>(7u));
@@ -260,568 +257,229 @@ fn sample_brick(pos: vec3<f32>, brick_min: vec3<f32>, slot: u32) -> f32 {
     return mix(c0, c1, t.z);
 }
 
-/// Level-parameterized version of sample_brick_full for clipmap levels.
-fn sample_brick_full_cm(pos: vec3<f32>, brick_min: vec3<f32>, slot: u32, level: u32) -> u32 {
-    let brick_local = (pos - brick_min) / cm_voxel_size(level);
+/// Get material ID from a voxelized object at a local position (nearest neighbor).
+fn sample_voxelized_material(local_pos: vec3<f32>, obj: GpuObject) -> u32 {
+    let vs = obj.voxel_size;
+    let brick_extent = vs * 8.0;
+    let dims = vec3<u32>(obj.brick_map_dims_x, obj.brick_map_dims_y, obj.brick_map_dims_z);
+    let grid_size = vec3<f32>(dims) * brick_extent;
+    let grid_pos = local_pos + grid_size * 0.5;
+
+    if any(grid_pos < vec3<f32>(0.0)) || any(grid_pos >= grid_size) {
+        return 0u;
+    }
+
+    let brick_coord = vec3<u32>(floor(grid_pos / brick_extent));
+    let flat_brick = brick_coord.x + brick_coord.y * dims.x + brick_coord.z * dims.x * dims.y;
+    let slot = brick_maps[obj.brick_map_offset + flat_brick];
+    if slot == EMPTY_SLOT {
+        return 0u;
+    }
+
+    let brick_min = vec3<f32>(brick_coord) * brick_extent - grid_size * 0.5;
+    let brick_local = (local_pos - brick_min) / vs;
     let voxel = clamp(vec3<u32>(floor(brick_local)), vec3<u32>(0u), vec3<u32>(7u));
-    let voxel_idx = voxel.x + voxel.y * 8u + voxel.z * 64u;
-    return slot * 512u + voxel_idx;
+    let idx = slot * 512u + voxel.x + voxel.y * 8u + voxel.z * 64u;
+    return extract_material_id(brick_pool[idx].word0);
 }
 
-/// Level-parameterized version of sample_brick for clipmap levels (trilinear).
-fn sample_brick_cm(pos: vec3<f32>, brick_min: vec3<f32>, slot: u32, level: u32) -> f32 {
-    let vs = cm_voxel_size(level);
-    let brick_local = (pos - brick_min) / vs - vec3<f32>(0.5);
-    let f = clamp(brick_local, vec3<f32>(0.0), vec3<f32>(6.9999));
-    let i0 = vec3<u32>(floor(f));
-    let i1 = min(i0 + vec3<u32>(1u), vec3<u32>(7u));
-    let t = f - floor(f);
+/// Evaluate a single object at a camera-relative position.
+/// Returns (distance_in_world_space, material_id).
+fn evaluate_object(cam_rel_pos: vec3<f32>, obj_idx: u32) -> vec2<f32> {
+    let obj = objects[obj_idx];
 
-    let base = slot * 512u;
-    let c000 = extract_distance(brick_pool[base + i0.x + i0.y*8u + i0.z*64u].word0);
-    let c100 = extract_distance(brick_pool[base + i1.x + i0.y*8u + i0.z*64u].word0);
-    let c010 = extract_distance(brick_pool[base + i0.x + i1.y*8u + i0.z*64u].word0);
-    let c110 = extract_distance(brick_pool[base + i1.x + i1.y*8u + i0.z*64u].word0);
-    let c001 = extract_distance(brick_pool[base + i0.x + i0.y*8u + i1.z*64u].word0);
-    let c101 = extract_distance(brick_pool[base + i1.x + i0.y*8u + i1.z*64u].word0);
-    let c011 = extract_distance(brick_pool[base + i0.x + i1.y*8u + i1.z*64u].word0);
-    let c111 = extract_distance(brick_pool[base + i1.x + i1.y*8u + i1.z*64u].word0);
-
-    let c00 = mix(c000, c100, t.x);
-    let c10 = mix(c010, c110, t.x);
-    let c01 = mix(c001, c101, t.x);
-    let c11 = mix(c011, c111, t.x);
-    let c0 = mix(c00, c10, t.y);
-    let c1 = mix(c01, c11, t.y);
-    return mix(c0, c1, t.z);
-}
-
-/// Sphere trace within a single brick, returning full material info on hit.
-fn sphere_trace_brick(origin: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
-                      t_enter: f32, cell: vec3<u32>, flat: u32) -> MarchResult {
-    let slot = slots[flat];
-    if slot == EMPTY_SLOT {
-        return MarchResult(-1.0, false, 0u, 0u, 0.0, 0u);
+    if obj.sdf_type == SDF_TYPE_NONE {
+        return vec2<f32>(MAX_FLOAT, 0.0);
     }
 
-    let be = brick_extent();
-    let brick_min = grid_origin() + vec3<f32>(cell) * be;
-    let brick_max = brick_min + vec3<f32>(be);
+    // Transform to object-local space.
+    let local_pos = (obj.inverse_world * vec4<f32>(cam_rel_pos, 1.0)).xyz;
 
-    let aabb_t = ray_aabb_intersect(origin, inv_dir, brick_min, brick_max);
-    let t_start = max(t_enter, max(aabb_t.x, 0.0));
-    let t_end = aabb_t.y;
+    var dist: f32;
+    var mat_id: u32;
 
-    if t_start > t_end {
-        return MarchResult(-1.0, false, 0u, 0u, 0.0, 0u);
-    }
-
-    var t = t_start;
-    for (var i = 0u; i < MAX_BRICK_STEPS; i++) {
-        let pos = origin + dir * t;
-        let clamped = clamp(pos, brick_min + vec3<f32>(MIN_STEP),
-                                 brick_max - vec3<f32>(MIN_STEP));
-
-        let d = sample_brick(clamped, brick_min, slot);
-
-        if d < HIT_EPSILON {
-            // Nearest-neighbor for material (categorical data)
-            let sample_idx = sample_brick_full(clamped, brick_min, slot);
-            let sample = brick_pool[sample_idx];
-            let mat_id = extract_material_id(sample.word0);
-            let blend = extract_blend_weight(sample.word1);
-            let sec_id = extract_secondary_id(sample.word1);
-            let flags = extract_flags(sample.word1);
-            // Pack secondary_id in lower 8 bits, flags in upper 8 bits
-            let sec_and_flags = sec_id | (flags << 8u);
-            return MarchResult(t, true, mat_id, sec_and_flags, blend, 0u);
-        }
-
-        t += max(abs(d), MIN_STEP);
-
-        if t > t_end {
-            break;
-        }
-    }
-
-    return MarchResult(t_end, false, 0u, 0u, 0.0, 0u);
-}
-
-/// Sphere trace within a single brick using clipmap-level parameters.
-fn sphere_trace_brick_cm(origin: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
-                         t_enter: f32, cell: vec3<u32>, flat: u32,
-                         level: u32) -> MarchResult {
-    let slot = cm_get_slot(flat, level);
-    if slot == EMPTY_SLOT {
-        return MarchResult(-1.0, false, 0u, 0u, 0.0, level);
-    }
-
-    let be = cm_brick_extent(level);
-    let brick_min = cm_grid_origin(level) + vec3<f32>(cell) * be;
-    let brick_max = brick_min + vec3<f32>(be);
-
-    let aabb_t = ray_aabb_intersect(origin, inv_dir, brick_min, brick_max);
-    let t_start = max(t_enter, max(aabb_t.x, 0.0));
-    let t_end = aabb_t.y;
-
-    if t_start > t_end {
-        return MarchResult(-1.0, false, 0u, 0u, 0.0, level);
-    }
-
-    var t = t_start;
-    for (var i = 0u; i < MAX_BRICK_STEPS; i++) {
-        let pos = origin + dir * t;
-        let clamped = clamp(pos, brick_min + vec3<f32>(MIN_STEP),
-                                 brick_max - vec3<f32>(MIN_STEP));
-
-        let d = sample_brick_cm(clamped, brick_min, slot, level);
-
-        if d < HIT_EPSILON {
-            // Nearest-neighbor for material (categorical data)
-            let sample_idx = sample_brick_full_cm(clamped, brick_min, slot, level);
-            let sample = brick_pool[sample_idx];
-            let mat_id = extract_material_id(sample.word0);
-            let blend = extract_blend_weight(sample.word1);
-            let sec_id = extract_secondary_id(sample.word1);
-            let flags = extract_flags(sample.word1);
-            let sec_and_flags = sec_id | (flags << 8u);
-            return MarchResult(t, true, mat_id, sec_and_flags, blend, level);
-        }
-
-        t += max(abs(d), MIN_STEP);
-
-        if t > t_end {
-            break;
-        }
-    }
-
-    return MarchResult(t_end, false, 0u, 0u, 0.0, level);
-}
-
-/// DDA ray march through the sparse grid. Returns full MarchResult with material info.
-fn ray_march_dda(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
-    let be = brick_extent();
-    let dims_f = vec3<f32>(grid_dims());
-    let g_origin = grid_origin();
-    let grid_max = g_origin + dims_f * be;
-
-    let safe_dir = select(dir, vec3<f32>(1e-10), abs(dir) < vec3<f32>(1e-10));
-    let inv_dir = 1.0 / safe_dir;
-
-    let aabb_t = ray_aabb_intersect(origin, inv_dir, g_origin, grid_max);
-    var t_near = max(aabb_t.x, 0.0);
-    let t_far = aabb_t.y;
-
-    if t_near > t_far || t_far < 0.0 {
-        return MarchResult(-1.0, false, 0u, 0u, 0.0, 0u);
-    }
-
-    t_near += HIT_EPSILON;
-
-    let entry = origin + safe_dir * t_near;
-    let dims_i = vec3<i32>(grid_dims());
-    var cell = vec3<i32>(floor((entry - g_origin) / be));
-    cell = clamp(cell, vec3<i32>(0), dims_i - vec3<i32>(1));
-
-    let step = vec3<i32>(
-        select(-1, 1, safe_dir.x >= 0.0),
-        select(-1, 1, safe_dir.y >= 0.0),
-        select(-1, 1, safe_dir.z >= 0.0)
-    );
-
-    let t_delta = abs(vec3<f32>(be) * inv_dir);
-
-    let cell_min = g_origin + vec3<f32>(cell) * be;
-    let cell_max = cell_min + vec3<f32>(be);
-    let next_boundary = select(cell_min, cell_max, safe_dir >= vec3<f32>(0.0));
-    var t_max = (next_boundary - origin) * inv_dir;
-
-    var t = t_near;
-
-    for (var i = 0u; i < MAX_DDA_STEPS; i++) {
-        if !cell_in_bounds(cell) || t > MAX_DISTANCE {
-            break;
-        }
-
-        let ucell = vec3<u32>(cell);
-        let flat = cell_flat_index(ucell);
-        let state = get_cell_state(flat);
-
-        if state == CELL_SURFACE {
-            let result = sphere_trace_brick(origin, safe_dir, inv_dir, t, ucell, flat);
-            if result.hit {
-                return result;
-            }
-        }
-
-        if t_max.x < t_max.y && t_max.x < t_max.z {
-            t = t_max.x;
-            t_max.x += t_delta.x;
-            cell.x += step.x;
-        } else if t_max.y < t_max.z {
-            t = t_max.y;
-            t_max.y += t_delta.y;
-            cell.y += step.y;
+    if obj.sdf_type == SDF_TYPE_ANALYTICAL {
+        dist = evaluate_analytical(local_pos, obj);
+        mat_id = obj.material_id;
+    } else {
+        // SDF_TYPE_VOXELIZED
+        dist = sample_voxelized(local_pos, obj);
+        if dist < MAX_FLOAT * 0.5 {
+            mat_id = sample_voxelized_material(local_pos, obj);
         } else {
-            t = t_max.z;
-            t_max.z += t_delta.z;
-            cell.z += step.z;
+            mat_id = 0u;
         }
     }
 
-    return MarchResult(-1.0, false, 0u, 0u, 0.0, 0u);
+    // Scale correction: SDF distance in local space needs to be scaled back
+    // to world space by the accumulated uniform scale.
+    dist = dist * obj.accumulated_scale;
+
+    return vec2<f32>(dist, f32(mat_id));
 }
 
-// ---------- Clipmap DDA Ray March ----------
+// ---------- BVH Traversal ----------
 
-/// DDA ray march through a single clipmap level's grid.
-///
-/// Uses the clipmap accessor functions to read occupancy and slots from the
-/// combined buffers at the correct offsets for the given level. The brick pool
-/// (group 0) is shared across all levels.
-fn ray_march_dda_level(origin: vec3<f32>, dir: vec3<f32>,
-                       level: u32, t_start: f32, t_end: f32) -> MarchResult {
-    let be = cm_brick_extent(level);
-    let dims = cm_grid_dims(level);
-    let dims_f = vec3<f32>(dims);
-    let g_origin = cm_grid_origin(level);
-    let grid_max = g_origin + dims_f * be;
+/// Traverse the BVH to find all candidate objects for a ray.
+/// Uses an iterative stack-based traversal. Returns the minimum distance
+/// and best material/object info by sphere-tracing through candidates.
+fn ray_march_bvh(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
+    var result: MarchResult;
+    result.t = MAX_FLOAT;
+    result.hit = false;
+    result.material_id = 0u;
+    result.object_id = 0u;
+    result.normal = vec3<f32>(0.0, 1.0, 0.0);
+
+    if scene.num_objects == 0u {
+        return result;
+    }
 
     let safe_dir = select(dir, vec3<f32>(1e-10), abs(dir) < vec3<f32>(1e-10));
     let inv_dir = 1.0 / safe_dir;
 
-    // Intersect ray with this level's grid AABB.
-    let aabb_t = ray_aabb_intersect(origin, inv_dir, g_origin, grid_max);
-    var t_near = max(max(aabb_t.x, 0.0), t_start);
-    let t_far = min(aabb_t.y, t_end);
+    var t = 0.0;
 
-    if t_near > t_far || t_far < 0.0 {
-        return MarchResult(-1.0, false, 0u, 0u, 0.0, level);
-    }
-
-    t_near += HIT_EPSILON;
-
-    let entry = origin + safe_dir * t_near;
-    let dims_i = vec3<i32>(dims);
-    var cell = vec3<i32>(floor((entry - g_origin) / be));
-    cell = clamp(cell, vec3<i32>(0), dims_i - vec3<i32>(1));
-
-    let step = vec3<i32>(
-        select(-1, 1, safe_dir.x >= 0.0),
-        select(-1, 1, safe_dir.y >= 0.0),
-        select(-1, 1, safe_dir.z >= 0.0)
-    );
-
-    let t_delta = abs(vec3<f32>(be) * inv_dir);
-
-    let cell_min_pos = g_origin + vec3<f32>(cell) * be;
-    let cell_max_pos = cell_min_pos + vec3<f32>(be);
-    let next_boundary = select(cell_min_pos, cell_max_pos, safe_dir >= vec3<f32>(0.0));
-    var t_max_axis = (next_boundary - origin) * inv_dir;
-
-    var t = t_near;
-
-    for (var i = 0u; i < MAX_DDA_STEPS; i++) {
-        if !cm_cell_in_bounds(cell, level) || t > t_far {
+    for (var step = 0u; step < scene.max_steps; step++) {
+        if t > scene.max_distance {
             break;
         }
 
-        let ucell = vec3<u32>(cell);
-        let flat = cm_cell_flat_index(ucell, level);
-        let state = cm_get_cell_state(flat, level);
+        let pos = origin + safe_dir * t;
 
-        if state == CELL_SURFACE {
-            let result = sphere_trace_brick_cm(origin, safe_dir, inv_dir, t, ucell, flat, level);
-            if result.hit {
-                return result;
+        // Find minimum distance across all objects using BVH.
+        var min_dist = MAX_FLOAT;
+        var best_mat = 0u;
+        var best_obj_id = 0u;
+
+        // BVH stack-based traversal.
+        var stack: array<u32, 32>;
+        var stack_ptr = 0u;
+        stack[0] = 0u;
+        stack_ptr = 1u;
+
+        while stack_ptr > 0u {
+            stack_ptr -= 1u;
+            let node_idx = stack[stack_ptr];
+            let node = bvh_nodes[node_idx];
+
+            let node_min = vec3<f32>(node.aabb_min_x, node.aabb_min_y, node.aabb_min_z);
+            let node_max = vec3<f32>(node.aabb_max_x, node.aabb_max_y, node.aabb_max_z);
+
+            // Quick AABB-point distance check: if the current marching position
+            // is far from this node's AABB, we can skip it.
+            let closest = clamp(pos, node_min, node_max);
+            let box_dist = length(closest - pos);
+            if box_dist > min_dist {
+                continue;
+            }
+
+            if node.left == BVH_INVALID {
+                // Leaf node — evaluate the object.
+                let obj_idx = node.right_or_object;
+                if obj_idx < scene.num_objects {
+                    let eval = evaluate_object(pos, obj_idx);
+                    if eval.x < min_dist {
+                        min_dist = eval.x;
+                        best_mat = u32(eval.y);
+                        best_obj_id = objects[obj_idx].object_id;
+                    }
+                }
+            } else {
+                // Internal node — push children.
+                if stack_ptr < BVH_STACK_SIZE - 1u {
+                    stack[stack_ptr] = node.left;
+                    stack_ptr += 1u;
+                    stack[stack_ptr] = node.right_or_object;
+                    stack_ptr += 1u;
+                }
             }
         }
-        // EMPTY and INTERIOR cells are simply skipped — the ray continues
-        // through this level's grid. If nothing is hit, ray_march_clipmap()
-        // advances to the next coarser level which covers the annular region
-        // beyond this level's grid.
 
-        if t_max_axis.x < t_max_axis.y && t_max_axis.x < t_max_axis.z {
-            t = t_max_axis.x;
-            t_max_axis.x += t_delta.x;
-            cell.x += step.x;
-        } else if t_max_axis.y < t_max_axis.z {
-            t = t_max_axis.y;
-            t_max_axis.y += t_delta.y;
-            cell.y += step.y;
-        } else {
-            t = t_max_axis.z;
-            t_max_axis.z += t_delta.z;
-            cell.z += step.z;
+        if min_dist < scene.hit_threshold {
+            result.t = t;
+            result.hit = true;
+            result.material_id = best_mat;
+            result.object_id = best_obj_id;
+            return result;
         }
+
+        // Step forward by the minimum distance (sphere tracing).
+        t += max(min_dist, MIN_STEP);
     }
 
-    return MarchResult(-1.0, false, 0u, 0u, 0.0, level);
+    return result;
 }
 
-/// Probe coarser clipmap levels for surface data at the current ray position.
-///
-/// When the finest level covering a position has an empty cell, coarser levels
-/// may still have surface data (e.g., coarse terrain where fine detail wasn't placed).
-/// Checks levels from `current_level + 1` to `num_levels - 1`.
-fn probe_coarser_levels(origin: vec3<f32>, dir: vec3<f32>, inv_dir: vec3<f32>,
-                        t: f32, current_level: u32) -> MarchResult {
-    let world_pos = origin + dir * t;
+/// Simple brute-force march (no BVH) for small object counts.
+fn ray_march_brute(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
+    var result: MarchResult;
+    result.t = MAX_FLOAT;
+    result.hit = false;
+    result.material_id = 0u;
+    result.object_id = 0u;
+    result.normal = vec3<f32>(0.0, 1.0, 0.0);
 
-    for (var lvl = current_level + 1u; lvl < clipmap.num_levels; lvl++) {
-        let be = cm_brick_extent(lvl);
-        let g_origin = cm_grid_origin(lvl);
-        let local = world_pos - g_origin;
-        let cell_i = vec3<i32>(floor(local / be));
-
-        if !cm_cell_in_bounds(cell_i, lvl) {
-            continue;
-        }
-
-        let cell = vec3<u32>(cell_i);
-        let flat = cm_cell_flat_index(cell, lvl);
-        let state = cm_get_cell_state(flat, lvl);
-
-        if state == CELL_SURFACE {
-            let result = sphere_trace_brick_cm(origin, dir, inv_dir, t, cell, flat, lvl);
-            if result.hit {
-                return result;
-            }
-        }
-    }
-
-    return MarchResult(-1.0, false, 0u, 0u, 0.0, current_level);
-}
-
-/// Multi-level clipmap ray march.
-///
-/// Iterates LOD levels from finest (0) to coarsest. Each level covers
-/// the region inside its grid AABB that is not already covered by a finer
-/// level. The transition between levels follows the actual grid boundary
-/// for this specific ray (per-ray AABB intersection), not a fixed radius.
-/// This correctly handles cameras that are off-center relative to the grid.
-fn ray_march_clipmap(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
     let safe_dir = select(dir, vec3<f32>(1e-10), abs(dir) < vec3<f32>(1e-10));
-    let inv_dir = 1.0 / safe_dir;
 
-    var t_start = 0.0;
+    var t = 0.0;
 
-    for (var lvl = 0u; lvl < clipmap.num_levels; lvl++) {
-        let be = cm_brick_extent(lvl);
-        let dims_f = vec3<f32>(cm_grid_dims(lvl));
-        let g_origin = cm_grid_origin(lvl);
-        let grid_max = g_origin + dims_f * be;
-
-        let aabb_t = ray_aabb_intersect(origin, inv_dir, g_origin, grid_max);
-
-        // Skip levels whose grid this ray doesn't intersect.
-        if aabb_t.x > aabb_t.y || aabb_t.y < 0.0 {
-            continue;
+    for (var step = 0u; step < scene.max_steps; step++) {
+        if t > scene.max_distance {
+            break;
         }
 
-        // This level handles from t_start to its grid AABB exit.
-        let t_end = aabb_t.y;
+        let pos = origin + safe_dir * t;
 
-        if t_start < t_end {
-            let result = ray_march_dda_level(origin, dir, lvl, t_start, t_end);
-            if result.hit {
-                return result;
+        var min_dist = MAX_FLOAT;
+        var best_mat = 0u;
+        var best_obj_id = 0u;
+
+        for (var i = 0u; i < scene.num_objects; i++) {
+            let eval = evaluate_object(pos, i);
+            if eval.x < min_dist {
+                min_dist = eval.x;
+                best_mat = u32(eval.y);
+                best_obj_id = objects[i].object_id;
             }
         }
 
-        // Next level starts where this level's grid ends.
-        t_start = max(t_start, t_end);
+        if min_dist < scene.hit_threshold {
+            result.t = t;
+            result.hit = true;
+            result.material_id = best_mat;
+            result.object_id = best_obj_id;
+            return result;
+        }
+
+        t += max(min_dist, MIN_STEP);
     }
 
-    return MarchResult(-1.0, false, 0u, 0u, 0.0, 0u);
+    return result;
 }
 
-// ---------- Normal computation ----------
+// ---------- Normal Computation ----------
 
-/// Sample the SDF at a world-space position using the sparse grid + brick pool.
-fn sample_sdf(pos: vec3<f32>) -> f32 {
-    let cell_i = world_to_cell(pos);
-    let be = brick_extent();
-
-    if !cell_in_bounds(cell_i) {
-        return be;
+/// Compute SDF at a world position by evaluating all objects (brute force).
+fn sample_scene(pos: vec3<f32>) -> f32 {
+    var min_dist = MAX_FLOAT;
+    for (var i = 0u; i < scene.num_objects; i++) {
+        let eval = evaluate_object(pos, i);
+        min_dist = min(min_dist, eval.x);
     }
-
-    let cell = vec3<u32>(cell_i);
-    let flat = cell_flat_index(cell);
-    let state = get_cell_state(flat);
-
-    if state == CELL_EMPTY {
-        return be * 0.5;
-    }
-    if state == CELL_INTERIOR {
-        return -be * 0.5;
-    }
-    if state == CELL_SURFACE {
-        let slot = slots[flat];
-        if slot == EMPTY_SLOT {
-            return be * 0.5;
-        }
-        let brick_min = grid_origin() + vec3<f32>(cell) * be;
-        return sample_brick(pos, brick_min, slot);
-    }
-    return be * 0.5;
-}
-
-/// Sample the SDF at a world-space position using a specific clipmap level.
-fn sample_sdf_cm(pos: vec3<f32>, level: u32) -> f32 {
-    let be = cm_brick_extent(level);
-    let g_origin = cm_grid_origin(level);
-    let local = pos - g_origin;
-    let cell_i = vec3<i32>(floor(local / be));
-
-    if !cm_cell_in_bounds(cell_i, level) {
-        return be;
-    }
-
-    let cell = vec3<u32>(cell_i);
-    let flat = cm_cell_flat_index(cell, level);
-    let state = cm_get_cell_state(flat, level);
-
-    if state == CELL_EMPTY {
-        return be * 0.5;
-    }
-    if state == CELL_INTERIOR {
-        return -be * 0.5;
-    }
-    if state == CELL_SURFACE {
-        let slot = cm_get_slot(flat, level);
-        if slot == EMPTY_SLOT {
-            return be * 0.5;
-        }
-        let brick_min = g_origin + vec3<f32>(cell) * be;
-        return sample_brick_cm(pos, brick_min, slot, level);
-    }
-    return be * 0.5;
+    return min_dist;
 }
 
 /// Compute surface normal via central differences (6 SDF evaluations).
 fn compute_normal(pos: vec3<f32>) -> vec3<f32> {
-    let e = voxel_size() * 1.5;
-    let nx = sample_sdf(pos + vec3<f32>(e, 0.0, 0.0)) - sample_sdf(pos - vec3<f32>(e, 0.0, 0.0));
-    let ny = sample_sdf(pos + vec3<f32>(0.0, e, 0.0)) - sample_sdf(pos - vec3<f32>(0.0, e, 0.0));
-    let nz = sample_sdf(pos + vec3<f32>(0.0, 0.0, e)) - sample_sdf(pos - vec3<f32>(0.0, 0.0, e));
+    let e = scene.hit_threshold * 10.0;
+    let nx = sample_scene(pos + vec3<f32>(e, 0.0, 0.0)) - sample_scene(pos - vec3<f32>(e, 0.0, 0.0));
+    let ny = sample_scene(pos + vec3<f32>(0.0, e, 0.0)) - sample_scene(pos - vec3<f32>(0.0, e, 0.0));
+    let nz = sample_scene(pos + vec3<f32>(0.0, 0.0, e)) - sample_scene(pos - vec3<f32>(0.0, 0.0, e));
     return normalize(vec3<f32>(nx, ny, nz));
 }
 
-/// Compute surface normal via central differences using a specific clipmap level.
-fn compute_normal_cm(pos: vec3<f32>, level: u32) -> vec3<f32> {
-    let e = cm_voxel_size(level) * 1.5;
-    let nx = sample_sdf_cm(pos + vec3<f32>(e, 0.0, 0.0), level)
-           - sample_sdf_cm(pos - vec3<f32>(e, 0.0, 0.0), level);
-    let ny = sample_sdf_cm(pos + vec3<f32>(0.0, e, 0.0), level)
-           - sample_sdf_cm(pos - vec3<f32>(0.0, e, 0.0), level);
-    let nz = sample_sdf_cm(pos + vec3<f32>(0.0, 0.0, e), level)
-           - sample_sdf_cm(pos - vec3<f32>(0.0, 0.0, e), level);
-    return normalize(vec3<f32>(nx, ny, nz));
-}
-
-/// Sample SDF at a position using the finest clipmap level with data.
-///
-/// Iterates levels from finest (0) to coarsest. Returns the SDF distance
-/// from the first level that has surface or interior data at this position.
-/// Used for accurate normal computation when multiple tiers coexist.
-fn sample_sdf_finest(pos: vec3<f32>) -> f32 {
-    for (var lvl = 0u; lvl < clipmap.num_levels; lvl++) {
-        let be = cm_brick_extent(lvl);
-        let g_origin = cm_grid_origin(lvl);
-        let local = pos - g_origin;
-        let cell_i = vec3<i32>(floor(local / be));
-
-        if !cm_cell_in_bounds(cell_i, lvl) {
-            continue;
-        }
-
-        let cell = vec3<u32>(cell_i);
-        let flat = cm_cell_flat_index(cell, lvl);
-        let state = cm_get_cell_state(flat, lvl);
-
-        if state == CELL_SURFACE {
-            let slot = cm_get_slot(flat, lvl);
-            if slot != EMPTY_SLOT {
-                let brick_min = g_origin + vec3<f32>(cell) * be;
-                return sample_brick_cm(pos, brick_min, slot, lvl);
-            }
-        }
-        if state == CELL_INTERIOR {
-            return -be * 0.5;
-        }
-    }
-
-    // No data at any level — return large positive distance.
-    return cm_brick_extent(clipmap.num_levels - 1u);
-}
-
-/// Compute surface normal using the finest available clipmap level at each sample point.
-///
-/// The central difference epsilon is based on the hit level's voxel size,
-/// but each SDF sample uses the finest level with data at that position.
-/// Returns vec4(normal.xyz, grad_magnitude).
-/// grad_magnitude is the SDF gradient length normalized by the expected value (2*eps).
-/// Clean surfaces have grad_magnitude ≈ 1.0.
-/// SDF min() union fillets have grad_magnitude ≈ 0.707 (perpendicular junction).
-fn compute_normal_finest(pos: vec3<f32>, hit_level: u32) -> vec4<f32> {
-    let e = cm_voxel_size(hit_level) * 1.5;
-    let nx = sample_sdf_finest(pos + vec3<f32>(e, 0.0, 0.0))
-           - sample_sdf_finest(pos - vec3<f32>(e, 0.0, 0.0));
-    let ny = sample_sdf_finest(pos + vec3<f32>(0.0, e, 0.0))
-           - sample_sdf_finest(pos - vec3<f32>(0.0, e, 0.0));
-    let nz = sample_sdf_finest(pos + vec3<f32>(0.0, 0.0, e))
-           - sample_sdf_finest(pos - vec3<f32>(0.0, 0.0, e));
-    let grad = vec3<f32>(nx, ny, nz);
-    let mag = length(grad);
-    return vec4<f32>(grad / max(mag, 1e-6), mag / (2.0 * e));
-}
-
-/// Compute normal with LOD transition blending near level boundaries.
-///
-/// Near a clipmap level grid boundary, blends between the finest-available
-/// normal and the next coarser level's normal. Uses distance to the grid
-/// AABB faces (not a fixed radius) so blending works correctly regardless
-/// of camera position relative to the grid center.
-/// Returns vec4(normal.xyz, grad_magnitude) with LOD blending.
-/// The grad_magnitude comes from the finest level (not blended).
-fn compute_normal_blended(pos: vec3<f32>, hit_level: u32, t: f32) -> vec4<f32> {
-    let fine4 = compute_normal_finest(pos, hit_level);
-    let n_fine = fine4.xyz;
-    let grad_mag = fine4.w;
-
-    // No blending possible if we're at the coarsest level.
-    if hit_level + 1u >= clipmap.num_levels {
-        return vec4<f32>(n_fine, grad_mag);
-    }
-
-    // Distance from hit position to the nearest face of this level's grid AABB.
-    let g_origin = cm_grid_origin(hit_level);
-    let be = cm_brick_extent(hit_level);
-    let dims_f = vec3<f32>(cm_grid_dims(hit_level));
-    let grid_max = g_origin + dims_f * be;
-    let to_min = pos - g_origin;
-    let to_max = grid_max - pos;
-    let dist_to_boundary = min(
-        min(min(to_min.x, to_min.y), to_min.z),
-        min(min(to_max.x, to_max.y), to_max.z)
-    );
-
-    let blend_width = cm_radius(hit_level) * LOD_BLEND_FRACTION;
-
-    // Outside transition band — use fine normal only.
-    if dist_to_boundary > blend_width || dist_to_boundary < 0.0 {
-        return vec4<f32>(n_fine, grad_mag);
-    }
-
-    // In transition zone: blend=1 at inner edge (fine), blend=0 at boundary (coarse).
-    let blend = clamp(dist_to_boundary / blend_width, 0.0, 1.0);
-    let n_coarse = compute_normal_cm(pos, hit_level + 1u);
-    return vec4<f32>(normalize(mix(n_coarse, n_fine, blend)), grad_mag);
-}
-
-// ---------- Entry point ----------
+// ---------- Entry Point ----------
 
 @compute @workgroup_size(8, 8, 1)
 fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
@@ -833,60 +491,44 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
     let coord = vec2<i32>(pixel.xy);
 
     // Generate UV in [0, 1], then NDC in [-1, 1].
-    // Y is flipped: pixel.y=0 is screen top -> ndc.y=+1 (camera up).
     let uv = (vec2<f32>(pixel.xy) + 0.5 + camera.jitter) / vec2<f32>(dims);
     let ndc = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
 
-    // Camera ray
+    // Camera ray.
     let ray_origin = camera.position.xyz;
     let ray_dir = normalize(
         camera.forward.xyz + ndc.x * camera.right.xyz + ndc.y * camera.up.xyz
     );
 
-    // Choose march strategy based on clipmap availability.
+    // Choose march strategy.
     var result: MarchResult;
-    if clipmap.num_levels > 0u {
-        result = ray_march_clipmap(ray_origin, ray_dir);
+    if arrayLength(&bvh_nodes) > 0u {
+        result = ray_march_bvh(ray_origin, ray_dir);
     } else {
-        result = ray_march_dda(ray_origin, ray_dir);
+        result = ray_march_brute(ray_origin, ray_dir);
     }
 
     if result.hit {
         let hit_pos = ray_origin + ray_dir * result.t;
+        let normal = compute_normal(hit_pos);
 
-        // Compute normal using the appropriate path.
-        // compute_normal_blended smooths LOD transitions by blending normals
-        // near level boundaries. Falls back to compute_normal_finest away from
-        // boundaries, which checks all levels for the finest data.
-        var normal: vec3<f32>;
-        var grad_mag = 1.0;
-        if clipmap.num_levels > 0u {
-            let nm = compute_normal_blended(hit_pos, result.level, result.t);
-            normal = nm.xyz;
-            grad_mag = nm.w;
-        } else {
-            normal = compute_normal(hit_pos);
-        }
-
-        // Write G-buffer
+        // Write G-buffer.
         textureStore(gbuf_position, coord, vec4<f32>(hit_pos, result.t));
-        textureStore(gbuf_normal, coord, vec4<f32>(normal, result.blend_weight));
-        // Pack material_id (lower 16) + secondary_id_and_flags (upper 16) into R32Uint
-        let packed_mat = result.material_id | (result.secondary_id_and_flags << 16u);
-        textureStore(gbuf_material, coord, vec4<u32>(packed_mat, 0u, 0u, 0u));
-        // Motion vector + gradient magnitude for fillet detection
+        textureStore(gbuf_normal, coord, vec4<f32>(normal, 0.0));
+        textureStore(gbuf_material, coord, vec4<u32>(result.material_id, 0u, 0u, 0u));
+
+        // Motion vectors.
         let prev_clip = camera.prev_vp * vec4<f32>(hit_pos, 1.0);
-        var motion = vec2<f32>(0.0, 0.0);
+        var motion = vec2<f32>(0.0);
         if prev_clip.w > 0.0 {
             let prev_ndc = prev_clip.xy / prev_clip.w;
-            // NDC [-1,1] -> UV [0,1], Y flipped (screen top = y=0, NDC top = y=+1)
             let prev_uv = vec2<f32>(prev_ndc.x * 0.5 + 0.5, 0.5 - prev_ndc.y * 0.5);
             let curr_uv = (vec2<f32>(pixel.xy) + 0.5) / vec2<f32>(dims);
             motion = curr_uv - prev_uv;
         }
-        textureStore(gbuf_motion, coord, vec4<f32>(motion, grad_mag, 0.0));
+        textureStore(gbuf_motion, coord, vec4<f32>(motion, 1.0, 0.0));
     } else {
-        // Sky / miss — encode as MAX_FLOAT hit distance
+        // Sky / miss.
         textureStore(gbuf_position, coord, vec4<f32>(0.0, 0.0, 0.0, MAX_FLOAT));
         textureStore(gbuf_normal, coord, vec4<f32>(0.0, 0.0, 0.0, 0.0));
         textureStore(gbuf_material, coord, vec4<u32>(0u, 0u, 0u, 0u));

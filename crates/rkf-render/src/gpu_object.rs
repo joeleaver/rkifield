@@ -32,7 +32,8 @@ use bytemuck::{Pod, Zeroable};
 /// | 148    | 4    | accumulated_scale (f32) |
 /// | 152    | 4    | lod_level (u32) |
 /// | 156    | 4    | object_id (u32) |
-/// | 160    | 96   | _padding |
+/// | 160    | 4    | primitive_type (u32) |
+/// | 164    | 92   | _padding |
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Pod, Zeroable)]
 pub struct GpuObject {
@@ -77,9 +78,11 @@ pub struct GpuObject {
     pub lod_level: u32,
     /// Unique object ID (matches SceneObject::id).
     pub object_id: u32,
+    /// Primitive type for analytical objects (see [`primitive_type`] module).
+    pub primitive_type: u32,
 
     /// Padding to 256 bytes.
-    pub _padding: [f32; 24],
+    pub _padding: [f32; 23],
 }
 
 /// SDF type constants for [`GpuObject::sdf_type`].
@@ -90,6 +93,22 @@ pub mod sdf_type {
     pub const ANALYTICAL: u32 = 1;
     /// Voxelized SDF (brick map lookup).
     pub const VOXELIZED: u32 = 2;
+}
+
+/// Primitive type constants for [`GpuObject::primitive_type`].
+pub mod primitive_type {
+    /// Sphere (params: radius).
+    pub const SPHERE: u32 = 0;
+    /// Box (params: half_x, half_y, half_z).
+    pub const BOX: u32 = 1;
+    /// Capsule (params: radius, half_height).
+    pub const CAPSULE: u32 = 2;
+    /// Torus (params: major_radius, minor_radius).
+    pub const TORUS: u32 = 3;
+    /// Cylinder (params: radius, half_height).
+    pub const CYLINDER: u32 = 4;
+    /// Plane (params: normal_xyz, distance).
+    pub const PLANE: u32 = 5;
 }
 
 /// Blend mode constants for [`GpuObject::blend_mode`].
@@ -104,22 +123,6 @@ pub mod blend_mode {
     pub const INTERSECT: u32 = 3;
 }
 
-/// Analytical SDF primitive type constants for sdf_params interpretation.
-pub mod primitive_type {
-    /// Sphere: sdf_params = [radius, 0, 0, 0].
-    pub const SPHERE: u32 = 0;
-    /// Box: sdf_params = [half_x, half_y, half_z, 0].
-    pub const BOX: u32 = 1;
-    /// Capsule: sdf_params = [radius, half_height, 0, 0].
-    pub const CAPSULE: u32 = 2;
-    /// Torus: sdf_params = [major_radius, minor_radius, 0, 0].
-    pub const TORUS: u32 = 3;
-    /// Cylinder: sdf_params = [radius, half_height, 0, 0].
-    pub const CYLINDER: u32 = 4;
-    /// Plane: sdf_params = [normal_x, normal_y, normal_z, distance].
-    pub const PLANE: u32 = 5;
-}
-
 impl GpuObject {
     /// Build a `GpuObject` from a flattened node and its parent object data.
     pub fn from_flat_node(
@@ -130,7 +133,7 @@ impl GpuObject {
     ) -> Self {
         let inv = flat.inverse_world.to_cols_array_2d();
 
-        let (sdf_type, material_id, sdf_params, brick_map_offset, brick_map_dims, voxel_size) =
+        let (sdf_type, material_id, sdf_params, brick_map_offset, brick_map_dims, voxel_size, prim_type) =
             match &flat.sdf_source {
                 rkf_core::SdfSource::None => (
                     sdf_type::NONE,
@@ -139,6 +142,7 @@ impl GpuObject {
                     0,
                     [0u32; 3],
                     0.0,
+                    0,
                 ),
                 rkf_core::SdfSource::Analytical {
                     primitive,
@@ -152,6 +156,7 @@ impl GpuObject {
                         0,
                         [0u32; 3],
                         0.0,
+                        primitive_type_id(primitive),
                     )
                 }
                 rkf_core::SdfSource::Voxelized {
@@ -169,6 +174,7 @@ impl GpuObject {
                         brick_map_handle.dims.z,
                     ],
                     *voxel_size,
+                    0,
                 ),
             };
 
@@ -189,12 +195,24 @@ impl GpuObject {
             accumulated_scale: flat.accumulated_scale,
             lod_level: 0,
             object_id,
-            _padding: [0.0; 24],
+            primitive_type: prim_type,
+            _padding: [0.0; 23],
         }
     }
 }
 
 /// Extract SDF primitive parameters into a `[f32; 4]` array.
+fn primitive_type_id(primitive: &rkf_core::SdfPrimitive) -> u32 {
+    match *primitive {
+        rkf_core::SdfPrimitive::Sphere { .. } => primitive_type::SPHERE,
+        rkf_core::SdfPrimitive::Box { .. } => primitive_type::BOX,
+        rkf_core::SdfPrimitive::Capsule { .. } => primitive_type::CAPSULE,
+        rkf_core::SdfPrimitive::Torus { .. } => primitive_type::TORUS,
+        rkf_core::SdfPrimitive::Cylinder { .. } => primitive_type::CYLINDER,
+        rkf_core::SdfPrimitive::Plane { .. } => primitive_type::PLANE,
+    }
+}
+
 fn primitive_params(primitive: &rkf_core::SdfPrimitive) -> [f32; 4] {
     match *primitive {
         rkf_core::SdfPrimitive::Sphere { radius } => [radius, 0.0, 0.0, 0.0],
@@ -268,7 +286,8 @@ mod tests {
             accumulated_scale: 2.0,
             lod_level: 0,
             object_id: 99,
-            _padding: [0.0; 24],
+            primitive_type: primitive_type::SPHERE,
+            _padding: [0.0; 23],
         };
 
         let bytes = bytemuck::bytes_of(&obj);
