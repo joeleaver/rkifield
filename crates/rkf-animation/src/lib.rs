@@ -2,16 +2,16 @@
 //!
 //! Skeletal animation system for the RKIField SDF engine.
 //!
-//! Unlike traditional mesh-based engines, skeletal animation here operates on
-//! segmented rigid body parts with joint rebaking. Bones are NOT evaluated
-//! during ray marching -- instead, a compute shader blends joint regions using
-//! smooth-min operations and writes the result back to the brick pool.
+//! In v2, skeletal animation is pure transform hierarchy animation — bones are
+//! nodes in the SceneNode tree and animation = updating local transforms from
+//! keyframes. No joint rebaking, no segment management.
 //!
 //! This crate provides:
-//! - Segmented joint rebaking pipeline
-//! - Blend shape support via delta-SDF application
-//! - Animation clip playback and blending
 //! - Skeleton definition and bone hierarchy types
+//! - Animation clip and keyframe data
+//! - Playback and blending
+//! - Blend shape support via delta-SDF application
+//! - Character assembly
 
 #![warn(missing_docs)]
 
@@ -19,6 +19,4 @@ pub mod blend_shape;
 pub mod character;
 pub mod clip;
 pub mod player;
-pub mod rebake;
-pub mod segment;
 pub mod skeleton;
