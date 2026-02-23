@@ -337,6 +337,7 @@ fn ray_march_bvh(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
 
     let safe_dir = select(dir, vec3<f32>(1e-10), abs(dir) < vec3<f32>(1e-10));
     let inv_dir = 1.0 / safe_dir;
+    let cam_pos = camera.position.xyz;
 
     var t = 0.0;
 
@@ -346,6 +347,9 @@ fn ray_march_bvh(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
         }
 
         let pos = origin + safe_dir * t;
+        // Camera-relative position for object evaluation.
+        // inverse_world matrices are built in camera-relative space by flatten_object().
+        let cam_rel = pos - cam_pos;
 
         // Find minimum distance across all objects using BVH.
         var min_dist = MAX_FLOAT;
@@ -378,7 +382,7 @@ fn ray_march_bvh(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
                 // Leaf node — evaluate the object.
                 let obj_idx = node.right_or_object;
                 if obj_idx < scene.num_objects {
-                    let eval = evaluate_object(pos, obj_idx);
+                    let eval = evaluate_object(cam_rel, obj_idx);
                     if eval.x < min_dist {
                         min_dist = eval.x;
                         best_mat = u32(eval.y);
@@ -421,6 +425,7 @@ fn ray_march_brute(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
     result.normal = vec3<f32>(0.0, 1.0, 0.0);
 
     let safe_dir = select(dir, vec3<f32>(1e-10), abs(dir) < vec3<f32>(1e-10));
+    let cam_pos = camera.position.xyz;
 
     var t = 0.0;
 
@@ -430,13 +435,14 @@ fn ray_march_brute(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
         }
 
         let pos = origin + safe_dir * t;
+        let cam_rel = pos - cam_pos;
 
         var min_dist = MAX_FLOAT;
         var best_mat = 0u;
         var best_obj_id = 0u;
 
         for (var i = 0u; i < scene.num_objects; i++) {
-            let eval = evaluate_object(pos, i);
+            let eval = evaluate_object(cam_rel, i);
             if eval.x < min_dist {
                 min_dist = eval.x;
                 best_mat = u32(eval.y);
@@ -461,10 +467,12 @@ fn ray_march_brute(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
 // ---------- Normal Computation ----------
 
 /// Compute SDF at a world position by evaluating all objects (brute force).
+/// Converts to camera-relative internally for correct inverse_world transforms.
 fn sample_scene(pos: vec3<f32>) -> f32 {
+    let cam_rel = pos - camera.position.xyz;
     var min_dist = MAX_FLOAT;
     for (var i = 0u; i < scene.num_objects; i++) {
-        let eval = evaluate_object(pos, i);
+        let eval = evaluate_object(cam_rel, i);
         min_dist = min(min_dist, eval.x);
     }
     return min_dist;
