@@ -92,7 +92,7 @@ pub struct RenderStats {
 /// Current camera position, orientation, and projection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CameraSnapshot {
-    /// Chunk-space integer part of the camera's world position `[cx, cy, cz]`.
+    /// Integer chunk coordinates of the camera's world position `[cx, cy, cz]`.
     pub chunk: [i32; 3],
     /// Sub-chunk local position in metres `[lx, ly, lz]`.
     pub local: [f32; 3],

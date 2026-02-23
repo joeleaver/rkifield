@@ -6,9 +6,8 @@
 //! - [`WorldPosition`] for float-precision-safe world-space coordinates
 //! - Voxel sample types and brick data structures (8x8x8 voxel bricks)
 //! - Brick pool management and GPU resource coordination
-//! - Sparse spatial index for world occupancy
 //! - Material table types and constants
-//! - Resolution tier definitions and chunk geometry
+//! - SDF primitives and AABB geometry
 
 #![warn(missing_docs)]
 
@@ -16,37 +15,24 @@ pub mod aabb;
 pub mod automation;
 /// 8×8×8 voxel brick — the fundamental unit of SDF storage.
 pub mod brick;
-/// Chunk data structure and `.rkf` binary format for streaming.
-pub mod chunk;
-/// Clipmap LOD system — multi-level sparse grids for camera-relative detail.
-pub mod clipmap;
 /// CPU-side brick pool with free-list allocation.
 pub mod brick_pool;
-pub mod cell_state;
 /// Companion brick types: bone, volumetric, and color data pools.
 pub mod companion;
 pub mod constants;
 /// Material properties for the global GPU material table.
 pub mod material;
-/// BrickPool + SparseGrid integration: populate a grid from an SDF.
-pub mod populate;
 /// CPU reference trilinear sampling within a brick.
 pub mod sampling;
 /// SDF generation utilities for testing and offline voxelization.
 pub mod sdf;
-/// Single-LOD sparse grid for voxel occupancy and brick indexing.
-pub mod sparse_grid;
 /// Voxel sample type and flag constants for GPU-packed voxel data.
 pub mod voxel;
 pub mod world_position;
 
 pub use aabb::{Aabb, WorldAabb};
-pub use chunk::{Chunk, ChunkIoError, RkfHeader, RkfTierHeader, TierGrid, load_chunk, load_chunk_file, save_chunk, save_chunk_file};
-pub use clipmap::{ClipmapConfig, ClipmapGridSet, ClipmapLevel, MAX_CLIPMAP_LEVELS, DEFAULT_CLIPMAP_LEVELS};
 pub use brick::Brick;
 pub use brick_pool::{BonePool, BrickPool, ColorPool, Pool, VolumetricPool};
-pub use cell_state::CellState;
-pub use sparse_grid::{SparseGrid, EMPTY_SLOT};
 pub use companion::{BoneBrick, BoneVoxel, ColorBrick, ColorVoxel, VolumetricBrick, VolumetricVoxel};
 pub use material::Material;
 pub use voxel::VoxelSample;
