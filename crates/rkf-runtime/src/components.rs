@@ -61,17 +61,6 @@ pub struct Parent {
     pub bone_index: Option<u32>,
 }
 
-/// Link to brick pool region for an SDF object.
-#[derive(Debug, Clone, Copy)]
-pub struct SdfObject {
-    /// Start index in the brick pool.
-    pub brick_start: u32,
-    /// Number of bricks in this object.
-    pub brick_count: u32,
-    /// Resolution tier (0 = finest = 0.5cm, 3 = coarsest = 32cm).
-    pub tier: u8,
-}
-
 /// Camera component.
 #[derive(Debug, Clone, Copy)]
 pub struct CameraComponent {
@@ -186,15 +175,4 @@ mod tests {
         assert!(!m.locked);
     }
 
-    #[test]
-    fn sdf_object_fields() {
-        let s = SdfObject {
-            brick_start: 100,
-            brick_count: 50,
-            tier: 2,
-        };
-        assert_eq!(s.brick_start, 100);
-        assert_eq!(s.brick_count, 50);
-        assert_eq!(s.tier, 2);
-    }
 }

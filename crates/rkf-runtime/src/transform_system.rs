@@ -11,6 +11,8 @@ use hecs::World;
 use rkf_core::WorldPosition;
 
 use crate::components::{Parent, Transform, WorldTransform};
+use crate::scene::RuntimeScene;
+use rkf_core::transform_flatten::{self, FlatNode};
 
 /// Compute the camera-relative f32 offset from a WorldPosition.
 ///
@@ -99,6 +101,46 @@ pub fn update_transforms(world: &mut World, camera_pos: &WorldPosition) {
             *existing = WorldTransform { matrix };
         }
     }
+}
+
+/// Flatten all SDF objects in a [`RuntimeScene`] for GPU upload.
+///
+/// Calls [`rkf_core::transform_flatten::flatten_object`] on each root object
+/// in the scene's SDF hierarchy, collecting the results into a single flat array.
+///
+/// # Returns
+///
+/// A vec of `(object_id, Vec<FlatNode>)` pairs — one per SDF object.
+pub fn flatten_sdf_scene(
+    scene: &RuntimeScene,
+    camera_pos: &WorldPosition,
+) -> Vec<(u32, Vec<FlatNode>)> {
+    scene
+        .sdf_scene
+        .root_objects
+        .iter()
+        .map(|obj| {
+            let flat = transform_flatten::flatten_object(obj, camera_pos);
+            (obj.id, flat)
+        })
+        .collect()
+}
+
+/// Update all transforms for a [`RuntimeScene`] — both ECS and SDF.
+///
+/// 1. Updates ECS `WorldTransform` components via [`update_transforms`]
+/// 2. Flattens SDF object trees via [`flatten_sdf_scene`]
+///
+/// Returns the flattened SDF nodes for GPU upload.
+pub fn update_all_transforms(
+    scene: &mut RuntimeScene,
+    camera_pos: &WorldPosition,
+) -> Vec<(u32, Vec<FlatNode>)> {
+    // Update ECS transforms (lights, cameras, fog volumes).
+    update_transforms(&mut scene.world, camera_pos);
+
+    // Flatten SDF object trees.
+    flatten_sdf_scene(scene, camera_pos)
 }
 
 // ─── tests ────────────────────────────────────────────────────────────────────
@@ -274,5 +316,67 @@ mod tests {
         let x_col = wt.matrix.col(0).truncate();
         // After 90° Y rotation: x_col ≈ (0, 0, -1)
         assert!(x_col.z.abs() > 0.9, "x_col = {:?}", x_col);
+    }
+
+    // ── v2 SDF scene flattening tests ───────────────────────────────────────
+
+    use rkf_core::scene_node::{SceneNode, SdfPrimitive};
+    use crate::components::CameraComponent;
+
+    #[test]
+    fn flatten_sdf_scene_empty() {
+        let scene = RuntimeScene::new("test");
+        let flat = flatten_sdf_scene(&scene, &zero_pos());
+        assert!(flat.is_empty());
+    }
+
+    #[test]
+    fn flatten_sdf_scene_single_object() {
+        let mut scene = RuntimeScene::new("test");
+        let node = SceneNode::analytical(
+            "sphere",
+            SdfPrimitive::Sphere { radius: 0.5 },
+            1,
+        );
+        scene.sdf_scene.add_object("sphere_obj", WorldPosition::default(), node);
+
+        let flat = flatten_sdf_scene(&scene, &zero_pos());
+        assert_eq!(flat.len(), 1);
+        assert_eq!(flat[0].0, 1); // object ID
+        assert_eq!(flat[0].1.len(), 1); // one node
+        assert_eq!(flat[0].1[0].name, "sphere");
+    }
+
+    #[test]
+    fn flatten_sdf_scene_multiple_objects() {
+        let mut scene = RuntimeScene::new("test");
+        let n1 = SceneNode::analytical("s1", SdfPrimitive::Sphere { radius: 0.3 }, 1);
+        let n2 = SceneNode::analytical("s2", SdfPrimitive::Sphere { radius: 0.7 }, 2);
+        scene.sdf_scene.add_object("obj1", WorldPosition::default(), n1);
+        scene.sdf_scene.add_object("obj2", WorldPosition::default(), n2);
+
+        let flat = flatten_sdf_scene(&scene, &zero_pos());
+        assert_eq!(flat.len(), 2);
+        assert_eq!(flat[0].0, 1);
+        assert_eq!(flat[1].0, 2);
+    }
+
+    #[test]
+    fn update_all_transforms_mixed() {
+        let mut scene = RuntimeScene::new("test");
+
+        // SDF object
+        let node = SceneNode::analytical("sphere", SdfPrimitive::Sphere { radius: 0.5 }, 1);
+        scene.sdf_scene.add_object("obj", WorldPosition::default(), node);
+
+        // ECS camera entity
+        scene.spawn_camera(Transform::default(), CameraComponent::default());
+
+        let flat = update_all_transforms(&mut scene, &zero_pos());
+
+        // SDF flattened
+        assert_eq!(flat.len(), 1);
+        // ECS entity count unchanged
+        assert_eq!(scene.ecs_entity_count(), 1);
     }
 }

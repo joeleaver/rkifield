@@ -22,7 +22,7 @@ pub mod config;
 pub mod double_buffer;
 /// Frame scheduling and render pass ordering (stub — pending v2 rewrite).
 pub mod frame;
-/// Scene management via hecs ECS.
+/// Scene management — v2 object-centric SDF scene + hecs ECS for non-SDF entities.
 pub mod scene;
 /// Transform hierarchy update system.
 pub mod transform_system;
@@ -44,7 +44,7 @@ pub mod material_reload;
 pub use asset_registry::{AssetEntry, AssetRegistry, AssetState, Handle};
 pub use components::{
     CameraComponent, EditorMetadata, FogVolumeComponent, Parent,
-    SdfObject, Transform, WorldTransform,
+    Transform, WorldTransform,
 };
 pub use config::{
     ConfigError, EngineConfig, GiSettings, PostProcessSettings, QualityPreset, RayMarchSettings,
@@ -52,8 +52,8 @@ pub use config::{
 };
 pub use double_buffer::{DoubleBuffer, DoubleBufferSet};
 pub use frame::FrameSettings;
-pub use scene::Scene;
-pub use transform_system::update_transforms;
+pub use scene::RuntimeScene;
+pub use transform_system::{flatten_sdf_scene, update_all_transforms, update_transforms};
 pub use memory_audit::{
     LeakReport, MemoryAudit, MemoryHistory, PoolStats, detect_leaks, POOL_BONE_BRICKS,
     POOL_COLOR_BRICKS, POOL_SDF_BRICKS, POOL_STAGING, POOL_VOLUMETRIC_BRICKS,
