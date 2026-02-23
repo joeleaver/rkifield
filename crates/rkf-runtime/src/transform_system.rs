@@ -8,6 +8,7 @@
 
 use glam::{Mat4, Vec3};
 use hecs::World;
+use rkf_core::bvh::Bvh;
 use rkf_core::WorldPosition;
 
 use crate::components::{Parent, Transform, WorldTransform};
@@ -124,6 +125,16 @@ pub fn flatten_sdf_scene(
             (obj.id, flat)
         })
         .collect()
+}
+
+/// Build a BVH from the scene's SDF objects.
+pub fn build_scene_bvh(scene: &RuntimeScene) -> Bvh {
+    scene.sdf_scene.build_bvh()
+}
+
+/// Refit an existing BVH using current scene object AABBs.
+pub fn refit_scene_bvh(scene: &RuntimeScene, bvh: &mut Bvh) {
+    scene.sdf_scene.refit_bvh(bvh);
 }
 
 /// Update all transforms for a [`RuntimeScene`] — both ECS and SDF.
@@ -359,6 +370,58 @@ mod tests {
         assert_eq!(flat.len(), 2);
         assert_eq!(flat[0].0, 1);
         assert_eq!(flat[1].0, 2);
+    }
+
+    #[test]
+    fn build_scene_bvh_empty() {
+        let scene = RuntimeScene::new("test");
+        let bvh = build_scene_bvh(&scene);
+        assert!(bvh.is_empty());
+    }
+
+    #[test]
+    fn build_scene_bvh_with_objects() {
+        use rkf_core::Aabb;
+
+        let mut scene = RuntimeScene::new("test");
+        let n1 = SceneNode::analytical("s1", SdfPrimitive::Sphere { radius: 0.5 }, 1);
+        let n2 = SceneNode::analytical("s2", SdfPrimitive::Sphere { radius: 0.5 }, 2);
+        scene.sdf_scene.add_object("obj1", WorldPosition::default(), n1);
+        scene.sdf_scene.add_object("obj2", WorldPosition::default(), n2);
+
+        // Set AABBs
+        scene.sdf_scene.root_objects[0].aabb = Aabb::new(
+            Vec3::new(-1.0, -1.0, -1.0),
+            Vec3::new(1.0, 1.0, 1.0),
+        );
+        scene.sdf_scene.root_objects[1].aabb = Aabb::new(
+            Vec3::new(5.0, -1.0, -1.0),
+            Vec3::new(7.0, 1.0, 1.0),
+        );
+
+        let bvh = build_scene_bvh(&scene);
+        assert_eq!(bvh.leaf_count(), 2);
+    }
+
+    #[test]
+    fn refit_scene_bvh_updates() {
+        use rkf_core::Aabb;
+
+        let mut scene = RuntimeScene::new("test");
+        let n1 = SceneNode::analytical("s1", SdfPrimitive::Sphere { radius: 0.5 }, 1);
+        scene.sdf_scene.add_object("obj1", WorldPosition::default(), n1);
+        scene.sdf_scene.root_objects[0].aabb = Aabb::new(Vec3::ZERO, Vec3::ONE);
+
+        let mut bvh = build_scene_bvh(&scene);
+        assert!(bvh.nodes[0].aabb.max.x <= 1.0 + 1e-5);
+
+        // Move object
+        scene.sdf_scene.root_objects[0].aabb = Aabb::new(
+            Vec3::new(50.0, 0.0, 0.0),
+            Vec3::new(52.0, 1.0, 1.0),
+        );
+        refit_scene_bvh(&scene, &mut bvh);
+        assert!(bvh.nodes[0].aabb.max.x >= 52.0);
     }
 
     #[test]

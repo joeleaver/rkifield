@@ -144,7 +144,7 @@ impl GpuBvh {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rkf_core::bvh::BvhNode;
+    use rkf_core::bvh::{BvhNode, INVALID};
     use rkf_core::Aabb;
     use glam::Vec3;
 

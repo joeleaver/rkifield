@@ -14,6 +14,7 @@
 use glam::Quat;
 
 use crate::aabb::Aabb;
+use crate::bvh::Bvh;
 use crate::scene_node::SceneNode;
 use crate::world_position::WorldPosition;
 
@@ -138,6 +139,24 @@ impl Scene {
             .map(|o| o.root_node.node_count())
             .sum()
     }
+
+    /// Collect `(object_id, aabb)` pairs for BVH construction.
+    pub fn object_aabb_pairs(&self) -> Vec<(u32, Aabb)> {
+        self.root_objects
+            .iter()
+            .map(|o| (o.id, o.aabb))
+            .collect()
+    }
+
+    /// Build a BVH over all objects in the scene.
+    pub fn build_bvh(&self) -> Bvh {
+        Bvh::build(&self.object_aabb_pairs())
+    }
+
+    /// Refit an existing BVH using current object AABBs.
+    pub fn refit_bvh(&self, bvh: &mut Bvh) {
+        bvh.refit(&self.object_aabb_pairs());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -147,7 +166,7 @@ impl Scene {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scene_node::{SdfPrimitive, SdfSource};
+    use crate::scene_node::SdfPrimitive;
     use glam::{IVec3, Vec3};
 
     fn sphere_node(name: &str, radius: f32, mat: u16) -> SceneNode {
@@ -294,6 +313,77 @@ mod tests {
 
         let obj = scene.find_by_name("far_away").unwrap();
         assert_eq!(obj.world_position.chunk, IVec3::new(100, 0, -50));
+    }
+
+    #[test]
+    fn build_bvh_empty_scene() {
+        let scene = Scene::new("test");
+        let bvh = scene.build_bvh();
+        assert!(bvh.is_empty());
+    }
+
+    #[test]
+    fn build_bvh_with_objects() {
+        let mut scene = Scene::new("test");
+
+        let n1 = SceneNode::analytical("s1", SdfPrimitive::Sphere { radius: 0.5 }, 1);
+        scene.add_object(
+            "obj1",
+            WorldPosition::new(IVec3::ZERO, Vec3::new(-5.0, 0.0, 0.0)),
+            n1,
+        );
+
+        let n2 = SceneNode::analytical("s2", SdfPrimitive::Sphere { radius: 0.5 }, 2);
+        scene.add_object(
+            "obj2",
+            WorldPosition::new(IVec3::ZERO, Vec3::new(5.0, 0.0, 0.0)),
+            n2,
+        );
+
+        // Set AABBs on objects
+        scene.root_objects[0].aabb = Aabb::new(
+            Vec3::new(-5.5, -0.5, -0.5),
+            Vec3::new(-4.5, 0.5, 0.5),
+        );
+        scene.root_objects[1].aabb = Aabb::new(
+            Vec3::new(4.5, -0.5, -0.5),
+            Vec3::new(5.5, 0.5, 0.5),
+        );
+
+        let bvh = scene.build_bvh();
+        assert_eq!(bvh.leaf_count(), 2);
+        assert_eq!(bvh.node_count(), 3); // 1 internal + 2 leaves
+    }
+
+    #[test]
+    fn refit_bvh_after_move() {
+        let mut scene = Scene::new("test");
+
+        scene.add_object("obj1", WorldPosition::default(), SceneNode::new("r1"));
+        scene.add_object("obj2", WorldPosition::default(), SceneNode::new("r2"));
+
+        scene.root_objects[0].aabb = Aabb::new(Vec3::splat(-1.0), Vec3::splat(1.0));
+        scene.root_objects[1].aabb = Aabb::new(Vec3::new(5.0, -1.0, -1.0), Vec3::new(7.0, 1.0, 1.0));
+
+        let mut bvh = scene.build_bvh();
+
+        // Move obj1 far away
+        scene.root_objects[0].aabb = Aabb::new(Vec3::new(100.0, -1.0, -1.0), Vec3::new(102.0, 1.0, 1.0));
+        scene.refit_bvh(&mut bvh);
+
+        // Root AABB should extend to 102
+        assert!(bvh.nodes[0].aabb.max.x >= 102.0);
+    }
+
+    #[test]
+    fn object_aabb_pairs() {
+        let mut scene = Scene::new("test");
+        scene.add_object("a", WorldPosition::default(), SceneNode::new("r"));
+        scene.root_objects[0].aabb = Aabb::new(Vec3::ZERO, Vec3::ONE);
+
+        let pairs = scene.object_aabb_pairs();
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].0, 1); // object ID
     }
 
     #[test]

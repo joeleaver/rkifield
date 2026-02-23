@@ -53,7 +53,9 @@ pub use config::{
 pub use double_buffer::{DoubleBuffer, DoubleBufferSet};
 pub use frame::FrameSettings;
 pub use scene::RuntimeScene;
-pub use transform_system::{flatten_sdf_scene, update_all_transforms, update_transforms};
+pub use transform_system::{
+    build_scene_bvh, flatten_sdf_scene, refit_scene_bvh, update_all_transforms, update_transforms,
+};
 pub use memory_audit::{
     LeakReport, MemoryAudit, MemoryHistory, PoolStats, detect_leaks, POOL_BONE_BRICKS,
     POOL_COLOR_BRICKS, POOL_SDF_BRICKS, POOL_STAGING, POOL_VOLUMETRIC_BRICKS,
