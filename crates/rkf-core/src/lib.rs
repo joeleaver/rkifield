@@ -30,6 +30,8 @@ pub mod scene;
 pub mod scene_node;
 /// SDF generation utilities for testing and offline voxelization.
 pub mod sdf;
+/// v2 transform flattening — depth-first traversal producing GPU-ready flat nodes.
+pub mod transform_flatten;
 /// Voxel sample type and flag constants for GPU-packed voxel data.
 pub mod voxel;
 pub mod world_position;
