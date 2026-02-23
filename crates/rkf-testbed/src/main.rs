@@ -1,8 +1,8 @@
 //! RKIField visual testbed — v2 object-centric render loop.
 //!
-//! Scene: 5 analytical SDF objects (sphere, box, capsule, torus, ground plane)
-//! rendered via the v2 object-centric ray marcher with BVH acceleration.
-//! Debug visualization shows Lambert-shaded normals by default.
+//! Scene: 5 analytical + 1 voxelized SDF objects rendered via the v2
+//! object-centric ray marcher with BVH acceleration. Debug visualization
+//! shows Lambert-shaded normals by default.
 
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -18,7 +18,8 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowAttributes, WindowId};
 
 use rkf_core::{
-    Aabb, Scene, SceneNode, SceneObject, SdfPrimitive, WorldPosition,
+    Aabb, BrickMapAllocator, BrickPool, Scene, SceneNode, SceneObject,
+    SdfPrimitive, SdfSource, WorldPosition, voxelize_sdf,
     transform_flatten::flatten_object,
 };
 use rkf_render::{
@@ -43,8 +44,15 @@ const INTERNAL_HEIGHT: u32 = 540;
 // Scene setup
 // ---------------------------------------------------------------------------
 
-/// Build the demo scene with 5 analytical objects.
-fn build_demo_scene() -> Scene {
+/// Build result containing the scene and CPU brick data for GPU upload.
+struct DemoScene {
+    scene: Scene,
+    brick_pool: BrickPool,
+    brick_map_alloc: BrickMapAllocator,
+}
+
+/// Build the demo scene with 5 analytical + 1 voxelized object.
+fn build_demo_scene() -> DemoScene {
     let mut scene = Scene::new("v2_testbed");
 
     // 1. Ground plane (large flat box)
@@ -62,7 +70,7 @@ fn build_demo_scene() -> Scene {
     };
     scene.add_object_full(ground_obj);
 
-    // 2. Sphere
+    // 2. Sphere (analytical)
     let sphere = SceneNode::analytical("sphere", SdfPrimitive::Sphere { radius: 0.5 }, 2);
     let sphere_obj = SceneObject {
         id: 0,
@@ -75,7 +83,7 @@ fn build_demo_scene() -> Scene {
     };
     scene.add_object_full(sphere_obj);
 
-    // 3. Box
+    // 3. Box (analytical)
     let box_node = SceneNode::analytical("box", SdfPrimitive::Box {
         half_extents: Vec3::new(0.35, 0.35, 0.35),
     }, 3);
@@ -90,7 +98,7 @@ fn build_demo_scene() -> Scene {
     };
     scene.add_object_full(box_obj);
 
-    // 4. Capsule
+    // 4. Capsule (analytical)
     let capsule = SceneNode::analytical("capsule", SdfPrimitive::Capsule {
         radius: 0.2,
         half_height: 0.4,
@@ -106,7 +114,7 @@ fn build_demo_scene() -> Scene {
     };
     scene.add_object_full(capsule_obj);
 
-    // 5. Torus
+    // 5. Torus (analytical)
     let torus = SceneNode::analytical("torus", SdfPrimitive::Torus {
         major_radius: 0.4,
         minor_radius: 0.12,
@@ -122,7 +130,58 @@ fn build_demo_scene() -> Scene {
     };
     scene.add_object_full(torus_obj);
 
-    scene
+    // 6. Voxelized sphere — demonstrates voxelized SDF rendering path.
+    let mut brick_pool = BrickPool::new(4096);
+    let mut brick_map_alloc = BrickMapAllocator::new();
+
+    let vox_radius = 0.4;
+    let voxel_size = 0.04; // 4cm voxels
+    let margin = voxel_size * 2.0;
+    let vox_aabb = Aabb::new(
+        Vec3::splat(-vox_radius - margin),
+        Vec3::splat(vox_radius + margin),
+    );
+
+    let sdf_fn = |pos: Vec3| -> (f32, u16) {
+        (pos.length() - vox_radius, 6u16) // material 6 = distinct color
+    };
+
+    let (handle, brick_count) = voxelize_sdf(
+        sdf_fn, &vox_aabb, voxel_size, &mut brick_pool, &mut brick_map_alloc,
+    ).expect("voxelize sphere");
+
+    log::info!(
+        "Voxelized sphere: {} bricks, handle offset={} dims={:?}",
+        brick_count, handle.offset, handle.dims
+    );
+
+    let mut vox_node = SceneNode::new("vox_sphere");
+    vox_node.sdf_source = SdfSource::Voxelized {
+        brick_map_handle: handle,
+        voxel_size,
+        aabb: vox_aabb,
+    };
+
+    // Place the voxelized sphere to the right of the analytical objects.
+    let vox_obj = SceneObject {
+        id: 0,
+        name: "vox_sphere".into(),
+        world_position: WorldPosition::new(IVec3::ZERO, Vec3::new(3.0, 0.0, -2.0)),
+        rotation: Quat::IDENTITY,
+        scale: 1.0,
+        root_node: vox_node,
+        aabb: Aabb::new(
+            Vec3::new(3.0 - vox_radius - margin, -vox_radius - margin, -2.0 - vox_radius - margin),
+            Vec3::new(3.0 + vox_radius + margin, vox_radius + margin, -2.0 + vox_radius + margin),
+        ),
+    };
+    scene.add_object_full(vox_obj);
+
+    DemoScene {
+        scene,
+        brick_pool,
+        brick_map_alloc,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -162,15 +221,30 @@ impl EngineState {
         let size = window.inner_size();
         let surface_format = ctx.configure_surface(&surface, size.width, size.height);
 
-        // Brick pool placeholder (empty, 1-element buffer for valid binding)
+        // Build demo scene (includes voxelized objects).
+        let demo = build_demo_scene();
+        let scene = demo.scene;
+
+        // Upload brick pool to GPU (array of VoxelSample, 8 bytes each).
+        let pool_data: &[u8] = bytemuck::cast_slice(demo.brick_pool.as_slice());
         let brick_pool_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("brick_pool_placeholder"),
-            size: 8, // one VoxelSample = 8 bytes
+            label: Some("brick_pool"),
+            size: pool_data.len().max(8) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        if !pool_data.is_empty() {
+            ctx.queue.write_buffer(&brick_pool_buffer, 0, pool_data);
+        }
 
-        let gpu_scene = GpuSceneV2::new(&ctx.device, brick_pool_buffer);
+        let mut gpu_scene = GpuSceneV2::new(&ctx.device, brick_pool_buffer);
+
+        // Upload brick maps to GPU.
+        let brick_map_data = demo.brick_map_alloc.as_slice();
+        if !brick_map_data.is_empty() {
+            gpu_scene.upload_brick_maps(&ctx.device, &ctx.queue, brick_map_data);
+        }
+
         let gbuffer = GBuffer::new(&ctx.device, INTERNAL_WIDTH, INTERNAL_HEIGHT);
         let ray_march = RayMarchPass::new(&ctx.device, &gpu_scene, &gbuffer);
         let debug_view = DebugViewPass::new(&ctx.device, &gbuffer);
@@ -179,8 +253,6 @@ impl EngineState {
         let mut camera = Camera::new(Vec3::new(0.0, 0.5, 1.0));
         camera.pitch = -0.15;
         camera.move_speed = 3.0;
-
-        let scene = build_demo_scene();
 
         // Readback buffer for MCP screenshots.
         // Rgba16Float = 8 bytes per pixel, row must be aligned to 256 bytes.
