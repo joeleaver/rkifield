@@ -205,7 +205,32 @@ fn evaluate_analytical(local_pos: vec3<f32>, obj: GpuObject) -> f32 {
     }
 }
 
+/// Sample a single voxel from a brick map at global grid coordinates.
+/// Returns the SDF distance, or a large fallback for empty/out-of-bounds slots.
+fn sample_voxel_at(obj_offset: u32, vc: vec3<i32>, dims: vec3<u32>,
+                    total_voxels: vec3<i32>, vs: f32) -> f32 {
+    // Clamp to grid bounds.
+    let c = clamp(vc, vec3<i32>(0), total_voxels - vec3<i32>(1));
+
+    // Which brick?
+    let brick = vec3<u32>(c / vec3<i32>(8));
+    // Which voxel within the brick?
+    let local = vec3<u32>(c % vec3<i32>(8));
+
+    let flat_brick = brick.x + brick.y * dims.x + brick.z * dims.x * dims.y;
+    let slot = brick_maps[obj_offset + flat_brick];
+
+    if slot == EMPTY_SLOT {
+        // Conservative fallback: return distance proportional to grid extent.
+        return vs * 4.0;
+    }
+
+    let idx = slot * 512u + local.x + local.y * 8u + local.z * 64u;
+    return extract_distance(brick_pool[idx].word0);
+}
+
 /// Sample a voxelized object's brick map at a local-space position.
+/// Uses global-grid trilinear interpolation that seamlessly crosses brick boundaries.
 /// Returns the SDF distance, or MAX_FLOAT if outside the brick map.
 fn sample_voxelized(local_pos: vec3<f32>, obj: GpuObject) -> f32 {
     let vs = obj.voxel_size;
@@ -220,34 +245,27 @@ fn sample_voxelized(local_pos: vec3<f32>, obj: GpuObject) -> f32 {
         return MAX_FLOAT;
     }
 
-    let brick_coord = vec3<u32>(floor(grid_pos / brick_extent));
-    let flat_brick = brick_coord.x + brick_coord.y * dims.x + brick_coord.z * dims.x * dims.y;
+    // Convert to continuous voxel coordinates. Voxel centers are at integers
+    // (the -0.5 shifts so that the center of voxel [0] is at coordinate 0.0).
+    let voxel_coord = grid_pos / vs - vec3<f32>(0.5);
 
-    let slot = brick_maps[obj.brick_map_offset + flat_brick];
-    if slot == EMPTY_SLOT {
-        return MAX_FLOAT;
-    }
+    // Lower corner of the trilinear cell (integer voxel coordinates).
+    let v0 = vec3<i32>(floor(voxel_coord));
+    let t = voxel_coord - vec3<f32>(v0);
 
-    // Brick minimum in local space.
-    let brick_min = vec3<f32>(brick_coord) * brick_extent - grid_size * 0.5;
+    let total_voxels = vec3<i32>(dims) * 8;
 
-    // Trilinear interpolation within brick.
-    let brick_local = (local_pos - brick_min) / vs - vec3<f32>(0.5);
-    let f = clamp(brick_local, vec3<f32>(0.0), vec3<f32>(6.9999));
-    let i0 = vec3<u32>(floor(f));
-    let i1 = min(i0 + vec3<u32>(1u), vec3<u32>(7u));
-    let t = f - floor(f);
+    // Sample the 8 corners — each may resolve to a different brick.
+    let c000 = sample_voxel_at(obj.brick_map_offset, v0 + vec3<i32>(0, 0, 0), dims, total_voxels, vs);
+    let c100 = sample_voxel_at(obj.brick_map_offset, v0 + vec3<i32>(1, 0, 0), dims, total_voxels, vs);
+    let c010 = sample_voxel_at(obj.brick_map_offset, v0 + vec3<i32>(0, 1, 0), dims, total_voxels, vs);
+    let c110 = sample_voxel_at(obj.brick_map_offset, v0 + vec3<i32>(1, 1, 0), dims, total_voxels, vs);
+    let c001 = sample_voxel_at(obj.brick_map_offset, v0 + vec3<i32>(0, 0, 1), dims, total_voxels, vs);
+    let c101 = sample_voxel_at(obj.brick_map_offset, v0 + vec3<i32>(1, 0, 1), dims, total_voxels, vs);
+    let c011 = sample_voxel_at(obj.brick_map_offset, v0 + vec3<i32>(0, 1, 1), dims, total_voxels, vs);
+    let c111 = sample_voxel_at(obj.brick_map_offset, v0 + vec3<i32>(1, 1, 1), dims, total_voxels, vs);
 
-    let base = slot * 512u;
-    let c000 = extract_distance(brick_pool[base + i0.x + i0.y*8u + i0.z*64u].word0);
-    let c100 = extract_distance(brick_pool[base + i1.x + i0.y*8u + i0.z*64u].word0);
-    let c010 = extract_distance(brick_pool[base + i0.x + i1.y*8u + i0.z*64u].word0);
-    let c110 = extract_distance(brick_pool[base + i1.x + i1.y*8u + i0.z*64u].word0);
-    let c001 = extract_distance(brick_pool[base + i0.x + i0.y*8u + i1.z*64u].word0);
-    let c101 = extract_distance(brick_pool[base + i1.x + i0.y*8u + i1.z*64u].word0);
-    let c011 = extract_distance(brick_pool[base + i0.x + i1.y*8u + i1.z*64u].word0);
-    let c111 = extract_distance(brick_pool[base + i1.x + i1.y*8u + i1.z*64u].word0);
-
+    // Trilinear interpolation.
     let c00 = mix(c000, c100, t.x);
     let c10 = mix(c010, c110, t.x);
     let c01 = mix(c001, c101, t.x);
@@ -258,6 +276,7 @@ fn sample_voxelized(local_pos: vec3<f32>, obj: GpuObject) -> f32 {
 }
 
 /// Get material ID from a voxelized object at a local position (nearest neighbor).
+/// Uses global grid coordinates for correct cross-brick lookup.
 fn sample_voxelized_material(local_pos: vec3<f32>, obj: GpuObject) -> u32 {
     let vs = obj.voxel_size;
     let brick_extent = vs * 8.0;
@@ -269,17 +288,20 @@ fn sample_voxelized_material(local_pos: vec3<f32>, obj: GpuObject) -> u32 {
         return 0u;
     }
 
-    let brick_coord = vec3<u32>(floor(grid_pos / brick_extent));
-    let flat_brick = brick_coord.x + brick_coord.y * dims.x + brick_coord.z * dims.x * dims.y;
+    // Nearest voxel in global grid coordinates.
+    let voxel_coord = grid_pos / vs;
+    let vc = clamp(vec3<i32>(floor(voxel_coord)), vec3<i32>(0), vec3<i32>(dims) * 8 - vec3<i32>(1));
+
+    let brick = vec3<u32>(vc / vec3<i32>(8));
+    let local = vec3<u32>(vc % vec3<i32>(8));
+
+    let flat_brick = brick.x + brick.y * dims.x + brick.z * dims.x * dims.y;
     let slot = brick_maps[obj.brick_map_offset + flat_brick];
     if slot == EMPTY_SLOT {
         return 0u;
     }
 
-    let brick_min = vec3<f32>(brick_coord) * brick_extent - grid_size * 0.5;
-    let brick_local = (local_pos - brick_min) / vs;
-    let voxel = clamp(vec3<u32>(floor(brick_local)), vec3<u32>(0u), vec3<u32>(7u));
-    let idx = slot * 512u + voxel.x + voxel.y * 8u + voxel.z * 64u;
+    let idx = slot * 512u + local.x + local.y * 8u + local.z * 64u;
     return extract_material_id(brick_pool[idx].word0);
 }
 

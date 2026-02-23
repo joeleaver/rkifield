@@ -288,11 +288,15 @@ impl EngineState {
     fn render(&mut self) {
         let camera_pos = WorldPosition::new(IVec3::ZERO, self.camera.position);
 
-        // Flatten all objects and build GPU object list.
+        // Flatten all objects and build GPU object list + BVH pairs.
+        // BVH leaf indices must match the GPU objects[] array index (0-based),
+        // NOT the scene object IDs (which start at 1).
         let mut gpu_objects = Vec::new();
+        let mut bvh_pairs = Vec::new();
         for obj in &self.scene.root_objects {
             let flat_nodes = flatten_object(obj, &camera_pos);
             for flat in &flat_nodes {
+                let gpu_idx = gpu_objects.len() as u32;
                 let aabb = obj.aabb;
                 let cam_rel_min = aabb.min - self.camera.position;
                 let cam_rel_max = aabb.max - self.camera.position;
@@ -302,14 +306,15 @@ impl EngineState {
                     [cam_rel_min.x, cam_rel_min.y, cam_rel_min.z, 0.0],
                     [cam_rel_max.x, cam_rel_max.y, cam_rel_max.z, 0.0],
                 ));
+                bvh_pairs.push((gpu_idx, aabb));
             }
         }
 
         // Upload objects.
         self.gpu_scene.upload_objects(&self.ctx.device, &self.ctx.queue, &gpu_objects);
 
-        // Build and upload BVH.
-        let bvh = self.scene.build_bvh();
+        // Build BVH using GPU array indices (not scene IDs).
+        let bvh = rkf_core::Bvh::build(&bvh_pairs);
         self.gpu_scene.upload_bvh(&self.ctx.device, &self.ctx.queue, &bvh);
 
         // Update camera.
