@@ -6,7 +6,6 @@
 //! It manages:
 //! - Frame scheduling and render graph execution
 //! - ECS world (via hecs) for scene entity management
-//! - Chunk streaming and LOD management
 //! - Asset loading and caching
 //! - Configuration and quality preset management
 //! - Window and input handling integration
@@ -15,26 +14,16 @@
 
 /// Asset registry with generational handles and state tracking.
 pub mod asset_registry;
-/// Async I/O pipeline for background chunk loading.
-pub mod async_io;
 /// ECS component types for the scene graph.
 pub mod components;
 /// Engine configuration system with quality presets and RON serialization.
 pub mod config;
 /// Double-buffered GPU uniform buffers.
 pub mod double_buffer;
-/// Frame scheduling and render pass ordering.
+/// Frame scheduling and render pass ordering (stub — pending v2 rewrite).
 pub mod frame;
-/// LRU eviction for the brick pool.
-pub mod lru_eviction;
-/// Procedural chunk generation for testing.
-pub mod procgen;
 /// Scene management via hecs ECS.
 pub mod scene;
-/// Chunk streaming system — camera-distance-based load/evict management.
-pub mod streaming;
-/// Streaming budget enforcement — memory and I/O throttling.
-pub mod streaming_budget;
 /// Transform hierarchy update system.
 pub mod transform_system;
 /// GPU memory audit and leak detection.
@@ -53,9 +42,8 @@ pub mod shader_reload;
 pub mod material_reload;
 
 pub use asset_registry::{AssetEntry, AssetRegistry, AssetState, Handle};
-pub use async_io::{AsyncIoPipeline, ChunkLoadResult};
 pub use components::{
-    AnimatedCharacter, CameraComponent, ChunkRef, EditorMetadata, FogVolumeComponent, Parent,
+    CameraComponent, EditorMetadata, FogVolumeComponent, Parent,
     SdfObject, Transform, WorldTransform,
 };
 pub use config::{
@@ -63,12 +51,8 @@ pub use config::{
     ShadingSettings, UpscaleSettings, VolumetricSettings,
 };
 pub use double_buffer::{DoubleBuffer, DoubleBufferSet};
-pub use frame::{execute_frame, FrameContext, FrameSettings};
-pub use lru_eviction::{EvictionPolicy, EvictionResult, LruEntry, LruTracker};
-pub use procgen::{ProcgenConfig, generate_chunk, generate_world};
+pub use frame::FrameSettings;
 pub use scene::Scene;
-pub use streaming::{ChunkEntry, ChunkState, StreamingConfig, StreamingSystem};
-pub use streaming_budget::{BudgetMonitor, BudgetState, StreamingBudget};
 pub use transform_system::update_transforms;
 pub use memory_audit::{
     LeakReport, MemoryAudit, MemoryHistory, PoolStats, detect_leaks, POOL_BONE_BRICKS,

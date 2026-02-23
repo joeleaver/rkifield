@@ -61,13 +61,6 @@ pub struct Parent {
     pub bone_index: Option<u32>,
 }
 
-/// Link to a streaming chunk.
-#[derive(Debug, Clone, Copy)]
-pub struct ChunkRef {
-    /// Chunk ID (maps to streaming system).
-    pub chunk_id: u64,
-}
-
 /// Link to brick pool region for an SDF object.
 #[derive(Debug, Clone, Copy)]
 pub struct SdfObject {
@@ -77,17 +70,6 @@ pub struct SdfObject {
     pub brick_count: u32,
     /// Resolution tier (0 = finest = 0.5cm, 3 = coarsest = 32cm).
     pub tier: u8,
-}
-
-/// Animated character component.
-#[derive(Debug, Clone)]
-pub struct AnimatedCharacter {
-    /// Skeleton asset ID.
-    pub skeleton_id: u64,
-    /// Brick ranges for each rigid body segment.
-    pub segment_ranges: Vec<[u32; 2]>,
-    /// Brick ranges for joint blend regions.
-    pub joint_ranges: Vec<[u32; 2]>,
 }
 
 /// Camera component.
