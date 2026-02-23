@@ -232,7 +232,11 @@ fn sample_voxel_at(obj_offset: u32, vc: vec3<i32>, dims: vec3<u32>,
 
 /// Sample a voxelized object's brick map at a local-space position.
 /// Uses global-grid trilinear interpolation that seamlessly crosses brick boundaries.
-/// Returns the SDF distance, or MAX_FLOAT if outside the brick map.
+///
+/// For positions outside the grid, returns the trilinear value at the nearest grid
+/// point plus the Euclidean distance to the grid boundary. This smooth extrapolation
+/// is critical for normal computation (finite differences need valid SDF values
+/// slightly outside the grid) and also improves ray marching near grid edges.
 fn sample_voxelized(local_pos: vec3<f32>, obj: GpuObject) -> f32 {
     let vs = obj.voxel_size;
     let brick_extent = vs * 8.0;
@@ -242,13 +246,18 @@ fn sample_voxelized(local_pos: vec3<f32>, obj: GpuObject) -> f32 {
     // Grid starts at -grid_size/2 (object origin = center of grid).
     let grid_pos = local_pos + grid_size * 0.5;
 
-    if any(grid_pos < vec3<f32>(0.0)) || any(grid_pos >= grid_size) {
-        return MAX_FLOAT;
+    // Clamp grid_pos to valid range and compute out-of-bounds distance.
+    let clamped = clamp(grid_pos, vec3<f32>(vs * 0.01), grid_size - vec3<f32>(vs * 0.01));
+    let outside_dist = length(grid_pos - clamped);
+
+    // If we're far outside the grid (> 2 brick extents), early-out with large value.
+    if outside_dist > brick_extent * 2.0 {
+        return outside_dist;
     }
 
     // Convert to continuous voxel coordinates. Voxel centers are at integers
     // (the -0.5 shifts so that the center of voxel [0] is at coordinate 0.0).
-    let voxel_coord = grid_pos / vs - vec3<f32>(0.5);
+    let voxel_coord = clamped / vs - vec3<f32>(0.5);
 
     // Lower corner of the trilinear cell (integer voxel coordinates).
     let v0 = vec3<i32>(floor(voxel_coord));
@@ -273,7 +282,59 @@ fn sample_voxelized(local_pos: vec3<f32>, obj: GpuObject) -> f32 {
     let c11 = mix(c011, c111, t.x);
     let c0 = mix(c00, c10, t.y);
     let c1 = mix(c01, c11, t.y);
-    return mix(c0, c1, t.z);
+    return mix(c0, c1, t.z) + outside_dist;
+}
+
+/// Compute the analytical gradient of the trilinear SDF field at a local-space position.
+/// Returns the local-space gradient (∂sdf/∂x, ∂sdf/∂y, ∂sdf/∂z) derived directly from
+/// the 8 trilinear corner values. This avoids the finite-difference sampling artifacts
+/// that cause wavy normals on voxelized objects.
+fn sample_voxelized_gradient(local_pos: vec3<f32>, obj: GpuObject) -> vec3<f32> {
+    let vs = obj.voxel_size;
+    let brick_extent = vs * 8.0;
+    let dims = vec3<u32>(obj.brick_map_dims_x, obj.brick_map_dims_y, obj.brick_map_dims_z);
+    let grid_size = vec3<f32>(dims) * brick_extent;
+    let grid_pos = local_pos + grid_size * 0.5;
+
+    if any(grid_pos < vec3<f32>(0.0)) || any(grid_pos >= grid_size) {
+        return vec3<f32>(0.0, 1.0, 0.0);
+    }
+
+    let voxel_coord = grid_pos / vs - vec3<f32>(0.5);
+    let v0 = vec3<i32>(floor(voxel_coord));
+    let t = voxel_coord - vec3<f32>(v0);
+    let total_voxels = vec3<i32>(dims) * 8;
+
+    let c000 = sample_voxel_at(obj.brick_map_offset, v0 + vec3<i32>(0, 0, 0), dims, total_voxels, vs);
+    let c100 = sample_voxel_at(obj.brick_map_offset, v0 + vec3<i32>(1, 0, 0), dims, total_voxels, vs);
+    let c010 = sample_voxel_at(obj.brick_map_offset, v0 + vec3<i32>(0, 1, 0), dims, total_voxels, vs);
+    let c110 = sample_voxel_at(obj.brick_map_offset, v0 + vec3<i32>(1, 1, 0), dims, total_voxels, vs);
+    let c001 = sample_voxel_at(obj.brick_map_offset, v0 + vec3<i32>(0, 0, 1), dims, total_voxels, vs);
+    let c101 = sample_voxel_at(obj.brick_map_offset, v0 + vec3<i32>(1, 0, 1), dims, total_voxels, vs);
+    let c011 = sample_voxel_at(obj.brick_map_offset, v0 + vec3<i32>(0, 1, 1), dims, total_voxels, vs);
+    let c111 = sample_voxel_at(obj.brick_map_offset, v0 + vec3<i32>(1, 1, 1), dims, total_voxels, vs);
+
+    // Analytical partial derivatives of trilinear interpolation f(tx,ty,tz):
+    //   ∂f/∂tx = bilinear interpolation of (c1xx - c0xx)
+    //   ∂f/∂ty = bilinear interpolation of (cx1x - cx0x)
+    //   ∂f/∂tz = bilinear interpolation of (cxx1 - cxx0)
+    let tx = t.x; let ty = t.y; let tz = t.z;
+    let otx = 1.0 - tx; let oty = 1.0 - ty; let otz = 1.0 - tz;
+
+    let gx = oty * otz * (c100 - c000)
+           + ty  * otz * (c110 - c010)
+           + oty * tz  * (c101 - c001)
+           + ty  * tz  * (c111 - c011);
+    let gy = otx * otz * (c010 - c000)
+           + tx  * otz * (c110 - c100)
+           + otx * tz  * (c011 - c001)
+           + tx  * tz  * (c111 - c101);
+    let gz = otx * oty * (c001 - c000)
+           + tx  * oty * (c101 - c100)
+           + otx * ty  * (c011 - c010)
+           + tx  * ty  * (c111 - c110);
+
+    return vec3<f32>(gx, gy, gz);
 }
 
 /// Get material ID from a voxelized object at a local position (nearest neighbor).
@@ -327,7 +388,9 @@ fn evaluate_object(cam_rel_pos: vec3<f32>, obj_idx: u32) -> vec2<f32> {
     } else {
         // SDF_TYPE_VOXELIZED
         dist = sample_voxelized(local_pos, obj);
-        if dist < MAX_FLOAT * 0.5 {
+        // Only look up material for near-surface hits (dist is finite for all
+        // positions now — large values mean we're far from the surface).
+        if dist < obj.voxel_size * 16.0 {
             mat_id = sample_voxelized_material(local_pos, obj);
         } else {
             mat_id = 0u;
@@ -505,15 +568,16 @@ fn sample_object(pos: vec3<f32>, obj_idx: u32) -> f32 {
 }
 
 /// Compute surface normal for a specific object via central differences.
-/// Uses adaptive epsilon: voxelized objects need a larger epsilon proportional
-/// to voxel_size to avoid gradient discontinuities at voxel cell boundaries.
-/// Analytical objects use a small epsilon for crisp normals.
+/// Voxelized objects use a larger epsilon (~4 voxels) to average over trilinear
+/// cell boundary gradient discontinuities, producing smooth normals.
+/// Analytical objects use a small epsilon for crisp, exact normals.
 fn compute_normal_for_object(pos: vec3<f32>, obj_idx: u32) -> vec3<f32> {
     let obj = objects[obj_idx];
     var e: f32;
     if obj.sdf_type == SDF_TYPE_VOXELIZED {
-        // Epsilon spans ~1.5 voxels to smooth over trilinear interpolation boundaries.
-        e = obj.voxel_size * obj.accumulated_scale * 1.5;
+        // Epsilon spans ~4 voxels: wide enough to average over trilinear
+        // cell boundary discontinuities for smooth normals.
+        e = obj.voxel_size * obj.accumulated_scale * 4.0;
     } else {
         // Small epsilon for analytical SDFs (smooth gradients everywhere).
         e = scene.hit_threshold * 10.0;
