@@ -51,4 +51,5 @@ pub use brick_pool::{BonePool, BrickPool, ColorPool, Pool, VolumetricPool};
 pub use companion::{BoneBrick, BoneVoxel, ColorBrick, ColorVoxel, VolumetricBrick, VolumetricVoxel};
 pub use material::Material;
 pub use voxel::VoxelSample;
+pub use voxelize_object::{evaluate_primitive, voxelize_sdf};
 pub use world_position::WorldPosition;
