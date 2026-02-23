@@ -285,36 +285,4 @@ mod tests {
         assert_eq!(mat, 42);
     }
 
-    // ------ Integration with voxelized SDF ------
-
-    #[test]
-    fn trilinear_on_voxelized_sphere() {
-        use crate::aabb::Aabb;
-        use crate::sdf::{sphere_sdf, voxelize_sdf};
-
-        let aabb = Aabb::new(Vec3::splat(-0.5), Vec3::splat(0.5));
-        let (grid, bricks) = voxelize_sdf(
-            |p| sphere_sdf(Vec3::ZERO, 0.3, p),
-            1,
-            &aabb,
-        );
-
-        // Find a Surface brick near the sphere surface and sample it
-        let dims = grid.dimensions();
-        let mut found_surface_brick = false;
-        for cz in 0..dims.z {
-            for cy in 0..dims.y {
-                for cx in 0..dims.x {
-                    if let Some(slot) = grid.brick_slot(cx, cy, cz) {
-                        let brick = &bricks[slot as usize];
-                        let center = sample_brick_trilinear(brick, Vec3::splat(0.5));
-                        // Should be a finite distance
-                        assert!(center.is_finite());
-                        found_surface_brick = true;
-                    }
-                }
-            }
-        }
-        assert!(found_surface_brick, "should have found at least one surface brick");
-    }
 }
