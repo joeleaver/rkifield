@@ -43,6 +43,8 @@ pub struct SharedState {
     pub pending_debug_mode: Option<u32>,
     /// Pending camera teleport (set by MCP, consumed by render loop).
     pub pending_camera: Option<PendingCamera>,
+    /// Set true by MCP screenshot(); render loop performs readback and clears.
+    pub screenshot_requested: bool,
 }
 
 impl SharedState {
@@ -61,6 +63,7 @@ impl SharedState {
             frame_height: height,
             pending_debug_mode: None,
             pending_camera: None,
+            screenshot_requested: false,
         }
     }
 }
@@ -79,30 +82,46 @@ impl TestbedAutomationApi {
 
 impl AutomationApi for TestbedAutomationApi {
     fn screenshot(&self, _width: u32, _height: u32) -> AutomationResult<Vec<u8>> {
-        let state = self
-            .state
-            .lock()
-            .map_err(|e| AutomationError::EngineError(format!("lock poisoned: {e}")))?;
-
-        if state.frame_pixels.is_empty() {
-            return Err(AutomationError::EngineError(
-                "no frame captured yet".into(),
-            ));
+        // Request the render loop to capture pixels.
+        {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|e| AutomationError::EngineError(format!("lock poisoned: {e}")))?;
+            state.screenshot_requested = true;
         }
 
-        // Encode raw RGBA pixels as PNG
-        let mut png_bytes = Vec::new();
-        let encoder = image::codecs::png::PngEncoder::new(&mut png_bytes);
-        encoder
-            .write_image(
-                &state.frame_pixels,
-                state.frame_width,
-                state.frame_height,
-                image::ExtendedColorType::Rgba8,
-            )
-            .map_err(|e| AutomationError::EngineError(format!("PNG encode failed: {e}")))?;
+        // Wait for the render loop to fulfill the request (up to ~500ms).
+        for _ in 0..50 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            let state = self
+                .state
+                .lock()
+                .map_err(|e| AutomationError::EngineError(format!("lock poisoned: {e}")))?;
+            if !state.screenshot_requested {
+                // Render loop has fulfilled the request.
+                if state.frame_pixels.is_empty() {
+                    return Err(AutomationError::EngineError(
+                        "no frame captured yet".into(),
+                    ));
+                }
+                let mut png_bytes = Vec::new();
+                let encoder = image::codecs::png::PngEncoder::new(&mut png_bytes);
+                encoder
+                    .write_image(
+                        &state.frame_pixels,
+                        state.frame_width,
+                        state.frame_height,
+                        image::ExtendedColorType::Rgba8,
+                    )
+                    .map_err(|e| AutomationError::EngineError(format!("PNG encode failed: {e}")))?;
+                return Ok(png_bytes);
+            }
+        }
 
-        Ok(png_bytes)
+        Err(AutomationError::EngineError(
+            "screenshot timeout — render loop did not respond within 500ms".into(),
+        ))
     }
 
     fn camera_state(&self) -> AutomationResult<CameraSnapshot> {
@@ -423,7 +442,8 @@ mod tests {
         let state = make_shared_state();
         {
             let mut s = state.lock().unwrap();
-            // Fill with a 4x4 red image
+            // Fill with a 4x4 red image and pre-clear the request flag
+            // (simulates render loop having already fulfilled the capture).
             for pixel in s.frame_pixels.chunks_exact_mut(4) {
                 pixel[0] = 255; // R
                 pixel[1] = 0; // G
@@ -431,7 +451,14 @@ mod tests {
                 pixel[3] = 255; // A
             }
         }
-        let api = TestbedAutomationApi::new(state);
+        let api = TestbedAutomationApi::new(Arc::clone(&state));
+        // Simulate: spawn a thread that clears the flag after a short delay
+        // (mimics what the render loop does).
+        let state2 = Arc::clone(&state);
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            state2.lock().unwrap().screenshot_requested = false;
+        });
         let png = api.screenshot(4, 4).unwrap();
         // PNG magic bytes
         assert_eq!(&png[..4], &[0x89, 0x50, 0x4E, 0x47]);

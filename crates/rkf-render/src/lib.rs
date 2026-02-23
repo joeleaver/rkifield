@@ -34,8 +34,10 @@ pub mod gpu_bvh;
 pub mod gpu_object;
 /// GPU scene v2 — object-centric bind group layout and resource management.
 pub mod gpu_scene;
-/// Ray march compute pass (stub — pending v2 rewrite).
+/// Ray march compute pass — v2 object-centric sphere tracing.
 pub mod ray_march;
+/// Debug visualization pass — reads G-buffer, writes displayable colors.
+pub mod debug_view;
 /// Light types and GPU light buffer.
 pub mod light;
 /// PBR shading compute pass (stub — pending v2 rewrite).
@@ -108,6 +110,7 @@ pub use gpu_object::GpuObject;
 pub use gpu_scene::{GpuSceneV2, SceneUniforms};
 pub use blit::BlitPass;
 pub use ray_march::RayMarchPass;
+pub use debug_view::{DebugViewPass, DebugMode, DebugUniforms, DEBUG_VIEW_FORMAT};
 pub use light::{Light, LightBuffer, MAX_LIGHTS, MAX_LIGHTS_PER_TILE, TILE_SIZE};
 pub use shading::{ShadeUniforms, ShadingPass};
 pub use tile_cull::{CullUniforms, TileCullPass};
