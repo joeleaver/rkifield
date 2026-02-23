@@ -13,6 +13,8 @@
 
 pub mod aabb;
 pub mod automation;
+/// Bounding volume hierarchy over scene objects for spatial acceleration.
+pub mod bvh;
 /// 8×8×8 voxel brick — the fundamental unit of SDF storage.
 pub mod brick;
 /// Per-object brick maps — flat 3D arrays mapping brick coordinates to pool slots.
@@ -41,6 +43,7 @@ pub mod voxel;
 pub mod world_position;
 
 pub use aabb::{Aabb, WorldAabb};
+pub use bvh::{Bvh, BvhNode};
 pub use scene::{Scene, SceneObject};
 pub use scene_node::{
     BlendMode, BrickMapHandle, NodeMetadata, SceneNode, SdfPrimitive, SdfSource, Transform,
