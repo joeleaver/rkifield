@@ -109,6 +109,34 @@ impl<T: Default + Clone> Pool<T> {
         self.free_list.is_empty()
     }
 
+    /// Allocate multiple slots at once. Returns `None` if the pool doesn't
+    /// have enough free slots.
+    ///
+    /// On success, returns a `Vec` of `count` slot indices.
+    /// On failure, no slots are consumed.
+    pub fn allocate_range(&mut self, count: u32) -> Option<Vec<u32>> {
+        if self.free_count() < count {
+            return None;
+        }
+        let mut slots = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            // Safe: we checked free_count >= count above.
+            slots.push(self.free_list.pop().unwrap());
+        }
+        Some(slots)
+    }
+
+    /// Return multiple slots to the free list, resetting their contents to default.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any slot is out of range (>= capacity).
+    pub fn deallocate_range(&mut self, slots: &[u32]) {
+        for &slot in slots {
+            self.deallocate(slot);
+        }
+    }
+
     /// Backing slice — suitable for GPU buffer upload.
     #[inline]
     pub fn as_slice(&self) -> &[T] {
@@ -342,6 +370,114 @@ mod tests {
             .get_mut(cs)
             .set(7, 7, 7, ColorVoxel::new(255, 128, 64, 200));
         assert_eq!(col_pool.get(cs).sample(7, 7, 7).red(), 255);
+    }
+
+    // ------ Bulk allocation ------
+
+    #[test]
+    fn allocate_range_returns_correct_count() {
+        let mut pool: BrickPool = Pool::new(16);
+        let slots = pool.allocate_range(5).unwrap();
+        assert_eq!(slots.len(), 5);
+        assert_eq!(pool.allocated_count(), 5);
+        assert_eq!(pool.free_count(), 11);
+    }
+
+    #[test]
+    fn allocate_range_slots_are_unique() {
+        let mut pool: BrickPool = Pool::new(16);
+        let slots = pool.allocate_range(10).unwrap();
+        let set: std::collections::HashSet<u32> = slots.iter().copied().collect();
+        assert_eq!(set.len(), 10);
+    }
+
+    #[test]
+    fn allocate_range_returns_none_when_insufficient() {
+        let mut pool: BrickPool = Pool::new(4);
+        pool.allocate(); // use 1
+        assert!(pool.allocate_range(4).is_none()); // need 4, only 3 free
+        // Pool state unchanged after failed allocation.
+        assert_eq!(pool.free_count(), 3);
+    }
+
+    #[test]
+    fn allocate_range_zero() {
+        let mut pool: BrickPool = Pool::new(4);
+        let slots = pool.allocate_range(0).unwrap();
+        assert!(slots.is_empty());
+        assert_eq!(pool.free_count(), 4);
+    }
+
+    #[test]
+    fn allocate_range_full_pool() {
+        let mut pool: BrickPool = Pool::new(8);
+        let slots = pool.allocate_range(8).unwrap();
+        assert_eq!(slots.len(), 8);
+        assert!(pool.is_full());
+    }
+
+    // ------ Bulk deallocation ------
+
+    #[test]
+    fn deallocate_range_frees_all() {
+        let mut pool: BrickPool = Pool::new(8);
+        let slots = pool.allocate_range(5).unwrap();
+        assert_eq!(pool.free_count(), 3);
+
+        pool.deallocate_range(&slots);
+        assert_eq!(pool.free_count(), 8);
+        assert!(pool.is_empty());
+    }
+
+    #[test]
+    fn deallocate_range_resets_items() {
+        let mut pool: BrickPool = Pool::new(4);
+        let slots = pool.allocate_range(3).unwrap();
+
+        // Modify a brick.
+        let v = VoxelSample::new(1.0, 99, 0, 0, 0);
+        pool.get_mut(slots[0]).set(0, 0, 0, v);
+        assert_eq!(pool.get(slots[0]).sample(0, 0, 0).material_id(), 99);
+
+        pool.deallocate_range(&slots);
+
+        // Re-allocate and verify reset.
+        let new_slots = pool.allocate_range(3).unwrap();
+        for &s in &new_slots {
+            assert!(pool.get(s).sample(0, 0, 0).distance() == f16::INFINITY);
+        }
+    }
+
+    #[test]
+    fn deallocate_range_empty_slice() {
+        let mut pool: BrickPool = Pool::new(4);
+        pool.allocate_range(2).unwrap();
+        pool.deallocate_range(&[]);
+        assert_eq!(pool.allocated_count(), 2);
+    }
+
+    #[test]
+    fn bulk_alloc_dealloc_cycle() {
+        let mut pool: BrickPool = Pool::new(16);
+
+        // Allocate in batches.
+        let batch1 = pool.allocate_range(6).unwrap();
+        let batch2 = pool.allocate_range(6).unwrap();
+        assert_eq!(pool.allocated_count(), 12);
+        assert_eq!(pool.free_count(), 4);
+
+        // Deallocate batch1.
+        pool.deallocate_range(&batch1);
+        assert_eq!(pool.free_count(), 10);
+
+        // Allocate again — should reuse freed slots.
+        let batch3 = pool.allocate_range(4).unwrap();
+        assert_eq!(pool.allocated_count(), 10);
+
+        // Deallocate everything.
+        pool.deallocate_range(&batch2);
+        pool.deallocate_range(&batch3);
+        assert!(pool.is_empty());
     }
 
     // ------ Multiple alloc/dealloc cycles ------
