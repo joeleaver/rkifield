@@ -9,7 +9,6 @@ use std::time::Instant;
 
 use anyhow::Result;
 use glam::{IVec3, Quat, Vec3};
-use half::f16;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::{DeviceEvent, ElementState, MouseButton, WindowEvent};
@@ -24,9 +23,11 @@ use rkf_core::{
 };
 use rkf_render::{
     BlitPass, Camera, CoarseField, DebugMode, DebugViewPass, GBuffer, GpuObject,
-    GpuSceneV2, RayMarchPass, RenderContext, SceneUniforms, TileObjectCullPass,
+    GpuSceneV2, Light, LightBuffer, RayMarchPass, RenderContext, SceneUniforms,
+    ShadeUniforms, ShadingPass, TileObjectCullPass, ToneMapPass,
     COARSE_VOXEL_SIZE,
 };
+use rkf_render::material_table::{MaterialTable, create_test_materials};
 
 mod automation;
 use automation::{SharedState, TestbedAutomationApi};
@@ -200,13 +201,18 @@ struct EngineState {
     coarse_field: CoarseField,
     ray_march: RayMarchPass,
     debug_view: DebugViewPass,
+    shading_pass: ShadingPass,
+    tone_map: ToneMapPass,
     blit: BlitPass,
     camera: Camera,
     scene: Scene,
+    /// World-space lights (converted to camera-relative each frame).
+    world_lights: Vec<Light>,
+    light_buffer: LightBuffer,
     frame_index: u32,
     prev_vp: [[f32; 4]; 4],
     debug_mode: DebugMode,
-    /// Staging buffer for GPU readback (Rgba16Float → RGBA8 for MCP screenshots).
+    /// Staging buffer for GPU readback (Rgba8Unorm → RGBA8 for MCP screenshots).
     readback_buffer: wgpu::Buffer,
     /// Shared state for MCP observation.
     shared_state: Arc<Mutex<SharedState>>,
@@ -272,15 +278,64 @@ impl EngineState {
             &ctx.device, &gpu_scene, &gbuffer, &tile_cull, &coarse_field,
         );
         let debug_view = DebugViewPass::new(&ctx.device, &gbuffer);
-        let blit = BlitPass::new(&ctx.device, &debug_view.output_view, surface_format);
+
+        // Material table — 14 test materials with distinct PBR properties.
+        let materials = create_test_materials();
+        let material_table = MaterialTable::upload(&ctx.device, &materials);
+        log::info!("Material table: {} materials uploaded", material_table.count);
+
+        // Lights — 1 directional (sun) + 2 point lights.
+        let world_lights = vec![
+            // Sun: warm white directional, shadow casting
+            Light::directional(
+                [-0.5, -1.0, -0.3],
+                [1.0, 0.95, 0.85],
+                2.0,
+                true,
+            ),
+            // Warm point light (right side)
+            Light::point(
+                [2.0, 1.5, -1.0],
+                [1.0, 0.8, 0.5],
+                5.0,
+                8.0,
+                true,
+            ),
+            // Cool point light (left-back)
+            Light::point(
+                [-2.0, 1.0, -3.0],
+                [0.5, 0.7, 1.0],
+                3.0,
+                6.0,
+                false,
+            ),
+        ];
+        let light_buffer = LightBuffer::upload(&ctx.device, &world_lights);
+        log::info!("Lights: {} lights uploaded", world_lights.len());
+
+        // Shading pass — full PBR with SDF shadows and AO.
+        let shading_pass = ShadingPass::new(
+            &ctx.device, &gbuffer, &gpu_scene, &light_buffer,
+            &coarse_field, &material_table.buffer,
+            INTERNAL_WIDTH, INTERNAL_HEIGHT,
+        );
+
+        // Tone mapping: HDR → LDR.
+        let tone_map = ToneMapPass::new(
+            &ctx.device, &shading_pass.hdr_view,
+            INTERNAL_WIDTH, INTERNAL_HEIGHT,
+        );
+
+        // Blit: LDR (Rgba8Unorm) → swapchain.
+        let blit = BlitPass::new(&ctx.device, &tone_map.ldr_view, surface_format);
 
         let mut camera = Camera::new(Vec3::new(0.0, 0.5, 1.0));
         camera.pitch = -0.15;
         camera.move_speed = 3.0;
 
         // Readback buffer for MCP screenshots.
-        // Rgba16Float = 8 bytes per pixel, row must be aligned to 256 bytes.
-        let bytes_per_pixel = 8u32; // f16 × 4
+        // Rgba8Unorm = 4 bytes per pixel, row must be aligned to 256 bytes.
+        let bytes_per_pixel = 4u32;
         let unpadded_row = INTERNAL_WIDTH * bytes_per_pixel;
         let padded_row = (unpadded_row + 255) & !255; // align to 256
         let readback_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
@@ -300,9 +355,13 @@ impl EngineState {
             coarse_field,
             ray_march,
             debug_view,
+            shading_pass,
+            tone_map,
             blit,
             camera,
             scene,
+            world_lights,
+            light_buffer,
             frame_index: 0,
             prev_vp: [[0.0; 4]; 4],
             debug_mode: DebugMode::Lambert,
@@ -361,7 +420,37 @@ impl EngineState {
         };
         self.gpu_scene.update_scene_uniforms(&self.ctx.queue, &scene_uniforms);
 
-        // Update debug mode.
+        // Update shade uniforms (debug_mode, lights, camera position).
+        // G-buffer positions are camera-relative, so camera_pos = [0,0,0].
+        let shade_debug = match self.debug_mode {
+            DebugMode::Lambert    => 0u32, // Full PBR shading
+            DebugMode::Normals    => 1,
+            DebugMode::Positions  => 2,
+            DebugMode::MaterialIds => 3,
+        };
+        self.shading_pass.update_uniforms(&self.ctx.queue, &ShadeUniforms {
+            debug_mode: shade_debug,
+            num_lights: self.world_lights.len() as u32,
+            _pad0: 0,
+            shadow_budget_k: 0, // unlimited
+            camera_pos: [0.0, 0.0, 0.0, 0.0], // camera-relative origin
+        });
+
+        // Upload camera-relative light positions each frame.
+        let cam = self.camera.position;
+        let cam_rel_lights: Vec<Light> = self.world_lights.iter().map(|l| {
+            let mut cl = *l;
+            // Only point/spot lights have meaningful positions.
+            if cl.light_type != 0 { // not directional
+                cl.pos_x -= cam.x;
+                cl.pos_y -= cam.y;
+                cl.pos_z -= cam.z;
+            }
+            cl
+        }).collect();
+        self.light_buffer.update(&self.ctx.queue, &cam_rel_lights);
+
+        // Update debug view (kept for fallback).
         self.debug_view.set_mode(&self.ctx.queue, self.debug_mode);
 
         // Store current VP for next frame's motion vectors.
@@ -398,24 +487,28 @@ impl EngineState {
             &mut encoder, &self.gpu_scene, &self.gbuffer,
             &self.tile_cull, &self.coarse_field,
         );
-        // 3. Debug view → display texture
-        self.debug_view.dispatch(&mut encoder, INTERNAL_WIDTH, INTERNAL_HEIGHT);
-        // 4. Blit → swapchain
+        // 3. PBR shading → HDR output (with SDF shadows + AO)
+        self.shading_pass.dispatch(
+            &mut encoder, &self.gbuffer, &self.gpu_scene, &self.coarse_field,
+        );
+        // 4. Tone map → LDR output
+        self.tone_map.dispatch(&mut encoder);
+        // 5. Blit → swapchain
         self.blit.draw(&mut encoder, &target_view);
 
-        // 5. If MCP screenshot requested, copy debug_view output to readback buffer.
+        // 6. If MCP screenshot requested, copy LDR output to readback buffer.
         let do_readback = self.shared_state.lock()
             .map(|s| s.screenshot_requested)
             .unwrap_or(false);
 
-        let bytes_per_pixel = 8u32; // Rgba16Float = 4 × f16 = 8 bytes
+        let bytes_per_pixel = 4u32; // Rgba8Unorm = 4 bytes
         let unpadded_row = INTERNAL_WIDTH * bytes_per_pixel;
         let padded_row = (unpadded_row + 255) & !255;
 
         if do_readback {
             encoder.copy_texture_to_buffer(
                 wgpu::TexelCopyTextureInfo {
-                    texture: &self.debug_view.output_texture,
+                    texture: &self.tone_map.ldr_texture,
                     mip_level: 0,
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
@@ -439,7 +532,7 @@ impl EngineState {
         self.ctx.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
 
-        // 6. Read back pixels for MCP screenshots (only when requested).
+        // 7. Read back pixels for MCP screenshots (only when requested).
         if do_readback {
             let buffer_slice = self.readback_buffer.slice(..);
             let (tx, rx) = std::sync::mpsc::channel();
@@ -453,22 +546,13 @@ impl EngineState {
                 let pixel_count = (INTERNAL_WIDTH * INTERNAL_HEIGHT) as usize;
                 let mut rgba8 = vec![0u8; pixel_count * 4];
 
+                // Rgba8Unorm: direct byte copy (strip row padding).
                 for y in 0..INTERNAL_HEIGHT as usize {
                     let src_row_offset = y * padded_row as usize;
                     let dst_row_offset = y * INTERNAL_WIDTH as usize * 4;
-                    for x in 0..INTERNAL_WIDTH as usize {
-                        let src_pixel = src_row_offset + x * bytes_per_pixel as usize;
-                        let dst_pixel = dst_row_offset + x * 4;
-                        // Each channel is an f16 (2 bytes, little-endian).
-                        let r = f16::from_le_bytes([data[src_pixel], data[src_pixel + 1]]);
-                        let g = f16::from_le_bytes([data[src_pixel + 2], data[src_pixel + 3]]);
-                        let b = f16::from_le_bytes([data[src_pixel + 4], data[src_pixel + 5]]);
-                        let a = f16::from_le_bytes([data[src_pixel + 6], data[src_pixel + 7]]);
-                        rgba8[dst_pixel] = (r.to_f32().clamp(0.0, 1.0) * 255.0) as u8;
-                        rgba8[dst_pixel + 1] = (g.to_f32().clamp(0.0, 1.0) * 255.0) as u8;
-                        rgba8[dst_pixel + 2] = (b.to_f32().clamp(0.0, 1.0) * 255.0) as u8;
-                        rgba8[dst_pixel + 3] = (a.to_f32().clamp(0.0, 1.0) * 255.0) as u8;
-                    }
+                    let row_bytes = INTERNAL_WIDTH as usize * 4;
+                    rgba8[dst_row_offset..dst_row_offset + row_bytes]
+                        .copy_from_slice(&data[src_row_offset..src_row_offset + row_bytes]);
                 }
                 drop(data);
                 self.readback_buffer.unmap();
