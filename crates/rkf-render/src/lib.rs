@@ -26,8 +26,12 @@ pub mod gbuffer;
 pub mod material_table;
 /// GPU color pool for per-voxel color companion data.
 pub mod gpu_color_pool;
+/// GPU brick maps buffer — packed per-object brick maps for GPU access.
+pub mod gpu_brick_maps;
 /// GPU object metadata for v2 object-centric rendering.
 pub mod gpu_object;
+/// GPU scene v2 — object-centric bind group layout and resource management.
+pub mod gpu_scene;
 /// Ray march compute pass (stub — pending v2 rewrite).
 pub mod ray_march;
 /// Light types and GPU light buffer.
@@ -96,7 +100,9 @@ pub use context::RenderContext;
 pub use gbuffer::GBuffer;
 pub use material_table::MaterialTable;
 pub use gpu_color_pool::GpuColorPool;
+pub use gpu_brick_maps::GpuBrickMaps;
 pub use gpu_object::GpuObject;
+pub use gpu_scene::{GpuSceneV2, SceneUniforms};
 pub use blit::BlitPass;
 pub use ray_march::RayMarchPass;
 pub use light::{Light, LightBuffer, MAX_LIGHTS, MAX_LIGHTS_PER_TILE, TILE_SIZE};
