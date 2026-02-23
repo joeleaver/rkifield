@@ -116,6 +116,9 @@ pub use shading::{ShadeUniforms, ShadingPass};
 pub use tile_cull::{CullUniforms, TileCullPass};
 pub mod tile_object_cull;
 pub use tile_object_cull::{TileObjectCullPass, MAX_OBJECTS_PER_TILE, OBJECT_TILE_SIZE};
+/// Coarse acceleration field for empty-space skipping.
+pub mod coarse_field;
+pub use coarse_field::{CoarseField, CoarseFieldUniforms, COARSE_VOXEL_SIZE, MAX_COARSE_DIM};
 pub use tone_map::{ToneMapPass, ToneMapMode, ToneMapParams, DEFAULT_EXPOSURE, LDR_FORMAT};
 pub use radiance_volume::{RadianceVolume, RadianceVolumeUniforms, RADIANCE_DIM, RADIANCE_LEVELS};
 pub use radiance_inject::{InjectUniforms, RadianceInjectPass};

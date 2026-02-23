@@ -15,3 +15,4 @@ log = { workspace = true }
 thiserror = { workspace = true }
 image = { workspace = true }
 pollster = { workspace = true }
+half = { workspace = true }
