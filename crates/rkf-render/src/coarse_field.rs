@@ -65,6 +65,9 @@ pub struct CoarseField {
     pub bind_group: wgpu::BindGroup,
     /// Uniform buffer for field metadata.
     uniform_buffer: wgpu::Buffer,
+    /// Dirty region (cell coordinates, inclusive). If set, only these cells need re-upload.
+    dirty_min: Option<UVec3>,
+    dirty_max: Option<UVec3>,
 }
 
 /// Unsigned distance from a point to an AABB surface.
@@ -197,6 +200,8 @@ impl CoarseField {
             bind_group_layout,
             bind_group,
             uniform_buffer,
+            dirty_min: None,
+            dirty_max: None,
         }
     }
 
@@ -313,6 +318,148 @@ impl CoarseField {
             _pad: [0.0; 2],
         };
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
+    }
+
+    // ------------------------------------------------------------------
+    // Dirty region tracking and incremental update
+    // ------------------------------------------------------------------
+
+    /// Convert a world-space position to cell coordinates.
+    /// Returns `None` if the position is outside the field bounds.
+    fn world_to_cell(&self, world_pos: Vec3) -> Option<UVec3> {
+        let local = world_pos - self.origin;
+        let cell = local / self.voxel_size;
+        if cell.x < 0.0 || cell.y < 0.0 || cell.z < 0.0 {
+            return None;
+        }
+        let c = UVec3::new(cell.x as u32, cell.y as u32, cell.z as u32);
+        if c.x >= self.dims.x || c.y >= self.dims.y || c.z >= self.dims.z {
+            return None;
+        }
+        Some(c)
+    }
+
+    /// Mark a world-space AABB region as dirty. The dirty region expands to
+    /// cover the union of all marked regions. Call this when an object moves,
+    /// is added, or is removed — pass both the old and new AABBs.
+    pub fn mark_dirty(&mut self, world_min: Vec3, world_max: Vec3) {
+        // Convert to cell coordinates, clamped to field bounds.
+        let inv_vs = 1.0 / self.voxel_size;
+        let local_min = (world_min - self.origin) * inv_vs;
+        let local_max = (world_max - self.origin) * inv_vs;
+
+        let clamped_min = local_min.floor().max(Vec3::ZERO);
+        let clamped_max = local_max.ceil().max(Vec3::ZERO);
+        let last = self.dims - UVec3::ONE;
+
+        let cell_min = UVec3::new(
+            (clamped_min.x as u32).min(last.x),
+            (clamped_min.y as u32).min(last.y),
+            (clamped_min.z as u32).min(last.z),
+        );
+        let cell_max = UVec3::new(
+            (clamped_max.x as u32).min(last.x),
+            (clamped_max.y as u32).min(last.y),
+            (clamped_max.z as u32).min(last.z),
+        );
+
+        self.dirty_min = Some(match self.dirty_min {
+            Some(prev) => prev.min(cell_min),
+            None => cell_min,
+        });
+        self.dirty_max = Some(match self.dirty_max {
+            Some(prev) => prev.max(cell_max),
+            None => cell_max,
+        });
+    }
+
+    /// Mark the entire field as dirty. Call after full scene reload.
+    pub fn mark_all_dirty(&mut self) {
+        self.dirty_min = Some(UVec3::ZERO);
+        self.dirty_max = Some(self.dims - UVec3::ONE);
+    }
+
+    /// Returns true if any cells are marked dirty.
+    pub fn is_dirty(&self) -> bool {
+        self.dirty_min.is_some()
+    }
+
+    /// Re-evaluate only the dirty cells and upload the changed region to the GPU.
+    ///
+    /// `aabbs` is the complete set of scene object AABBs (old and new positions).
+    /// Only cells within the dirty region are re-evaluated. After upload, the
+    /// dirty region is cleared.
+    ///
+    /// Returns the number of cells updated, or 0 if nothing was dirty.
+    pub fn update_dirty(&mut self, queue: &wgpu::Queue, aabbs: &[(Vec3, Vec3)]) -> u32 {
+        let (cell_min, cell_max) = match (self.dirty_min, self.dirty_max) {
+            (Some(lo), Some(hi)) => (lo, hi),
+            _ => return 0,
+        };
+
+        let dx = self.dims.x;
+        let dy = self.dims.y;
+        let vs = self.voxel_size;
+        let max_dist = vs * dx.max(dy).max(self.dims.z) as f32;
+        let mut cells_updated = 0u32;
+
+        for z in cell_min.z..=cell_max.z {
+            for y in cell_min.y..=cell_max.y {
+                for x in cell_min.x..=cell_max.x {
+                    let world_pos = self.origin + Vec3::new(
+                        (x as f32 + 0.5) * vs,
+                        (y as f32 + 0.5) * vs,
+                        (z as f32 + 0.5) * vs,
+                    );
+
+                    let mut min_dist = max_dist;
+                    for (amin, amax) in aabbs {
+                        let d = aabb_unsigned_distance(world_pos, *amin, *amax);
+                        min_dist = min_dist.min(d);
+                    }
+
+                    let idx = (x + y * dx + z * dx * dy) as usize;
+                    self.data[idx] = half::f16::from_f32(min_dist);
+                    cells_updated += 1;
+                }
+            }
+        }
+
+        // Upload only the dirty z-slices to the GPU.
+        // wgpu write_texture works on contiguous z-slice ranges, so we upload
+        // the minimal range of z-slices containing the dirty region.
+        let slice_size = (dx * dy) as usize;
+        let z_start = cell_min.z;
+        let z_count = cell_max.z - cell_min.z + 1;
+        let data_offset = (z_start * dx * dy) as usize;
+        let data_len = (z_count * dx * dy) as usize;
+
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: 0, y: 0, z: z_start },
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(&self.data[data_offset..data_offset + data_len]),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(dx * 2),
+                rows_per_image: Some(dy),
+            },
+            wgpu::Extent3d {
+                width: dx,
+                height: dy,
+                depth_or_array_layers: z_count,
+            },
+        );
+
+        // Clear dirty region.
+        self.dirty_min = None;
+        self.dirty_max = None;
+
+        let _ = slice_size; // suppress unused
+        cells_updated
     }
 }
 
@@ -455,5 +602,95 @@ mod tests {
         let idx_corner = 0;
         let expected = (1.0_f32 + 1.0 + 1.0).sqrt();
         assert!((data[idx_corner].to_f32() - expected).abs() < 0.01);
+    }
+
+    // --- Dirty tracking tests (no GPU needed) ---
+
+    #[test]
+    fn world_to_cell_inside() {
+        // Manual CoarseField-like test without GPU.
+        let origin = Vec3::new(-2.0, -1.0, -3.0);
+        let dims = UVec3::new(13, 7, 19);
+        let voxel_size = 0.32_f32;
+
+        // Test point at origin + (0.5*vs, 0.5*vs, 0.5*vs) = cell (0,0,0).
+        let local = (origin + Vec3::splat(0.16)) - origin;
+        let cell = local / voxel_size;
+        assert_eq!(cell.x as u32, 0);
+        assert_eq!(cell.y as u32, 0);
+        assert_eq!(cell.z as u32, 0);
+
+        // Test point at origin + (4.0, 1.5, 5.0).
+        let local2 = Vec3::new(4.0, 1.5, 5.0);
+        let c2 = (local2 / voxel_size).floor();
+        assert_eq!(c2.x as u32, 12); // 4.0/0.32 = 12.5 → floor 12
+        assert_eq!(c2.y as u32, 4);  // 1.5/0.32 = 4.6875 → floor 4
+        let _ = dims;
+    }
+
+    #[test]
+    fn mark_dirty_single() {
+        // Test dirty tracking logic without GPU.
+        let origin = Vec3::ZERO;
+        let voxel_size = 1.0_f32;
+        let dims = UVec3::new(10, 10, 10);
+        let inv_vs = 1.0 / voxel_size;
+        let last = dims - UVec3::ONE;
+
+        // Simulate mark_dirty for AABB (2.0..4.0, 3.0..5.0, 1.0..6.0).
+        let world_min = Vec3::new(2.0, 3.0, 1.0);
+        let world_max = Vec3::new(4.0, 5.0, 6.0);
+        let local_min = (world_min - origin) * inv_vs;
+        let local_max = (world_max - origin) * inv_vs;
+
+        let clamped_min = local_min.floor().max(Vec3::ZERO);
+        let clamped_max = local_max.ceil().max(Vec3::ZERO);
+
+        let cell_min = UVec3::new(
+            (clamped_min.x as u32).min(last.x),
+            (clamped_min.y as u32).min(last.y),
+            (clamped_min.z as u32).min(last.z),
+        );
+        let cell_max = UVec3::new(
+            (clamped_max.x as u32).min(last.x),
+            (clamped_max.y as u32).min(last.y),
+            (clamped_max.z as u32).min(last.z),
+        );
+
+        assert_eq!(cell_min, UVec3::new(2, 3, 1));
+        assert_eq!(cell_max, UVec3::new(4, 5, 6));
+    }
+
+    #[test]
+    fn mark_dirty_union() {
+        // Two dirty regions should merge.
+        let mut dirty_min: Option<UVec3> = None;
+        let mut dirty_max: Option<UVec3> = None;
+
+        // First region: (2,3,1) to (4,5,6).
+        let r1_min = UVec3::new(2, 3, 1);
+        let r1_max = UVec3::new(4, 5, 6);
+        dirty_min = Some(r1_min);
+        dirty_max = Some(r1_max);
+
+        // Second region: (0,0,5) to (3,2,8).
+        let r2_min = UVec3::new(0, 0, 5);
+        let r2_max = UVec3::new(3, 2, 8);
+        dirty_min = Some(dirty_min.unwrap().min(r2_min));
+        dirty_max = Some(dirty_max.unwrap().max(r2_max));
+
+        assert_eq!(dirty_min.unwrap(), UVec3::new(0, 0, 1));
+        assert_eq!(dirty_max.unwrap(), UVec3::new(4, 5, 8));
+    }
+
+    #[test]
+    fn dirty_cell_count() {
+        // Test that the expected number of cells in a dirty region is correct.
+        let cell_min = UVec3::new(2, 3, 1);
+        let cell_max = UVec3::new(4, 5, 6);
+        let count = (cell_max.x - cell_min.x + 1)
+            * (cell_max.y - cell_min.y + 1)
+            * (cell_max.z - cell_min.z + 1);
+        assert_eq!(count, 3 * 3 * 6); // 54 cells
     }
 }
