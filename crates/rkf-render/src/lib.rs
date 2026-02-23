@@ -114,6 +114,8 @@ pub use debug_view::{DebugViewPass, DebugMode, DebugUniforms, DEBUG_VIEW_FORMAT}
 pub use light::{Light, LightBuffer, MAX_LIGHTS, MAX_LIGHTS_PER_TILE, TILE_SIZE};
 pub use shading::{ShadeUniforms, ShadingPass};
 pub use tile_cull::{CullUniforms, TileCullPass};
+pub mod tile_object_cull;
+pub use tile_object_cull::{TileObjectCullPass, MAX_OBJECTS_PER_TILE, OBJECT_TILE_SIZE};
 pub use tone_map::{ToneMapPass, ToneMapMode, ToneMapParams, DEFAULT_EXPOSURE, LDR_FORMAT};
 pub use radiance_volume::{RadianceVolume, RadianceVolumeUniforms, RADIANCE_DIM, RADIANCE_LEVELS};
 pub use radiance_inject::{InjectUniforms, RadianceInjectPass};
