@@ -24,6 +24,8 @@ pub mod constants;
 pub mod material;
 /// CPU reference trilinear sampling within a brick.
 pub mod sampling;
+/// v2 scene hierarchy node — object SDF tree with transforms and blending.
+pub mod scene_node;
 /// SDF generation utilities for testing and offline voxelization.
 pub mod sdf;
 /// Voxel sample type and flag constants for GPU-packed voxel data.
@@ -31,6 +33,9 @@ pub mod voxel;
 pub mod world_position;
 
 pub use aabb::{Aabb, WorldAabb};
+pub use scene_node::{
+    BlendMode, BrickMapHandle, NodeMetadata, SceneNode, SdfPrimitive, SdfSource, Transform,
+};
 pub use brick::Brick;
 pub use brick_pool::{BonePool, BrickPool, ColorPool, Pool, VolumetricPool};
 pub use companion::{BoneBrick, BoneVoxel, ColorBrick, ColorVoxel, VolumetricBrick, VolumetricVoxel};
