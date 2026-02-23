@@ -132,6 +132,19 @@ struct MarchResult {
 @group(2) @binding(0) var<storage, read> tile_object_indices: array<u32>;
 @group(2) @binding(1) var<storage, read> tile_object_counts: array<u32>;
 
+// Group 3: coarse acceleration field (for empty-space skipping)
+struct CoarseFieldInfo {
+    origin_cam_rel: vec4<f32>,  // camera-relative origin (minimum corner)
+    dims: vec4<u32>,            // field dimensions in cells (x, y, z, 0)
+    voxel_size: f32,
+    inv_voxel_size: f32,
+    _pad0: f32,
+    _pad1: f32,
+}
+@group(3) @binding(0) var coarse_field: texture_3d<f32>;
+@group(3) @binding(1) var coarse_sampler: sampler;
+@group(3) @binding(2) var<uniform> coarse_info: CoarseFieldInfo;
+
 // ---------- VoxelSample Helpers ----------
 
 fn extract_distance(word0: u32) -> f32 {
@@ -183,6 +196,20 @@ fn ray_aabb_intersect(origin: vec3<f32>, inv_dir: vec3<f32>,
     let t_near = max(t_lo.x, max(t_lo.y, t_lo.z));
     let t_far  = min(t_hi.x, min(t_hi.y, t_hi.z));
     return vec2<f32>(t_near, t_far);
+}
+
+// ---------- Coarse Field Sampling ----------
+
+/// Sample the coarse acceleration field at a camera-relative position.
+/// Returns the conservative distance to the nearest surface (based on AABB distance).
+/// Returns 0.0 if the position is outside the field bounds (no skip info).
+fn sample_coarse_field(cam_rel_pos: vec3<f32>) -> f32 {
+    let field_pos = cam_rel_pos - coarse_info.origin_cam_rel.xyz;
+    let uvw = field_pos * coarse_info.inv_voxel_size / vec3<f32>(coarse_info.dims.xyz);
+    if any(uvw < vec3<f32>(0.0)) || any(uvw > vec3<f32>(1.0)) {
+        return 0.0; // Outside field — no skip info, fall through to per-object eval.
+    }
+    return textureSampleLevel(coarse_field, coarse_sampler, uvw, 0.0).r;
 }
 
 // ---------- Object Evaluation ----------
@@ -566,10 +593,20 @@ fn ray_march_brute(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
     return result;
 }
 
-/// Tiled ray march — only evaluates objects in the pixel's tile list.
+/// Threshold below which we switch from coarse field to per-object evaluation.
+/// When the coarse field distance is below this, objects are nearby and we need
+/// precise SDF evaluation from the tile's object list.
+const COARSE_NEAR_THRESHOLD: f32 = 0.5;
+
+/// Tiled ray march with coarse field acceleration.
+///
+/// Two-phase marching:
+/// 1. When coarse field reports large distance, step by that amount (empty-space skip).
+/// 2. When coarse field distance is small (near surfaces), evaluate per-tile objects.
+///
 /// The tile_object_cull pass projects object AABBs and writes per-tile object
-/// index lists. This function reads the list for the current pixel's tile and
-/// only evaluates those objects, typically 3-5 instead of all scene objects.
+/// index lists. Phase 2 reads the list for the current pixel's tile and only
+/// evaluates those objects, typically 3-5 instead of all scene objects.
 fn ray_march_tiled(origin: vec3<f32>, dir: vec3<f32>, pixel: vec2<u32>) -> MarchResult {
     var result: MarchResult;
     result.t = MAX_FLOAT;
@@ -605,12 +642,21 @@ fn ray_march_tiled(origin: vec3<f32>, dir: vec3<f32>, pixel: vec2<u32>) -> March
         let pos = origin + safe_dir * t;
         let cam_rel = pos - cam_pos;
 
+        // Phase 1: coarse field empty-space skipping.
+        // If the coarse field reports a large distance, we can skip ahead without
+        // evaluating any objects.
+        let coarse_dist = sample_coarse_field(cam_rel);
+        if coarse_dist > COARSE_NEAR_THRESHOLD {
+            t += coarse_dist;
+            continue;
+        }
+
+        // Phase 2: near surfaces — evaluate per-tile objects for precise distance.
         var min_dist = MAX_FLOAT;
         var best_mat = 0u;
         var best_obj_id = 0u;
         var best_obj_idx = 0u;
 
-        // Only evaluate objects in this tile's list.
         for (var i = 0u; i < count; i++) {
             let obj_idx = tile_object_indices[base + i];
             let eval = evaluate_object(cam_rel, obj_idx);

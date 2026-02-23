@@ -13,7 +13,9 @@
 //! | 0 | GpuSceneV2 (brick pool, brick maps, objects, camera, scene, BVH) |
 //! | 1 | G-buffer write targets (position, normal, material, motion) |
 //! | 2 | Per-tile object lists from [`TileObjectCullPass`] (indices + counts) |
+//! | 3 | Coarse acceleration field from [`CoarseField`] (3D texture + sampler + uniforms) |
 
+use crate::coarse_field::CoarseField;
 use crate::gbuffer::GBuffer;
 use crate::gpu_scene::GpuSceneV2;
 use crate::tile_object_cull::TileObjectCullPass;
@@ -33,12 +35,14 @@ impl RayMarchPass {
     /// Create the ray march pass by compiling the shader and building the pipeline.
     ///
     /// `tile_cull` provides the read-only bind group layout for per-tile object lists
-    /// (group 2). The ray marcher reads tile data to only evaluate relevant objects.
+    /// (group 2). `coarse_field` provides the 3D distance texture for empty-space
+    /// skipping (group 3).
     pub fn new(
         device: &wgpu::Device,
         scene: &GpuSceneV2,
         gbuffer: &GBuffer,
         tile_cull: &TileObjectCullPass,
+        coarse_field: &CoarseField,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("ray_march.wgsl"),
@@ -53,6 +57,7 @@ impl RayMarchPass {
                 &scene.bind_group_layout,
                 &gbuffer.write_bind_group_layout,
                 &tile_cull.read_bind_group_layout,
+                &coarse_field.bind_group_layout,
             ],
             push_constant_ranges: &[],
         });
@@ -72,14 +77,15 @@ impl RayMarchPass {
     /// Record the ray march dispatch into a command encoder.
     ///
     /// Dispatches one thread per pixel at internal resolution using 8x8 workgroups.
-    /// `tile_cull` provides the per-tile object lists that the shader reads to
-    /// narrow down which objects to evaluate per pixel.
+    /// `tile_cull` provides per-tile object lists. `coarse_field` provides the
+    /// 3D distance field for empty-space skipping.
     pub fn dispatch(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         scene: &GpuSceneV2,
         gbuffer: &GBuffer,
         tile_cull: &TileObjectCullPass,
+        coarse_field: &CoarseField,
     ) {
         let workgroups_x = (gbuffer.width + 7) / 8;
         let workgroups_y = (gbuffer.height + 7) / 8;
@@ -93,6 +99,7 @@ impl RayMarchPass {
         pass.set_bind_group(0, &scene.bind_group, &[]);
         pass.set_bind_group(1, &gbuffer.write_bind_group, &[]);
         pass.set_bind_group(2, &tile_cull.read_bind_group, &[]);
+        pass.set_bind_group(3, &coarse_field.bind_group, &[]);
         pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
     }
 }

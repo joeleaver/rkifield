@@ -23,8 +23,9 @@ use rkf_core::{
     transform_flatten::flatten_object,
 };
 use rkf_render::{
-    BlitPass, Camera, DebugMode, DebugViewPass, GBuffer, GpuObject,
+    BlitPass, Camera, CoarseField, DebugMode, DebugViewPass, GBuffer, GpuObject,
     GpuSceneV2, RayMarchPass, RenderContext, SceneUniforms, TileObjectCullPass,
+    COARSE_VOXEL_SIZE,
 };
 
 mod automation;
@@ -196,6 +197,7 @@ struct EngineState {
     gpu_scene: GpuSceneV2,
     gbuffer: GBuffer,
     tile_cull: TileObjectCullPass,
+    coarse_field: CoarseField,
     ray_march: RayMarchPass,
     debug_view: DebugViewPass,
     blit: BlitPass,
@@ -250,7 +252,25 @@ impl EngineState {
         let tile_cull = TileObjectCullPass::new(
             &ctx.device, &gpu_scene, INTERNAL_WIDTH, INTERNAL_HEIGHT,
         );
-        let ray_march = RayMarchPass::new(&ctx.device, &gpu_scene, &gbuffer, &tile_cull);
+
+        // Build coarse acceleration field from scene AABBs.
+        let scene_aabbs: Vec<(Vec3, Vec3)> = scene.root_objects.iter()
+            .map(|obj| (obj.aabb.min, obj.aabb.max))
+            .collect();
+        let mut coarse_field = CoarseField::from_scene_aabbs(
+            &ctx.device, &scene_aabbs, COARSE_VOXEL_SIZE, 1.0,
+        );
+        coarse_field.populate(&scene_aabbs);
+        coarse_field.upload(&ctx.queue, Vec3::ZERO);
+        log::info!(
+            "Coarse field: {}x{}x{} cells, voxel_size={}m",
+            coarse_field.dims.x, coarse_field.dims.y, coarse_field.dims.z,
+            coarse_field.voxel_size,
+        );
+
+        let ray_march = RayMarchPass::new(
+            &ctx.device, &gpu_scene, &gbuffer, &tile_cull, &coarse_field,
+        );
         let debug_view = DebugViewPass::new(&ctx.device, &gbuffer);
         let blit = BlitPass::new(&ctx.device, &debug_view.output_view, surface_format);
 
@@ -277,6 +297,7 @@ impl EngineState {
             gpu_scene,
             gbuffer,
             tile_cull,
+            coarse_field,
             ray_march,
             debug_view,
             blit,
@@ -367,10 +388,16 @@ impl EngineState {
             label: Some("frame"),
         });
 
+        // Update coarse field uniforms (camera-relative origin changes each frame).
+        self.coarse_field.update_uniforms(&self.ctx.queue, self.camera.position);
+
         // 1. Tile object culling → per-tile object lists
         self.tile_cull.dispatch(&mut encoder, &self.gpu_scene);
-        // 2. Ray march → G-buffer (reads tile lists from step 1)
-        self.ray_march.dispatch(&mut encoder, &self.gpu_scene, &self.gbuffer, &self.tile_cull);
+        // 2. Ray march → G-buffer (reads tile lists + coarse field)
+        self.ray_march.dispatch(
+            &mut encoder, &self.gpu_scene, &self.gbuffer,
+            &self.tile_cull, &self.coarse_field,
+        );
         // 3. Debug view → display texture
         self.debug_view.dispatch(&mut encoder, INTERNAL_WIDTH, INTERNAL_HEIGHT);
         // 4. Blit → swapchain
