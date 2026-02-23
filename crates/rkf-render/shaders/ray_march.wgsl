@@ -104,6 +104,7 @@ struct MarchResult {
     hit: bool,
     material_id: u32,
     object_id: u32,
+    obj_idx: u32,
     normal: vec3<f32>,
 }
 
@@ -351,6 +352,7 @@ fn ray_march_bvh(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
     result.hit = false;
     result.material_id = 0u;
     result.object_id = 0u;
+    result.obj_idx = 0u;
     result.normal = vec3<f32>(0.0, 1.0, 0.0);
 
     if scene.num_objects == 0u {
@@ -377,6 +379,7 @@ fn ray_march_bvh(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
         var min_dist = MAX_FLOAT;
         var best_mat = 0u;
         var best_obj_id = 0u;
+        var best_obj_idx = 0u;
 
         // BVH stack-based traversal.
         var stack: array<u32, 32>;
@@ -402,13 +405,14 @@ fn ray_march_bvh(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
 
             if node.left == BVH_INVALID {
                 // Leaf node — evaluate the object.
-                let obj_idx = node.right_or_object;
-                if obj_idx < scene.num_objects {
-                    let eval = evaluate_object(cam_rel, obj_idx);
+                let leaf_obj_idx = node.right_or_object;
+                if leaf_obj_idx < scene.num_objects {
+                    let eval = evaluate_object(cam_rel, leaf_obj_idx);
                     if eval.x < min_dist {
                         min_dist = eval.x;
                         best_mat = u32(eval.y);
-                        best_obj_id = objects[obj_idx].object_id;
+                        best_obj_id = objects[leaf_obj_idx].object_id;
+                        best_obj_idx = leaf_obj_idx;
                     }
                 }
             } else {
@@ -427,6 +431,7 @@ fn ray_march_bvh(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
             result.hit = true;
             result.material_id = best_mat;
             result.object_id = best_obj_id;
+            result.obj_idx = best_obj_idx;
             return result;
         }
 
@@ -444,6 +449,7 @@ fn ray_march_brute(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
     result.hit = false;
     result.material_id = 0u;
     result.object_id = 0u;
+    result.obj_idx = 0u;
     result.normal = vec3<f32>(0.0, 1.0, 0.0);
 
     let safe_dir = select(dir, vec3<f32>(1e-10), abs(dir) < vec3<f32>(1e-10));
@@ -462,6 +468,7 @@ fn ray_march_brute(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
         var min_dist = MAX_FLOAT;
         var best_mat = 0u;
         var best_obj_id = 0u;
+        var best_obj_idx = 0u;
 
         for (var i = 0u; i < scene.num_objects; i++) {
             let eval = evaluate_object(cam_rel, i);
@@ -469,6 +476,7 @@ fn ray_march_brute(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
                 min_dist = eval.x;
                 best_mat = u32(eval.y);
                 best_obj_id = objects[i].object_id;
+                best_obj_idx = i;
             }
         }
 
@@ -477,6 +485,7 @@ fn ray_march_brute(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
             result.hit = true;
             result.material_id = best_mat;
             result.object_id = best_obj_id;
+            result.obj_idx = best_obj_idx;
             return result;
         }
 
@@ -488,24 +497,34 @@ fn ray_march_brute(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
 
 // ---------- Normal Computation ----------
 
-/// Compute SDF at a world position by evaluating all objects (brute force).
-/// Converts to camera-relative internally for correct inverse_world transforms.
-fn sample_scene(pos: vec3<f32>) -> f32 {
+/// Evaluate a single object's SDF at a world-space position.
+/// Used for per-object normal computation.
+fn sample_object(pos: vec3<f32>, obj_idx: u32) -> f32 {
     let cam_rel = pos - camera.position.xyz;
-    var min_dist = MAX_FLOAT;
-    for (var i = 0u; i < scene.num_objects; i++) {
-        let eval = evaluate_object(cam_rel, i);
-        min_dist = min(min_dist, eval.x);
-    }
-    return min_dist;
+    return evaluate_object(cam_rel, obj_idx).x;
 }
 
-/// Compute surface normal via central differences (6 SDF evaluations).
-fn compute_normal(pos: vec3<f32>) -> vec3<f32> {
-    let e = scene.hit_threshold * 10.0;
-    let nx = sample_scene(pos + vec3<f32>(e, 0.0, 0.0)) - sample_scene(pos - vec3<f32>(e, 0.0, 0.0));
-    let ny = sample_scene(pos + vec3<f32>(0.0, e, 0.0)) - sample_scene(pos - vec3<f32>(0.0, e, 0.0));
-    let nz = sample_scene(pos + vec3<f32>(0.0, 0.0, e)) - sample_scene(pos - vec3<f32>(0.0, 0.0, e));
+/// Compute surface normal for a specific object via central differences.
+/// Uses adaptive epsilon: voxelized objects need a larger epsilon proportional
+/// to voxel_size to avoid gradient discontinuities at voxel cell boundaries.
+/// Analytical objects use a small epsilon for crisp normals.
+fn compute_normal_for_object(pos: vec3<f32>, obj_idx: u32) -> vec3<f32> {
+    let obj = objects[obj_idx];
+    var e: f32;
+    if obj.sdf_type == SDF_TYPE_VOXELIZED {
+        // Epsilon spans ~1.5 voxels to smooth over trilinear interpolation boundaries.
+        e = obj.voxel_size * obj.accumulated_scale * 1.5;
+    } else {
+        // Small epsilon for analytical SDFs (smooth gradients everywhere).
+        e = scene.hit_threshold * 10.0;
+    }
+
+    let nx = sample_object(pos + vec3<f32>(e, 0.0, 0.0), obj_idx)
+           - sample_object(pos - vec3<f32>(e, 0.0, 0.0), obj_idx);
+    let ny = sample_object(pos + vec3<f32>(0.0, e, 0.0), obj_idx)
+           - sample_object(pos - vec3<f32>(0.0, e, 0.0), obj_idx);
+    let nz = sample_object(pos + vec3<f32>(0.0, 0.0, e), obj_idx)
+           - sample_object(pos - vec3<f32>(0.0, 0.0, e), obj_idx);
     return normalize(vec3<f32>(nx, ny, nz));
 }
 
@@ -540,7 +559,7 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
 
     if result.hit {
         let hit_pos = ray_origin + ray_dir * result.t;
-        let normal = compute_normal(hit_pos);
+        let normal = compute_normal_for_object(hit_pos, result.obj_idx);
 
         // Write G-buffer.
         textureStore(gbuf_position, coord, vec4<f32>(hit_pos, result.t));
