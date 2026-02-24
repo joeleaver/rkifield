@@ -876,6 +876,36 @@ impl ApplicationHandler for App {
                         // Apply environment settings (sun, fog, bloom, exposure)
                         // to render pipeline when dirty.
                         engine.apply_environment(&mut es.environment);
+
+                        // Sync editor lights → render lights when dirty.
+                        if es.light_editor.is_dirty() {
+                            engine.world_lights = es.light_editor.all_lights().iter().map(|el| {
+                                use crate::light_editor::EditorLightType;
+                                rkf_render::Light {
+                                    light_type: match el.light_type {
+                                        EditorLightType::Directional => 0,
+                                        EditorLightType::Point => 1,
+                                        EditorLightType::Spot => 2,
+                                    },
+                                    pos_x: el.position.x,
+                                    pos_y: el.position.y,
+                                    pos_z: el.position.z,
+                                    dir_x: el.direction.x,
+                                    dir_y: el.direction.y,
+                                    dir_z: el.direction.z,
+                                    color_r: el.color.x,
+                                    color_g: el.color.y,
+                                    color_b: el.color.z,
+                                    intensity: el.intensity,
+                                    range: el.range,
+                                    inner_angle: el.spot_inner_angle,
+                                    outer_angle: el.spot_outer_angle,
+                                    cookie_index: -1,
+                                    shadow_caster: el.cast_shadows as u32,
+                                }
+                            }).collect();
+                            es.light_editor.clear_dirty();
+                        }
                     }
 
                     // Reset per-frame deltas.
