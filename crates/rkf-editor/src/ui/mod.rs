@@ -258,6 +258,28 @@ pub fn TitleBar() -> NodeHandle {
             }
         }));
 
+    let spawn_primitives: &[(&str, &str)] = &[
+        ("Box", "Box"),
+        ("Sphere", "Sphere"),
+        ("Capsule", "Capsule"),
+        ("Torus", "Torus"),
+        ("Cylinder", "Cylinder"),
+    ];
+    let mut spawn_menu = Menu::new();
+    for &(label, prim_name) in spawn_primitives {
+        spawn_menu = spawn_menu.item(MenuItem::new(label).on_click({
+            let es = es.clone();
+            let rev = rev;
+            let name = prim_name.to_string();
+            move || {
+                if let Ok(mut s) = es.lock() {
+                    s.pending_spawn = Some(name.clone());
+                }
+                rev.bump();
+            }
+        }));
+    }
+
     let edit_menu = Menu::new()
         .item(MenuItem::new("Undo").shortcut("Ctrl+Z").on_click({
             let es = es.clone();
@@ -270,7 +292,26 @@ pub fn TitleBar() -> NodeHandle {
             move || {
                 if let Ok(mut s) = es.lock() { s.undo.redo(); }
             }
-        }));
+        }))
+        .separator()
+        .item(MenuItem::new("Delete").shortcut("Del").on_click({
+            let es = es.clone();
+            let rev = rev;
+            move || {
+                if let Ok(mut s) = es.lock() { s.pending_delete = true; }
+                rev.bump();
+            }
+        }))
+        .item(MenuItem::new("Duplicate").shortcut("Ctrl+D").on_click({
+            let es = es.clone();
+            let rev = rev;
+            move || {
+                if let Ok(mut s) = es.lock() { s.pending_duplicate = true; }
+                rev.bump();
+            }
+        }))
+        .separator()
+        .submenu("Spawn", spawn_menu);
 
     let debug_modes: &[(&str, u32)] = &[
         ("Normal", 0),
@@ -318,6 +359,17 @@ pub fn TitleBar() -> NodeHandle {
             }
         }));
     }
+
+    // Grid overlay toggle.
+    view_menu = view_menu.separator();
+    view_menu = view_menu.item(MenuItem::new("Toggle Grid").shortcut("G").on_click({
+        let es = es.clone();
+        let rev = rev;
+        move || {
+            if let Ok(mut s) = es.lock() { s.show_grid = !s.show_grid; }
+            rev.bump();
+        }
+    }));
 
     // ── Build DOM for each top-level menu ──────────────────────────────
     let menus: &[(&str, &Menu)] = &[

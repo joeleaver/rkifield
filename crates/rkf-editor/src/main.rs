@@ -574,7 +574,7 @@ impl ApplicationHandler for App {
                         return;
                     }
 
-                    // Ctrl+S: Save scene, Ctrl+O: Open scene.
+                    // Ctrl+S: Save scene, Ctrl+O: Open scene, Ctrl+D: Duplicate.
                     if event.state == ElementState::Pressed && self.modifiers.control_key() {
                         match key {
                             WinitKeyCode::KeyS => {
@@ -585,8 +585,28 @@ impl ApplicationHandler for App {
                                 self.open_scene();
                                 return;
                             }
+                            WinitKeyCode::KeyD => {
+                                if let Ok(mut es) = self.editor_state.lock() {
+                                    es.pending_duplicate = true;
+                                }
+                                if let Some(rev) = &self.ui_revision {
+                                    rev.bump();
+                                }
+                                return;
+                            }
                             _ => {}
                         }
+                    }
+
+                    // Delete key: remove selected object.
+                    if event.state == ElementState::Pressed && key == WinitKeyCode::Delete {
+                        if let Ok(mut es) = self.editor_state.lock() {
+                            es.pending_delete = true;
+                        }
+                        if let Some(rev) = &self.ui_revision {
+                            rev.bump();
+                        }
+                        return;
                     }
 
                     // Tool toggle via S (Sculpt) / P (Paint).
@@ -635,6 +655,22 @@ impl ApplicationHandler for App {
                                     }
                                     return;
                                 }
+                            }
+                        }
+
+                        // G: toggle grid overlay.
+                        if key == WinitKeyCode::KeyG {
+                            let right_mouse_held = self.editor_state.lock()
+                                .map(|es| es.editor_input.is_mouse_button_down(1))
+                                .unwrap_or(false);
+                            if !right_mouse_held {
+                                if let Ok(mut es) = self.editor_state.lock() {
+                                    es.show_grid = !es.show_grid;
+                                }
+                                if let Some(rev) = &self.ui_revision {
+                                    rev.bump();
+                                }
+                                return;
                             }
                         }
 
@@ -835,6 +871,76 @@ impl ApplicationHandler for App {
                     es.reset_frame_deltas();
                 }
 
+                // 4b. Process pending spawn / delete / duplicate.
+                // Collect scene change out of the lock, then apply to engine.
+                let mut scene_changed = false;
+                if let Ok(mut es) = self.editor_state.lock() {
+                    // Spawn: create a new analytical SDF object in the scene.
+                    if let Some(prim_name) = es.pending_spawn.take() {
+                        use rkf_core::scene_node::SdfPrimitive;
+                        let prim = match prim_name.as_str() {
+                            "Box" => SdfPrimitive::Box { half_extents: glam::Vec3::splat(0.5) },
+                            "Sphere" => SdfPrimitive::Sphere { radius: 0.5 },
+                            "Capsule" => SdfPrimitive::Capsule { radius: 0.3, half_height: 0.5 },
+                            "Torus" => SdfPrimitive::Torus { major_radius: 0.5, minor_radius: 0.15 },
+                            "Cylinder" => SdfPrimitive::Cylinder { radius: 0.3, half_height: 0.5 },
+                            _ => SdfPrimitive::Sphere { radius: 0.5 },
+                        };
+                        // Place 3 units in front of the camera.
+                        let cam = &es.editor_camera;
+                        let fwd = camera::screen_to_ray(cam, 0.5, 0.5, 1.0, 1.0).1;
+                        let spawn_pos = cam.position + fwd * 3.0;
+
+                        let obj = placement::create_v2_object(&prim_name, spawn_pos, prim, 1);
+                        if let Some(ref mut scene) = es.v2_scene {
+                            let _id = scene.add_object_full(obj);
+                        }
+                        es.sync_v2_scene();
+                        scene_changed = true;
+                    }
+
+                    // Delete: remove the selected object from the scene.
+                    if es.pending_delete {
+                        es.pending_delete = false;
+                        if let Some(editor_state::SelectedEntity::Object(eid)) = es.selected_entity {
+                            if let Some(ref mut scene) = es.v2_scene {
+                                scene.root_objects.retain(|obj| obj.id as u64 != eid);
+                            }
+                            es.selected_entity = None;
+                            es.sync_v2_scene();
+                            scene_changed = true;
+                        }
+                    }
+
+                    // Duplicate: clone the selected object with a small offset.
+                    if es.pending_duplicate {
+                        es.pending_duplicate = false;
+                        if let Some(editor_state::SelectedEntity::Object(eid)) = es.selected_entity {
+                            if let Some(ref mut scene) = es.v2_scene {
+                                if let Some(src) = scene.root_objects.iter().find(|o| o.id as u64 == eid) {
+                                    let mut clone = src.clone();
+                                    clone.world_position.local += glam::Vec3::new(1.0, 0.0, 0.0);
+                                    clone.name = format!("{} (copy)", clone.name);
+                                    let new_id = scene.add_object_full(clone);
+                                    es.selected_entity = Some(
+                                        editor_state::SelectedEntity::Object(new_id as u64),
+                                    );
+                                }
+                            }
+                            es.sync_v2_scene();
+                            scene_changed = true;
+                        }
+                    }
+                }
+                // Apply scene changes to the render engine (outside the lock).
+                if scene_changed {
+                    if let (Some(engine), Ok(es)) = (self.engine.as_mut(), self.editor_state.lock()) {
+                        if let Some(ref scene) = es.v2_scene {
+                            engine.replace_scene(scene.clone());
+                        }
+                    }
+                }
+
                 // 5. Build wireframe vertices for selected object OBBs.
                 //    Read from engine.scene (live animated transforms) rather than
                 //    es.v2_scene (static snapshot) so wireframes track animation
@@ -931,6 +1037,16 @@ impl ApplicationHandler for App {
                                     verts.extend(wireframe::scale_gizmo_wireframe(gc, gizmo_size));
                                 }
                             }
+                        }
+
+                        // Ground grid overlay.
+                        if es.show_grid {
+                            verts.extend(wireframe::ground_grid_wireframe(
+                                es.editor_camera.position,
+                                40.0,   // 40-unit extent
+                                1.0,    // 1-unit spacing
+                                [0.3, 0.3, 0.3, 0.4], // Subtle dark gray
+                            ));
                         }
 
                         // Brush preview sphere when in Sculpt or Paint mode.

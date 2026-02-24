@@ -487,6 +487,32 @@ pub fn scale_gizmo_wireframe(center: Vec3, size: f32) -> Vec<LineVertex> {
     verts
 }
 
+/// Build a ground grid wireframe at Y=0 centered around the camera position.
+///
+/// Draws grid lines along X and Z axes with the given spacing. The grid
+/// automatically follows the camera's XZ position (snapped to grid spacing).
+pub fn ground_grid_wireframe(
+    cam_pos: Vec3, extent: f32, spacing: f32, color: [f32; 4],
+) -> Vec<LineVertex> {
+    let half = extent * 0.5;
+    // Snap center to grid.
+    let cx = (cam_pos.x / spacing).round() * spacing;
+    let cz = (cam_pos.z / spacing).round() * spacing;
+    let count = (extent / spacing) as i32;
+
+    let mut verts = Vec::with_capacity(count as usize * 4 + 4);
+    for i in -count / 2..=count / 2 {
+        let offset = i as f32 * spacing;
+        // Line along X.
+        verts.push(LineVertex { position: [cx - half, 0.0, cz + offset], color });
+        verts.push(LineVertex { position: [cx + half, 0.0, cz + offset], color });
+        // Line along Z.
+        verts.push(LineVertex { position: [cx + offset, 0.0, cz - half], color });
+        verts.push(LineVertex { position: [cx + offset, 0.0, cz + half], color });
+    }
+    verts
+}
+
 /// Build a wireframe sphere (3 orthogonal great circles) for brush preview.
 ///
 /// `center` is the world-space hit point, `radius` is the brush radius.
