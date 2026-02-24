@@ -530,9 +530,9 @@ impl EditorEngine {
 
     /// Apply environment settings to the render pipeline.
     ///
-    /// Updates volumetric params (sun, fog) and post-processing passes (bloom,
-    /// exposure) from the editor's `EnvironmentState`. Only writes to the GPU
-    /// when the environment is marked dirty, then clears the flag.
+    /// Updates volumetric params (sun, fog) and all post-processing passes
+    /// from the editor's `EnvironmentState`. Only writes to the GPU when
+    /// the environment is marked dirty, then clears the flag.
     pub fn apply_environment(&mut self, env: &mut crate::environment::EnvironmentState) {
         if !env.is_dirty() {
             return;
@@ -550,13 +550,37 @@ impl EditorEngine {
         self.env_fog_height_falloff = fog.height_falloff;
 
         let queue = &self.ctx.queue;
+        let pp = &env.post_process;
 
-        // Bloom threshold + knee (knee = threshold * 0.5 is a reasonable default).
-        let t = env.post_process.bloom_threshold;
+        // Bloom.
+        let t = pp.bloom_threshold;
         self.bloom.set_threshold(queue, t, t * 0.5);
+        self.bloom_composite.set_intensity(queue, pp.bloom_intensity);
 
-        // Manual exposure override.
-        self.tone_map.set_exposure(queue, env.post_process.exposure);
+        // Tone mapping.
+        let mode = if pp.tone_map_mode == 1 {
+            rkf_render::ToneMapMode::AgX
+        } else {
+            rkf_render::ToneMapMode::Aces
+        };
+        self.tone_map.set_mode(queue, mode);
+        self.tone_map.set_exposure(queue, pp.exposure);
+
+        // Depth of field.
+        if pp.dof_enabled {
+            self.dof.update_focus(queue, pp.dof_focus_distance, pp.dof_focus_range, pp.dof_max_coc);
+        }
+
+        // Sharpen.
+        self.sharpen.set_strength(queue, pp.sharpen_strength);
+
+        // Motion blur.
+        self.motion_blur.set_intensity(queue, pp.motion_blur_intensity);
+
+        // Cosmetics (vignette, grain, chromatic aberration).
+        self.cosmetics.set_vignette(queue, pp.vignette_intensity);
+        self.cosmetics.set_grain(queue, pp.grain_intensity);
+        self.cosmetics.set_chromatic_aberration(queue, pp.chromatic_aberration);
 
         env.clear_dirty();
     }

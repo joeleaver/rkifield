@@ -118,6 +118,24 @@ pub struct PostProcessSettings {
     pub saturation: f32,
     /// Vignette darkening intensity (0.0 = none).
     pub vignette_intensity: f32,
+    /// Tone map mode (0 = ACES, 1 = AgX).
+    pub tone_map_mode: u32,
+    /// Sharpen filter strength (0.0 = off).
+    pub sharpen_strength: f32,
+    /// Whether depth-of-field is enabled.
+    pub dof_enabled: bool,
+    /// DoF focus distance from camera.
+    pub dof_focus_distance: f32,
+    /// DoF in-focus range around focus distance.
+    pub dof_focus_range: f32,
+    /// DoF maximum circle-of-confusion in pixels.
+    pub dof_max_coc: f32,
+    /// Motion blur intensity (0.0 = off).
+    pub motion_blur_intensity: f32,
+    /// Film grain intensity (0.0 = off).
+    pub grain_intensity: f32,
+    /// Chromatic aberration strength (0.0 = off).
+    pub chromatic_aberration: f32,
 }
 
 impl Default for PostProcessSettings {
@@ -130,6 +148,15 @@ impl Default for PostProcessSettings {
             contrast: 1.0,
             saturation: 1.0,
             vignette_intensity: 0.0,
+            tone_map_mode: 0,
+            sharpen_strength: 0.5,
+            dof_enabled: false,
+            dof_focus_distance: 2.0,
+            dof_focus_range: 3.0,
+            dof_max_coc: 8.0,
+            motion_blur_intensity: 1.0,
+            grain_intensity: 0.0,
+            chromatic_aberration: 0.0,
         }
     }
 }

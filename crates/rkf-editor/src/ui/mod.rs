@@ -679,6 +679,15 @@ pub fn RightPanel() -> NodeHandle {
     let bloom_intensity_signal: Signal<f64> = Signal::new(0.3);
     let bloom_threshold_signal: Signal<f64> = Signal::new(1.0);
     let exposure_signal: Signal<f64> = Signal::new(1.0);
+    // Extended post-processing signals.
+    let sharpen_signal: Signal<f64> = Signal::new(0.5);
+    let dof_focus_dist_signal: Signal<f64> = Signal::new(2.0);
+    let dof_focus_range_signal: Signal<f64> = Signal::new(3.0);
+    let dof_max_coc_signal: Signal<f64> = Signal::new(8.0);
+    let motion_blur_signal: Signal<f64> = Signal::new(1.0);
+    let vignette_signal: Signal<f64> = Signal::new(0.0);
+    let grain_signal: Signal<f64> = Signal::new(0.0);
+    let chromatic_signal: Signal<f64> = Signal::new(0.0);
 
     let es = editor_state.clone();
     rinch::core::reactive_component_dom(__scope, &root, move |__scope| {
@@ -904,6 +913,14 @@ pub fn RightPanel() -> NodeHandle {
             bloom_intensity_signal.set(pp.bloom_intensity as f64);
             bloom_threshold_signal.set(pp.bloom_threshold as f64);
             exposure_signal.set(pp.exposure as f64);
+            sharpen_signal.set(pp.sharpen_strength as f64);
+            dof_focus_dist_signal.set(pp.dof_focus_distance as f64);
+            dof_focus_range_signal.set(pp.dof_focus_range as f64);
+            dof_max_coc_signal.set(pp.dof_max_coc as f64);
+            motion_blur_signal.set(pp.motion_blur_intensity as f64);
+            vignette_signal.set(pp.vignette_intensity as f64);
+            grain_signal.set(pp.grain_intensity as f64);
+            chromatic_signal.set(pp.chromatic_aberration as f64);
         }
 
         // ── Atmosphere section ──
@@ -1071,6 +1088,137 @@ pub fn RightPanel() -> NodeHandle {
             { let es = es.clone(); move |v| {
                 if let Ok(mut es) = es.lock() {
                     es.environment.post_process.exposure = v as f32;
+                    es.environment.mark_dirty();
+                }
+            }},
+        );
+
+        // Tone map mode toggle (ACES / AgX).
+        {
+            let tm_mode = es.lock().map(|e| e.environment.post_process.tone_map_mode).unwrap_or(0);
+            let toggle_row = __scope.create_element("div");
+            toggle_row.set_attribute(
+                "style",
+                "padding:3px 12px;font-size:11px;color:var(--rinch-color-dimmed);\
+                 cursor:pointer;user-select:none;",
+            );
+            let label = if tm_mode == 0 { "Tone Map: ACES" } else { "Tone Map: AgX" };
+            toggle_row.append_child(&__scope.create_text(label));
+            let es_toggle = es.clone();
+            let rev = revision;
+            let hid = __scope.register_handler(move || {
+                if let Ok(mut es) = es_toggle.lock() {
+                    es.environment.post_process.tone_map_mode =
+                        if es.environment.post_process.tone_map_mode == 0 { 1 } else { 0 };
+                    es.environment.mark_dirty();
+                }
+                rev.bump();
+            });
+            toggle_row.set_attribute("data-rid", &hid.to_string());
+            container.append_child(&toggle_row);
+        }
+
+        build_slider_row(
+            __scope, &container, "Sharpen", "", sharpen_signal,
+            0.0, 2.0, 0.05, 2,
+            { let es = es.clone(); move |v| {
+                if let Ok(mut es) = es.lock() {
+                    es.environment.post_process.sharpen_strength = v as f32;
+                    es.environment.mark_dirty();
+                }
+            }},
+        );
+
+        // DoF enable toggle.
+        {
+            let dof_on = es.lock().map(|e| e.environment.post_process.dof_enabled).unwrap_or(false);
+            let toggle_row = __scope.create_element("div");
+            toggle_row.set_attribute(
+                "style",
+                "padding:3px 12px;font-size:11px;color:var(--rinch-color-dimmed);\
+                 cursor:pointer;user-select:none;",
+            );
+            let label = if dof_on { "DoF: ON" } else { "DoF: OFF" };
+            toggle_row.append_child(&__scope.create_text(label));
+            let es_toggle = es.clone();
+            let rev = revision;
+            let hid = __scope.register_handler(move || {
+                if let Ok(mut es) = es_toggle.lock() {
+                    es.environment.post_process.dof_enabled = !es.environment.post_process.dof_enabled;
+                    es.environment.mark_dirty();
+                }
+                rev.bump();
+            });
+            toggle_row.set_attribute("data-rid", &hid.to_string());
+            container.append_child(&toggle_row);
+        }
+
+        build_slider_row(
+            __scope, &container, "Focus Distance", "", dof_focus_dist_signal,
+            0.1, 50.0, 0.1, 1,
+            { let es = es.clone(); move |v| {
+                if let Ok(mut es) = es.lock() {
+                    es.environment.post_process.dof_focus_distance = v as f32;
+                    es.environment.mark_dirty();
+                }
+            }},
+        );
+        build_slider_row(
+            __scope, &container, "Focus Range", "", dof_focus_range_signal,
+            0.1, 20.0, 0.1, 1,
+            { let es = es.clone(); move |v| {
+                if let Ok(mut es) = es.lock() {
+                    es.environment.post_process.dof_focus_range = v as f32;
+                    es.environment.mark_dirty();
+                }
+            }},
+        );
+        build_slider_row(
+            __scope, &container, "Max CoC", "px", dof_max_coc_signal,
+            1.0, 32.0, 1.0, 0,
+            { let es = es.clone(); move |v| {
+                if let Ok(mut es) = es.lock() {
+                    es.environment.post_process.dof_max_coc = v as f32;
+                    es.environment.mark_dirty();
+                }
+            }},
+        );
+        build_slider_row(
+            __scope, &container, "Motion Blur", "", motion_blur_signal,
+            0.0, 3.0, 0.1, 1,
+            { let es = es.clone(); move |v| {
+                if let Ok(mut es) = es.lock() {
+                    es.environment.post_process.motion_blur_intensity = v as f32;
+                    es.environment.mark_dirty();
+                }
+            }},
+        );
+        build_slider_row(
+            __scope, &container, "Vignette", "", vignette_signal,
+            0.0, 1.0, 0.01, 2,
+            { let es = es.clone(); move |v| {
+                if let Ok(mut es) = es.lock() {
+                    es.environment.post_process.vignette_intensity = v as f32;
+                    es.environment.mark_dirty();
+                }
+            }},
+        );
+        build_slider_row(
+            __scope, &container, "Grain", "", grain_signal,
+            0.0, 1.0, 0.01, 2,
+            { let es = es.clone(); move |v| {
+                if let Ok(mut es) = es.lock() {
+                    es.environment.post_process.grain_intensity = v as f32;
+                    es.environment.mark_dirty();
+                }
+            }},
+        );
+        build_slider_row(
+            __scope, &container, "Chromatic Ab.", "", chromatic_signal,
+            0.0, 1.0, 0.01, 2,
+            { let es = es.clone(); move |v| {
+                if let Ok(mut es) = es.lock() {
+                    es.environment.post_process.chromatic_aberration = v as f32;
                     es.environment.mark_dirty();
                 }
             }},
