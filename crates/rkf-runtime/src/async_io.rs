@@ -489,4 +489,204 @@ mod tests {
 
         pipeline.shutdown();
     }
+
+    // ── 8. shutdown_with_inflight_requests ───────────────────────────────────
+    // Verify that shutdown() does not hang when requests are in-flight.
+
+    #[test]
+    fn shutdown_with_inflight_requests() {
+        let tmp = std::env::temp_dir().join("rkf_async_io_test_shutdown");
+        std::fs::create_dir_all(&tmp).expect("create tmp dir");
+        let path = tmp.join("shutdown_test.rkf");
+        write_minimal_rkf(&path);
+
+        let config = AsyncIoConfig {
+            max_workers: 2,
+            max_pending: 8,
+        };
+        let pipeline = AsyncIoPipeline::new(config);
+
+        // Submit multiple requests that will be in-flight.
+        pipeline.submit(100, path.to_string_lossy().into_owned(), 0);
+        pipeline.submit(101, path.to_string_lossy().into_owned(), 0);
+        pipeline.submit(102, path.to_string_lossy().into_owned(), 0);
+
+        // Shutdown without draining results — workers should complete in-flight
+        // work and then exit gracefully when they read the closed channel.
+        let start = Instant::now();
+        pipeline.shutdown();
+        let elapsed = start.elapsed();
+
+        // Shutdown should complete quickly (within 5 seconds), not hang indefinitely.
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "shutdown took {:?}, possible hang detected",
+            elapsed
+        );
+    }
+
+    // ── 9. submit_returns_false_after_shutdown ───────────────────────────────
+    // Verify that submit() returns false when the request channel is closed
+    // (simulated by zero workers, no channel send).
+
+    #[test]
+    fn submit_returns_false_after_shutdown() {
+        let config = AsyncIoConfig {
+            max_workers: 0,
+            max_pending: 1,
+        };
+        let pipeline = AsyncIoPipeline::new(config);
+
+        // Submit one request to fill the pending slot.
+        let first = pipeline.submit(200, "/some/path.rkf".into(), 0);
+        assert!(first, "first submit should succeed");
+
+        // Second submit should be rejected because max_pending=1 and slot is full.
+        let second = pipeline.submit(201, "/some/path.rkf".into(), 0);
+        assert!(
+            !second,
+            "second submit should be rejected when queue is full, but returned true"
+        );
+
+        // Now test the channel-closed path by dropping the request sender
+        // (simulating what shutdown does). Create a new pipeline with a sender
+        // we can manually drop.
+        let config2 = AsyncIoConfig {
+            max_workers: 1,
+            max_pending: 8,
+        };
+        let mut pipeline2 = AsyncIoPipeline::new(config2);
+
+        // Drop the request sender to close the channel.
+        drop(pipeline2.request_tx.take());
+
+        // Now submit should return false because send will fail.
+        let result = pipeline2.submit(202, "/some/path.rkf".into(), 0);
+        assert!(
+            !result,
+            "submit should return false when channel is closed, but returned true"
+        );
+
+        pipeline.shutdown();
+        pipeline2.shutdown();
+    }
+
+    // ── 10. result_ordering_doesnt_matter ────────────────────────────────────
+    // Verify that all submitted IDs eventually appear in results, regardless of
+    // the order in which they are returned by workers.
+
+    #[test]
+    fn result_ordering_doesnt_matter() {
+        let tmp = std::env::temp_dir().join("rkf_async_io_test_ordering");
+        std::fs::create_dir_all(&tmp).expect("create tmp dir");
+
+        // Create 5 test files with distinct paths.
+        let paths: Vec<_> = (0..5)
+            .map(|i| {
+                let p = tmp.join(format!("obj_{}.rkf", i));
+                write_minimal_rkf(&p);
+                p
+            })
+            .collect();
+
+        let config = AsyncIoConfig {
+            max_workers: 3,
+            max_pending: 16,
+        };
+        let pipeline = AsyncIoPipeline::new(config);
+
+        // Submit 5 requests in order (object_id = 300-304).
+        for (i, path) in paths.iter().enumerate() {
+            pipeline.submit(
+                300 + i as u32,
+                path.to_string_lossy().into_owned(),
+                0,
+            );
+        }
+
+        // Collect all results with a timeout.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut collected: Vec<LoadResult> = Vec::new();
+
+        while collected.len() < 5 {
+            assert!(Instant::now() < deadline, "timed out waiting for all results");
+            let mut batch = pipeline.poll_results();
+            collected.append(&mut batch);
+            if collected.len() < 5 {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        // Verify that all 5 object IDs are present (order irrelevant).
+        let mut ids: Vec<u32> = collected.iter().map(|r| r.object_id).collect();
+        ids.sort();
+        assert_eq!(
+            ids, vec![300, 301, 302, 303, 304],
+            "not all submitted IDs appeared in results"
+        );
+
+        // Verify all results are successful.
+        for r in &collected {
+            assert!(r.result.is_ok(), "result for object {} failed", r.object_id);
+        }
+
+        pipeline.shutdown();
+    }
+
+    // ── 11. rapid_submit_poll_cycling ────────────────────────────────────────
+    // Verify that rapid submit/poll cycling works correctly without data loss
+    // or missed results.
+
+    #[test]
+    fn rapid_submit_poll_cycling() {
+        let tmp = std::env::temp_dir().join("rkf_async_io_test_rapid");
+        std::fs::create_dir_all(&tmp).expect("create tmp dir");
+        let path = tmp.join("rapid_test.rkf");
+        write_minimal_rkf(&path);
+
+        let config = AsyncIoConfig {
+            max_workers: 2,
+            max_pending: 16,
+        };
+        let pipeline = AsyncIoPipeline::new(config);
+
+        let path_str = path.to_string_lossy().into_owned();
+
+        // Rapidly submit 10 requests in a tight loop.
+        for i in 0..10 {
+            let queued = pipeline.submit(400 + i, path_str.clone(), 0);
+            assert!(queued, "submit {} should succeed", i);
+        }
+
+        // Rapidly poll results in a tight loop with brief sleeps.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut collected: Vec<LoadResult> = Vec::new();
+
+        while collected.len() < 10 {
+            assert!(Instant::now() < deadline, "timed out waiting for all results");
+
+            // Poll multiple times without sleeping to stress the channel.
+            for _ in 0..5 {
+                let mut batch = pipeline.poll_results();
+                collected.append(&mut batch);
+            }
+
+            if collected.len() < 10 {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+
+        // Verify all 10 results arrived and succeeded.
+        assert_eq!(collected.len(), 10, "did not collect all 10 results");
+        for r in &collected {
+            assert!(r.result.is_ok(), "result for object {} failed", r.object_id);
+        }
+
+        // Verify all object IDs are present.
+        let mut ids: Vec<u32> = collected.iter().map(|r| r.object_id).collect();
+        ids.sort();
+        assert_eq!(ids, (400..410).collect::<Vec<_>>());
+
+        pipeline.shutdown();
+    }
 }

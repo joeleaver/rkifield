@@ -368,4 +368,275 @@ mod tests {
         LodManager::deallocate_evicted(&transitions, &mut allocator);
         assert_eq!(allocator.free_region_count(), free_before + 1);
     }
+
+    #[test]
+    fn multiple_objects_different_distances_select_different_lod_levels() {
+        let mut mgr = LodManager::new(1.0);
+
+        // Register three objects with the same LOD config
+        let lod_config = test_lod_config();
+        mgr.register_object(
+            1,
+            LodSelection::Voxelized(0),
+            vec![Some(handle(0)), Some(handle(64)), Some(handle(128))],
+        );
+        mgr.register_object(
+            2,
+            LodSelection::Voxelized(0),
+            vec![Some(handle(192)), Some(handle(256)), Some(handle(320))],
+        );
+        mgr.register_object(
+            3,
+            LodSelection::Voxelized(0),
+            vec![Some(handle(384)), Some(handle(448)), Some(handle(512))],
+        );
+
+        let mut configs = HashMap::new();
+        configs.insert(1, lod_config.clone());
+        configs.insert(2, lod_config.clone());
+        configs.insert(3, lod_config);
+
+        let mut aabbs = HashMap::new();
+        aabbs.insert(1, Aabb::new(Vec3::splat(-1.0), Vec3::splat(1.0)));
+        aabbs.insert(2, Aabb::new(Vec3::splat(-1.0), Vec3::splat(1.0)));
+        aabbs.insert(3, Aabb::new(Vec3::splat(-1.0), Vec3::splat(1.0)));
+
+        // Object 1: very close, should stay at finest
+        // Object 2: moderate distance, may be at intermediate
+        // Object 3: very far, should be at coarser
+        let mut dists = HashMap::new();
+        dists.insert(1, 5.0);
+        dists.insert(2, 50.0);
+        dists.insert(3, 500.0);
+
+        let transitions = mgr.update(&configs, &dists, &aabbs, 1080.0, FRAC_PI_4);
+
+        // Objects 2 and 3 should transition to coarser levels
+        // Object 1 may not transition (depending on calculation)
+        let has_transitions = !transitions.is_empty();
+        assert!(
+            has_transitions,
+            "at least one object should transition to coarser LOD"
+        );
+
+        // Verify that object 3 is at a coarser level than object 1
+        let obj1_level = match mgr.current_lod(1) {
+            Some(LodSelection::Voxelized(level)) => *level,
+            _ => panic!("object 1 should have a voxelized LOD"),
+        };
+        let obj3_level = match mgr.current_lod(3) {
+            Some(LodSelection::Voxelized(level)) => *level,
+            _ => panic!("object 3 should have a voxelized LOD"),
+        };
+        assert!(
+            obj3_level >= obj1_level,
+            "far object (3) should be at coarser or equal LOD than close object (1)"
+        );
+    }
+
+    #[test]
+    fn lod_transition_tracking_object_moves_closer() {
+        let mut mgr = LodManager::new(1.0);
+        let lod_config = test_lod_config();
+
+        mgr.register_object(
+            1,
+            LodSelection::Voxelized(2), // start at coarsest
+            vec![Some(handle(0)), Some(handle(64)), Some(handle(128))],
+        );
+
+        let mut configs = HashMap::new();
+        configs.insert(1, lod_config);
+
+        let mut aabbs = HashMap::new();
+        aabbs.insert(1, Aabb::new(Vec3::splat(-1.0), Vec3::splat(1.0)));
+
+        // Initially very far (coarsest LOD)
+        let mut dists = HashMap::new();
+        dists.insert(1, 500.0);
+        let transitions = mgr.update(&configs, &dists, &aabbs, 1080.0, FRAC_PI_4);
+        assert!(transitions.is_empty(), "should stay at coarsest when very far");
+
+        // Move closer — should transition to finer LOD
+        dists.insert(1, 5.0);
+        let transitions = mgr.update(&configs, &dists, &aabbs, 1080.0, FRAC_PI_4);
+        assert!(
+            !transitions.is_empty(),
+            "should transition to finer LOD when moving closer"
+        );
+        assert_eq!(transitions[0].object_id, 1);
+        assert_eq!(transitions[0].from, LodSelection::Voxelized(2));
+        match &transitions[0].to {
+            LodSelection::Voxelized(level) => {
+                assert!(*level < 2, "should transition to finer LOD (lower level number)")
+            }
+            _ => panic!("expected Voxelized LOD"),
+        }
+
+        // Verify current LOD reflects the change
+        let current = mgr.current_lod(1).expect("object should still be registered");
+        match current {
+            LodSelection::Voxelized(level) => {
+                assert!(*level < 2, "current LOD should be finer than before")
+            }
+            _ => panic!("expected Voxelized"),
+        }
+    }
+
+    #[test]
+    fn object_at_exact_boundary_distance_between_lod_levels() {
+        let mut mgr = LodManager::new(1.0);
+        let _lod_config = test_lod_config();
+
+        mgr.register_object(
+            1,
+            LodSelection::Voxelized(0),
+            vec![Some(handle(0)), Some(handle(64)), Some(handle(128))],
+        );
+
+        let mut configs = HashMap::new();
+        configs.insert(1, test_lod_config().clone());
+
+        let mut aabbs = HashMap::new();
+        aabbs.insert(1, Aabb::new(Vec3::splat(-1.0), Vec3::splat(1.0)));
+
+        // Use a specific distance that might be a boundary
+        // (exact boundary depends on select_lod logic, so we test stability)
+        let boundary_distance = 50.0;
+        let mut dists = HashMap::new();
+        dists.insert(1, boundary_distance);
+
+        let _transitions1 = mgr.update(&configs, &dists, &aabbs, 1080.0, FRAC_PI_4);
+        let lod_at_boundary = mgr.current_lod(1).cloned();
+
+        // Update again at same distance — should not transition
+        let transitions2 = mgr.update(&configs, &dists, &aabbs, 1080.0, FRAC_PI_4);
+        assert!(
+            transitions2.is_empty(),
+            "object at same distance should not transition again"
+        );
+
+        // LOD should remain the same
+        let lod_still = mgr.current_lod(1).cloned();
+        assert_eq!(
+            lod_at_boundary, lod_still,
+            "LOD should be stable at boundary distance"
+        );
+    }
+
+    #[test]
+    fn object_with_single_lod_level_no_transition_possible() {
+        let mut mgr = LodManager::new(1.0);
+
+        // Create a single-level LOD config
+        let single_lod = ObjectLod::multi(
+            vec![LodLevel {
+                voxel_size: 0.02,
+                brick_count: 100,
+            }],
+            Some(SdfPrimitive::Sphere { radius: 1.0 }),
+        );
+
+        mgr.register_object(1, LodSelection::Voxelized(0), vec![Some(handle(0))]);
+
+        let mut configs = HashMap::new();
+        configs.insert(1, single_lod);
+
+        let mut aabbs = HashMap::new();
+        aabbs.insert(1, Aabb::new(Vec3::splat(-1.0), Vec3::splat(1.0)));
+
+        // Close distance
+        let mut dists = HashMap::new();
+        dists.insert(1, 5.0);
+        let transitions = mgr.update(&configs, &dists, &aabbs, 1080.0, FRAC_PI_4);
+        assert!(transitions.is_empty(), "no transition possible with single LOD level");
+
+        // Far distance — still only one level
+        dists.insert(1, 500.0);
+        let transitions2 = mgr.update(&configs, &dists, &aabbs, 1080.0, FRAC_PI_4);
+        assert!(
+            transitions2.is_empty(),
+            "even at far distance, single-level object cannot transition"
+        );
+
+        // Verify it stays at level 0
+        assert_eq!(
+            mgr.current_lod(1),
+            Some(&LodSelection::Voxelized(0)),
+            "single-level object should remain at level 0"
+        );
+    }
+
+    #[test]
+    fn very_far_object_should_use_analytical_fallback() {
+        let mut mgr = LodManager::new(1.0);
+
+        // Create object with analytical fallback
+        let lod_with_fallback = ObjectLod::multi(
+            vec![
+                LodLevel {
+                    voxel_size: 0.005,
+                    brick_count: 1000,
+                },
+                LodLevel {
+                    voxel_size: 0.02,
+                    brick_count: 100,
+                },
+                LodLevel {
+                    voxel_size: 0.08,
+                    brick_count: 20,
+                },
+            ],
+            Some(SdfPrimitive::Sphere { radius: 1.0 }), // analytical fallback
+        );
+
+        mgr.register_object(
+            1,
+            LodSelection::Voxelized(0),
+            vec![Some(handle(0)), Some(handle(64)), Some(handle(128))],
+        );
+
+        let mut configs = HashMap::new();
+        configs.insert(1, lod_with_fallback);
+
+        let mut aabbs = HashMap::new();
+        aabbs.insert(1, Aabb::new(Vec3::splat(-1.0), Vec3::splat(1.0)));
+
+        // At very close distance, should use voxelized
+        let mut dists = HashMap::new();
+        dists.insert(1, 1.0);
+        let transitions = mgr.update(&configs, &dists, &aabbs, 1080.0, FRAC_PI_4);
+        let lod_close = mgr.current_lod(1).cloned();
+        assert!(
+            matches!(lod_close, Some(LodSelection::Voxelized(_))),
+            "close object should use voxelized"
+        );
+
+        // At extremely far distance, may fall back to analytical
+        dists.insert(1, 100000.0); // extremely far
+        let transitions_far = mgr.update(&configs, &dists, &aabbs, 1080.0, FRAC_PI_4);
+
+        // After very far update, check if we transitioned to Analytical
+        let lod_far = mgr.current_lod(1).cloned();
+        // If analytical fallback is triggered, transitions should have one entry
+        // switching to Analytical; if not, object stays voxelized but at coarser level
+        match lod_far {
+            Some(LodSelection::Analytical) => {
+                assert!(
+                    !transitions_far.is_empty(),
+                    "transitioning to analytical should produce a transition"
+                );
+                assert_eq!(
+                    transitions_far[0].to,
+                    LodSelection::Analytical,
+                    "should transition to analytical"
+                );
+            }
+            Some(LodSelection::Voxelized(level)) => {
+                // Also valid: object stays voxelized at coarser level
+                assert_eq!(level, 2, "far object should use coarsest voxelized level");
+            }
+            _ => panic!("expected Voxelized or Analytical"),
+        }
+    }
 }

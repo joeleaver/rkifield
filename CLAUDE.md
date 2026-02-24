@@ -76,14 +76,19 @@ cargo run -p rkf-convert -- input.glb -o output.rkf  # asset conversion
 // World-space position — ALWAYS use this, never raw Vec3
 struct WorldPosition { chunk: IVec3, local: Vec3 }
 
+// Scene hierarchy — objects own SDF in local space
+SceneObject { id: u32, world_position: WorldPosition, rotation: Quat, scale: f32, root_node: SceneNode, aabb: Aabb }
+SceneNode { name, local_transform: Transform, sdf_source: SdfSource, blend_mode: BlendMode, children: Vec<SceneNode> }
+SdfSource::Analytical { primitive, material_id } | SdfSource::Voxelized { brick_map_handle, voxel_size, aabb }
+
+// Per-object brick map — flat 3D array mapping brick coords to pool slots
+BrickMap { dims: UVec3, entries: Vec<u32> }  // EMPTY_SLOT = u32::MAX
+
 // Voxel sample — 8 bytes, tightly packed
 // Word 0: f16 distance | u16 material_id
 // Word 1: u8 blend_weight | u8 secondary_id | u8 flags | u8 reserved
 
 // Brick: 8×8×8 = 512 voxel samples = 4KB
-// Resolution tiers: 0.5cm, 2cm, 8cm, 32cm voxel sizes
-// Chunk size: 8m × 8m × 8m
-
 // Material: 96 bytes — PBR + SSS + procedural noise
 // Max 65536 materials (u16), stored in GPU storage buffer
 ```
@@ -91,34 +96,42 @@ struct WorldPosition { chunk: IVec3, local: Vec3 }
 ## Render Pipeline (all compute)
 
 ```
-1. Animation Rebake (joints + blend shapes)
-2. Particle Simulate
-3. Ray March → G-buffer (internal res, e.g. 960×540)
-4. Tile Light Cull → per-tile light lists
-5. Radiance Inject → GI volume L0
-6. Radiance Mip Gen → GI volume L1-L3
-7. Shade (PBR + shadows + AO + SSS + GI + atmosphere)
-8. Volumetric Shadow Map + Cloud Shadow Map
-9. Volumetric March (half-res) → bilateral upscale
-10. Volumetric Composite
-11. Pre-upscale post-process (bloom, DoF, motion blur)
-12. Upscale (DLSS or custom temporal)
-13. Post-upscale post-process (tone map, color grade)
-14. Screen-space particles
-15. Present
+1. Update transforms → flatten SceneNode trees → upload GpuObject metadata
+2. BVH refit → upload GPU BVH nodes
+3. Tile-based object culling → per-tile object lists
+4. Particle Simulate
+5. Ray March → BVH traversal → per-object SDF evaluation → G-buffer (internal res)
+6. Tile Light Cull → per-tile light lists
+7. Radiance Inject → GI volume L0 (coarse field + BVH for SDF queries)
+8. Radiance Mip Gen → GI volume L1-L3
+9. Shade (PBR + shadows + AO + SSS + GI + atmosphere)
+10. Volumetric Shadow Map + Cloud Shadow Map
+11. Volumetric March (half-res) → bilateral upscale
+12. Volumetric Composite
+13. Pre-upscale post-process (bloom, DoF, motion blur)
+14. Upscale (spatial bilinear + sharpen)
+15. Post-upscale post-process (tone map, color grade)
+16. Screen-space particles
+17. Present
 ```
 
 ## Novel/Unusual Patterns — Don't Get These Wrong
 
-**Skeletal animation** uses segmented rigid body parts + joint rebaking (smooth-min blend in a compute shader). Bones are NOT evaluated during ray marching. Joint bricks use 0.8× conservative step multiplier for Lipschitz safety.
+**Object-centric SDF.** Each object owns its SDF in local space (brick map or analytical primitive). Transforms are applied at ray march time — moving an object never triggers re-voxelization. Objects have persistent identity throughout their lifecycle.
 
-**SDF collision** for physics: Rapier handles dynamics, but world collision is a custom adapter that evaluates the SDF at contact sample points. Character controller is custom (capsule-vs-SDF, iterative slide).
+**BVH-accelerated ray marching.** A CPU-side BVH over object AABBs is uploaded to GPU. The ray marcher traverses the BVH to find candidate objects, then evaluates each in object-local space. Tile-based culling produces per-tile object lists for further acceleration.
 
-**Three particle backends:** Volumetric density splats (glowing), SDF micro-objects (solid), screen-space overlay (weather). NOT traditional billboards.
+**Skeletal animation** uses a SceneNode tree where bones are child nodes with voxelized SDF. Animation updates bone local transforms (no rebaking). Smooth-min blending between sibling nodes produces natural joints during ray marching.
 
-**Edit persistence** uses per-chunk append-only journals (`.rkj`) with 64-byte `CompactEditOp` entries. Replayed on chunk load. Compacted when large.
+**SDF collision** for physics: Rapier handles dynamics, but world collision iterates scene objects via BVH, evaluating SDF in object-local space. Character controller is custom (capsule-vs-SDF, iterative slide with 14 sample points).
+
+**Three particle backends:** Volumetric density splats (glowing), SDF micro-objects (solid), screen-space overlay (weather). NOT traditional billboards. Collision uses per-object BVH queries.
+
+**Per-object editing.** CSG operations target an object's brick map in local space. Brush positions transform from world to object-local before applying. Undo/redo is per-object, not per-chunk.
 
 **Floating point precision** solved via WorldPosition (IVec3 chunk + Vec3 local). CPU does f64 subtraction, GPU only sees camera-relative f32. Effective range ±17 billion meters.
+
+**Per-object streaming.** Objects load from `.rkf` v2 files with multi-LOD LZ4 compression (coarsest first). Streaming priority = screen_coverage × importance_bias. LRU eviction with watermark-based policy demotes LOD before full eviction.
 
 **MCP-native engine.** The engine is designed to be operated by AI agents. `rkf-mcp` is a standalone MCP server binary that connects to any running engine process via IPC. Tools self-register via a discovery system — add new tools by implementing a trait, not modifying the server. Every feature ships with MCP tools. If the MCP is broken, that's priority zero.
 
@@ -229,9 +242,11 @@ MCP server is configured in `.mcp.json` at the project root:
 
 | Format | Extension | Purpose |
 |--------|-----------|---------|
-| RKIField Asset | `.rkf` | Binary voxel data (bricks + skeleton + materials), LZ4 compressed |
-| Edit Journal | `.rkj` | Append-only edit history per chunk, 64-byte entries |
-| Scene | `.rkscene` | RON-serialized scene definition (entities, environment, chunk manifest) |
+| RKIField Asset v2 | `.rkf` | Per-object multi-LOD voxel data, LZ4 compressed, coarsest-first |
+| Scene v2 | `.rkscene` | RON-serialized scene (object hierarchy, cameras, lights, environment) |
+| Project | `.rkproject` | RON-serialized project descriptor (scene list, asset paths, quality) |
+| Environment | `.rkenv` | RON-serialized environment profile (sky, fog, ambient, volumetrics) |
+| Save | `.rksave` | RON-serialized game state snapshot (scenes, camera, state, overrides) |
 | Config | `.ron` | Engine configuration, quality presets |
 
 ## Architecture Reference
@@ -263,30 +278,29 @@ MCP server is configured in `.mcp.json` at the project root:
 - **Shader code is WGSL** — not GLSL, not HLSL. All GPU work is `@compute` dispatches.
 - **GPU structs use `bytemuck` or `encase`** for Rust ↔ GPU layout. Match WGSL alignment rules.
 - **Brick pool access is centralized** through `BrickPoolManager`. Never write to the brick pool buffer directly.
-- **All world positions flow through WorldPosition.** The only f32 Vec3 positions on the GPU are camera-relative or chunk-local.
-- **Spatial index is the source of truth** for what exists in the world. If it's not in the index, the ray marcher won't see it.
+- **All world positions flow through WorldPosition.** The only f32 Vec3 positions on the GPU are camera-relative or object-local.
+- **BVH is the spatial acceleration structure.** CPU-side BVH over object AABBs is uploaded to GPU. Objects not in the BVH won't be ray marched.
+- **Per-object brick maps.** Each voxelized object owns a `BrickMap` — a flat 3D array mapping brick coordinates to pool slots. `BrickMapAllocator` packs multiple maps contiguously.
 - **Error handling:** `anyhow` for CLI tools, typed errors for library crates. GPU errors are wgpu device errors — log and recover, don't panic.
 - **Testing is TDD.** Write the test first, watch it fail, then implement. Unit tests for math/data types in `rkf-core`. Visual regression via `rkf-testbed` screenshots. GPU tests use wgpu in headless mode where possible. Every public function in library crates has at least one test.
 - **No `unsafe`** unless required for FFI (DLSS) or proven-necessary GPU buffer mapping. Document every `unsafe` block.
 
 ## Implementation Progress
 
-**Source of truth: git history.** Rule 9 mandates commit messages like `phase-1: 1.1 — implement WorldPosition type`. Progress is derived from commits, not a manually-maintained checklist.
+**Source of truth: git history.** Commit messages use `v2-N.M` prefixes (e.g., `v2-12.1: .rkf v2 file format`). Progress is derived from commits, not a manually-maintained checklist.
 
 **Check progress:**
 ```bash
-# Which phases have commits?
-git log --oneline | grep -oP 'phase-\d+' | sort -t- -k2 -n -u
+# Which v2 phases have commits?
+git log --oneline | grep -oP 'v2-\d+' | sort -t- -k2 -n -u
 
 # Which tasks are done in a phase?
-git log --oneline --grep='phase-2:'
+git log --oneline --grep='v2-12'
 
-# Full progress summary (all phases)
-scripts/progress.sh
+# Full commit history
+git log --oneline --grep='v2-'
 ```
 
-**`scripts/progress.sh`** — generates progress from git log. Created during Phase 0 scaffolding. Parses `phase-N: N.X` commit prefixes against `IMPLEMENTATION_PLAN.md` task list and prints completion status per phase.
+**All 16 phases (0–15) of the v2 implementation plan are implemented.** 1,680+ tests, 0 failures.
 
-**Never manually maintain a progress checklist.** If git says it's done, it's done. If there's no commit, it's not done. This cannot get out of sync.
-
-See [IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md) for the full 24-phase plan with ~160 tasks.
+See [v2 Implementation Plan](docs/v2/IMPLEMENTATION_PLAN.md) for the full 16-phase, 82-task plan.
