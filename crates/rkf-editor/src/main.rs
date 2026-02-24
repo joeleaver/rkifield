@@ -1,7 +1,8 @@
-//! RKIField editor — v2 object-centric render pipeline with camera controls.
+//! RKIField editor — v2 object-centric render pipeline with rinch UI overlay.
 //!
-//! Provides a full rendering window with the v2 compute-shader pipeline,
-//! orbit/fly camera controls, and IPC server for MCP agent tooling.
+//! Provides the full v2 compute-shader rendering pipeline, rinch-based UI
+//! panels (scene tree, properties, toolbar, status bar), orbit/fly camera
+//! controls, and IPC server for MCP agent tooling.
 
 #![allow(dead_code)] // Editor modules are WIP — used incrementally
 
@@ -13,21 +14,26 @@ mod editor_state;
 mod engine;
 mod engine_viewport;
 mod environment;
+mod event_bridge;
 mod gizmo;
 mod input;
 mod light_editor;
 mod overlay;
+mod overlay_blit;
 mod paint;
 mod placement;
 mod properties;
 mod scene_io;
 mod scene_tree;
 mod sculpt;
+mod ui;
 mod undo;
 
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use rinch::prelude::*;
+use rinch_platform::PlatformEvent;
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
@@ -38,6 +44,7 @@ use automation::SharedState;
 use editor_state::EditorState;
 use engine::EditorEngine;
 use engine_viewport::{DISPLAY_HEIGHT, DISPLAY_WIDTH};
+use overlay_blit::OverlayBlit;
 
 // ---------------------------------------------------------------------------
 // Winit key → editor key translation
@@ -133,6 +140,16 @@ struct App {
     _ipc_handle: Option<tokio::task::JoinHandle<()>>,
     socket_path: Option<String>,
     rt: tokio::runtime::Runtime,
+
+    // Rinch UI
+    rinch_ctx: Option<RinchContext>,
+    overlay_renderer: Option<RinchOverlayRenderer>,
+    overlay_blit: Option<OverlayBlit>,
+
+    // Input state for event routing
+    mouse_phys: (f32, f32),
+    modifiers: winit::keyboard::ModifiersState,
+    pending_events: Vec<PlatformEvent>,
 }
 
 impl App {
@@ -153,7 +170,39 @@ impl App {
             _ipc_handle: None,
             socket_path: None,
             rt,
+
+            rinch_ctx: None,
+            overlay_renderer: None,
+            overlay_blit: None,
+
+            mouse_phys: (0.0, 0.0),
+            modifiers: winit::keyboard::ModifiersState::empty(),
+            pending_events: Vec::new(),
         }
+    }
+
+    fn scale_factor(&self) -> f64 {
+        self.window.as_ref().map(|w| w.scale_factor()).unwrap_or(1.0)
+    }
+
+    fn logical_mouse(&self) -> (f32, f32) {
+        let sf = self.scale_factor() as f32;
+        (self.mouse_phys.0 / sf, self.mouse_phys.1 / sf)
+    }
+
+    /// Check if rinch wants mouse input at the current position.
+    fn ui_wants_mouse(&self) -> bool {
+        let (lx, ly) = self.logical_mouse();
+        self.rinch_ctx
+            .as_ref()
+            .is_some_and(|ctx| ctx.wants_mouse(lx, ly))
+    }
+
+    /// Check if rinch wants keyboard input (text field focused).
+    fn ui_wants_keyboard(&self) -> bool {
+        self.rinch_ctx
+            .as_ref()
+            .is_some_and(|ctx| ctx.wants_keyboard())
     }
 }
 
@@ -169,9 +218,44 @@ impl ApplicationHandler for App {
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
         self.window = Some(window.clone());
 
+        let size = window.inner_size();
+
         // Initialize engine (wgpu, all render passes, demo scene).
         let engine_inst = EditorEngine::new(window.clone(), Arc::clone(&self.shared_state));
+
+        // Initialize rinch UI context.
+        let rinch_ctx = RinchContext::new(
+            RinchContextConfig {
+                width: size.width,
+                height: size.height,
+                scale_factor: window.scale_factor(),
+                theme: Some(ThemeProviderProps {
+                    dark_mode: true,
+                    primary_color: Some("blue".into()),
+                    ..Default::default()
+                }),
+            },
+            ui::editor_ui,
+        );
+
+        // Initialize overlay renderer (Vello → transparent texture).
+        let overlay_renderer = RinchOverlayRenderer::new(
+            engine_inst.device(),
+            size.width,
+            size.height,
+            wgpu::TextureFormat::Rgba8Unorm,
+        );
+
+        // Initialize overlay blit (premultiplied alpha composite onto swapchain).
+        let overlay_blit_pass = OverlayBlit::new(
+            engine_inst.device(),
+            engine_inst.surface_format(),
+        );
+
         self.engine = Some(engine_inst);
+        self.rinch_ctx = Some(rinch_ctx);
+        self.overlay_renderer = Some(overlay_renderer);
+        self.overlay_blit = Some(overlay_blit_pass);
 
         // Start IPC server for MCP agent tooling.
         let api = automation::EditorAutomationApi::new(
@@ -183,7 +267,7 @@ impl ApplicationHandler for App {
         self._ipc_handle = Some(handle);
         self.socket_path = Some(path);
 
-        log::info!("RKIField Editor initialized — v2 render pipeline active");
+        log::info!("RKIField Editor initialized — v2 render pipeline + rinch UI active");
     }
 
     fn device_event(
@@ -194,11 +278,14 @@ impl ApplicationHandler for App {
     ) {
         // Raw mouse motion for camera rotation (fires even when cursor is at edge).
         if let DeviceEvent::MouseMotion { delta } = event {
-            if let Ok(mut es) = self.editor_state.lock() {
-                // Only accumulate delta when right mouse is held (camera rotation).
-                if es.editor_input.is_mouse_button_down(1) {
-                    es.editor_input.mouse_delta.x += delta.0 as f32;
-                    es.editor_input.mouse_delta.y += delta.1 as f32;
+            // Only process camera delta when UI doesn't want the mouse.
+            if !self.ui_wants_mouse() {
+                if let Ok(mut es) = self.editor_state.lock() {
+                    // Only accumulate delta when right mouse is held (camera rotation).
+                    if es.editor_input.is_mouse_button_down(1) {
+                        es.editor_input.mouse_delta.x += delta.0 as f32;
+                        es.editor_input.mouse_delta.y += delta.1 as f32;
+                    }
                 }
             }
         }
@@ -210,6 +297,10 @@ impl ApplicationHandler for App {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        // Always collect platform events for rinch (hover effects, etc).
+        let platform_events = event_bridge::translate_window_event(&event, self.modifiers);
+        self.pending_events.extend(platform_events);
+
         match event {
             WindowEvent::CloseRequested => {
                 if let Some(ref path) = self.socket_path {
@@ -219,6 +310,9 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::CursorMoved { position, .. } => {
+                self.mouse_phys = (position.x as f32, position.y as f32);
+
+                // Always update editor input mouse pos (for viewport bounds checking).
                 if let Ok(mut es) = self.editor_state.lock() {
                     es.editor_input.mouse_pos =
                         glam::Vec2::new(position.x as f32, position.y as f32);
@@ -226,37 +320,70 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::MouseInput { state, button, .. } => {
-                if let Ok(mut es) = self.editor_state.lock() {
-                    let idx = match button {
-                        MouseButton::Left => 0,
-                        MouseButton::Right => 1,
-                        MouseButton::Middle => 2,
-                        _ => return,
-                    };
-                    es.editor_input.mouse_buttons[idx] = state == ElementState::Pressed;
+                // Update rinch pending events with actual mouse position.
+                // (translate_window_event uses 0,0 — fix up the last event)
+                if let Some(last) = self.pending_events.last_mut() {
+                    let (px, py) = self.mouse_phys;
+                    match last {
+                        PlatformEvent::MouseDown { x, y, .. }
+                        | PlatformEvent::MouseUp { x, y, .. } => {
+                            *x = px;
+                            *y = py;
+                        }
+                        _ => {}
+                    }
+                }
 
-                    // Hide cursor when right-mouse is held (fly/orbit rotation).
-                    if idx == 1 {
-                        if let Some(window) = &self.window {
-                            let _ = window.set_cursor_visible(state != ElementState::Pressed);
+                let wants_ui = self.ui_wants_mouse();
+
+                // Only route to engine if UI doesn't want the click.
+                if !wants_ui {
+                    if let Ok(mut es) = self.editor_state.lock() {
+                        let idx = match button {
+                            MouseButton::Left => 0,
+                            MouseButton::Right => 1,
+                            MouseButton::Middle => 2,
+                            _ => return,
+                        };
+                        es.editor_input.mouse_buttons[idx] = state == ElementState::Pressed;
+
+                        // Hide cursor when right-mouse is held (fly/orbit rotation).
+                        if idx == 1 {
+                            if let Some(window) = &self.window {
+                                let _ = window.set_cursor_visible(state != ElementState::Pressed);
+                            }
                         }
                     }
                 }
             }
 
             WindowEvent::MouseWheel { delta, .. } => {
-                if let Ok(mut es) = self.editor_state.lock() {
-                    let scroll = match delta {
-                        winit::event::MouseScrollDelta::LineDelta(_, y) => y,
-                        winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 / 120.0,
-                    };
-                    es.editor_input.scroll_delta += scroll;
+                // Fix up mouse position in pending events.
+                if let Some(last) = self.pending_events.last_mut() {
+                    let (px, py) = self.mouse_phys;
+                    if let PlatformEvent::MouseWheel { x, y, .. } = last {
+                        *x = px;
+                        *y = py;
+                    }
+                }
+
+                let wants_ui = self.ui_wants_mouse();
+
+                // Only route scroll to engine if UI doesn't want it.
+                if !wants_ui {
+                    if let Ok(mut es) = self.editor_state.lock() {
+                        let scroll = match delta {
+                            winit::event::MouseScrollDelta::LineDelta(_, y) => y,
+                            winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 / 120.0,
+                        };
+                        es.editor_input.scroll_delta += scroll;
+                    }
                 }
             }
 
             WindowEvent::KeyboardInput { event, .. } => {
                 if let PhysicalKey::Code(key) = event.physical_key {
-                    // Escape exits.
+                    // Escape always exits.
                     if key == WinitKeyCode::Escape && event.state == ElementState::Pressed {
                         if let Some(ref path) = self.socket_path {
                             cleanup_ipc(path);
@@ -265,15 +392,19 @@ impl ApplicationHandler for App {
                         return;
                     }
 
-                    // Translate to editor key codes.
-                    if let Some(ek) = translate_key(key) {
-                        if let Ok(mut es) = self.editor_state.lock() {
-                            match event.state {
-                                ElementState::Pressed => {
-                                    es.editor_input.keys_pressed.insert(ek);
-                                }
-                                ElementState::Released => {
-                                    es.editor_input.keys_pressed.remove(&ek);
+                    let wants_kb = self.ui_wants_keyboard();
+
+                    // Only route to engine when UI doesn't want keyboard.
+                    if !wants_kb {
+                        if let Some(ek) = translate_key(key) {
+                            if let Ok(mut es) = self.editor_state.lock() {
+                                match event.state {
+                                    ElementState::Pressed => {
+                                        es.editor_input.keys_pressed.insert(ek);
+                                    }
+                                    ElementState::Released => {
+                                        es.editor_input.keys_pressed.remove(&ek);
+                                    }
                                 }
                             }
                         }
@@ -282,6 +413,7 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers.state();
                 if let Ok(mut es) = self.editor_state.lock() {
                     let m = modifiers.state();
                     es.editor_input.modifiers.shift = m.shift_key();
@@ -294,6 +426,20 @@ impl ApplicationHandler for App {
                 if let Some(engine) = self.engine.as_mut() {
                     engine.resize(size.width, size.height);
                 }
+                if let Some(ctx) = self.rinch_ctx.as_mut() {
+                    ctx.resize(size.width, size.height);
+                }
+                if let Some(overlay) = self.overlay_renderer.as_mut() {
+                    if let Some(engine) = self.engine.as_ref() {
+                        overlay.resize(engine.device(), size.width, size.height);
+                    }
+                }
+            }
+
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                if let Some(ctx) = self.rinch_ctx.as_mut() {
+                    ctx.set_scale_factor(scale_factor);
+                }
             }
 
             WindowEvent::RedrawRequested => {
@@ -301,7 +447,21 @@ impl ApplicationHandler for App {
                 let dt = now.duration_since(self.last_frame).as_secs_f32();
                 self.last_frame = now;
 
-                // 1. Lock editor state, update camera from input, get camera params.
+                // 1. Update rinch UI with collected platform events.
+                let events: Vec<_> = self.pending_events.drain(..).collect();
+                if let Some(ctx) = self.rinch_ctx.as_mut() {
+                    let _actions = ctx.update(&events);
+                }
+
+                // 2. Query viewport rect from rinch layout (logical pixels → physical).
+                let viewport = self.rinch_ctx.as_ref().and_then(|ctx| {
+                    ctx.viewport_rect("main").map(|rect| {
+                        let sf = self.scale_factor() as f32;
+                        (rect.x * sf, rect.y * sf, rect.width * sf, rect.height * sf)
+                    })
+                });
+
+                // 3. Lock editor state, update camera from input.
                 if let Ok(mut es) = self.editor_state.lock() {
                     // Apply pending MCP commands.
                     if let Ok(mut ss) = self.shared_state.lock() {
@@ -309,13 +469,13 @@ impl ApplicationHandler for App {
                             es.editor_camera.position = cam.position;
                             es.editor_camera.fly_yaw = cam.yaw;
                             es.editor_camera.fly_pitch = cam.pitch;
-                            // Update orbit target to match for mode-switch consistency.
                             let dir = glam::Vec3::new(
                                 -cam.yaw.sin() * cam.pitch.cos(),
                                 cam.pitch.sin(),
                                 -cam.yaw.cos() * cam.pitch.cos(),
                             );
-                            es.editor_camera.target = es.editor_camera.position + dir * es.editor_camera.orbit_distance;
+                            es.editor_camera.target = es.editor_camera.position
+                                + dir * es.editor_camera.orbit_distance;
                         }
                         if let Some(mode) = ss.pending_debug_mode.take() {
                             es.pending_debug_mode = Some(mode);
@@ -338,12 +498,43 @@ impl ApplicationHandler for App {
                     es.reset_frame_deltas();
                 }
 
-                // 2. Render frame (engine internally locks SharedState for readback).
+                // 4. Render frame with overlay compositing.
+                //    Take overlay state out temporarily to avoid borrow conflict
+                //    with engine (both live in self).
+                let mut rinch_ctx = self.rinch_ctx.take();
+                let mut overlay_renderer = self.overlay_renderer.take();
+                let overlay_blit = self.overlay_blit.take();
+
                 if let Some(engine) = self.engine.as_mut() {
-                    engine.render_frame();
+                    if let Some(vp) = viewport {
+                        engine.render_frame_viewport(vp, |device, queue, target_view| {
+                            // Render rinch UI to overlay texture, then composite.
+                            if let (Some(ctx), Some(renderer), Some(blit)) =
+                                (&mut rinch_ctx, &mut overlay_renderer, &overlay_blit)
+                            {
+                                let scene = ctx.scene();
+                                let overlay_view = renderer.render(device, queue, scene);
+                                let mut enc = device.create_command_encoder(
+                                    &wgpu::CommandEncoderDescriptor {
+                                        label: Some("overlay"),
+                                    },
+                                );
+                                blit.draw(device, &mut enc, target_view, &overlay_view);
+                                queue.submit(std::iter::once(enc.finish()));
+                            }
+                        });
+                    } else {
+                        // No viewport rect yet — render fullscreen (fallback).
+                        engine.render_frame();
+                    }
                 }
 
-                // 3. Update shared state for MCP observation.
+                // Restore overlay state.
+                self.rinch_ctx = rinch_ctx;
+                self.overlay_renderer = overlay_renderer;
+                self.overlay_blit = overlay_blit;
+
+                // 5. Update shared state for MCP observation.
                 if let Ok(es) = self.editor_state.lock() {
                     if let Ok(mut ss) = self.shared_state.lock() {
                         ss.camera_position = es.editor_camera.position;
@@ -367,7 +558,7 @@ impl ApplicationHandler for App {
 
 fn main() -> anyhow::Result<()> {
     env_logger::init();
-    log::info!("RKIField Editor — v2 object-centric render pipeline");
+    log::info!("RKIField Editor — v2 render pipeline + rinch UI");
 
     let event_loop = EventLoop::new()?;
     let mut app = App::new();

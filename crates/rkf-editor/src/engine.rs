@@ -471,6 +471,21 @@ impl EditorEngine {
         }
     }
 
+    /// Access the wgpu device.
+    pub fn device(&self) -> &wgpu::Device {
+        &self.ctx.device
+    }
+
+    /// Access the wgpu queue.
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.ctx.queue
+    }
+
+    /// The swapchain texture format.
+    pub fn surface_format(&self) -> wgpu::TextureFormat {
+        self.surface_format
+    }
+
     /// Sync the render camera from the editor camera state.
     pub fn sync_camera(&mut self, editor_cam: &EditorCamera) {
         self.camera.position = editor_cam.position;
@@ -491,8 +506,51 @@ impl EditorEngine {
         }
     }
 
-    /// Render one frame: all compute passes, blit to swapchain, optional readback.
+    /// Render one frame without UI overlay (full-screen engine blit).
     pub fn render_frame(&mut self) {
+        self.render_frame_composited(|_, _, _| {});
+    }
+
+    /// Render one frame with an overlay compositing callback.
+    ///
+    /// The callback runs after the engine has submitted its compute passes
+    /// and blit to the swapchain, but before present. The callback receives
+    /// the device, queue, and swapchain target view so it can render an
+    /// overlay (e.g. rinch UI) on top.
+    ///
+    /// The engine blit fills the full swapchain. Use `render_frame_viewport`
+    /// for sub-region rendering with panels.
+    pub fn render_frame_composited<F>(&mut self, post_engine: F)
+    where
+        F: FnOnce(&wgpu::Device, &wgpu::Queue, &wgpu::TextureView),
+    {
+        self.render_frame_inner(None, post_engine);
+    }
+
+    /// Render one frame with engine output constrained to a viewport sub-region.
+    ///
+    /// The engine blit is drawn into `viewport` (x, y, width, height) in pixels.
+    /// Areas outside the viewport are cleared to black (covered by UI panels).
+    /// The `post_engine` callback composites the UI overlay on top.
+    pub fn render_frame_viewport<F>(
+        &mut self,
+        viewport: (f32, f32, f32, f32),
+        post_engine: F,
+    )
+    where
+        F: FnOnce(&wgpu::Device, &wgpu::Queue, &wgpu::TextureView),
+    {
+        self.render_frame_inner(Some(viewport), post_engine);
+    }
+
+    fn render_frame_inner<F>(
+        &mut self,
+        viewport: Option<(f32, f32, f32, f32)>,
+        post_engine: F,
+    )
+    where
+        F: FnOnce(&wgpu::Device, &wgpu::Queue, &wgpu::TextureView),
+    {
         // Advance character animation.
         let now = Instant::now();
         let dt = (now - self.last_frame_time).as_secs_f32().min(0.1);
@@ -672,10 +730,14 @@ impl EditorEngine {
         self.color_grade.dispatch(&mut encoder);
         self.cosmetics.dispatch(&mut encoder, &self.ctx.queue, self.frame_index);
 
-        // --- Blit to swapchain ---
-        self.blit.draw(&mut encoder, &target_view);
+        // --- Blit engine output to swapchain ---
+        if let Some(vp) = viewport {
+            self.blit.draw_viewport(&mut encoder, &target_view, vp);
+        } else {
+            self.blit.draw(&mut encoder, &target_view);
+        }
 
-        // --- Screenshot readback (on demand) ---
+        // --- Screenshot readback (on demand, before submit) ---
         let do_readback = self.shared_state.lock()
             .map(|s| s.screenshot_requested)
             .unwrap_or(false);
@@ -708,7 +770,13 @@ impl EditorEngine {
             );
         }
 
+        // Submit engine work.
         self.ctx.queue.submit(std::iter::once(encoder.finish()));
+
+        // Let the caller composite overlay (e.g. rinch UI) on top.
+        // This runs after engine submit (Vello needs the queue), before present.
+        post_engine(&self.ctx.device, &self.ctx.queue, &target_view);
+
         frame.present();
 
         // Read back pixels for MCP screenshots.
