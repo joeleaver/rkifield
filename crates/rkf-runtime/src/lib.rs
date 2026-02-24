@@ -40,6 +40,13 @@ pub mod edge_cases;
 pub mod shader_reload;
 /// Material hot-reload — registry, RON serialization, change diffing.
 pub mod material_reload;
+/// Async I/O pipeline for loading .rkf v2 object files on background threads.
+pub mod async_io;
+/// Per-object LRU eviction system — tracks brick-pool usage and selects
+/// eviction/demotion candidates when the pool is under pressure.
+pub mod lru_eviction;
+/// Per-object streaming state machine for the v2 object-centric SDF architecture.
+pub mod object_streaming;
 
 pub use asset_registry::{AssetEntry, AssetRegistry, AssetState, Handle};
 pub use components::{
@@ -82,4 +89,10 @@ pub use shader_reload::{
 pub use material_reload::{
     MaterialChangeSet, MaterialDefinition, MaterialFile, MaterialFileEntry, MaterialProperties,
     MaterialRegistry, diff_material_files, parse_material_file, serialize_material_file,
+};
+pub use lru_eviction::{
+    EvictionAction, EvictionPolicy, LruEvictionTracker, ObjectUsageEntry,
+};
+pub use object_streaming::{
+    LoadRequest, ObjectStreamState, ObjectStreamingSystem, StreamingConfig, StreamingObject,
 };
