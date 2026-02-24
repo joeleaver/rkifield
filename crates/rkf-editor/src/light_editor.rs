@@ -144,6 +144,17 @@ impl LightEditor {
         id
     }
 
+    /// Add a fully specified light. Returns its id.
+    pub fn add_light_full(&mut self, light: EditorLight) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        let mut light = light;
+        light.id = id;
+        self.lights.push(light);
+        self.dirty = true;
+        id
+    }
+
     /// Remove a light by id. Returns true if the light was found and removed.
     pub fn remove_light(&mut self, id: u64) -> bool {
         let len_before = self.lights.len();

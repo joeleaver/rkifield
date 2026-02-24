@@ -297,6 +297,114 @@ pub fn crosshair(center: Vec3, size: f32, color: [f32; 4]) -> Vec<LineVertex> {
     ]
 }
 
+/// Build a circle of line segments in the plane with the given `normal`.
+pub fn circle_wireframe(
+    center: Vec3, normal: Vec3, radius: f32, color: [f32; 4], segments: u32,
+) -> Vec<LineVertex> {
+    let dir = normal.normalize();
+    let tangent = if dir.dot(Vec3::Y).abs() < 0.99 {
+        dir.cross(Vec3::Y).normalize()
+    } else {
+        dir.cross(Vec3::X).normalize()
+    };
+    let bitangent = dir.cross(tangent);
+
+    let step = std::f32::consts::TAU / segments as f32;
+    let mut verts = Vec::with_capacity(segments as usize * 2);
+    for i in 0..segments {
+        let a0 = step * i as f32;
+        let a1 = step * ((i + 1) % segments) as f32;
+        let p0 = center + (tangent * a0.cos() + bitangent * a0.sin()) * radius;
+        let p1 = center + (tangent * a1.cos() + bitangent * a1.sin()) * radius;
+        verts.push(LineVertex { position: p0.to_array(), color });
+        verts.push(LineVertex { position: p1.to_array(), color });
+    }
+    verts
+}
+
+/// Build a point light gizmo: three orthogonal great circles showing range.
+pub fn point_light_wireframe(center: Vec3, range: f32, color: [f32; 4]) -> Vec<LineVertex> {
+    let segs = 32;
+    let mut verts = circle_wireframe(center, Vec3::Y, range, color, segs);
+    verts.extend(circle_wireframe(center, Vec3::X, range, color, segs));
+    verts.extend(circle_wireframe(center, Vec3::Z, range, color, segs));
+    // Small crosshair at center.
+    verts.extend(crosshair(center, 0.2, color));
+    verts
+}
+
+/// Build a spot light gizmo: cone showing outer angle + range, with a crosshair at apex.
+pub fn spot_light_wireframe(
+    apex: Vec3, direction: Vec3, range: f32, outer_angle: f32, color: [f32; 4],
+) -> Vec<LineVertex> {
+    let dir = direction.normalize();
+    let base_center = apex + dir * range;
+    let base_radius = range * outer_angle.tan();
+
+    let tangent = if dir.dot(Vec3::Y).abs() < 0.99 {
+        dir.cross(Vec3::Y).normalize()
+    } else {
+        dir.cross(Vec3::X).normalize()
+    };
+    let bitangent = dir.cross(tangent);
+
+    // Base circle.
+    let mut verts = circle_wireframe(base_center, dir, base_radius, color, 32);
+
+    // 4 lines from apex to base.
+    let step = std::f32::consts::TAU / 4.0;
+    for i in 0..4 {
+        let a = step * i as f32;
+        let p = base_center + (tangent * a.cos() + bitangent * a.sin()) * base_radius;
+        verts.push(LineVertex { position: apex.to_array(), color });
+        verts.push(LineVertex { position: p.to_array(), color });
+    }
+
+    // Crosshair at apex.
+    verts.extend(crosshair(apex, 0.2, color));
+    verts
+}
+
+/// Build a directional light gizmo: arrow showing direction, placed at a reference position.
+pub fn directional_light_wireframe(
+    position: Vec3, direction: Vec3, color: [f32; 4],
+) -> Vec<LineVertex> {
+    let dir = direction.normalize();
+    let arrow_len = 2.0;
+    let head_len = 0.4;
+    let head_radius = 0.15;
+    let tip = position + dir * arrow_len;
+
+    // Main shaft.
+    let mut verts = vec![
+        LineVertex { position: position.to_array(), color },
+        LineVertex { position: tip.to_array(), color },
+    ];
+
+    // Arrowhead: 4 lines from tip back to a ring.
+    let tangent = if dir.dot(Vec3::Y).abs() < 0.99 {
+        dir.cross(Vec3::Y).normalize()
+    } else {
+        dir.cross(Vec3::X).normalize()
+    };
+    let bitangent = dir.cross(tangent);
+    let base = tip - dir * head_len;
+
+    let step = std::f32::consts::TAU / 4.0;
+    for i in 0..4 {
+        let a = step * i as f32;
+        let p = base + (tangent * a.cos() + bitangent * a.sin()) * head_radius;
+        verts.push(LineVertex { position: tip.to_array(), color });
+        verts.push(LineVertex { position: p.to_array(), color });
+    }
+
+    // Sun disc at position.
+    verts.extend(circle_wireframe(position, dir, 0.3, color, 16));
+    // Cross through the disc.
+    verts.extend(crosshair(position, 0.5, color));
+    verts
+}
+
 /// Compute the world-space AABB of a scene node tree by recursing through all children.
 ///
 /// `parent_world` is the accumulated world transform (translation + rotation + scale)

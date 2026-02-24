@@ -329,6 +329,30 @@ impl ApplicationHandler for App {
         if let Ok(mut es) = self.editor_state.lock() {
             es.v2_scene = Some(engine_inst.scene.clone());
             es.sync_v2_scene();
+
+            // Seed editor light list from render lights.
+            for rl in &engine_inst.world_lights {
+                use crate::light_editor::{EditorLight, EditorLightType};
+                let light_type = match rl.light_type {
+                    0 => EditorLightType::Directional,
+                    2 => EditorLightType::Spot,
+                    _ => EditorLightType::Point,
+                };
+                es.light_editor.add_light_full(EditorLight {
+                    id: 0, // overwritten by add_light_full
+                    light_type,
+                    position: glam::Vec3::new(rl.pos_x, rl.pos_y, rl.pos_z),
+                    direction: glam::Vec3::new(rl.dir_x, rl.dir_y, rl.dir_z),
+                    color: glam::Vec3::new(rl.color_r, rl.color_g, rl.color_b),
+                    intensity: rl.intensity,
+                    range: rl.range,
+                    spot_inner_angle: rl.inner_angle,
+                    spot_outer_angle: rl.outer_angle,
+                    cast_shadows: rl.shadow_caster != 0,
+                    cookie_path: None,
+                });
+            }
+            es.light_editor.clear_dirty();
         }
 
         // Set up rinch context sharing — components use use_context to access these.
@@ -791,12 +815,38 @@ impl ApplicationHandler for App {
                     if let (Some(engine), Ok(es)) =
                         (self.engine.as_ref(), self.editor_state.lock())
                     {
+                        let color = [0.3, 0.7, 1.0, 1.0]; // Light blue
+
+                        // Light gizmos for selected light.
+                        if let Some(editor_state::SelectedEntity::Light(lid)) = es.selected_entity {
+                            if let Some(light) = es.light_editor.get_light(lid) {
+                                let lc = [1.0, 0.9, 0.5, 1.0]; // Warm yellow
+                                match light.light_type {
+                                    light_editor::EditorLightType::Point => {
+                                        verts.extend(wireframe::point_light_wireframe(
+                                            light.position, light.range, lc,
+                                        ));
+                                    }
+                                    light_editor::EditorLightType::Spot => {
+                                        verts.extend(wireframe::spot_light_wireframe(
+                                            light.position, light.direction,
+                                            light.range, light.spot_outer_angle, lc,
+                                        ));
+                                    }
+                                    light_editor::EditorLightType::Directional => {
+                                        verts.extend(wireframe::directional_light_wireframe(
+                                            light.position, light.direction, lc,
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+
                         // Only draw wireframe for selected SDF objects.
                         let selected_ids: Vec<u64> = match es.selected_entity {
                             Some(editor_state::SelectedEntity::Object(eid)) => vec![eid],
                             _ => vec![],
                         };
-                        let color = [0.3, 0.7, 1.0, 1.0]; // Light blue
                         let origin = rkf_core::WorldPosition::default();
                         for &eid in &selected_ids {
                             for obj in &engine.scene.root_objects {

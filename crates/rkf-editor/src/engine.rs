@@ -248,7 +248,7 @@ pub struct EditorEngine {
     // State
     camera: Camera,
     pub scene: Scene,
-    world_lights: Vec<Light>,
+    pub world_lights: Vec<Light>,
     light_buffer: LightBuffer,
     material_buffer: wgpu::Buffer,
     frame_index: u32,
