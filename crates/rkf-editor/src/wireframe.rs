@@ -487,6 +487,18 @@ pub fn scale_gizmo_wireframe(center: Vec3, size: f32) -> Vec<LineVertex> {
     verts
 }
 
+/// Build a wireframe sphere (3 orthogonal great circles) for brush preview.
+///
+/// `center` is the world-space hit point, `radius` is the brush radius.
+/// `color` encodes the brush type (e.g., cyan for sculpt, magenta for paint).
+pub fn sphere_wireframe(center: Vec3, radius: f32, color: [f32; 4]) -> Vec<LineVertex> {
+    let segs = 32;
+    let mut verts = circle_wireframe(center, Vec3::X, radius, color, segs);
+    verts.extend(circle_wireframe(center, Vec3::Y, radius, color, segs));
+    verts.extend(circle_wireframe(center, Vec3::Z, radius, color, segs));
+    verts
+}
+
 /// Compute the world-space AABB of a scene node tree by recursing through all children.
 ///
 /// `parent_world` is the accumulated world transform (translation + rotation + scale)

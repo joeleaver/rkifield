@@ -932,6 +932,48 @@ impl ApplicationHandler for App {
                                 }
                             }
                         }
+
+                        // Brush preview sphere when in Sculpt or Paint mode.
+                        if matches!(es.mode, EditorMode::Sculpt | EditorMode::Paint) {
+                            // Get viewport rect to map mouse → viewport-relative coords.
+                            let vp = self.rinch_ctx.as_ref().and_then(|ctx| {
+                                ctx.viewport_rect("main").map(|r| {
+                                    let sf = self.scale_factor() as f32;
+                                    (r.x * sf, r.y * sf, r.width * sf, r.height * sf)
+                                })
+                            });
+                            if let Some((vp_x, vp_y, vp_w, vp_h)) = vp {
+                                let (mx, my) = self.mouse_phys;
+                                let px = mx - vp_x;
+                                let py = my - vp_y;
+                                // Only show cursor when mouse is within the viewport.
+                                if px >= 0.0 && py >= 0.0 && px < vp_w && py < vp_h {
+                                    let (ray_o, ray_d) = camera::screen_to_ray(
+                                        &es.editor_camera, px, py, vp_w, vp_h,
+                                    );
+                                    // Cast against ground plane (y=0) for brush preview position.
+                                    let hit = placement::ray_cast_sdf(
+                                        ray_o, ray_d, 500.0, 0.5, placement::ground_plane_sdf,
+                                    );
+                                    if hit.hit {
+                                        let (radius, color) = match es.mode {
+                                            EditorMode::Sculpt => (
+                                                es.sculpt.current_settings.radius,
+                                                [0.0, 0.8, 1.0, 0.7], // Cyan
+                                            ),
+                                            EditorMode::Paint => (
+                                                es.paint.current_settings.radius,
+                                                [1.0, 0.3, 0.8, 0.7], // Magenta
+                                            ),
+                                            _ => unreachable!(),
+                                        };
+                                        verts.extend(wireframe::sphere_wireframe(
+                                            hit.position, radius, color,
+                                        ));
+                                    }
+                                }
+                            }
+                        }
                     }
                     verts
                 };
