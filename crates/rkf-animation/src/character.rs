@@ -216,8 +216,6 @@ pub fn transform_aabb(aabb: &Aabb, mat: &Mat4) -> Aabb {
 ///     13: LowerLeg_R
 /// ```
 pub fn build_humanoid_skeleton() -> Skeleton {
-    use glam::Mat4;
-
     let bones = vec![
         make_bone("Hips", Vec3::new(0.0, 0.9, 0.0)),
         make_bone("Spine", Vec3::new(0.0, 0.15, 0.0)),
@@ -362,7 +360,7 @@ pub fn build_walk_clip() -> AnimationClip {
 use crate::skeleton::Bone;
 
 fn make_bone(name: &str, translation: Vec3) -> Bone {
-    let bind = Mat4::from_translation(translation);
+    let bind = glam::Mat4::from_translation(translation);
     Bone {
         name: name.to_string(),
         bind_transform: bind,

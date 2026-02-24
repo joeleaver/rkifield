@@ -32,6 +32,9 @@ use rkf_render::{
 use rkf_render::radiance_inject::{RadianceInjectPass, InjectUniforms};
 use rkf_render::radiance_mip::RadianceMipPass;
 use rkf_render::material_table::{MaterialTable, create_test_materials};
+use rkf_animation::character::{
+    AnimatedCharacter, build_humanoid_skeleton, build_humanoid_visuals, build_walk_clip,
+};
 
 mod automation;
 use automation::{SharedState, TestbedAutomationApi};
@@ -55,6 +58,10 @@ struct DemoScene {
     scene: Scene,
     brick_pool: BrickPool,
     brick_map_alloc: BrickMapAllocator,
+    /// Animated character (stored separately for per-frame pose updates).
+    character: AnimatedCharacter,
+    /// Index of the character's SceneObject in scene.root_objects.
+    character_obj_index: usize,
 }
 
 /// Build the demo scene with 5 analytical + 1 voxelized object.
@@ -183,10 +190,30 @@ fn build_demo_scene() -> DemoScene {
     };
     scene.add_object_full(vox_obj);
 
+    // 7. Animated humanoid character (14-bone skeleton as SceneNode tree).
+    let skeleton = build_humanoid_skeleton();
+    let visuals = build_humanoid_visuals(5); // material 5 = skin-like
+    let walk_clip = build_walk_clip();
+    let character = AnimatedCharacter::new(skeleton, visuals, walk_clip, 0.05);
+    let char_root = character.build_scene_node();
+    let char_obj = SceneObject {
+        id: 0,
+        name: "humanoid".into(),
+        world_position: WorldPosition::new(IVec3::ZERO, Vec3::new(-3.0, 0.0, -2.0)),
+        rotation: Quat::IDENTITY,
+        scale: 1.0,
+        root_node: char_root,
+        aabb: Aabb::new(Vec3::new(-3.6, -0.5, -2.5), Vec3::new(-2.4, 2.0, -1.5)),
+    };
+    scene.add_object_full(char_obj);
+    let character_obj_index = scene.root_objects.len() - 1;
+
     DemoScene {
         scene,
         brick_pool,
         brick_map_alloc,
+        character,
+        character_obj_index,
     }
 }
 
@@ -241,6 +268,12 @@ struct EngineState {
     readback_buffer: wgpu::Buffer,
     /// Shared state for MCP observation.
     shared_state: Arc<Mutex<SharedState>>,
+    /// Animated character (updated each frame).
+    character: AnimatedCharacter,
+    /// Index of the character's SceneObject in scene.root_objects.
+    character_obj_index: usize,
+    /// Last frame time for animation advancement.
+    last_frame_time: Instant,
 }
 
 impl EngineState {
@@ -512,10 +545,21 @@ impl EngineState {
             shade_debug_mode: 0,
             readback_buffer,
             shared_state,
+            character: demo.character,
+            character_obj_index: demo.character_obj_index,
+            last_frame_time: Instant::now(),
         }
     }
 
     fn render(&mut self) {
+        // Advance character animation.
+        let now = Instant::now();
+        let dt = (now - self.last_frame_time).as_secs_f32().min(0.1); // cap at 100ms
+        self.last_frame_time = now;
+        self.character.advance_and_update(
+            dt,
+            &mut self.scene.root_objects[self.character_obj_index].root_node,
+        );
         let camera_pos = WorldPosition::new(IVec3::ZERO, self.camera.position);
 
         // Flatten all objects and build GPU object list + BVH pairs.
