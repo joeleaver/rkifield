@@ -211,6 +211,14 @@ impl EditorCamera {
         Mat4::perspective_rh(self.fov_y, aspect, self.near, self.far)
     }
 
+    /// Set orbit yaw/pitch and recompute position (for camera presets).
+    pub fn set_orbit_angles(&mut self, yaw: f32, pitch: f32) {
+        self.orbit_yaw = yaw;
+        self.orbit_pitch = pitch.clamp(self.min_pitch, self.max_pitch);
+        self.mode = CameraMode::Orbit;
+        self.update_from_orbit();
+    }
+
     /// Snap the orbit camera to look at a specific point from a given distance.
     pub fn focus_on(&mut self, point: Vec3, distance: f32) {
         self.target = point;

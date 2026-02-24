@@ -296,6 +296,29 @@ pub fn TitleBar() -> NodeHandle {
         }));
     }
 
+    // Camera presets (yaw, pitch in radians).
+    view_menu = view_menu.separator();
+    let cam_presets: &[(&str, f32, f32)] = &[
+        ("Front",       0.0,                    0.0),
+        ("Back",        std::f32::consts::PI,   0.0),
+        ("Left",        std::f32::consts::FRAC_PI_2, 0.0),
+        ("Right",       -std::f32::consts::FRAC_PI_2, 0.0),
+        ("Top",         0.0,                    1.39),  // ~80°
+        ("Perspective",  0.0,                    0.3),
+    ];
+    for &(label, yaw, pitch) in cam_presets {
+        view_menu = view_menu.item(MenuItem::new(label).on_click({
+            let es = es.clone();
+            let rev = rev;
+            move || {
+                if let Ok(mut s) = es.lock() {
+                    s.editor_camera.set_orbit_angles(yaw, pitch);
+                }
+                rev.bump();
+            }
+        }));
+    }
+
     // ── Build DOM for each top-level menu ──────────────────────────────
     let menus: &[(&str, &Menu)] = &[
         ("File", &file_menu),
