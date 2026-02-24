@@ -36,6 +36,8 @@ pub mod material;
 pub mod sampling;
 /// v2 scene and root object container.
 pub mod scene;
+/// Grid-based terrain container — O(1) tile lookup, procedural SDF fallback.
+pub mod terrain;
 /// v2 scene hierarchy node — object SDF tree with transforms and blending.
 pub mod scene_node;
 /// SDF generation utilities for testing and offline voxelization.
@@ -55,6 +57,7 @@ pub use asset_file::{
 };
 pub use bvh::{Bvh, BvhNode};
 pub use scene::{Scene, SceneObject};
+pub use terrain::{TerrainConfig, TerrainLodTier, TerrainNode, TerrainTile};
 pub use scene_node::{
     BlendMode, BrickMapHandle, NodeMetadata, SceneNode, SdfPrimitive, SdfSource, Transform,
 };

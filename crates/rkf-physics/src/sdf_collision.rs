@@ -330,6 +330,150 @@ impl SdfQueryable for SphereSdf {
 }
 
 // ---------------------------------------------------------------------------
+// V2 Object-Centric Collision
+// ---------------------------------------------------------------------------
+
+/// Result of a v2 object-aware SDF collision query.
+#[derive(Debug, Clone)]
+pub struct V2CollisionResult {
+    /// Signed distance at the query point.
+    pub distance: f32,
+    /// Material ID at the surface.
+    pub material_id: u16,
+    /// Object ID that was hit (0 = terrain, u32::MAX = no hit).
+    pub object_id: u32,
+    /// Surface normal estimate.
+    pub normal: Vec3,
+}
+
+/// Evaluate a single v2 object's SDF at `world_pos`.
+///
+/// Each object is a sphere in object-local space. The tuple fields are:
+/// - `id`: object identity
+/// - `position`: object world-space centre
+/// - `scale`: uniform scale (radius of the bounding sphere / SDF extent)
+/// - `rotation`: object orientation
+/// - `sdf_radius`: SDF sphere radius in local space
+///
+/// Returns `(distance_in_world_space, id)`.
+fn eval_object_sdf(
+    world_pos: Vec3,
+    id: u32,
+    obj_pos: Vec3,
+    scale: f32,
+    rotation: glam::Quat,
+    sdf_radius: f32,
+) -> (f32, u32) {
+    // Transform world_pos into object-local space.
+    let local = rotation.inverse() * ((world_pos - obj_pos) / scale.max(1e-6));
+    // SDF in local space: sphere of radius sdf_radius.
+    let local_dist = local.length() - sdf_radius;
+    // Scale distance back to world space.
+    (local_dist * scale, id)
+}
+
+/// Query the v2 scene for SDF collision at a world position.
+///
+/// Evaluates all objects (sphere SDF in object-local space) and optional
+/// terrain. Returns the hit with the smallest (most-negative / closest)
+/// signed distance.
+///
+/// # Arguments
+///
+/// * `world_pos` — world-space query point.
+/// * `objects` — slice of `(id, position, scale, rotation, sdf_radius)` tuples.
+/// * `terrain_height` — optional flat terrain at this Y height.
+///
+/// # Returns
+///
+/// [`V2CollisionResult`] for the nearest surface. If nothing is within
+/// 1 000 world units the result has `object_id == u32::MAX`.
+pub fn query_v2_scene(
+    world_pos: Vec3,
+    objects: &[(u32, Vec3, f32, glam::Quat, f32)],
+    terrain_height: Option<f32>,
+) -> V2CollisionResult {
+    let mut best_dist = f32::MAX;
+    let mut best_id: u32 = u32::MAX;
+    let mut best_material: u16 = 0;
+
+    // Evaluate each object SDF.
+    for &(id, pos, scale, rot, sdf_radius) in objects {
+        let (dist, _) = eval_object_sdf(world_pos, id, pos, scale, rot, sdf_radius);
+        if dist < best_dist {
+            best_dist = dist;
+            best_id = id;
+            // Material ID: low 16 bits of object id as a simple default.
+            best_material = (id & 0xFFFF) as u16;
+        }
+    }
+
+    // Evaluate terrain (infinite plane).
+    if let Some(th) = terrain_height {
+        let terrain_dist = world_pos.y - th;
+        if terrain_dist < best_dist {
+            best_dist = terrain_dist;
+            best_id = 0; // 0 == terrain
+            best_material = 0;
+        }
+    }
+
+    // Estimate normal at the winning surface.
+    let normal = estimate_normal_v2(world_pos, objects, terrain_height, 0.01);
+
+    V2CollisionResult {
+        distance: best_dist,
+        material_id: best_material,
+        object_id: best_id,
+        normal,
+    }
+}
+
+/// Estimate the surface normal at `world_pos` via central finite differences
+/// over the v2 scene SDF.
+///
+/// `epsilon` controls the step size for the finite-difference stencil (0.01
+/// gives good results for typical scene scales).
+pub fn estimate_normal_v2(
+    world_pos: Vec3,
+    objects: &[(u32, Vec3, f32, glam::Quat, f32)],
+    terrain_height: Option<f32>,
+    epsilon: f32,
+) -> Vec3 {
+    /// Evaluate the minimum SDF across all objects + terrain.
+    fn scene_dist(
+        p: Vec3,
+        objects: &[(u32, Vec3, f32, glam::Quat, f32)],
+        terrain_height: Option<f32>,
+    ) -> f32 {
+        let mut d = f32::MAX;
+        for &(id, pos, scale, rot, sdf_radius) in objects {
+            let (od, _) = eval_object_sdf(p, id, pos, scale, rot, sdf_radius);
+            if od < d {
+                d = od;
+            }
+        }
+        if let Some(th) = terrain_height {
+            let td = p.y - th;
+            if td < d {
+                d = td;
+            }
+        }
+        d
+    }
+
+    let e = epsilon;
+    let dx = scene_dist(world_pos + Vec3::X * e, objects, terrain_height)
+        - scene_dist(world_pos - Vec3::X * e, objects, terrain_height);
+    let dy = scene_dist(world_pos + Vec3::Y * e, objects, terrain_height)
+        - scene_dist(world_pos - Vec3::Y * e, objects, terrain_height);
+    let dz = scene_dist(world_pos + Vec3::Z * e, objects, terrain_height)
+        - scene_dist(world_pos - Vec3::Z * e, objects, terrain_height);
+
+    Vec3::new(dx, dy, dz).normalize_or_zero()
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -525,6 +669,132 @@ mod tests {
                 contacts[i].penetration
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // V2 collision tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn v2_collision_no_objects() {
+        // Empty object list, no terrain → distance should be f32::MAX and
+        // object_id should be u32::MAX (sentinel "no hit").
+        let result = query_v2_scene(Vec3::ZERO, &[], None);
+        assert_eq!(result.object_id, u32::MAX, "empty scene should return no-hit sentinel");
+        assert_eq!(result.distance, f32::MAX);
+    }
+
+    #[test]
+    fn v2_collision_with_sphere_object() {
+        // Single sphere object at the origin with radius 1.0 and unit scale.
+        // A query point just outside the surface should return a small positive distance.
+        let objects = [(
+            42_u32,          // id
+            Vec3::new(0.0, 0.0, 0.0), // position
+            1.0_f32,         // scale
+            glam::Quat::IDENTITY, // rotation
+            1.0_f32,         // sdf_radius
+        )];
+
+        // Point on the surface (distance ~ 0)
+        let on_surface = query_v2_scene(Vec3::new(1.0, 0.0, 0.0), &objects, None);
+        assert!(
+            on_surface.distance.abs() < 0.05,
+            "point on sphere surface should have near-zero distance, got {}",
+            on_surface.distance
+        );
+        assert_eq!(on_surface.object_id, 42, "should identify the sphere object");
+
+        // Point well outside — positive distance
+        let outside = query_v2_scene(Vec3::new(5.0, 0.0, 0.0), &objects, None);
+        assert!(
+            outside.distance > 0.0,
+            "point outside sphere should have positive distance, got {}",
+            outside.distance
+        );
+
+        // Point inside — negative distance
+        let inside = query_v2_scene(Vec3::ZERO, &objects, None);
+        assert!(
+            inside.distance < 0.0,
+            "point at sphere center should have negative distance, got {}",
+            inside.distance
+        );
+    }
+
+    #[test]
+    fn v2_collision_terrain_floor() {
+        // Terrain at y=0, query below → negative distance (inside terrain).
+        let result_below = query_v2_scene(Vec3::new(0.0, -1.0, 0.0), &[], Some(0.0));
+        assert!(
+            result_below.distance < 0.0,
+            "point below terrain should be negative distance, got {}",
+            result_below.distance
+        );
+        assert_eq!(result_below.object_id, 0, "terrain id should be 0");
+
+        // Query above → positive distance.
+        let result_above = query_v2_scene(Vec3::new(0.0, 2.0, 0.0), &[], Some(0.0));
+        assert!(
+            result_above.distance > 0.0,
+            "point above terrain should have positive distance, got {}",
+            result_above.distance
+        );
+        assert_eq!(result_above.object_id, 0, "terrain id should be 0");
+    }
+
+    #[test]
+    fn v2_collision_object_identity() {
+        // Two objects at different positions. The closer one's id must be returned.
+        let objects = [
+            (10_u32, Vec3::new(-5.0, 0.0, 0.0), 1.0_f32, glam::Quat::IDENTITY, 1.0_f32),
+            (20_u32, Vec3::new(1.0, 0.0, 0.0), 1.0_f32, glam::Quat::IDENTITY, 1.0_f32),
+        ];
+
+        // Query near object 20 (id=20)
+        let result = query_v2_scene(Vec3::new(1.5, 0.0, 0.0), &objects, None);
+        assert_eq!(
+            result.object_id, 20,
+            "should return id of closest object (20), got {}",
+            result.object_id
+        );
+
+        // Query near object 10 (id=10)
+        let result2 = query_v2_scene(Vec3::new(-4.5, 0.0, 0.0), &objects, None);
+        assert_eq!(
+            result2.object_id, 10,
+            "should return id of closest object (10), got {}",
+            result2.object_id
+        );
+    }
+
+    #[test]
+    fn v2_normal_estimation() {
+        // Sphere at origin, radius 1.0. Normal at (2,0,0) should point in +X.
+        let objects = [(
+            1_u32,
+            Vec3::ZERO,
+            1.0_f32,
+            glam::Quat::IDENTITY,
+            1.0_f32,
+        )];
+
+        let normal = estimate_normal_v2(Vec3::new(2.0, 0.0, 0.0), &objects, None, 0.01);
+        assert!(
+            normal.x > 0.9,
+            "normal at +X side of sphere should point in +X, got {:?}",
+            normal
+        );
+        assert!(normal.y.abs() < 0.1);
+        assert!(normal.z.abs() < 0.1);
+
+        // Terrain floor at y=0, normal should point up.
+        let terrain_normal = estimate_normal_v2(Vec3::new(0.0, 0.5, 0.0), &[], Some(0.0), 0.01);
+        assert!(
+            terrain_normal.y > 0.9,
+            "normal above terrain should point up, got {:?}",
+            terrain_normal
+        );
     }
 
     #[test]

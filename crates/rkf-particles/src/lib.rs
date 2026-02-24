@@ -15,6 +15,7 @@
 #![warn(missing_docs)]
 
 pub mod binning;
+pub mod collision_v2;
 pub mod emitter;
 pub mod micro_object;
 pub mod particle;

@@ -62,6 +62,8 @@ pub mod game_manager;
 pub mod main_camera;
 /// Save/load system (.rksave) — full game-state snapshots with RON serialization.
 pub mod save_system;
+/// Terrain tile streaming manager — camera-based LOD selection and tile load/unload scheduling.
+pub mod terrain_streaming;
 
 pub use asset_registry::{AssetEntry, AssetRegistry, AssetState, Handle};
 pub use components::{
@@ -129,4 +131,7 @@ pub use main_camera::{EnvironmentZone, MainCamera};
 pub use save_system::{
     CameraSnapshot, EntityOverride, EnvironmentSnapshot, SaveFile, SaveInfo,
     create_save, load_game, list_saves, save_game,
+};
+pub use terrain_streaming::{
+    TerrainStreamConfig, TerrainStreaming, TileRequest, TileState,
 };

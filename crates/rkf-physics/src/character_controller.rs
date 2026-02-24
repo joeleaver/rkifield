@@ -280,6 +280,150 @@ impl Default for SdfCharacterController {
 }
 
 // ---------------------------------------------------------------------------
+// V2 character movement (object-aware query function)
+// ---------------------------------------------------------------------------
+
+/// Perform a v2 character slide step against per-object SDFs.
+///
+/// This is the v2 equivalent of [`SdfCharacterController::move_and_slide`] but
+/// takes a generic query closure instead of an `impl SdfQueryable`. This lets
+/// callers drive the SDF evaluation through the object BVH or any other
+/// v2-aware data structure without requiring access to the full
+/// [`SdfCharacterController`] state.
+///
+/// # Arguments
+///
+/// * `position` — current world-space capsule centre.
+/// * `velocity` — current velocity vector.
+/// * `capsule_radius` — capsule radius.
+/// * `capsule_half_height` — half-height of the capsule shaft (excludes caps).
+/// * `dt` — frame delta time in seconds.
+/// * `query_fn` — closure that evaluates `(distance, surface_normal)` at a
+///   world-space point. Should return distance < 0 when the point is inside
+///   solid geometry.
+///
+/// # Returns
+///
+/// A tuple `(new_pos, new_vel, grounded)`:
+///
+/// * `new_pos` — resolved world-space capsule centre after collision.
+/// * `new_vel` — velocity with surface-normal components cancelled where
+///   collision was detected.
+/// * `grounded` — `true` if the capsule foot is within `0.1` world units of
+///   any surface with a mostly-upward normal (angle < 50°).
+pub fn slide_step_v2(
+    position: Vec3,
+    velocity: Vec3,
+    capsule_radius: f32,
+    capsule_half_height: f32,
+    dt: f32,
+    query_fn: impl Fn(Vec3) -> (f32, Vec3),
+) -> (Vec3, Vec3, bool) {
+    const MAX_ITERATIONS: u32 = 4;
+    const SKIN_WIDTH: f32 = 0.01;
+    const GROUND_SNAP: f32 = 0.1;
+    const MAX_SLOPE_RADIANS: f32 = 0.872_664_6; // 50 degrees
+
+    /// Generate capsule sample points for a given centre.
+    fn capsule_points(center: Vec3, r: f32, hh: f32) -> [Vec3; 14] {
+        [
+            // Bottom hemisphere (5 points)
+            center + Vec3::new(0.0, -(hh + r), 0.0),
+            center + Vec3::new(r, -hh, 0.0),
+            center + Vec3::new(-r, -hh, 0.0),
+            center + Vec3::new(0.0, -hh, r),
+            center + Vec3::new(0.0, -hh, -r),
+            // Top hemisphere (5 points)
+            center + Vec3::new(0.0, hh + r, 0.0),
+            center + Vec3::new(r, hh, 0.0),
+            center + Vec3::new(-r, hh, 0.0),
+            center + Vec3::new(0.0, hh, r),
+            center + Vec3::new(0.0, hh, -r),
+            // Shaft midpoints (4 points at y=0)
+            center + Vec3::new(r, 0.0, 0.0),
+            center + Vec3::new(-r, 0.0, 0.0),
+            center + Vec3::new(0.0, 0.0, r),
+            center + Vec3::new(0.0, 0.0, -r),
+        ]
+    }
+
+    /// Find the deepest penetration at `center` using `query_fn`.
+    fn deepest_penetration(
+        center: Vec3,
+        r: f32,
+        hh: f32,
+        query_fn: &impl Fn(Vec3) -> (f32, Vec3),
+    ) -> Option<(f32, Vec3)> {
+        let points = capsule_points(center, r, hh);
+        let mut worst_dist = f32::MAX;
+        let mut worst_normal = Vec3::Y;
+
+        for &p in &points {
+            let (d, n) = query_fn(p);
+            if d < worst_dist {
+                worst_dist = d;
+                worst_normal = n;
+            }
+        }
+
+        if worst_dist < 0.0 {
+            Some((-worst_dist, worst_normal))
+        } else {
+            None
+        }
+    }
+
+    let mut pos = position;
+    let mut vel = velocity;
+    let mut remaining = vel * dt;
+
+    // Iterative slide.
+    for _ in 0..MAX_ITERATIONS {
+        if remaining.length_squared() < 1e-8 {
+            break;
+        }
+
+        let tentative = pos + remaining;
+
+        match deepest_penetration(tentative, capsule_radius, capsule_half_height, &query_fn) {
+            Some((penetration, normal)) if normal.length_squared() > 0.01 => {
+                let n = normal.normalize_or_zero();
+                // Push out of the surface.
+                pos = tentative + n * (penetration + SKIN_WIDTH);
+
+                // Cancel velocity and remaining displacement into the surface.
+                let into_surface = remaining.dot(n);
+                if into_surface < 0.0 {
+                    remaining -= n * into_surface;
+                } else {
+                    break;
+                }
+                let vel_into = vel.dot(n);
+                if vel_into < 0.0 {
+                    vel -= n * vel_into;
+                }
+            }
+            _ => {
+                pos = tentative;
+                break;
+            }
+        }
+    }
+
+    // Determine grounded state: sample below the foot.
+    let foot = pos - Vec3::new(0.0, capsule_half_height + capsule_radius, 0.0);
+    let (foot_dist, foot_normal) = query_fn(foot);
+    let grounded = if foot_dist < GROUND_SNAP {
+        let angle = foot_normal.normalize_or_zero().dot(Vec3::Y).acos();
+        angle <= MAX_SLOPE_RADIANS
+    } else {
+        false
+    };
+
+    (pos, vel, grounded)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -417,6 +561,66 @@ mod tests {
             !cc.grounded,
             "steep surface should not be walkable with strict slope limit"
         );
+    }
+
+    #[test]
+    fn v2_slide_step_basic() {
+        use super::slide_step_v2;
+
+        // Query function: open space — always returns large positive distance
+        // with an upward normal (mimics standing on flat ground far below).
+        let open_space = |_p: Vec3| -> (f32, Vec3) { (100.0_f32, Vec3::Y) };
+
+        let start = Vec3::new(0.0, 5.0, 0.0);
+        let vel = Vec3::new(3.0, 0.0, 0.0);
+        let dt = 0.1_f32;
+
+        let (new_pos, new_vel, grounded) =
+            slide_step_v2(start, vel, 0.3, 0.5, dt, open_space);
+
+        // Should have moved roughly in +X (no collision).
+        assert!(
+            new_pos.x > 0.0,
+            "should have moved in X: pos={:?}",
+            new_pos
+        );
+        // Velocity should be unchanged (no collision).
+        assert!(
+            (new_vel - vel).length() < 1e-4,
+            "velocity should be unchanged in open space: vel={:?}",
+            new_vel
+        );
+        // Not grounded (100 units above any surface).
+        assert!(!grounded, "should not be grounded in open space");
+    }
+
+    #[test]
+    fn v2_slide_step_collision_stops_penetration() {
+        use super::slide_step_v2;
+
+        // Query function: floor at y=0 (character standing on it should not go below).
+        // Returns negative distance below y=0, positive above.
+        let floor = |p: Vec3| -> (f32, Vec3) { (p.y, Vec3::Y) };
+
+        // Start just above the floor, capsule foot at y = 0.8 - 0.8 = 0.0
+        let start = Vec3::new(0.0, 0.8, 0.0);
+        // Velocity downward (into the floor)
+        let vel = Vec3::new(0.0, -5.0, 0.0);
+        let dt = 0.1_f32;
+
+        let (new_pos, _new_vel, grounded) =
+            slide_step_v2(start, vel, 0.3, 0.5, dt, floor);
+
+        // Should not have gone below the floor significantly.
+        // The capsule foot is at new_pos.y - 0.8; it should not be deeply below 0.
+        let foot_y = new_pos.y - 0.8;
+        assert!(
+            foot_y >= -0.1,
+            "capsule foot should not penetrate floor deeply: foot_y={}",
+            foot_y
+        );
+        // Should be grounded.
+        assert!(grounded, "should be grounded after landing on floor");
     }
 
     #[test]
