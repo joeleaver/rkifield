@@ -4,10 +4,13 @@
 //! [`BrushShape`] (what SDF primitive to use), and tuning parameters like
 //! radius, strength, falloff, and material IDs.
 //!
-//! Brushes are the user-facing abstraction.  The edit pipeline converts them
-//! into GPU-compatible [`EditParams`](crate::types::EditParams) via
-//! [`prepare_edit`](crate::edit_op::prepare_edit).
+//! Brushes are the user-facing abstraction. In v2, brushes operate in
+//! object-local space. Use [`Brush::to_edit_op`] to convert a world-space
+//! brush stroke into an object-local [`EditOp`](crate::edit_op::EditOp).
 
+use glam::{Quat, Vec3};
+
+use crate::edit_op::EditOp;
 use crate::types::{EditType, FalloffCurve, ShapeType};
 
 // ---------------------------------------------------------------------------
@@ -154,6 +157,71 @@ impl Brush {
             BrushShape::Cylinder => ShapeType::Cylinder,
         }
     }
+
+    /// Convert a world-space brush application into an object-local [`EditOp`].
+    ///
+    /// Transforms the brush position and dimensions from world space into the
+    /// target object's local coordinate space.
+    ///
+    /// # Parameters
+    /// - `object_id` — Which object to edit
+    /// - `world_pos` — Brush hit position in world space
+    /// - `object_world_pos` — Object's world-space origin
+    /// - `object_rotation` — Object's world rotation
+    /// - `object_scale` — Object's uniform scale
+    pub fn to_edit_op(
+        &self,
+        object_id: u32,
+        world_pos: Vec3,
+        object_world_pos: Vec3,
+        object_rotation: Quat,
+        object_scale: f32,
+    ) -> EditOp {
+        let local_pos =
+            world_to_object_local(world_pos, object_world_pos, object_rotation, object_scale);
+        let inv_scale = 1.0 / object_scale.max(1e-6);
+
+        // Scale brush dimensions into object-local space
+        let local_dims = match self.shape {
+            BrushShape::Sphere => Vec3::new(self.radius * inv_scale, 0.0, 0.0),
+            BrushShape::Cube => Vec3::splat(self.radius * inv_scale),
+            BrushShape::Capsule => {
+                Vec3::new(self.radius * inv_scale, self.radius * inv_scale, 0.0)
+            }
+            BrushShape::Cylinder => {
+                Vec3::new(self.radius * inv_scale, self.radius * inv_scale, 0.0)
+            }
+        };
+
+        EditOp {
+            object_id,
+            position: local_pos,
+            rotation: Quat::IDENTITY, // brush rotation stays identity for now
+            edit_type: self.edit_type(),
+            shape_type: self.shape_type(),
+            dimensions: local_dims,
+            strength: self.strength,
+            blend_k: self.blend_k * inv_scale,
+            falloff: self.falloff,
+            material_id: self.material_id,
+            secondary_id: self.secondary_id,
+            color_packed: 0,
+        }
+    }
+}
+
+/// Transform a world-space position into an object's local coordinate space.
+///
+/// Applies inverse rotation then inverse scale to `(world_pos - object_origin)`.
+pub fn world_to_object_local(
+    world_pos: Vec3,
+    object_origin: Vec3,
+    object_rotation: Quat,
+    object_scale: f32,
+) -> Vec3 {
+    let relative = world_pos - object_origin;
+    let unrotated = object_rotation.inverse() * relative;
+    unrotated / object_scale.max(1e-6)
 }
 
 impl Default for Brush {
@@ -170,6 +238,7 @@ impl Default for Brush {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::f32::consts::FRAC_PI_2;
 
     // -- Default --
 
@@ -314,5 +383,91 @@ mod tests {
         let s = format!("{b:?}");
         assert!(s.contains("Add"), "debug string: {s}");
         assert!(s.contains("Sphere"), "debug string: {s}");
+    }
+
+    // -- world_to_object_local --
+
+    #[test]
+    fn world_to_local_identity() {
+        let local = world_to_object_local(
+            Vec3::new(1.0, 2.0, 3.0),
+            Vec3::ZERO,
+            Quat::IDENTITY,
+            1.0,
+        );
+        assert!((local - Vec3::new(1.0, 2.0, 3.0)).length() < 1e-5);
+    }
+
+    #[test]
+    fn world_to_local_with_offset() {
+        let local = world_to_object_local(
+            Vec3::new(5.0, 3.0, 1.0),
+            Vec3::new(2.0, 1.0, 0.0),
+            Quat::IDENTITY,
+            1.0,
+        );
+        assert!((local - Vec3::new(3.0, 2.0, 1.0)).length() < 1e-5);
+    }
+
+    #[test]
+    fn world_to_local_with_scale() {
+        let local = world_to_object_local(
+            Vec3::new(4.0, 0.0, 0.0),
+            Vec3::ZERO,
+            Quat::IDENTITY,
+            2.0,
+        );
+        assert!((local - Vec3::new(2.0, 0.0, 0.0)).length() < 1e-5);
+    }
+
+    #[test]
+    fn world_to_local_with_rotation() {
+        // Object rotated 90° around Y: local +X maps to world -Z,
+        // so inverse maps world +X to local +Z.
+        let rot = Quat::from_rotation_y(FRAC_PI_2);
+        let local = world_to_object_local(
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::ZERO,
+            rot,
+            1.0,
+        );
+        assert!((local - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-4);
+    }
+
+    // -- to_edit_op --
+
+    #[test]
+    fn to_edit_op_identity_transform() {
+        let brush = Brush::add_sphere(0.5, 3);
+        let op = brush.to_edit_op(
+            42,
+            Vec3::new(1.0, 2.0, 3.0),
+            Vec3::ZERO,
+            Quat::IDENTITY,
+            1.0,
+        );
+        assert_eq!(op.object_id, 42);
+        assert!((op.position - Vec3::new(1.0, 2.0, 3.0)).length() < 1e-5);
+        assert_eq!(op.dimensions.x, 0.5);
+        assert_eq!(op.edit_type, EditType::SmoothUnion);
+        assert_eq!(op.material_id, 3);
+    }
+
+    #[test]
+    fn to_edit_op_scales_radius() {
+        let brush = Brush::add_sphere(1.0, 1);
+        let op = brush.to_edit_op(
+            1,
+            Vec3::new(2.0, 0.0, 0.0),
+            Vec3::ZERO,
+            Quat::IDENTITY,
+            2.0, // object at 2x scale
+        );
+        // Position divided by scale
+        assert!((op.position.x - 1.0).abs() < 1e-5);
+        // Radius divided by scale
+        assert!((op.dimensions.x - 0.5).abs() < 1e-5);
+        // blend_k divided by scale (1.0 * 0.3 / 2.0 = 0.15)
+        assert!((op.blend_k - 0.15).abs() < 1e-5);
     }
 }
