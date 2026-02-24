@@ -692,7 +692,12 @@ fn build_slider_row(
         })),
         ..Default::default()
     };
-    row.append_child(&slider.render(scope, &[]));
+    // Render the slider inside `untracked` so the Slider's internal
+    // `value_signal.get()` (for initial value) doesn't subscribe the
+    // parent reactive_component_dom scope to every slider signal.
+    // Without this, dragging ANY slider rebuilds the entire RightPanel.
+    let slider_node = rinch::core::untracked(|| slider.render(scope, &[]));
+    row.append_child(&slider_node);
     container.append_child(&row);
 }
 
