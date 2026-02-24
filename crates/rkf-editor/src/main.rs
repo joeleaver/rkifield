@@ -461,7 +461,16 @@ impl ApplicationHandler for App {
                     })
                 });
 
-                // 3. Lock editor state, update camera from input.
+                // 3. Resize render resolution to match viewport (if changed).
+                if let Some(vp) = viewport {
+                    let vp_w = (vp.2 as u32).max(64);
+                    let vp_h = (vp.3 as u32).max(64);
+                    if let Some(engine) = self.engine.as_mut() {
+                        engine.resize_render(vp_w, vp_h);
+                    }
+                }
+
+                // 4. Lock editor state, update camera from input.
                 if let Ok(mut es) = self.editor_state.lock() {
                     // Apply pending MCP commands.
                     if let Ok(mut ss) = self.shared_state.lock() {
@@ -498,7 +507,7 @@ impl ApplicationHandler for App {
                     es.reset_frame_deltas();
                 }
 
-                // 4. Render frame with overlay compositing.
+                // 5. Render frame with overlay compositing.
                 //    Take overlay state out temporarily to avoid borrow conflict
                 //    with engine (both live in self).
                 let mut rinch_ctx = self.rinch_ctx.take();
@@ -534,7 +543,7 @@ impl ApplicationHandler for App {
                 self.overlay_renderer = overlay_renderer;
                 self.overlay_blit = overlay_blit;
 
-                // 5. Update shared state for MCP observation.
+                // 6. Update shared state for MCP observation.
                 if let Ok(es) = self.editor_state.lock() {
                     if let Ok(mut ss) = self.shared_state.lock() {
                         ss.camera_position = es.editor_camera.position;

@@ -250,9 +250,13 @@ pub struct EditorEngine {
     pub scene: Scene,
     world_lights: Vec<Light>,
     light_buffer: LightBuffer,
+    material_buffer: wgpu::Buffer,
     frame_index: u32,
     prev_vp: [[f32; 4]; 4],
     shade_debug_mode: u32,
+    // Render resolution (tracks viewport physical pixels)
+    render_width: u32,
+    render_height: u32,
     // Screenshot readback (window-resolution, captures composited output with UI)
     readback_buffer: wgpu::Buffer,
     window_width: u32,
@@ -464,9 +468,12 @@ impl EditorEngine {
             scene,
             world_lights,
             light_buffer,
+            material_buffer: material_table.buffer,
             frame_index: 0,
             prev_vp: [[0.0; 4]; 4],
             shade_debug_mode: 0,
+            render_width: INTERNAL_WIDTH,
+            render_height: INTERNAL_HEIGHT,
             readback_buffer,
             window_width,
             window_height,
@@ -566,6 +573,104 @@ impl EditorEngine {
         }
     }
 
+    /// Current render resolution width.
+    pub fn render_width(&self) -> u32 {
+        self.render_width
+    }
+
+    /// Current render resolution height.
+    pub fn render_height(&self) -> u32 {
+        self.render_height
+    }
+
+    /// Resize the internal render resolution.
+    ///
+    /// Recreates all size-dependent GPU resources: GBuffer, tile cull, shading,
+    /// volumetric pipeline, post-processing, and blit pass. Called when the
+    /// viewport dimensions change (window resize or panel layout change).
+    pub fn resize_render(&mut self, width: u32, height: u32) {
+        let width = width.max(64);
+        let height = height.max(64);
+        if width == self.render_width && height == self.render_height {
+            return;
+        }
+        log::info!("Render resolution: {}x{} → {}x{}", self.render_width, self.render_height, width, height);
+        self.render_width = width;
+        self.render_height = height;
+
+        let device = &self.ctx.device;
+
+        // --- Core passes ---
+        self.gbuffer = GBuffer::new(device, width, height);
+        self.tile_cull = TileObjectCullPass::new(device, &self.gpu_scene, width, height);
+        // RayMarchPass pipeline is resolution-agnostic (dispatch from gbuffer dims).
+        // DebugViewPass stores bind groups to gbuffer.
+        self.debug_view = DebugViewPass::new(device, &self.gbuffer);
+        self.shading_pass = ShadingPass::new(
+            device, &self.gbuffer, &self.gpu_scene, &self.light_buffer,
+            &self.coarse_field, &self.radiance_volume, &self.material_buffer,
+            width, height,
+        );
+
+        // --- Volumetric pipeline (half-res march, full-res upscale) ---
+        // vol_shadow and cloud_shadow are resolution-independent.
+        let half_w = width / 2;
+        let half_h = height / 2;
+        self.vol_march = VolMarchPass::new(
+            device, &self.ctx.queue,
+            &self.gbuffer.position_view, &self.vol_shadow.shadow_view,
+            &self.cloud_shadow.shadow_view,
+            half_w, half_h, width, height,
+        );
+        self.vol_upscale = VolUpscalePass::new(
+            device, &self.vol_march.output_view, &self.gbuffer.position_view,
+            width, height, half_w, half_h,
+        );
+        self.vol_composite = VolCompositePass::new(
+            device, &self.shading_pass.hdr_view, &self.vol_upscale.output_view,
+            width, height,
+        );
+
+        // --- Post-processing pipeline ---
+        self.bloom = BloomPass::new(
+            device, &self.vol_composite.output_view, width, height,
+        );
+        self.auto_exposure = AutoExposurePass::new(
+            device, &self.vol_composite.output_view, width, height,
+        );
+        self.dof = DofPass::new(
+            device, &self.vol_composite.output_view, &self.gbuffer.position_view,
+            width, height,
+        );
+        self.motion_blur = MotionBlurPass::new(
+            device, &self.dof.output_view, &self.gbuffer.motion_view,
+            width, height,
+        );
+        self.bloom_composite = BloomCompositePass::new(
+            device, &self.motion_blur.output_view, self.bloom.mip_views(),
+            width, height,
+        );
+        self.tone_map = ToneMapPass::new_with_exposure(
+            device, &self.bloom_composite.output_view,
+            width, height,
+            Some(self.auto_exposure.get_exposure_buffer()),
+        );
+        self.color_grade = ColorGradePass::new(
+            device, &self.ctx.queue, &self.tone_map.ldr_view,
+            width, height,
+        );
+        self.cosmetics = CosmeticsPass::new(
+            device, &self.color_grade.output_view, width, height,
+        );
+        self.sharpen = SharpenPass::new(
+            device, &self.vol_composite.output_view, &self.gbuffer,
+            width, height,
+        );
+
+        // --- Blit (update source view to new cosmetics output) ---
+        self.blit.update_source(device, &self.cosmetics.output_view);
+    }
+
     /// Render one frame without UI overlay (full-screen engine blit).
     pub fn render_frame(&mut self) {
         self.render_frame_composited(|_, _, _| {});
@@ -649,7 +754,7 @@ impl EditorEngine {
 
         // Update camera uniforms.
         let cam_uniforms = self.camera.uniforms(
-            INTERNAL_WIDTH, INTERNAL_HEIGHT, self.frame_index, self.prev_vp,
+            self.render_width, self.render_height, self.frame_index, self.prev_vp,
         );
         self.gpu_scene.update_camera(&self.ctx.queue, &cam_uniforms);
 
@@ -695,7 +800,7 @@ impl EditorEngine {
         self.debug_view.set_mode(&self.ctx.queue, debug_mode);
 
         // Store VP for next frame's motion vectors.
-        self.prev_vp = self.camera.view_projection(INTERNAL_WIDTH, INTERNAL_HEIGHT)
+        self.prev_vp = self.camera.view_projection(self.render_width, self.render_height)
             .to_cols_array_2d();
 
         // Get swapchain texture.
@@ -703,8 +808,8 @@ impl EditorEngine {
             Ok(f) => f,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
                 self.resize(
-                    INTERNAL_WIDTH.max(64),
-                    INTERNAL_HEIGHT.max(64),
+                    self.window_width.max(64),
+                    self.window_height.max(64),
                 );
                 return;
             }
@@ -760,10 +865,10 @@ impl EditorEngine {
             cam_up: [self.camera.up().x, self.camera.up().y, self.camera.up().z, 0.0],
             sun_dir: [sun_dir[0], sun_dir[1], sun_dir[2], 0.0],
             sun_color: [1.0, 0.95, 0.85, 0.0],
-            width: INTERNAL_WIDTH / 2,
-            height: INTERNAL_HEIGHT / 2,
-            full_width: INTERNAL_WIDTH,
-            full_height: INTERNAL_HEIGHT,
+            width: self.render_width / 2,
+            height: self.render_height / 2,
+            full_width: self.render_width,
+            full_height: self.render_height,
             max_steps: 32,
             step_size: 2.0,
             near: 0.5,
