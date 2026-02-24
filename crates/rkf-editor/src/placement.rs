@@ -272,6 +272,40 @@ impl AssetBrowser {
     }
 }
 
+/// Create a v2 `rkf_core::scene::SceneObject` from a placement request.
+///
+/// The returned object has no ID yet (id = 0); assign a final ID by
+/// passing the object to `Scene::add_object_full`. The object's
+/// `world_position.local` is set from `position`; the chunk remains
+/// `IVec3::ZERO`. For large-world placement callers should convert
+/// through `WorldPosition::from_world_f64` instead.
+pub fn create_v2_object(
+    name: &str,
+    position: glam::Vec3,
+    primitive: rkf_core::scene_node::SdfPrimitive,
+    material_id: u16,
+) -> rkf_core::scene::SceneObject {
+    use rkf_core::{
+        aabb::Aabb,
+        scene::SceneObject,
+        scene_node::SceneNode,
+        WorldPosition,
+    };
+    use glam::{IVec3, Quat};
+
+    let root_node = SceneNode::analytical(name, primitive, material_id);
+
+    SceneObject {
+        id: 0,
+        name: name.to_string(),
+        world_position: WorldPosition::new(IVec3::ZERO, position),
+        rotation: Quat::IDENTITY,
+        scale: 1.0,
+        root_node,
+        aabb: Aabb::new(glam::Vec3::ZERO, glam::Vec3::ZERO),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -567,5 +601,53 @@ mod tests {
         let miss = SurfaceSnapResult::miss();
         assert!(!miss.hit);
         assert!(vec3_approx_eq(miss.position, Vec3::ZERO));
+    }
+
+    // --- create_v2_object tests ---
+
+    #[test]
+    fn test_create_v2_object_fields() {
+        use rkf_core::scene_node::{SdfPrimitive, SdfSource};
+        use glam::IVec3;
+
+        let pos = Vec3::new(1.0, 2.0, 3.0);
+        let prim = SdfPrimitive::Sphere { radius: 0.5 };
+        let obj = super::create_v2_object("MySphere", pos, prim, 7);
+
+        assert_eq!(obj.name, "MySphere");
+        assert_eq!(obj.id, 0);
+        assert_eq!(obj.world_position.chunk, IVec3::ZERO);
+        assert!(vec3_approx_eq(obj.world_position.local, pos));
+        assert!(approx_eq(obj.scale, 1.0));
+
+        // Root node should be analytical with the given primitive
+        match &obj.root_node.sdf_source {
+            SdfSource::Analytical { primitive, material_id } => {
+                assert!(matches!(primitive, SdfPrimitive::Sphere { radius } if (*radius - 0.5).abs() < EPS));
+                assert_eq!(*material_id, 7);
+            }
+            _ => panic!("expected Analytical sdf_source"),
+        }
+    }
+
+    #[test]
+    fn test_create_v2_object_name_propagates_to_node() {
+        use rkf_core::scene_node::SdfPrimitive;
+
+        let obj = super::create_v2_object("BoxPrimitive", Vec3::ZERO, SdfPrimitive::Box { half_extents: Vec3::ONE }, 0);
+        assert_eq!(obj.root_node.name, "BoxPrimitive");
+    }
+
+    #[test]
+    fn test_create_v2_object_added_to_scene() {
+        use rkf_core::{scene::Scene, scene_node::SdfPrimitive};
+
+        let obj = super::create_v2_object("Capsule", Vec3::ZERO, SdfPrimitive::Capsule { radius: 0.2, half_height: 0.5 }, 1);
+
+        let mut scene = Scene::new("test");
+        let id = scene.add_object_full(obj);
+        assert!(id > 0);
+        assert_eq!(scene.object_count(), 1);
+        assert_eq!(scene.root_objects[0].name, "Capsule");
     }
 }

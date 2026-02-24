@@ -192,6 +192,31 @@ impl SculptState {
     }
 }
 
+/// Transform a world-space position into a v2 object's local coordinate space.
+///
+/// Converts `world_pos` from world space into the object's local space by
+/// applying the inverse of the object's world transform. The object transform
+/// is `T(world_position.local) * R(rotation) * S(scale)`.
+///
+/// This is used by the sculpt pipeline to convert brush hit positions (which
+/// are in world space) into the per-object SDF space before evaluating or
+/// writing voxels.
+pub fn world_to_object_local_v2(
+    world_pos: glam::Vec3,
+    object: &rkf_core::scene::SceneObject,
+) -> glam::Vec3 {
+    use glam::Mat4;
+
+    // Build the object's world-to-local matrix.
+    let world_matrix = Mat4::from_scale_rotation_translation(
+        glam::Vec3::splat(object.scale),
+        object.rotation,
+        object.world_position.local,
+    );
+    let inv = world_matrix.inverse();
+    inv.transform_point3(world_pos)
+}
+
 /// Compute brush falloff at a given distance from the brush center.
 ///
 /// Returns a value from 1.0 at the center to 0.0 at the radius edge.
@@ -494,5 +519,49 @@ mod tests {
         assert_eq!(BrushShape::Sphere, BrushShape::Sphere);
         assert_ne!(BrushShape::Sphere, BrushShape::Cube);
         assert_ne!(BrushShape::Cube, BrushShape::Cylinder);
+    }
+
+    // --- world_to_object_local_v2 tests ---
+
+    fn make_test_object(local_pos: Vec3, scale: f32) -> rkf_core::scene::SceneObject {
+        use rkf_core::{aabb::Aabb, scene::SceneObject, scene_node::SceneNode, WorldPosition};
+        use glam::{IVec3, Quat};
+        SceneObject {
+            id: 1,
+            name: "test".into(),
+            world_position: WorldPosition::new(IVec3::ZERO, local_pos),
+            rotation: Quat::IDENTITY,
+            scale,
+            root_node: SceneNode::new("root"),
+            aabb: Aabb::new(Vec3::ZERO, Vec3::ZERO),
+        }
+    }
+
+    #[test]
+    fn test_world_to_object_local_identity() {
+        // Object at origin, scale 1 — world pos should equal local pos
+        let obj = make_test_object(Vec3::ZERO, 1.0);
+        let world = Vec3::new(1.0, 2.0, 3.0);
+        let local = super::world_to_object_local_v2(world, &obj);
+        assert!((local - world).length() < EPS, "identity: {local:?}");
+    }
+
+    #[test]
+    fn test_world_to_object_local_translated() {
+        // Object at (5, 0, 0), scale 1 — local(0,0,0) should give world(5,0,0)
+        let obj = make_test_object(Vec3::new(5.0, 0.0, 0.0), 1.0);
+        // World point at (5,0,0) should be at local (0,0,0)
+        let local = super::world_to_object_local_v2(Vec3::new(5.0, 0.0, 0.0), &obj);
+        assert!(local.length() < EPS, "translated: {local:?}");
+    }
+
+    #[test]
+    fn test_world_to_object_local_scaled() {
+        // Object at origin, scale 2 — world (2,0,0) should be local (1,0,0)
+        let obj = make_test_object(Vec3::ZERO, 2.0);
+        let local = super::world_to_object_local_v2(Vec3::new(2.0, 0.0, 0.0), &obj);
+        assert!(approx_eq(local.x, 1.0), "scaled x: {local:?}");
+        assert!(local.y.abs() < EPS);
+        assert!(local.z.abs() < EPS);
     }
 }

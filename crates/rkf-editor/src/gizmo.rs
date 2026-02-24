@@ -445,6 +445,39 @@ pub fn compute_rotate_delta(
     Quat::from_axis_angle(axis, angle)
 }
 
+/// The result of applying a completed gizmo drag to an object's transform.
+///
+/// Returned by helpers like `compute_translate_delta`/`compute_rotate_delta`/
+/// `compute_scale_delta` and consumed by `apply_to_v2_object`.
+#[derive(Debug, Clone)]
+pub struct GizmoResult {
+    /// New world-space position of the object.
+    pub position: Vec3,
+    /// New world-space rotation of the object.
+    pub rotation: Quat,
+    /// New uniform scale factor of the object.
+    pub scale: f32,
+}
+
+/// Apply a gizmo drag result to a v2 `rkf_core::scene::SceneObject`.
+///
+/// Writes `result.position` into the object's `world_position.local` component,
+/// copies `result.rotation` to `object.rotation`, and sets `object.scale` to
+/// `result.scale`. The chunk component of `world_position` is left unchanged.
+///
+/// # Note
+/// For large-world precision, callers should update `world_position.chunk`
+/// when `local` exceeds half-chunk range and re-normalise. This helper only
+/// writes the local offset.
+pub fn apply_to_v2_object(
+    result: &GizmoResult,
+    object: &mut rkf_core::scene::SceneObject,
+) {
+    object.world_position.local = result.position;
+    object.rotation = result.rotation;
+    object.scale = result.scale;
+}
+
 /// Compute the scale delta from a drag operation.
 ///
 /// Returns a `Vec3` scale factor. Per-axis handles (X/Y/Z) scale only
@@ -906,5 +939,65 @@ mod tests {
         assert_eq!(GizmoMode::Translate, GizmoMode::Translate);
         assert_ne!(GizmoMode::Translate, GizmoMode::Rotate);
         assert_ne!(GizmoMode::Rotate, GizmoMode::Scale);
+    }
+
+    // --- GizmoResult / apply_to_v2_object tests ---
+
+    #[test]
+    fn test_apply_to_v2_object_sets_fields() {
+        use rkf_core::{aabb::Aabb, scene::SceneObject, scene_node::SceneNode, WorldPosition};
+
+        let mut obj = SceneObject {
+            id: 1,
+            name: "test".into(),
+            world_position: WorldPosition::default(),
+            rotation: Quat::IDENTITY,
+            scale: 1.0,
+            root_node: SceneNode::new("root"),
+            aabb: Aabb::new(Vec3::ZERO, Vec3::ZERO),
+        };
+
+        let result = GizmoResult {
+            position: Vec3::new(1.0, 2.0, 3.0),
+            rotation: Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
+            scale: 2.5,
+        };
+
+        apply_to_v2_object(&result, &mut obj);
+
+        assert!(vec3_approx_eq(obj.world_position.local, Vec3::new(1.0, 2.0, 3.0)));
+        assert!((obj.scale - 2.5).abs() < EPS);
+        // Rotation should match
+        let expected = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        assert!((obj.rotation - expected).length() < EPS);
+    }
+
+    #[test]
+    fn test_apply_to_v2_object_preserves_chunk() {
+        use rkf_core::{aabb::Aabb, scene::SceneObject, scene_node::SceneNode, WorldPosition};
+        use glam::IVec3;
+
+        let mut obj = SceneObject {
+            id: 2,
+            name: "far".into(),
+            world_position: WorldPosition::new(IVec3::new(10, 0, -5), Vec3::ZERO),
+            rotation: Quat::IDENTITY,
+            scale: 1.0,
+            root_node: SceneNode::new("root"),
+            aabb: Aabb::new(Vec3::ZERO, Vec3::ZERO),
+        };
+
+        let result = GizmoResult {
+            position: Vec3::new(0.5, 0.5, 0.5),
+            rotation: Quat::IDENTITY,
+            scale: 1.0,
+        };
+
+        apply_to_v2_object(&result, &mut obj);
+
+        // Chunk must be unchanged
+        assert_eq!(obj.world_position.chunk, IVec3::new(10, 0, -5));
+        // Local updated
+        assert!(vec3_approx_eq(obj.world_position.local, Vec3::new(0.5, 0.5, 0.5)));
     }
 }

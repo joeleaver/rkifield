@@ -343,6 +343,68 @@ pub trait AutomationApi: Send + Sync {
 
     /// Execute an engine console command and return its output string.
     fn execute_command(&self, command: &str) -> AutomationResult<String>;
+
+    // --- v2 object-centric methods (default: unsupported) ------------------
+
+    /// Spawn a new SDF object in the v2 scene and return its object ID.
+    ///
+    /// `primitive_type` is a string such as `"sphere"`, `"box"`, `"capsule"`, etc.
+    /// `params` are primitive-specific shape parameters (radius, half-extents, …).
+    /// `position` is the initial world-space position in metres.
+    /// `material_id` is the index into the global material table.
+    #[allow(unused_variables)]
+    fn object_spawn(
+        &self,
+        name: &str,
+        primitive_type: &str,
+        params: &[f32],
+        position: [f32; 3],
+        material_id: u16,
+    ) -> Result<u32, String> {
+        Err("object_spawn not supported".into())
+    }
+
+    /// Despawn an SDF object by ID, removing it from the v2 scene.
+    #[allow(unused_variables)]
+    fn object_despawn(&self, object_id: u32) -> Result<(), String> {
+        Err("object_despawn not supported".into())
+    }
+
+    /// Set a node's local transform in the v2 scene.
+    ///
+    /// `position` is the local translation in metres, `rotation` is a unit
+    /// quaternion `[x, y, z, w]`, and `scale` is a uniform scale factor.
+    #[allow(unused_variables)]
+    fn node_set_transform(
+        &self,
+        object_id: u32,
+        position: [f32; 3],
+        rotation: [f32; 4],
+        scale: f32,
+    ) -> Result<(), String> {
+        Err("node_set_transform not supported".into())
+    }
+
+    /// Return a human-readable description of the current environment profile.
+    fn environment_get(&self) -> Result<String, String> {
+        Err("environment_get not supported".into())
+    }
+
+    /// Begin blending the environment toward the profile at `target_index` over
+    /// `duration` seconds.
+    #[allow(unused_variables)]
+    fn environment_blend(&self, target_index: usize, duration: f32) -> Result<(), String> {
+        Err("environment_blend not supported".into())
+    }
+
+    /// Override a single environment property by name.
+    ///
+    /// `property` is a dot-separated path such as `"sun.intensity"` or
+    /// `"fog.density"`.  `value` is the new scalar value.
+    #[allow(unused_variables)]
+    fn env_override(&self, property: &str, value: f32) -> Result<(), String> {
+        Err("env_override not supported".into())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -445,6 +507,10 @@ impl AutomationApi for StubAutomationApi {
     fn execute_command(&self, _command: &str) -> AutomationResult<String> {
         Err(AutomationError::NotImplemented("execute_command"))
     }
+
+    // The v2 methods have default implementations in the trait that return
+    // Err("... not supported").  StubAutomationApi inherits those defaults and
+    // does not need to override them; the trait defaults are tested directly.
 }
 
 // ---------------------------------------------------------------------------
@@ -728,6 +794,57 @@ mod tests {
             let back: QualityPreset = serde_json::from_str(&json).unwrap();
             assert_eq!(back, preset);
         }
+    }
+
+    // --- v2 default method tests -------------------------------------------
+
+    // Helper: assert a Result<_, String> is Err containing the expected text.
+    fn assert_err_contains<T: std::fmt::Debug>(result: Result<T, String>, needle: &str) {
+        match result {
+            Err(msg) => assert!(
+                msg.contains(needle),
+                "expected error containing {:?}, got {:?}",
+                needle,
+                msg
+            ),
+            Ok(v) => panic!("expected Err, got Ok({v:?})"),
+        }
+    }
+
+    #[test]
+    fn default_object_spawn_returns_error() {
+        assert_err_contains(
+            make_stub().object_spawn("cube", "box", &[0.5, 0.5, 0.5], [0.0; 3], 0),
+            "not supported",
+        );
+    }
+
+    #[test]
+    fn default_object_despawn_returns_error() {
+        assert_err_contains(make_stub().object_despawn(1), "not supported");
+    }
+
+    #[test]
+    fn default_node_set_transform_returns_error() {
+        assert_err_contains(
+            make_stub().node_set_transform(1, [0.0; 3], [0.0, 0.0, 0.0, 1.0], 1.0),
+            "not supported",
+        );
+    }
+
+    #[test]
+    fn default_environment_get_returns_error() {
+        assert_err_contains(make_stub().environment_get(), "not supported");
+    }
+
+    #[test]
+    fn default_environment_blend_returns_error() {
+        assert_err_contains(make_stub().environment_blend(0, 2.0), "not supported");
+    }
+
+    #[test]
+    fn default_env_override_returns_error() {
+        assert_err_contains(make_stub().env_override("sun.intensity", 1.0), "not supported");
     }
 
     #[test]

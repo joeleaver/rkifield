@@ -446,4 +446,169 @@ impl AutomationApi for EditorAutomationApi {
             ))),
         }
     }
+
+    // --- v2 object-centric methods -----------------------------------------
+
+    fn object_spawn(
+        &self,
+        name: &str,
+        primitive_type: &str,
+        params: &[f32],
+        position: [f32; 3],
+        material_id: u16,
+    ) -> Result<u32, String> {
+        let mut es = self
+            .editor_state
+            .lock()
+            .map_err(|e| format!("lock poisoned: {e}"))?;
+
+        // Generate a stable ID from the current tree size (simple sequential ID).
+        let entity_id = (es.scene_tree.roots.len() as u64 + 1) * 0x1000 + 1;
+
+        let mut node = crate::scene_tree::SceneNode::new(entity_id, name);
+        node.asset_path = Some(format!(
+            "procedural://{primitive_type}?params={}&mat={material_id}",
+            params
+                .iter()
+                .map(|f| f.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
+        node.position = glam::Vec3::new(position[0], position[1], position[2]);
+
+        es.scene_tree.add_node(node);
+
+        Ok(entity_id as u32)
+    }
+
+    fn object_despawn(&self, object_id: u32) -> Result<(), String> {
+        let mut es = self
+            .editor_state
+            .lock()
+            .map_err(|e| format!("lock poisoned: {e}"))?;
+
+        es.scene_tree
+            .remove_node(object_id as u64)
+            .ok_or_else(|| format!("object {object_id} not found"))?;
+
+        Ok(())
+    }
+
+    fn node_set_transform(
+        &self,
+        object_id: u32,
+        position: [f32; 3],
+        rotation: [f32; 4],
+        scale: f32,
+    ) -> Result<(), String> {
+        let mut es = self
+            .editor_state
+            .lock()
+            .map_err(|e| format!("lock poisoned: {e}"))?;
+
+        let node = es
+            .scene_tree
+            .find_node_mut(object_id as u64)
+            .ok_or_else(|| format!("object {object_id} not found"))?;
+
+        node.position = glam::Vec3::new(position[0], position[1], position[2]);
+        node.rotation =
+            glam::Quat::from_xyzw(rotation[0], rotation[1], rotation[2], rotation[3]);
+        node.scale = glam::Vec3::splat(scale);
+
+        Ok(())
+    }
+
+    fn environment_get(&self) -> Result<String, String> {
+        let es = self
+            .editor_state
+            .lock()
+            .map_err(|e| format!("lock poisoned: {e}"))?;
+
+        Ok(format!(
+            "environment: sun_intensity={:.2}, fog_enabled={}, fog_density={:.4}, \
+             bloom_enabled={}, clouds_enabled={}",
+            es.environment.atmosphere.sun_intensity,
+            es.environment.fog.enabled,
+            es.environment.fog.density,
+            es.environment.post_process.bloom_enabled,
+            es.environment.clouds.enabled,
+        ))
+    }
+
+    fn environment_blend(&self, _target_index: usize, _duration: f32) -> Result<(), String> {
+        // EnvironmentState has no multi-profile blend concept yet.
+        // Mark dirty so the render loop knows something changed.
+        let mut es = self
+            .editor_state
+            .lock()
+            .map_err(|e| format!("lock poisoned: {e}"))?;
+        es.environment.mark_dirty();
+        Ok(())
+    }
+
+    fn env_override(&self, property: &str, value: f32) -> Result<(), String> {
+        let mut es = self
+            .editor_state
+            .lock()
+            .map_err(|e| format!("lock poisoned: {e}"))?;
+
+        match property {
+            "sun.intensity" | "atmosphere.sun_intensity" => {
+                es.environment.atmosphere.sun_intensity = value;
+            }
+            "fog.density" => {
+                es.environment.fog.density = value;
+            }
+            "fog.enabled" => {
+                es.environment.fog.enabled = value != 0.0;
+            }
+            "fog.start_distance" => {
+                es.environment.fog.start_distance = value;
+            }
+            "fog.end_distance" => {
+                es.environment.fog.end_distance = value;
+            }
+            "fog.height_falloff" => {
+                es.environment.fog.height_falloff = value;
+            }
+            "clouds.enabled" => {
+                es.environment.clouds.enabled = value != 0.0;
+            }
+            "clouds.coverage" => {
+                es.environment.clouds.coverage = value;
+            }
+            "clouds.density" => {
+                es.environment.clouds.density = value;
+            }
+            "post.bloom_enabled" | "post_process.bloom_enabled" => {
+                es.environment.post_process.bloom_enabled = value != 0.0;
+            }
+            "post.bloom_intensity" | "post_process.bloom_intensity" => {
+                es.environment.post_process.bloom_intensity = value;
+            }
+            "post.exposure" | "post_process.exposure" => {
+                es.environment.post_process.exposure = value;
+            }
+            "post.contrast" | "post_process.contrast" => {
+                es.environment.post_process.contrast = value;
+            }
+            "post.saturation" | "post_process.saturation" => {
+                es.environment.post_process.saturation = value;
+            }
+            other => {
+                return Err(format!(
+                    "unknown environment property: {other}. \
+                     Known properties: sun.intensity, fog.density, fog.enabled, \
+                     fog.start_distance, fog.end_distance, fog.height_falloff, \
+                     clouds.enabled, clouds.coverage, clouds.density, \
+                     post.bloom_enabled, post.bloom_intensity, post.exposure, \
+                     post.contrast, post.saturation"
+                ));
+            }
+        }
+
+        es.environment.mark_dirty();
+        Ok(())
+    }
 }

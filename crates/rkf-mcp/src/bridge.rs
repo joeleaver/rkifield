@@ -302,6 +302,99 @@ impl AutomationApi for BridgeAutomationApi {
             ))),
         }
     }
+
+    // --- v2 object-centric methods (forwarded over IPC) --------------------
+
+    fn object_spawn(
+        &self,
+        name: &str,
+        primitive_type: &str,
+        params: &[f32],
+        position: [f32; 3],
+        material_id: u16,
+    ) -> Result<u32, String> {
+        let result = self
+            .call_tool(
+                "object_spawn",
+                serde_json::json!({
+                    "name": name,
+                    "primitive_type": primitive_type,
+                    "params": params,
+                    "position": position,
+                    "material_id": material_id,
+                }),
+            )
+            .map_err(|e| e.to_string())?;
+
+        result["object_id"]
+            .as_u64()
+            .map(|id| id as u32)
+            .ok_or_else(|| "missing object_id in response".to_string())
+    }
+
+    fn object_despawn(&self, object_id: u32) -> Result<(), String> {
+        self.call_tool(
+            "object_despawn",
+            serde_json::json!({"object_id": object_id}),
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    }
+
+    fn node_set_transform(
+        &self,
+        object_id: u32,
+        position: [f32; 3],
+        rotation: [f32; 4],
+        scale: f32,
+    ) -> Result<(), String> {
+        self.call_tool(
+            "node_set_transform",
+            serde_json::json!({
+                "object_id": object_id,
+                "position": position,
+                "rotation": rotation,
+                "scale": scale,
+            }),
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    }
+
+    fn environment_get(&self) -> Result<String, String> {
+        let result = self
+            .call_tool("environment_get", serde_json::json!({}))
+            .map_err(|e| e.to_string())?;
+
+        result["description"]
+            .as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| "missing description in response".to_string())
+    }
+
+    fn environment_blend(&self, target_index: usize, duration: f32) -> Result<(), String> {
+        self.call_tool(
+            "environment_blend",
+            serde_json::json!({
+                "target_index": target_index,
+                "duration": duration,
+            }),
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    }
+
+    fn env_override(&self, property: &str, value: f32) -> Result<(), String> {
+        self.call_tool(
+            "env_override",
+            serde_json::json!({
+                "property": property,
+                "value": value,
+            }),
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    }
 }
 
 #[cfg(test)]

@@ -240,6 +240,44 @@ impl SceneTree {
     }
 }
 
+/// Build an editor SceneTree from a v2 `rkf_core::scene::Scene`.
+///
+/// Clears all existing roots and repopulates the tree from the v2 scene's
+/// `root_objects`. Child nodes within each object are recursively mirrored
+/// into the editor tree.
+pub fn sync_from_v2_scene(tree: &mut SceneTree, scene: &rkf_core::scene::Scene) {
+    tree.roots.clear();
+    for obj in &scene.root_objects {
+        let mut node = SceneNode::new(obj.id as u64, &obj.name);
+        node.position = glam::Vec3::new(
+            obj.world_position.local.x,
+            obj.world_position.local.y,
+            obj.world_position.local.z,
+        );
+        node.rotation = obj.rotation;
+        node.scale = glam::Vec3::splat(obj.scale);
+        sync_node_children(&mut node, &obj.root_node);
+        tree.roots.push(node);
+    }
+}
+
+/// Recursively mirror a v2 `rkf_core::scene_node::SceneNode` tree into
+/// the editor `SceneNode` children of `parent`.
+fn sync_node_children(
+    parent: &mut SceneNode,
+    core_node: &rkf_core::scene_node::SceneNode,
+) {
+    for (i, child) in core_node.children.iter().enumerate() {
+        let child_id = parent.entity_id * 1000 + i as u64;
+        let mut child_node = SceneNode::new(child_id, &child.name);
+        child_node.position = child.local_transform.position;
+        child_node.rotation = child.local_transform.rotation;
+        child_node.scale = glam::Vec3::splat(child.local_transform.scale);
+        sync_node_children(&mut child_node, child);
+        parent.children.push(child_node);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -418,5 +456,64 @@ mod tests {
         assert!(tree.roots.is_empty());
         assert!(tree.selected_entities().is_empty());
         assert!(tree.find_node(1).is_none());
+    }
+
+    #[test]
+    fn sync_from_v2_scene() {
+        use rkf_core::scene::Scene;
+        use rkf_core::scene_node::SceneNode as CoreNode;
+        use rkf_core::WorldPosition;
+
+        let mut scene = Scene::new("test");
+        let node = CoreNode::new("sphere");
+        scene.add_object("obj1", WorldPosition::default(), node);
+
+        let mut tree = SceneTree::new();
+        super::sync_from_v2_scene(&mut tree, &scene);
+        assert_eq!(tree.roots.len(), 1);
+        assert_eq!(tree.roots[0].name, "obj1");
+    }
+
+    #[test]
+    fn sync_from_v2_scene_clears_existing() {
+        use rkf_core::scene::Scene;
+        use rkf_core::scene_node::SceneNode as CoreNode;
+        use rkf_core::WorldPosition;
+
+        // Populate tree with an existing node first
+        let mut tree = SceneTree::new();
+        tree.add_node(SceneNode::new(99, "OldNode"));
+        assert_eq!(tree.roots.len(), 1);
+
+        // Sync from a v2 scene — old node should be gone
+        let mut scene = Scene::new("test");
+        scene.add_object("NewObj", WorldPosition::default(), CoreNode::new("root"));
+
+        super::sync_from_v2_scene(&mut tree, &scene);
+        assert_eq!(tree.roots.len(), 1);
+        assert_eq!(tree.roots[0].name, "NewObj");
+    }
+
+    #[test]
+    fn sync_from_v2_scene_with_children() {
+        use rkf_core::scene::Scene;
+        use rkf_core::scene_node::{SceneNode as CoreNode, SdfPrimitive};
+        use rkf_core::WorldPosition;
+
+        let mut root = CoreNode::new("root");
+        root.add_child(CoreNode::analytical("child_a", SdfPrimitive::Sphere { radius: 0.5 }, 1));
+        root.add_child(CoreNode::new("child_b"));
+
+        let mut scene = Scene::new("test");
+        scene.add_object("obj1", WorldPosition::default(), root);
+
+        let mut tree = SceneTree::new();
+        super::sync_from_v2_scene(&mut tree, &scene);
+
+        assert_eq!(tree.roots.len(), 1);
+        // The root node from obj1 has 2 children
+        assert_eq!(tree.roots[0].children.len(), 2);
+        assert_eq!(tree.roots[0].children[0].name, "child_a");
+        assert_eq!(tree.roots[0].children[1].name, "child_b");
     }
 }

@@ -103,6 +103,79 @@ pub fn save_scene_to_path(scene: &SceneFile, path: &str) -> Result<(), String> {
         .map_err(|e| format!("Failed to write scene file '{path}': {e}"))
 }
 
+// ─── v2 Scene I/O ─────────────────────────────────────────────────────────────
+
+/// Save a v2 `rkf_core::scene::Scene` to a `.rkscene` file using the v2
+/// `rkf_runtime::scene_file::SceneFile` format.
+///
+/// Each `SceneObject` is written as an `ObjectEntry`. If the root node is an
+/// analytical primitive the `analytical` and `analytical_params` fields are
+/// populated; otherwise `analytical` is left as `None` (asset-backed path
+/// would be filled in by a richer serialiser).
+///
+/// Returns `Ok(())` on success, or an `anyhow::Error` on serialisation or
+/// I/O failure.
+pub fn save_v2_scene(scene: &rkf_core::scene::Scene, path: &str) -> anyhow::Result<()> {
+    use rkf_core::scene_node::SdfSource;
+    use rkf_runtime::scene_file::{ObjectEntry, SceneFile};
+
+    let mut sf = SceneFile::new(&scene.name);
+
+    for obj in &scene.root_objects {
+        let pos = obj.world_position.local;
+        let rot = obj.rotation;
+        let (analytical, analytical_params) = match &obj.root_node.sdf_source {
+            SdfSource::Analytical { primitive, material_id: _ } => {
+                use rkf_core::scene_node::SdfPrimitive;
+                let (name, params) = match primitive {
+                    SdfPrimitive::Sphere { radius } => ("sphere", vec![*radius]),
+                    SdfPrimitive::Box { half_extents } => {
+                        ("box", vec![half_extents.x, half_extents.y, half_extents.z])
+                    }
+                    SdfPrimitive::Capsule { radius, half_height } => {
+                        ("capsule", vec![*radius, *half_height])
+                    }
+                    SdfPrimitive::Torus { major_radius, minor_radius } => {
+                        ("torus", vec![*major_radius, *minor_radius])
+                    }
+                    SdfPrimitive::Cylinder { radius, half_height } => {
+                        ("cylinder", vec![*radius, *half_height])
+                    }
+                    SdfPrimitive::Plane { normal, distance } => {
+                        ("plane", vec![normal.x, normal.y, normal.z, *distance])
+                    }
+                };
+                (Some(name.to_string()), Some(params))
+            }
+            _ => (None, None),
+        };
+
+        sf.objects.push(ObjectEntry {
+            name: obj.name.clone(),
+            asset_path: None,
+            position: [pos.x as f64, pos.y as f64, pos.z as f64],
+            rotation: [rot.x, rot.y, rot.z, rot.w],
+            scale: obj.scale,
+            material_id: None,
+            analytical,
+            analytical_params,
+            importance_bias: 1.0,
+        });
+    }
+
+    rkf_runtime::scene_file::save_scene_file(path, &sf)?;
+    Ok(())
+}
+
+/// Load a v2 `.rkscene` file and return the parsed `rkf_runtime::scene_file::SceneFile`.
+///
+/// The caller is responsible for converting the `ObjectEntry` list back into
+/// `rkf_core::scene::SceneObject`s (e.g. by looking up `.rkf` assets or
+/// reconstructing analytical primitives from `analytical` / `analytical_params`).
+pub fn load_v2_scene(path: &str) -> anyhow::Result<rkf_runtime::scene_file::SceneFile> {
+    rkf_runtime::scene_file::load_scene_file(path)
+}
+
 /// An entry in the recent files list.
 #[derive(Debug, Clone)]
 pub struct RecentFileEntry {
@@ -469,5 +542,89 @@ mod tests {
     fn test_recent_files_default() {
         let recent = RecentFiles::default();
         assert!(recent.is_empty());
+    }
+
+    // ── v2 Scene I/O tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_save_v2_scene_creates_file() {
+        use rkf_core::{
+            scene::Scene,
+            scene_node::{SceneNode, SdfPrimitive},
+            WorldPosition,
+        };
+
+        let mut scene = Scene::new("v2test");
+        let node = SceneNode::analytical("sphere", SdfPrimitive::Sphere { radius: 1.0 }, 0);
+        scene.add_object("SphereObj", WorldPosition::default(), node);
+
+        let path = "/tmp/rkf_v2_save_test.rkscene";
+        super::save_v2_scene(&scene, path).expect("save_v2_scene should succeed");
+
+        assert!(
+            std::path::Path::new(path).exists(),
+            "file should have been written"
+        );
+    }
+
+    #[test]
+    fn test_load_v2_scene_roundtrip() {
+        use rkf_core::{
+            scene::Scene,
+            scene_node::{SceneNode, SdfPrimitive},
+            WorldPosition,
+        };
+
+        let mut scene = Scene::new("roundtrip");
+        let node = SceneNode::analytical("box", SdfPrimitive::Box { half_extents: glam::Vec3::ONE }, 3);
+        scene.add_object("BoxObj", WorldPosition::default(), node);
+
+        let path = "/tmp/rkf_v2_roundtrip_test.rkscene";
+        super::save_v2_scene(&scene, path).expect("save");
+
+        let loaded = super::load_v2_scene(path).expect("load");
+        assert_eq!(loaded.name, "roundtrip");
+        assert_eq!(loaded.objects.len(), 1);
+        assert_eq!(loaded.objects[0].name, "BoxObj");
+        assert_eq!(loaded.objects[0].analytical.as_deref(), Some("box"));
+        let params = loaded.objects[0].analytical_params.as_ref().unwrap();
+        assert_eq!(params.len(), 3);
+        // half_extents = (1, 1, 1)
+        assert!((params[0] - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_load_v2_scene_nonexistent_path() {
+        let result = super::load_v2_scene("/nonexistent/path/scene.rkscene");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_save_v2_scene_multiple_objects() {
+        use rkf_core::{
+            scene::Scene,
+            scene_node::{SceneNode, SdfPrimitive},
+            WorldPosition,
+        };
+
+        let mut scene = Scene::new("multi");
+        scene.add_object(
+            "Sphere",
+            WorldPosition::default(),
+            SceneNode::analytical("s", SdfPrimitive::Sphere { radius: 0.5 }, 1),
+        );
+        scene.add_object(
+            "Capsule",
+            WorldPosition::default(),
+            SceneNode::analytical("c", SdfPrimitive::Capsule { radius: 0.2, half_height: 0.8 }, 2),
+        );
+
+        let path = "/tmp/rkf_v2_multi_test.rkscene";
+        super::save_v2_scene(&scene, path).expect("save");
+
+        let loaded = super::load_v2_scene(path).expect("load");
+        assert_eq!(loaded.objects.len(), 2);
+        assert_eq!(loaded.objects[0].name, "Sphere");
+        assert_eq!(loaded.objects[1].name, "Capsule");
     }
 }

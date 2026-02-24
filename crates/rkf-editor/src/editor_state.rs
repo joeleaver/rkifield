@@ -199,6 +199,11 @@ pub struct EditorState {
     pub pending_debug_mode: Option<u32>,
     /// Set by File > Quit, consumed by the event loop.
     pub wants_exit: bool,
+
+    // ── v2 Scene model ───────────────────────────────────────
+    /// Optional v2 scene reference. When set, `sync_v2_scene` mirrors it
+    /// into the editor scene tree.
+    pub v2_scene: Option<rkf_core::scene::Scene>,
 }
 
 impl EditorState {
@@ -242,6 +247,7 @@ impl EditorState {
             bottom_bar_height: 25, // status bar 24px + 1px border-top
             pending_debug_mode: None,
             wants_exit: false,
+            v2_scene: None,
         }
     }
 
@@ -289,6 +295,17 @@ impl EditorState {
     pub fn reset_frame_deltas(&mut self) {
         self.editor_input.mouse_delta = glam::Vec2::ZERO;
         self.editor_input.scroll_delta = 0.0;
+    }
+
+    /// Mirror the v2 scene into the editor scene tree.
+    ///
+    /// If `v2_scene` is `Some`, calls [`crate::scene_tree::sync_from_v2_scene`]
+    /// to rebuild `scene_tree.roots` from the v2 object list. Does nothing when
+    /// `v2_scene` is `None`.
+    pub fn sync_v2_scene(&mut self) {
+        if let Some(ref scene) = self.v2_scene {
+            crate::scene_tree::sync_from_v2_scene(&mut self.scene_tree, scene);
+        }
     }
 
     /// Load a scene file and populate the editor state from it.
@@ -663,6 +680,44 @@ mod tests {
             .components
             .iter()
             .any(|c| matches!(c, ComponentData::Light { intensity, .. } if (*intensity - 3.0).abs() < 1e-6)));
+    }
+
+    #[test]
+    fn test_v2_scene_field_defaults_to_none() {
+        let state = EditorState::new();
+        assert!(state.v2_scene.is_none());
+    }
+
+    #[test]
+    fn test_sync_v2_scene_populates_tree() {
+        use rkf_core::scene::Scene;
+        use rkf_core::scene_node::SceneNode as CoreNode;
+        use rkf_core::WorldPosition;
+
+        let mut state = EditorState::new();
+        let mut v2 = Scene::new("test");
+        v2.add_object("SphereObj", WorldPosition::default(), CoreNode::new("root"));
+        v2.add_object("BoxObj", WorldPosition::default(), CoreNode::new("root2"));
+
+        state.v2_scene = Some(v2);
+        state.sync_v2_scene();
+
+        assert_eq!(state.scene_tree.roots.len(), 2);
+        assert_eq!(state.scene_tree.roots[0].name, "SphereObj");
+        assert_eq!(state.scene_tree.roots[1].name, "BoxObj");
+    }
+
+    #[test]
+    fn test_sync_v2_scene_no_op_when_none() {
+        let mut state = EditorState::new();
+        // Add a node manually
+        use crate::scene_tree::SceneNode;
+        state.scene_tree.add_node(SceneNode::new(1, "ManualNode"));
+
+        // sync with no v2_scene — tree should be unchanged
+        state.sync_v2_scene();
+        assert_eq!(state.scene_tree.roots.len(), 1);
+        assert_eq!(state.scene_tree.roots[0].name, "ManualNode");
     }
 
     #[test]
