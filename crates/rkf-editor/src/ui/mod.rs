@@ -931,6 +931,382 @@ pub fn RightPanel() -> NodeHandle {
                 &format!("Pos: ({:.1}, {:.1}, {:.1})", pos.x, pos.y, pos.z),
             ));
             container.append_child(&pos_row);
+
+            // ── Divider between camera props and environment ──
+            let div = __scope.create_element("div");
+            div.set_attribute(
+                "style",
+                "height:1px;background:var(--rinch-color-border);margin:8px 0;",
+            );
+            container.append_child(&div);
+
+            // ── Atmosphere section ──
+            let atmo_header = __scope.create_element("div");
+            atmo_header.set_attribute("style", LABEL_STYLE);
+            atmo_header.append_child(&__scope.create_text("Atmosphere"));
+            container.append_child(&atmo_header);
+
+            build_slider_row(
+                __scope, &container, "Sun Azimuth", "\u{00b0}", sun_azimuth_signal,
+                0.0, 360.0, 1.0, 0,
+                { let es = es.clone(); move |v| {
+                    if let Ok(mut es) = es.lock() {
+                        let az = (v as f32).to_radians();
+                        let el = es.environment.atmosphere.sun_direction.y.asin();
+                        let cos_el = el.cos();
+                        es.environment.atmosphere.sun_direction =
+                            glam::Vec3::new(az.sin() * cos_el, el.sin(), az.cos() * cos_el).normalize();
+                        es.environment.mark_dirty();
+                    }
+                }},
+            );
+            build_slider_row(
+                __scope, &container, "Sun Elevation", "\u{00b0}", sun_elevation_signal,
+                -90.0, 90.0, 1.0, 0,
+                { let es = es.clone(); move |v| {
+                    if let Ok(mut es) = es.lock() {
+                        let d = es.environment.atmosphere.sun_direction.normalize_or_zero();
+                        let az = d.x.atan2(d.z);
+                        let el = (v as f32).to_radians();
+                        let cos_el = el.cos();
+                        es.environment.atmosphere.sun_direction =
+                            glam::Vec3::new(az.sin() * cos_el, el.sin(), az.cos() * cos_el).normalize();
+                        es.environment.mark_dirty();
+                    }
+                }},
+            );
+            build_slider_row(
+                __scope, &container, "Sun Intensity", "", sun_intensity_signal,
+                0.0, 10.0, 0.1, 1,
+                { let es = es.clone(); move |v| {
+                    if let Ok(mut es) = es.lock() {
+                        es.environment.atmosphere.sun_intensity = v as f32;
+                        es.environment.mark_dirty();
+                    }
+                }},
+            );
+
+            // Sun color (read-only display).
+            {
+                let es_lock = es.lock().unwrap();
+                let sc = es_lock.environment.atmosphere.sun_color;
+                let color_row = __scope.create_element("div");
+                color_row.set_attribute("style", VALUE_STYLE);
+                color_row.append_child(&__scope.create_text(
+                    &format!("Sun Color: ({:.2}, {:.2}, {:.2})", sc.x, sc.y, sc.z),
+                ));
+                container.append_child(&color_row);
+            }
+
+            // ── Fog section ──
+            let fog_header = __scope.create_element("div");
+            fog_header.set_attribute("style", LABEL_STYLE);
+            fog_header.append_child(&__scope.create_text("Fog"));
+            container.append_child(&fog_header);
+
+            // Fog enable toggle (simple clickable label).
+            {
+                let fog_enabled = es.lock().map(|e| e.environment.fog.enabled).unwrap_or(false);
+                let toggle_row = __scope.create_element("div");
+                toggle_row.set_attribute(
+                    "style",
+                    "padding:3px 12px;font-size:11px;color:var(--rinch-color-dimmed);\
+                     cursor:pointer;user-select:none;",
+                );
+                let label = if fog_enabled { "Fog: ON" } else { "Fog: OFF" };
+                toggle_row.append_child(&__scope.create_text(label));
+                let es_toggle = es.clone();
+                let rev = revision;
+                let hid = __scope.register_handler(move || {
+                    if let Ok(mut es) = es_toggle.lock() {
+                        es.environment.fog.enabled = !es.environment.fog.enabled;
+                        es.environment.mark_dirty();
+                    }
+                    rev.bump();
+                });
+                toggle_row.set_attribute("data-rid", &hid.to_string());
+                container.append_child(&toggle_row);
+            }
+
+            build_slider_row(
+                __scope, &container, "Fog Density", "", fog_density_signal,
+                0.0, 0.5, 0.001, 3,
+                { let es = es.clone(); move |v| {
+                    if let Ok(mut es) = es.lock() {
+                        es.environment.fog.density = v as f32;
+                        es.environment.mark_dirty();
+                    }
+                }},
+            );
+            build_slider_row(
+                __scope, &container, "Height Falloff", "", fog_height_falloff_signal,
+                0.0, 1.0, 0.01, 2,
+                { let es = es.clone(); move |v| {
+                    if let Ok(mut es) = es.lock() {
+                        es.environment.fog.height_falloff = v as f32;
+                        es.environment.mark_dirty();
+                    }
+                }},
+            );
+
+            // ── Post-Processing section ──
+            let pp_header = __scope.create_element("div");
+            pp_header.set_attribute("style", LABEL_STYLE);
+            pp_header.append_child(&__scope.create_text("Post-Processing"));
+            container.append_child(&pp_header);
+
+            // Bloom enable toggle.
+            {
+                let bloom_on = es.lock().map(|e| e.environment.post_process.bloom_enabled).unwrap_or(true);
+                let toggle_row = __scope.create_element("div");
+                toggle_row.set_attribute(
+                    "style",
+                    "padding:3px 12px;font-size:11px;color:var(--rinch-color-dimmed);\
+                     cursor:pointer;user-select:none;",
+                );
+                let label = if bloom_on { "Bloom: ON" } else { "Bloom: OFF" };
+                toggle_row.append_child(&__scope.create_text(label));
+                let es_toggle = es.clone();
+                let rev = revision;
+                let hid = __scope.register_handler(move || {
+                    if let Ok(mut es) = es_toggle.lock() {
+                        es.environment.post_process.bloom_enabled = !es.environment.post_process.bloom_enabled;
+                        es.environment.mark_dirty();
+                    }
+                    rev.bump();
+                });
+                toggle_row.set_attribute("data-rid", &hid.to_string());
+                container.append_child(&toggle_row);
+            }
+
+            build_slider_row(
+                __scope, &container, "Bloom Intensity", "", bloom_intensity_signal,
+                0.0, 2.0, 0.01, 2,
+                { let es = es.clone(); move |v| {
+                    if let Ok(mut es) = es.lock() {
+                        es.environment.post_process.bloom_intensity = v as f32;
+                        es.environment.mark_dirty();
+                    }
+                }},
+            );
+            build_slider_row(
+                __scope, &container, "Bloom Threshold", "", bloom_threshold_signal,
+                0.0, 5.0, 0.1, 1,
+                { let es = es.clone(); move |v| {
+                    if let Ok(mut es) = es.lock() {
+                        es.environment.post_process.bloom_threshold = v as f32;
+                        es.environment.mark_dirty();
+                    }
+                }},
+            );
+            build_slider_row(
+                __scope, &container, "Exposure", "", exposure_signal,
+                0.1, 10.0, 0.1, 1,
+                { let es = es.clone(); move |v| {
+                    if let Ok(mut es) = es.lock() {
+                        es.environment.post_process.exposure = v as f32;
+                        es.environment.mark_dirty();
+                    }
+                }},
+            );
+
+            // Tone map mode toggle (ACES / AgX).
+            {
+                let tm_mode = es.lock().map(|e| e.environment.post_process.tone_map_mode).unwrap_or(0);
+                let toggle_row = __scope.create_element("div");
+                toggle_row.set_attribute(
+                    "style",
+                    "padding:3px 12px;font-size:11px;color:var(--rinch-color-dimmed);\
+                     cursor:pointer;user-select:none;",
+                );
+                let label = if tm_mode == 0 { "Tone Map: ACES" } else { "Tone Map: AgX" };
+                toggle_row.append_child(&__scope.create_text(label));
+                let es_toggle = es.clone();
+                let rev = revision;
+                let hid = __scope.register_handler(move || {
+                    if let Ok(mut es) = es_toggle.lock() {
+                        es.environment.post_process.tone_map_mode =
+                            if es.environment.post_process.tone_map_mode == 0 { 1 } else { 0 };
+                        es.environment.mark_dirty();
+                    }
+                    rev.bump();
+                });
+                toggle_row.set_attribute("data-rid", &hid.to_string());
+                container.append_child(&toggle_row);
+            }
+
+            build_slider_row(
+                __scope, &container, "Sharpen", "", sharpen_signal,
+                0.0, 2.0, 0.05, 2,
+                { let es = es.clone(); move |v| {
+                    if let Ok(mut es) = es.lock() {
+                        es.environment.post_process.sharpen_strength = v as f32;
+                        es.environment.mark_dirty();
+                    }
+                }},
+            );
+
+            // DoF enable toggle.
+            {
+                let dof_on = es.lock().map(|e| e.environment.post_process.dof_enabled).unwrap_or(false);
+                let toggle_row = __scope.create_element("div");
+                toggle_row.set_attribute(
+                    "style",
+                    "padding:3px 12px;font-size:11px;color:var(--rinch-color-dimmed);\
+                     cursor:pointer;user-select:none;",
+                );
+                let label = if dof_on { "DoF: ON" } else { "DoF: OFF" };
+                toggle_row.append_child(&__scope.create_text(label));
+                let es_toggle = es.clone();
+                let rev = revision;
+                let hid = __scope.register_handler(move || {
+                    if let Ok(mut es) = es_toggle.lock() {
+                        es.environment.post_process.dof_enabled = !es.environment.post_process.dof_enabled;
+                        es.environment.mark_dirty();
+                    }
+                    rev.bump();
+                });
+                toggle_row.set_attribute("data-rid", &hid.to_string());
+                container.append_child(&toggle_row);
+            }
+
+            build_slider_row(
+                __scope, &container, "Focus Distance", "", dof_focus_dist_signal,
+                0.1, 50.0, 0.1, 1,
+                { let es = es.clone(); move |v| {
+                    if let Ok(mut es) = es.lock() {
+                        es.environment.post_process.dof_focus_distance = v as f32;
+                        es.environment.mark_dirty();
+                    }
+                }},
+            );
+            build_slider_row(
+                __scope, &container, "Focus Range", "", dof_focus_range_signal,
+                0.1, 20.0, 0.1, 1,
+                { let es = es.clone(); move |v| {
+                    if let Ok(mut es) = es.lock() {
+                        es.environment.post_process.dof_focus_range = v as f32;
+                        es.environment.mark_dirty();
+                    }
+                }},
+            );
+            build_slider_row(
+                __scope, &container, "Max CoC", "px", dof_max_coc_signal,
+                1.0, 32.0, 1.0, 0,
+                { let es = es.clone(); move |v| {
+                    if let Ok(mut es) = es.lock() {
+                        es.environment.post_process.dof_max_coc = v as f32;
+                        es.environment.mark_dirty();
+                    }
+                }},
+            );
+            build_slider_row(
+                __scope, &container, "Motion Blur", "", motion_blur_signal,
+                0.0, 3.0, 0.1, 1,
+                { let es = es.clone(); move |v| {
+                    if let Ok(mut es) = es.lock() {
+                        es.environment.post_process.motion_blur_intensity = v as f32;
+                        es.environment.mark_dirty();
+                    }
+                }},
+            );
+            build_slider_row(
+                __scope, &container, "Vignette", "", vignette_signal,
+                0.0, 1.0, 0.01, 2,
+                { let es = es.clone(); move |v| {
+                    if let Ok(mut es) = es.lock() {
+                        es.environment.post_process.vignette_intensity = v as f32;
+                        es.environment.mark_dirty();
+                    }
+                }},
+            );
+            build_slider_row(
+                __scope, &container, "Grain", "", grain_signal,
+                0.0, 1.0, 0.01, 2,
+                { let es = es.clone(); move |v| {
+                    if let Ok(mut es) = es.lock() {
+                        es.environment.post_process.grain_intensity = v as f32;
+                        es.environment.mark_dirty();
+                    }
+                }},
+            );
+            build_slider_row(
+                __scope, &container, "Chromatic Ab.", "", chromatic_signal,
+                0.0, 1.0, 0.01, 2,
+                { let es = es.clone(); move |v| {
+                    if let Ok(mut es) = es.lock() {
+                        es.environment.post_process.chromatic_aberration = v as f32;
+                        es.environment.mark_dirty();
+                    }
+                }},
+            );
+
+            // ── Animation controls ──
+            {
+                let div = __scope.create_element("div");
+                div.set_attribute(
+                    "style",
+                    "height:1px;background:var(--rinch-color-border);margin:8px 0;",
+                );
+                container.append_child(&div);
+
+                let hdr = __scope.create_element("div");
+                hdr.set_attribute("style", SECTION_STYLE);
+                hdr.append_child(&__scope.create_text("Animation"));
+                container.append_child(&hdr);
+
+                // Play / Pause / Stop buttons.
+                let btn_row = __scope.create_element("div");
+                btn_row.set_attribute("style", "display:flex;gap:6px;padding:2px 12px;");
+
+                for (label, state) in [
+                    ("Play", crate::animation_preview::PlaybackState::Playing),
+                    ("Pause", crate::animation_preview::PlaybackState::Paused),
+                    ("Stop", crate::animation_preview::PlaybackState::Stopped),
+                ] {
+                    let btn = __scope.create_element("div");
+                    let is_active = es.lock()
+                        .map(|e| e.animation.playback_state == state)
+                        .unwrap_or(false);
+                    let bg = if is_active { "var(--rinch-primary-color)" } else { "var(--rinch-color-dark-7)" };
+                    btn.set_attribute("style", &format!(
+                        "padding:2px 8px;border-radius:3px;cursor:pointer;\
+                         background:{bg};font-size:11px;color:var(--rinch-color-text);",
+                    ));
+                    btn.append_child(&__scope.create_text(label));
+
+                    let hid = __scope.register_handler({
+                        let es = es.clone();
+                        let rev = revision;
+                        move || {
+                            if let Ok(mut es) = es.lock() {
+                                es.animation.playback_state = state;
+                                if matches!(state, crate::animation_preview::PlaybackState::Stopped) {
+                                    es.animation.current_time = 0.0;
+                                }
+                            }
+                            rev.bump();
+                        }
+                    });
+                    btn.set_attribute("data-rid", &hid.to_string());
+                    btn_row.append_child(&btn);
+                }
+                container.append_child(&btn_row);
+
+                let anim_speed_signal: Signal<f64> = Signal::new(
+                    es.lock().map(|e| e.animation.speed as f64).unwrap_or(1.0),
+                );
+
+                build_slider_row(
+                    __scope, &container, "Speed", "x", anim_speed_signal,
+                    0.0, 4.0, 0.1, 1,
+                    { let es = es.clone(); move |v| {
+                        if let Ok(mut es) = es.lock() {
+                            es.animation.speed = v as f32;
+                        }
+                    }},
+                );
+            }
         } else {
             // ── Generic info display for non-camera entities ──
             // Light editing: sync signals and show sliders.
@@ -1042,384 +1418,6 @@ pub fn RightPanel() -> NodeHandle {
                 msg.append_child(&__scope.create_text("No object selected"));
                 container.append_child(&msg);
             }
-        }
-
-        // ── Divider between properties and environment ──
-        let div = __scope.create_element("div");
-        div.set_attribute(
-            "style",
-            "height:1px;background:var(--rinch-color-border);margin:8px 0;",
-        );
-        container.append_child(&div);
-
-        // ── Environment (always visible) ──
-
-        // ── Atmosphere section ──
-        let atmo_header = __scope.create_element("div");
-        atmo_header.set_attribute("style", LABEL_STYLE);
-        atmo_header.append_child(&__scope.create_text("Atmosphere"));
-        container.append_child(&atmo_header);
-
-        build_slider_row(
-            __scope, &container, "Sun Azimuth", "\u{00b0}", sun_azimuth_signal,
-            0.0, 360.0, 1.0, 0,
-            { let es = es.clone(); move |v| {
-                if let Ok(mut es) = es.lock() {
-                    let az = (v as f32).to_radians();
-                    let el = es.environment.atmosphere.sun_direction.y.asin();
-                    let cos_el = el.cos();
-                    es.environment.atmosphere.sun_direction =
-                        glam::Vec3::new(az.sin() * cos_el, el.sin(), az.cos() * cos_el).normalize();
-                    es.environment.mark_dirty();
-                }
-            }},
-        );
-        build_slider_row(
-            __scope, &container, "Sun Elevation", "\u{00b0}", sun_elevation_signal,
-            -90.0, 90.0, 1.0, 0,
-            { let es = es.clone(); move |v| {
-                if let Ok(mut es) = es.lock() {
-                    let d = es.environment.atmosphere.sun_direction.normalize_or_zero();
-                    let az = d.x.atan2(d.z);
-                    let el = (v as f32).to_radians();
-                    let cos_el = el.cos();
-                    es.environment.atmosphere.sun_direction =
-                        glam::Vec3::new(az.sin() * cos_el, el.sin(), az.cos() * cos_el).normalize();
-                    es.environment.mark_dirty();
-                }
-            }},
-        );
-        build_slider_row(
-            __scope, &container, "Sun Intensity", "", sun_intensity_signal,
-            0.0, 10.0, 0.1, 1,
-            { let es = es.clone(); move |v| {
-                if let Ok(mut es) = es.lock() {
-                    es.environment.atmosphere.sun_intensity = v as f32;
-                    es.environment.mark_dirty();
-                }
-            }},
-        );
-
-        // Sun color (read-only display).
-        {
-            let es_lock = es.lock().unwrap();
-            let sc = es_lock.environment.atmosphere.sun_color;
-            let color_row = __scope.create_element("div");
-            color_row.set_attribute("style", VALUE_STYLE);
-            color_row.append_child(&__scope.create_text(
-                &format!("Sun Color: ({:.2}, {:.2}, {:.2})", sc.x, sc.y, sc.z),
-            ));
-            container.append_child(&color_row);
-        }
-
-        // ── Fog section ──
-        let fog_header = __scope.create_element("div");
-        fog_header.set_attribute("style", LABEL_STYLE);
-        fog_header.append_child(&__scope.create_text("Fog"));
-        container.append_child(&fog_header);
-
-        // Fog enable toggle (simple clickable label).
-        {
-            let fog_enabled = es.lock().map(|e| e.environment.fog.enabled).unwrap_or(false);
-            let toggle_row = __scope.create_element("div");
-            toggle_row.set_attribute(
-                "style",
-                "padding:3px 12px;font-size:11px;color:var(--rinch-color-dimmed);\
-                 cursor:pointer;user-select:none;",
-            );
-            let label = if fog_enabled { "Fog: ON" } else { "Fog: OFF" };
-            toggle_row.append_child(&__scope.create_text(label));
-            let es_toggle = es.clone();
-            let rev = revision;
-            let hid = __scope.register_handler(move || {
-                if let Ok(mut es) = es_toggle.lock() {
-                    es.environment.fog.enabled = !es.environment.fog.enabled;
-                    es.environment.mark_dirty();
-                }
-                rev.bump();
-            });
-            toggle_row.set_attribute("data-rid", &hid.to_string());
-            container.append_child(&toggle_row);
-        }
-
-        build_slider_row(
-            __scope, &container, "Fog Density", "", fog_density_signal,
-            0.0, 0.5, 0.001, 3,
-            { let es = es.clone(); move |v| {
-                if let Ok(mut es) = es.lock() {
-                    es.environment.fog.density = v as f32;
-                    es.environment.mark_dirty();
-                }
-            }},
-        );
-        build_slider_row(
-            __scope, &container, "Height Falloff", "", fog_height_falloff_signal,
-            0.0, 1.0, 0.01, 2,
-            { let es = es.clone(); move |v| {
-                if let Ok(mut es) = es.lock() {
-                    es.environment.fog.height_falloff = v as f32;
-                    es.environment.mark_dirty();
-                }
-            }},
-        );
-
-        // ── Post-Processing section ──
-        let pp_header = __scope.create_element("div");
-        pp_header.set_attribute("style", LABEL_STYLE);
-        pp_header.append_child(&__scope.create_text("Post-Processing"));
-        container.append_child(&pp_header);
-
-        // Bloom enable toggle.
-        {
-            let bloom_on = es.lock().map(|e| e.environment.post_process.bloom_enabled).unwrap_or(true);
-            let toggle_row = __scope.create_element("div");
-            toggle_row.set_attribute(
-                "style",
-                "padding:3px 12px;font-size:11px;color:var(--rinch-color-dimmed);\
-                 cursor:pointer;user-select:none;",
-            );
-            let label = if bloom_on { "Bloom: ON" } else { "Bloom: OFF" };
-            toggle_row.append_child(&__scope.create_text(label));
-            let es_toggle = es.clone();
-            let rev = revision;
-            let hid = __scope.register_handler(move || {
-                if let Ok(mut es) = es_toggle.lock() {
-                    es.environment.post_process.bloom_enabled = !es.environment.post_process.bloom_enabled;
-                    es.environment.mark_dirty();
-                }
-                rev.bump();
-            });
-            toggle_row.set_attribute("data-rid", &hid.to_string());
-            container.append_child(&toggle_row);
-        }
-
-        build_slider_row(
-            __scope, &container, "Bloom Intensity", "", bloom_intensity_signal,
-            0.0, 2.0, 0.01, 2,
-            { let es = es.clone(); move |v| {
-                if let Ok(mut es) = es.lock() {
-                    es.environment.post_process.bloom_intensity = v as f32;
-                    es.environment.mark_dirty();
-                }
-            }},
-        );
-        build_slider_row(
-            __scope, &container, "Bloom Threshold", "", bloom_threshold_signal,
-            0.0, 5.0, 0.1, 1,
-            { let es = es.clone(); move |v| {
-                if let Ok(mut es) = es.lock() {
-                    es.environment.post_process.bloom_threshold = v as f32;
-                    es.environment.mark_dirty();
-                }
-            }},
-        );
-        build_slider_row(
-            __scope, &container, "Exposure", "", exposure_signal,
-            0.1, 10.0, 0.1, 1,
-            { let es = es.clone(); move |v| {
-                if let Ok(mut es) = es.lock() {
-                    es.environment.post_process.exposure = v as f32;
-                    es.environment.mark_dirty();
-                }
-            }},
-        );
-
-        // Tone map mode toggle (ACES / AgX).
-        {
-            let tm_mode = es.lock().map(|e| e.environment.post_process.tone_map_mode).unwrap_or(0);
-            let toggle_row = __scope.create_element("div");
-            toggle_row.set_attribute(
-                "style",
-                "padding:3px 12px;font-size:11px;color:var(--rinch-color-dimmed);\
-                 cursor:pointer;user-select:none;",
-            );
-            let label = if tm_mode == 0 { "Tone Map: ACES" } else { "Tone Map: AgX" };
-            toggle_row.append_child(&__scope.create_text(label));
-            let es_toggle = es.clone();
-            let rev = revision;
-            let hid = __scope.register_handler(move || {
-                if let Ok(mut es) = es_toggle.lock() {
-                    es.environment.post_process.tone_map_mode =
-                        if es.environment.post_process.tone_map_mode == 0 { 1 } else { 0 };
-                    es.environment.mark_dirty();
-                }
-                rev.bump();
-            });
-            toggle_row.set_attribute("data-rid", &hid.to_string());
-            container.append_child(&toggle_row);
-        }
-
-        build_slider_row(
-            __scope, &container, "Sharpen", "", sharpen_signal,
-            0.0, 2.0, 0.05, 2,
-            { let es = es.clone(); move |v| {
-                if let Ok(mut es) = es.lock() {
-                    es.environment.post_process.sharpen_strength = v as f32;
-                    es.environment.mark_dirty();
-                }
-            }},
-        );
-
-        // DoF enable toggle.
-        {
-            let dof_on = es.lock().map(|e| e.environment.post_process.dof_enabled).unwrap_or(false);
-            let toggle_row = __scope.create_element("div");
-            toggle_row.set_attribute(
-                "style",
-                "padding:3px 12px;font-size:11px;color:var(--rinch-color-dimmed);\
-                 cursor:pointer;user-select:none;",
-            );
-            let label = if dof_on { "DoF: ON" } else { "DoF: OFF" };
-            toggle_row.append_child(&__scope.create_text(label));
-            let es_toggle = es.clone();
-            let rev = revision;
-            let hid = __scope.register_handler(move || {
-                if let Ok(mut es) = es_toggle.lock() {
-                    es.environment.post_process.dof_enabled = !es.environment.post_process.dof_enabled;
-                    es.environment.mark_dirty();
-                }
-                rev.bump();
-            });
-            toggle_row.set_attribute("data-rid", &hid.to_string());
-            container.append_child(&toggle_row);
-        }
-
-        build_slider_row(
-            __scope, &container, "Focus Distance", "", dof_focus_dist_signal,
-            0.1, 50.0, 0.1, 1,
-            { let es = es.clone(); move |v| {
-                if let Ok(mut es) = es.lock() {
-                    es.environment.post_process.dof_focus_distance = v as f32;
-                    es.environment.mark_dirty();
-                }
-            }},
-        );
-        build_slider_row(
-            __scope, &container, "Focus Range", "", dof_focus_range_signal,
-            0.1, 20.0, 0.1, 1,
-            { let es = es.clone(); move |v| {
-                if let Ok(mut es) = es.lock() {
-                    es.environment.post_process.dof_focus_range = v as f32;
-                    es.environment.mark_dirty();
-                }
-            }},
-        );
-        build_slider_row(
-            __scope, &container, "Max CoC", "px", dof_max_coc_signal,
-            1.0, 32.0, 1.0, 0,
-            { let es = es.clone(); move |v| {
-                if let Ok(mut es) = es.lock() {
-                    es.environment.post_process.dof_max_coc = v as f32;
-                    es.environment.mark_dirty();
-                }
-            }},
-        );
-        build_slider_row(
-            __scope, &container, "Motion Blur", "", motion_blur_signal,
-            0.0, 3.0, 0.1, 1,
-            { let es = es.clone(); move |v| {
-                if let Ok(mut es) = es.lock() {
-                    es.environment.post_process.motion_blur_intensity = v as f32;
-                    es.environment.mark_dirty();
-                }
-            }},
-        );
-        build_slider_row(
-            __scope, &container, "Vignette", "", vignette_signal,
-            0.0, 1.0, 0.01, 2,
-            { let es = es.clone(); move |v| {
-                if let Ok(mut es) = es.lock() {
-                    es.environment.post_process.vignette_intensity = v as f32;
-                    es.environment.mark_dirty();
-                }
-            }},
-        );
-        build_slider_row(
-            __scope, &container, "Grain", "", grain_signal,
-            0.0, 1.0, 0.01, 2,
-            { let es = es.clone(); move |v| {
-                if let Ok(mut es) = es.lock() {
-                    es.environment.post_process.grain_intensity = v as f32;
-                    es.environment.mark_dirty();
-                }
-            }},
-        );
-        build_slider_row(
-            __scope, &container, "Chromatic Ab.", "", chromatic_signal,
-            0.0, 1.0, 0.01, 2,
-            { let es = es.clone(); move |v| {
-                if let Ok(mut es) = es.lock() {
-                    es.environment.post_process.chromatic_aberration = v as f32;
-                    es.environment.mark_dirty();
-                }
-            }},
-        );
-
-        // ── Animation controls ──
-        {
-            let div = __scope.create_element("div");
-            div.set_attribute(
-                "style",
-                "height:1px;background:var(--rinch-color-border);margin:8px 0;",
-            );
-            container.append_child(&div);
-
-            let hdr = __scope.create_element("div");
-            hdr.set_attribute("style", SECTION_STYLE);
-            hdr.append_child(&__scope.create_text("Animation"));
-            container.append_child(&hdr);
-
-            // Play / Pause / Stop buttons.
-            let btn_row = __scope.create_element("div");
-            btn_row.set_attribute("style", "display:flex;gap:6px;padding:2px 12px;");
-
-            for (label, state) in [
-                ("Play", crate::animation_preview::PlaybackState::Playing),
-                ("Pause", crate::animation_preview::PlaybackState::Paused),
-                ("Stop", crate::animation_preview::PlaybackState::Stopped),
-            ] {
-                let btn = __scope.create_element("div");
-                let is_active = es.lock()
-                    .map(|e| e.animation.playback_state == state)
-                    .unwrap_or(false);
-                let bg = if is_active { "var(--rinch-primary-color)" } else { "var(--rinch-color-dark-7)" };
-                btn.set_attribute("style", &format!(
-                    "padding:2px 8px;border-radius:3px;cursor:pointer;\
-                     background:{bg};font-size:11px;color:var(--rinch-color-text);",
-                ));
-                btn.append_child(&__scope.create_text(label));
-
-                let hid = __scope.register_handler({
-                    let es = es.clone();
-                    let rev = revision;
-                    move || {
-                        if let Ok(mut es) = es.lock() {
-                            es.animation.playback_state = state;
-                            if matches!(state, crate::animation_preview::PlaybackState::Stopped) {
-                                es.animation.current_time = 0.0;
-                            }
-                        }
-                        rev.bump();
-                    }
-                });
-                btn.set_attribute("data-rid", &hid.to_string());
-                btn_row.append_child(&btn);
-            }
-            container.append_child(&btn_row);
-
-            let anim_speed_signal: Signal<f64> = Signal::new(
-                es.lock().map(|e| e.animation.speed as f64).unwrap_or(1.0),
-            );
-
-            build_slider_row(
-                __scope, &container, "Speed", "x", anim_speed_signal,
-                0.0, 4.0, 0.1, 1,
-                { let es = es.clone(); move |v| {
-                    if let Ok(mut es) = es.lock() {
-                        es.animation.speed = v as f32;
-                    }
-                }},
-            );
         }
 
         container
