@@ -46,6 +46,8 @@ pub struct SharedState {
     pub pending_debug_mode: Option<u32>,
     /// Pending camera teleport (set by MCP, consumed by render loop).
     pub pending_camera: Option<PendingCamera>,
+    /// Set true by MCP screenshot(); render loop performs readback and clears.
+    pub screenshot_requested: bool,
     /// Ring buffer of recent log entries for MCP `read_log` tool.
     pub log_entries: VecDeque<LogEntry>,
     /// Engine start time for log timestamps.
@@ -71,6 +73,7 @@ impl SharedState {
             frame_height: height,
             pending_debug_mode: None,
             pending_camera: None,
+            screenshot_requested: false,
             log_entries: VecDeque::with_capacity(MAX_LOG_ENTRIES),
             start_time: Instant::now(),
         }
@@ -107,29 +110,45 @@ impl EditorAutomationApi {
 
 impl AutomationApi for EditorAutomationApi {
     fn screenshot(&self, _width: u32, _height: u32) -> AutomationResult<Vec<u8>> {
-        let state = self
-            .state
-            .lock()
-            .map_err(|e| AutomationError::EngineError(format!("lock poisoned: {e}")))?;
-
-        if state.frame_pixels.is_empty() {
-            return Err(AutomationError::EngineError(
-                "no frame captured yet".into(),
-            ));
+        // Request the render loop to capture pixels.
+        {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|e| AutomationError::EngineError(format!("lock poisoned: {e}")))?;
+            state.screenshot_requested = true;
         }
 
-        let mut png_bytes = Vec::new();
-        let encoder = image::codecs::png::PngEncoder::new(&mut png_bytes);
-        encoder
-            .write_image(
-                &state.frame_pixels,
-                state.frame_width,
-                state.frame_height,
-                image::ExtendedColorType::Rgba8,
-            )
-            .map_err(|e| AutomationError::EngineError(format!("PNG encode failed: {e}")))?;
+        // Wait for the render loop to fulfill the request (up to ~500ms).
+        for _ in 0..50 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            let state = self
+                .state
+                .lock()
+                .map_err(|e| AutomationError::EngineError(format!("lock poisoned: {e}")))?;
+            if !state.screenshot_requested {
+                if state.frame_pixels.is_empty() {
+                    return Err(AutomationError::EngineError(
+                        "no frame captured yet".into(),
+                    ));
+                }
+                let mut png_bytes = Vec::new();
+                let encoder = image::codecs::png::PngEncoder::new(&mut png_bytes);
+                encoder
+                    .write_image(
+                        &state.frame_pixels,
+                        state.frame_width,
+                        state.frame_height,
+                        image::ExtendedColorType::Rgba8,
+                    )
+                    .map_err(|e| AutomationError::EngineError(format!("PNG encode failed: {e}")))?;
+                return Ok(png_bytes);
+            }
+        }
 
-        Ok(png_bytes)
+        Err(AutomationError::EngineError(
+            "screenshot timeout — render loop did not respond within 500ms".into(),
+        ))
     }
 
     fn camera_state(&self) -> AutomationResult<CameraSnapshot> {
