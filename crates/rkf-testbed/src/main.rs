@@ -22,10 +22,12 @@ use rkf_core::{
     transform_flatten::flatten_object,
 };
 use rkf_render::{
-    BlitPass, Camera, CoarseField, DebugMode, DebugViewPass, GBuffer, GpuObject,
-    GpuSceneV2, Light, LightBuffer, RadianceVolume, RayMarchPass, RenderContext,
-    SceneUniforms, ShadeUniforms, ShadingPass, TileObjectCullPass, ToneMapPass,
-    COARSE_VOXEL_SIZE,
+    AutoExposurePass, BlitPass, BloomCompositePass, BloomPass, Camera, CloudShadowPass,
+    CoarseField, ColorGradePass, CosmeticsPass, DebugMode, DebugViewPass, DofPass,
+    GBuffer, GpuObject, GpuSceneV2, Light, LightBuffer, MotionBlurPass, RadianceVolume,
+    RayMarchPass, RenderContext, SceneUniforms, ShadeUniforms, ShadingPass, SharpenPass,
+    TileObjectCullPass, ToneMapPass, VolCompositePass, VolMarchPass, VolShadowPass,
+    VolUpscalePass, COARSE_VOXEL_SIZE,
 };
 use rkf_render::radiance_inject::{RadianceInjectPass, InjectUniforms};
 use rkf_render::radiance_mip::RadianceMipPass;
@@ -207,7 +209,23 @@ struct EngineState {
     radiance_volume: RadianceVolume,
     radiance_inject: RadianceInjectPass,
     radiance_mip: RadianceMipPass,
+    // Volumetric pipeline
+    vol_shadow: VolShadowPass,
+    cloud_shadow: CloudShadowPass,
+    vol_march: VolMarchPass,
+    vol_upscale: VolUpscalePass,
+    vol_composite: VolCompositePass,
+    // Post-processing pipeline
+    bloom: BloomPass,
+    auto_exposure: AutoExposurePass,
+    dof: DofPass,
+    motion_blur: MotionBlurPass,
+    bloom_composite: BloomCompositePass,
     tone_map: ToneMapPass,
+    color_grade: ColorGradePass,
+    cosmetics: CosmeticsPass,
+    #[allow(dead_code)]
+    sharpen: SharpenPass,
     blit: BlitPass,
     camera: Camera,
     scene: Scene,
@@ -340,14 +358,104 @@ impl EngineState {
             INTERNAL_WIDTH, INTERNAL_HEIGHT,
         );
 
-        // Tone mapping: HDR → LDR.
-        let tone_map = ToneMapPass::new(
-            &ctx.device, &shading_pass.hdr_view,
+        // --- Volumetric pipeline ---
+
+        // Volumetric shadow map (coarse field SDF density → 3D transmittance).
+        let vol_shadow = VolShadowPass::new(
+            &ctx.device, &ctx.queue, &coarse_field.bind_group_layout,
+        );
+        log::info!("Vol shadow map: 256×128×256 R32Float");
+
+        // Cloud shadow map (analytical FBM clouds → 2D transmittance).
+        let cloud_shadow = CloudShadowPass::new(&ctx.device);
+        log::info!("Cloud shadow map: 1024×1024 R32Float");
+
+        // Volumetric march (half-res fog/dust/clouds with shadow lookups).
+        let half_w = INTERNAL_WIDTH / 2;
+        let half_h = INTERNAL_HEIGHT / 2;
+        let vol_march = VolMarchPass::new(
+            &ctx.device, &ctx.queue,
+            &gbuffer.position_view,
+            &vol_shadow.shadow_view,
+            &cloud_shadow.shadow_view,
+            half_w, half_h, INTERNAL_WIDTH, INTERNAL_HEIGHT,
+        );
+        log::info!("Vol march: {}×{} half-res", half_w, half_h);
+
+        // Bilateral upscale (half-res scatter → full-res).
+        let vol_upscale = VolUpscalePass::new(
+            &ctx.device, &vol_march.output_view, &gbuffer.position_view,
+            INTERNAL_WIDTH, INTERNAL_HEIGHT, half_w, half_h,
+        );
+
+        // Volumetric composite (shade HDR + upscaled scatter → composited HDR).
+        let vol_composite = VolCompositePass::new(
+            &ctx.device, &shading_pass.hdr_view, &vol_upscale.output_view,
+            INTERNAL_WIDTH, INTERNAL_HEIGHT,
+        );
+        log::info!("Volumetric pipeline wired: vol_shadow → cloud_shadow → vol_march → vol_upscale → vol_composite");
+
+        // --- Post-processing pipeline ---
+
+        // Bloom extraction + downsample (from composited HDR → 4-level mip pyramid).
+        let bloom = BloomPass::new(
+            &ctx.device, &vol_composite.output_view,
             INTERNAL_WIDTH, INTERNAL_HEIGHT,
         );
 
-        // Blit: LDR (Rgba8Unorm) → swapchain.
-        let blit = BlitPass::new(&ctx.device, &tone_map.ldr_view, surface_format);
+        // Auto-exposure (histogram from composited HDR → adapted EV).
+        let auto_exposure = AutoExposurePass::new(
+            &ctx.device, &vol_composite.output_view,
+            INTERNAL_WIDTH, INTERNAL_HEIGHT,
+        );
+
+        // Depth of field (composited HDR + depth → blurred HDR).
+        let dof = DofPass::new(
+            &ctx.device, &vol_composite.output_view, &gbuffer.position_view,
+            INTERNAL_WIDTH, INTERNAL_HEIGHT,
+        );
+
+        // Motion blur (DoF output + motion vectors → motion-blurred HDR).
+        let motion_blur = MotionBlurPass::new(
+            &ctx.device, &dof.output_view, &gbuffer.motion_view,
+            INTERNAL_WIDTH, INTERNAL_HEIGHT,
+        );
+
+        // Bloom composite (motion-blurred HDR + bloom mips → HDR with bloom glow).
+        let bloom_composite = BloomCompositePass::new(
+            &ctx.device, &motion_blur.output_view, bloom.mip_views(),
+            INTERNAL_WIDTH, INTERNAL_HEIGHT,
+        );
+
+        // Tone mapping: HDR → LDR (with auto-exposure integration).
+        let tone_map = ToneMapPass::new_with_exposure(
+            &ctx.device, &bloom_composite.output_view,
+            INTERNAL_WIDTH, INTERNAL_HEIGHT,
+            Some(auto_exposure.get_exposure_buffer()),
+        );
+
+        // Color grading (LUT-based color correction).
+        let color_grade = ColorGradePass::new(
+            &ctx.device, &ctx.queue, &tone_map.ldr_view,
+            INTERNAL_WIDTH, INTERNAL_HEIGHT,
+        );
+
+        // Cosmetics (vignette, film grain, chromatic aberration).
+        let cosmetics = CosmeticsPass::new(
+            &ctx.device, &color_grade.output_view,
+            INTERNAL_WIDTH, INTERNAL_HEIGHT,
+        );
+
+        // Edge-aware sharpen (applied in HDR space before tone map, optional).
+        // For now, sharpen reads from vol_composite and is not in the main chain.
+        let sharpen = SharpenPass::new(
+            &ctx.device, &vol_composite.output_view, &gbuffer,
+            INTERNAL_WIDTH, INTERNAL_HEIGHT,
+        );
+        log::info!("Post-processing pipeline wired: bloom → dof → motion_blur → bloom_composite → tone_map → color_grade → cosmetics");
+
+        // Blit: final LDR → swapchain.
+        let blit = BlitPass::new(&ctx.device, &cosmetics.output_view, surface_format);
 
         let mut camera = Camera::new(Vec3::new(0.0, 1.0, -0.5));
         camera.pitch = -0.15;
@@ -379,7 +487,20 @@ impl EngineState {
             radiance_volume,
             radiance_inject,
             radiance_mip,
+            vol_shadow,
+            cloud_shadow,
+            vol_march,
+            vol_upscale,
+            vol_composite,
+            bloom,
+            auto_exposure,
+            dof,
+            motion_blur,
+            bloom_composite,
             tone_map,
+            color_grade,
+            cosmetics,
+            sharpen,
             blit,
             camera,
             scene,
@@ -511,6 +632,7 @@ impl EngineState {
             _pad: [0; 2],
         });
 
+        // --- Core rendering ---
         // 1. Tile object culling → per-tile object lists
         self.tile_cull.dispatch(&mut encoder, &self.gpu_scene);
         // 2. Ray march → G-buffer (reads tile lists + coarse field)
@@ -529,9 +651,80 @@ impl EngineState {
             &mut encoder, &self.gbuffer, &self.gpu_scene,
             &self.coarse_field, &self.radiance_volume,
         );
-        // 6. Tone map → LDR output
+
+        // --- Volumetric pipeline ---
+        // 6. Volumetric shadow map (coarse field → 3D transmittance)
+        let sun_dir = [0.5f32, 1.0, 0.3]; // match scene sun direction
+        self.vol_shadow.dispatch(
+            &mut encoder, &self.ctx.queue,
+            [self.camera.position.x, self.camera.position.y, self.camera.position.z],
+            sun_dir,
+            &self.coarse_field.bind_group,
+        );
+        // 7. Cloud shadow map (analytical FBM → 2D transmittance)
+        self.cloud_shadow.dispatch(
+            &mut encoder, &self.ctx.queue,
+            [self.camera.position.x, self.camera.position.y, self.camera.position.z],
+            sun_dir,
+        );
+        // 8. Volumetric march (half-res fog/dust/clouds)
+        let vol_params = rkf_render::VolMarchParams {
+            cam_pos: [cam.x, cam.y, cam.z, 0.0],
+            cam_forward: [self.camera.forward().x, self.camera.forward().y, self.camera.forward().z, 0.0],
+            cam_right: [self.camera.right().x, self.camera.right().y, self.camera.right().z, 0.0],
+            cam_up: [self.camera.up().x, self.camera.up().y, self.camera.up().z, 0.0],
+            sun_dir: [sun_dir[0], sun_dir[1], sun_dir[2], 0.0],
+            sun_color: [1.0, 0.95, 0.85, 0.0],
+            width: INTERNAL_WIDTH / 2,
+            height: INTERNAL_HEIGHT / 2,
+            full_width: INTERNAL_WIDTH,
+            full_height: INTERNAL_HEIGHT,
+            max_steps: 32,
+            step_size: 2.0,
+            near: 0.5,
+            far: 200.0,
+            // Light height fog for atmosphere
+            fog_color: [0.7, 0.8, 0.9, 1.0],     // height fog ON (w=1)
+            fog_height: [0.01, -0.5, 0.15, 0.0],   // gentle base density, below ground
+            fog_distance: [0.0, 0.01, 0.001, 0.3], // very light ambient dust
+            frame_index: self.frame_index,
+            _pad0: 0, _pad1: 0, _pad2: 0,
+            vol_shadow_min: [
+                self.camera.position.x - 40.0,
+                self.camera.position.y - 10.0,
+                self.camera.position.z - 40.0, 0.0,
+            ],
+            vol_shadow_max: [
+                self.camera.position.x + 40.0,
+                self.camera.position.y + 10.0,
+                self.camera.position.z + 40.0, 0.0,
+            ],
+        };
+        self.vol_march.dispatch(&mut encoder, &self.ctx.queue, &vol_params);
+        // 9. Bilateral upscale (half-res scatter → full-res)
+        self.vol_upscale.dispatch(&mut encoder);
+        // 10. Volumetric composite (shade HDR + scatter → composited HDR)
+        self.vol_composite.dispatch(&mut encoder);
+
+        // --- Post-processing pipeline ---
+        // 11. Bloom extraction + downsample
+        self.bloom.dispatch(&mut encoder);
+        // 12. Auto-exposure (histogram + adapted EV)
+        let dt = 1.0 / 60.0; // approximate dt for exposure adaptation
+        self.auto_exposure.dispatch(&mut encoder, &self.ctx.queue, dt);
+        // 13. Depth of field
+        self.dof.dispatch(&mut encoder);
+        // 14. Motion blur
+        self.motion_blur.dispatch(&mut encoder);
+        // 15. Bloom composite (add bloom glow to motion-blurred HDR)
+        self.bloom_composite.dispatch(&mut encoder);
+        // 16. Tone map (HDR → LDR with auto-exposure)
         self.tone_map.dispatch(&mut encoder);
-        // 7. Blit → swapchain
+        // 17. Color grading
+        self.color_grade.dispatch(&mut encoder);
+        // 18. Cosmetics (vignette, grain, chromatic aberration)
+        self.cosmetics.dispatch(&mut encoder, &self.ctx.queue, self.frame_index);
+        // 19. Blit → swapchain
         self.blit.draw(&mut encoder, &target_view);
 
         // 6. If MCP screenshot requested, copy LDR output to readback buffer.
@@ -546,7 +739,7 @@ impl EngineState {
         if do_readback {
             encoder.copy_texture_to_buffer(
                 wgpu::TexelCopyTextureInfo {
-                    texture: &self.tone_map.ldr_texture,
+                    texture: &self.cosmetics.output_texture,
                     mip_level: 0,
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
