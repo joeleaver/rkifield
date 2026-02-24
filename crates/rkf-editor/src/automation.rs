@@ -309,13 +309,17 @@ impl AutomationApi for EditorAutomationApi {
             .find_node(entity_id)
             .ok_or(AutomationError::EntityNotFound(entity_id))?;
 
+        let is_selected = matches!(
+            es.selected_entity,
+            Some(crate::editor_state::SelectedEntity::Object(eid)) if eid == entity_id
+        );
+
         let mut components = HashMap::new();
         components.insert(
             "scene_node".to_string(),
             serde_json::json!({
                 "visible": node.visible,
-                "expanded": node.expanded,
-                "selected": node.selected,
+                "selected": is_selected,
                 "children": node.children.len(),
             }),
         );

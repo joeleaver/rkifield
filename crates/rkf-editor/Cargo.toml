@@ -25,6 +25,7 @@ env_logger = { workspace = true }
 anyhow = { workspace = true }
 rinch = { workspace = true }
 rinch-platform = { workspace = true }
+rinch-tabler-icons = { workspace = true }
 pollster = { workspace = true }
 bytemuck = { workspace = true }
 image = { workspace = true }

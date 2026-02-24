@@ -49,6 +49,7 @@ base64 = "0.22"
 pollster = "0.4"
 rinch = { git = "https://github.com/joeleaver/rinch.git", features = ["desktop", "components", "theme", "debug"] }
 rinch-platform = { git = "https://github.com/joeleaver/rinch.git" }
+rinch-tabler-icons = { git = "https://github.com/joeleaver/rinch.git" }
 
 # Internal crate cross-references
 rkf-core = { path = "crates/rkf-core" }

@@ -19,8 +19,31 @@ struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> }
     return o;
 }
 
+// sRGB → linear for a single channel (exact piecewise).
+fn srgb_to_linear(c: f32) -> f32 {
+    if c <= 0.04045 {
+        return c / 12.92;
+    }
+    return pow((c + 0.055) / 1.055, 2.4);
+}
+
 @fragment fn fs(in: VsOut) -> @location(0) vec4<f32> {
-    return textureSample(t, s, in.uv);
+    let tex = textureSample(t, s, in.uv);
+    // The overlay is rendered to Rgba8Unorm by Vello, which stores sRGB-encoded
+    // values. When the swapchain is sRGB, the hardware applies linear→sRGB on
+    // output. To avoid double-encoding, decode sRGB→linear here.
+    // Premultiplied alpha: un-premultiply, convert, re-premultiply.
+    if tex.a < 0.001 {
+        return vec4(0.0, 0.0, 0.0, 0.0);
+    }
+    let inv_a = 1.0 / tex.a;
+    let straight = tex.rgb * inv_a;
+    let linear = vec3(
+        srgb_to_linear(straight.r),
+        srgb_to_linear(straight.g),
+        srgb_to_linear(straight.b),
+    );
+    return vec4(linear * tex.a, tex.a);
 }
 ";
 

@@ -947,12 +947,13 @@ impl EditorEngine {
         self.color_grade.dispatch(&mut encoder);
         self.cosmetics.dispatch(&mut encoder, &self.ctx.queue, self.frame_index);
 
-        // --- Blit engine output to swapchain ---
-        if let Some(vp) = viewport {
-            self.blit.draw_viewport(&mut encoder, &target_view, vp);
-        } else {
-            self.blit.draw(&mut encoder, &target_view);
-        }
+        // --- Blit engine output to full swapchain ---
+        // Always blit to the full window. The rinch overlay will paint opaque
+        // panels over non-viewport areas (like the game-embed and video player
+        // examples). This avoids sub-pixel alignment gaps between the viewport
+        // blit region and the overlay's transparent hole.
+        let _ = viewport; // viewport used only for resize_render, not blit positioning
+        self.blit.draw(&mut encoder, &target_view);
 
         // Submit engine work.
         self.ctx.queue.submit(std::iter::once(encoder.finish()));

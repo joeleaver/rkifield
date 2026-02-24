@@ -42,7 +42,7 @@ use winit::keyboard::{KeyCode as WinitKeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use automation::SharedState;
-use editor_state::{EditorState, UiRevision};
+use editor_state::{EditorMode, EditorState, UiRevision};
 use engine::EditorEngine;
 use engine_viewport::{DISPLAY_HEIGHT, DISPLAY_WIDTH};
 use overlay_blit::OverlayBlit;
@@ -314,7 +314,9 @@ impl ApplicationHandler for App {
 
         let attrs = winit::window::WindowAttributes::default()
             .with_title("RKIField Editor")
-            .with_inner_size(winit::dpi::PhysicalSize::new(DISPLAY_WIDTH, DISPLAY_HEIGHT));
+            .with_inner_size(winit::dpi::PhysicalSize::new(DISPLAY_WIDTH, DISPLAY_HEIGHT))
+            .with_decorations(false)
+            .with_transparent(true);
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
         self.window = Some(window.clone());
 
@@ -485,9 +487,11 @@ impl ApplicationHandler for App {
                                     if let Some(entity_id) =
                                         es.pick_object(px, py, vp_w, vp_h)
                                     {
-                                        es.scene_tree.select_node(entity_id);
+                                        es.selected_entity = Some(
+                                            editor_state::SelectedEntity::Object(entity_id),
+                                        );
                                     } else {
-                                        es.scene_tree.clear_selection();
+                                        es.selected_entity = None;
                                     }
                                     should_bump_revision = true;
                                 }
@@ -561,6 +565,44 @@ impl ApplicationHandler for App {
                         }
                     }
 
+                    // Tool toggle via S (Sculpt) / P (Paint).
+                    // Pressing the key for the active tool deactivates it.
+                    if event.state == ElementState::Pressed
+                        && !self.modifiers.control_key()
+                    {
+                        let toggle = match key {
+                            WinitKeyCode::KeyB => Some(EditorMode::Sculpt),
+                            WinitKeyCode::KeyN => Some(EditorMode::Paint),
+                            _ => None,
+                        };
+                        if let Some(mode) = toggle {
+                            if let Ok(mut es) = self.editor_state.lock() {
+                                if es.mode == mode {
+                                    es.mode = EditorMode::Default;
+                                } else {
+                                    es.mode = mode;
+                                }
+                            }
+                            if let Some(rev) = &self.ui_revision {
+                                rev.bump();
+                            }
+                            return;
+                        }
+
+                        // F3: cycle debug visualization mode (0-6).
+                        if key == WinitKeyCode::F3 {
+                            if let Ok(mut es) = self.editor_state.lock() {
+                                let next = (es.debug_mode + 1) % 7;
+                                es.debug_mode = next;
+                                es.pending_debug_mode = Some(next);
+                            }
+                            if let Some(rev) = &self.ui_revision {
+                                rev.bump();
+                            }
+                            return;
+                        }
+                    }
+
                     let wants_kb = self.ui_wants_keyboard();
 
                     // Only route to engine when UI doesn't want keyboard.
@@ -622,20 +664,83 @@ impl ApplicationHandler for App {
                     ctx.update(&events);
                 }
 
+                // 1b. Consume pending menu commands (set by rinch menu callbacks).
+                {
+                    let (do_open, do_save, do_save_as, do_exit, do_drag, do_min, do_max) = {
+                        if let Ok(mut es) = self.editor_state.lock() {
+                            let o = std::mem::replace(&mut es.pending_open, false);
+                            let s = std::mem::replace(&mut es.pending_save, false);
+                            let sa = std::mem::replace(&mut es.pending_save_as, false);
+                            let e = std::mem::replace(&mut es.wants_exit, false);
+                            let dr = std::mem::replace(&mut es.pending_drag, false);
+                            let mn = std::mem::replace(&mut es.pending_minimize, false);
+                            let mx = std::mem::replace(&mut es.pending_maximize, false);
+                            (o, s, sa, e, dr, mn, mx)
+                        } else {
+                            (false, false, false, false, false, false, false)
+                        }
+                    };
+                    if do_exit {
+                        if let Some(ref path) = self.socket_path {
+                            cleanup_ipc(path);
+                        }
+                        event_loop.exit();
+                        return;
+                    }
+                    if do_open {
+                        self.open_scene();
+                    }
+                    if do_save_as {
+                        // Force Save As: temporarily clear current_scene_path so
+                        // save_scene() always shows the file dialog.
+                        let prev = self.editor_state.lock().ok()
+                            .and_then(|mut es| es.current_scene_path.take());
+                        self.save_scene();
+                        // If save was cancelled, restore the old path.
+                        if let (Some(prev_path), Ok(mut es)) = (prev, self.editor_state.lock()) {
+                            if es.current_scene_path.is_none() {
+                                es.current_scene_path = Some(prev_path);
+                            }
+                        }
+                    } else if do_save {
+                        self.save_scene();
+                    }
+                    // Window management commands.
+                    if do_drag {
+                        if let Some(window) = &self.window {
+                            let _ = window.drag_window();
+                        }
+                    }
+                    if do_min {
+                        if let Some(window) = &self.window {
+                            window.set_minimized(true);
+                        }
+                    }
+                    if do_max {
+                        if let Some(window) = &self.window {
+                            window.set_maximized(!window.is_maximized());
+                        }
+                    }
+                }
+
                 // 2. Query viewport rect from rinch layout (logical pixels → physical).
-                let viewport = self.rinch_ctx.as_ref().and_then(|ctx| {
+                // Currently only used for input routing (ray-pick); rendering uses
+                // full-window blit with rinch overlay masking non-viewport areas.
+                let _viewport = self.rinch_ctx.as_ref().and_then(|ctx| {
                     ctx.viewport_rect("main").map(|rect| {
                         let sf = self.scale_factor() as f32;
                         (rect.x * sf, rect.y * sf, rect.width * sf, rect.height * sf)
                     })
                 });
 
-                // 3. Resize render resolution to match viewport (if changed).
-                if let Some(vp) = viewport {
-                    let vp_w = (vp.2 as u32).max(64);
-                    let vp_h = (vp.3 as u32).max(64);
+                // 3. Resize render resolution to match full window.
+                // The engine blits to the entire swapchain (not a sub-region)
+                // and the rinch overlay paints opaque panels over non-viewport
+                // areas. This avoids sub-pixel alignment gaps.
+                if let Some(window) = self.window.as_ref() {
+                    let ws = window.inner_size();
                     if let Some(engine) = self.engine.as_mut() {
-                        engine.resize_render(vp_w, vp_h);
+                        engine.resize_render(ws.width.max(64), ws.height.max(64));
                     }
                 }
 
@@ -668,6 +773,7 @@ impl ApplicationHandler for App {
                         engine.sync_camera(&es.editor_camera);
 
                         if let Some(mode) = es.pending_debug_mode.take() {
+                            es.debug_mode = mode;
                             engine.set_debug_mode(mode);
                         }
                     }
@@ -685,10 +791,14 @@ impl ApplicationHandler for App {
                     if let (Some(engine), Ok(es)) =
                         (self.engine.as_ref(), self.editor_state.lock())
                     {
-                        let selected = es.scene_tree.selected_entities();
+                        // Only draw wireframe for selected SDF objects.
+                        let selected_ids: Vec<u64> = match es.selected_entity {
+                            Some(editor_state::SelectedEntity::Object(eid)) => vec![eid],
+                            _ => vec![],
+                        };
                         let color = [0.3, 0.7, 1.0, 1.0]; // Light blue
                         let origin = rkf_core::WorldPosition::default();
-                        for &eid in &selected {
+                        for &eid in &selected_ids {
                             for obj in &engine.scene.root_objects {
                                 let obj_id = obj.id as u64;
                                 let world_pos = obj.world_position.relative_to(&origin);
@@ -737,44 +847,44 @@ impl ApplicationHandler for App {
 
                 if let Some(engine) = self.engine.as_mut() {
                     let vp_matrix = engine.view_projection();
+                    // Full-window viewport for wireframe (matches engine render).
+                    let win_vp = self.window.as_ref().map(|w| {
+                        let s = w.inner_size();
+                        (0.0f32, 0.0f32, s.width as f32, s.height as f32)
+                    }).unwrap_or((0.0, 0.0, DISPLAY_WIDTH as f32, DISPLAY_HEIGHT as f32));
 
-                    if let Some(vp) = viewport {
-                        engine.render_frame_viewport(vp, |device, queue, target_view| {
-                            // Draw wireframe selection highlights.
-                            if let Some(ref wf) = wireframe {
-                                if !wireframe_verts.is_empty() {
-                                    let mut enc = device.create_command_encoder(
-                                        &wgpu::CommandEncoderDescriptor {
-                                            label: Some("wireframe"),
-                                        },
-                                    );
-                                    wf.draw(
-                                        device, queue, &mut enc, target_view,
-                                        vp_matrix, vp, &wireframe_verts,
-                                    );
-                                    queue.submit(std::iter::once(enc.finish()));
-                                }
-                            }
-
-                            // Render rinch UI to overlay texture, then composite.
-                            if let (Some(ctx), Some(renderer), Some(blit)) =
-                                (&mut rinch_ctx, &mut overlay_renderer, &overlay_blit)
-                            {
-                                let scene = ctx.scene();
-                                let overlay_view = renderer.render(device, queue, scene);
+                    engine.render_frame_viewport(win_vp, |device, queue, target_view| {
+                        // Draw wireframe selection highlights at full-window viewport.
+                        if let Some(ref wf) = wireframe {
+                            if !wireframe_verts.is_empty() {
                                 let mut enc = device.create_command_encoder(
                                     &wgpu::CommandEncoderDescriptor {
-                                        label: Some("overlay"),
+                                        label: Some("wireframe"),
                                     },
                                 );
-                                blit.draw(device, &mut enc, target_view, &overlay_view);
+                                wf.draw(
+                                    device, queue, &mut enc, target_view,
+                                    vp_matrix, win_vp, &wireframe_verts,
+                                );
                                 queue.submit(std::iter::once(enc.finish()));
                             }
-                        });
-                    } else {
-                        // No viewport rect yet — render fullscreen (fallback).
-                        engine.render_frame();
-                    }
+                        }
+
+                        // Render rinch UI to overlay texture, then composite.
+                        if let (Some(ctx), Some(renderer), Some(blit)) =
+                            (&mut rinch_ctx, &mut overlay_renderer, &overlay_blit)
+                        {
+                            let scene = ctx.scene();
+                            let overlay_view = renderer.render(device, queue, scene);
+                            let mut enc = device.create_command_encoder(
+                                &wgpu::CommandEncoderDescriptor {
+                                    label: Some("overlay"),
+                                },
+                            );
+                            blit.draw(device, &mut enc, target_view, &overlay_view);
+                            queue.submit(std::iter::once(enc.finish()));
+                        }
+                    });
                 }
 
                 // Restore overlay state.

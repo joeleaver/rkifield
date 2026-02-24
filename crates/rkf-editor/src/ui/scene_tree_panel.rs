@@ -1,71 +1,124 @@
 //! Scene tree panel — shows the hierarchical scene graph in the left panel.
 //!
-//! Reads the scene tree from `EditorState` (shared via rinch context) and
-//! renders it as a flat list of indented rows. Supports expand/collapse
-//! for nodes with children, and click-to-select.
+//! Uses rinch's `Tree` component with `TreeNodeData` to render the project
+//! hierarchy: Project → Camera + Scene → objects + lights.
 
 use std::sync::{Arc, Mutex};
 
 use rinch::prelude::*;
+use rinch_tabler_icons::TablerIcon;
 
-use crate::editor_state::{EditorState, UiRevision};
-use crate::scene_tree::SceneNode;
+use crate::editor_state::{EditorState, SelectedEntity, UiRevision};
+use crate::light_editor::EditorLightType;
 
 // ── Style constants ──────────────────────────────────────────────────────────
 
-const LABEL_STYLE: &str = "font-size:11px;color:rgba(255,255,255,0.45);\
+const LABEL_STYLE: &str = "font-size:11px;color:var(--rinch-color-dimmed);\
     text-transform:uppercase;letter-spacing:1px;padding:8px 12px;";
 
-// ── Flattened tree item ──────────────────────────────────────────────────────
+// ── Tree data builder ────────────────────────────────────────────────────────
 
-/// A single visible row in the flattened scene tree.
-#[derive(Clone, Debug)]
-struct TreeItem {
-    entity_id: u64,
-    name: String,
-    depth: u32,
-    selected: bool,
-    expanded: bool,
-    has_children: bool,
+/// Build `TreeNodeData` for a SceneNode and its children (recursive).
+fn build_object_nodes(node: &crate::scene_tree::SceneNode) -> TreeNodeData {
+    let value = format!("obj:{}", node.entity_id);
+    let mut tree_node = TreeNodeData::new(value, &node.name)
+        .with_icon(TablerIcon::Cube);
+    for child in &node.children {
+        tree_node = tree_node.with_child(build_object_nodes(child));
+    }
+    tree_node
 }
 
-/// Flatten the recursive scene tree into a list of visible items.
-///
-/// Respects expand/collapse state — children of collapsed nodes are omitted.
-fn flatten_tree(roots: &[SceneNode]) -> Vec<TreeItem> {
-    let mut items = Vec::new();
-    fn visit(node: &SceneNode, depth: u32, out: &mut Vec<TreeItem>) {
-        out.push(TreeItem {
-            entity_id: node.entity_id,
-            name: node.name.clone(),
-            depth,
-            selected: node.selected,
-            expanded: node.expanded,
-            has_children: !node.children.is_empty(),
-        });
-        if node.expanded {
-            for child in &node.children {
-                visit(child, depth + 1, out);
-            }
+/// Build the full tree data from editor state.
+fn build_tree_data(es: &EditorState) -> Vec<TreeNodeData> {
+    // Camera node.
+    let camera_node = TreeNodeData::new("camera", "Camera")
+        .with_icon(TablerIcon::Camera);
+
+    // Scene children: SDF objects + lights.
+    let mut scene_children: Vec<TreeNodeData> = Vec::new();
+
+    for root in &es.scene_tree.roots {
+        scene_children.push(build_object_nodes(root));
+    }
+
+    for light in es.light_editor.all_lights() {
+        let value = format!("light:{}", light.id);
+        let label = match light.light_type {
+            EditorLightType::Point => format!("Point Light {}", light.id),
+            EditorLightType::Spot => format!("Spot Light {}", light.id),
+            EditorLightType::Directional => format!("Directional Light {}", light.id),
+        };
+        let node = TreeNodeData::new(value, label)
+            .with_icon(TablerIcon::Bulb);
+        scene_children.push(node);
+    }
+
+    let scene_name = es.v2_scene.as_ref()
+        .map(|s| s.name.clone())
+        .unwrap_or_else(|| "Scene".to_string());
+
+    let scene_node = TreeNodeData::new("scene", scene_name)
+        .with_icon(TablerIcon::World)
+        .with_children(scene_children);
+
+    let project_name = es.current_scene_path.as_ref()
+        .and_then(|p| std::path::Path::new(p).file_stem())
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Untitled Project".to_string());
+
+    let project_node = TreeNodeData::new("project", project_name)
+        .with_icon(TablerIcon::FolderOpen)
+        .with_children(vec![camera_node, scene_node]);
+
+    vec![project_node]
+}
+
+/// Convert a `SelectedEntity` to the tree node value string.
+fn selected_to_value(sel: &SelectedEntity) -> String {
+    match sel {
+        SelectedEntity::Object(id) => format!("obj:{id}"),
+        SelectedEntity::Light(id) => format!("light:{id}"),
+        SelectedEntity::Camera => "camera".to_string(),
+        SelectedEntity::Scene => "scene".to_string(),
+        SelectedEntity::Project => "project".to_string(),
+    }
+}
+
+/// Parse a tree node value string into a `SelectedEntity`.
+fn parse_value(value: &str) -> Option<SelectedEntity> {
+    if let Some(id_str) = value.strip_prefix("obj:") {
+        id_str.parse::<u64>().ok().map(SelectedEntity::Object)
+    } else if let Some(id_str) = value.strip_prefix("light:") {
+        id_str.parse::<u64>().ok().map(SelectedEntity::Light)
+    } else {
+        match value {
+            "camera" => Some(SelectedEntity::Camera),
+            "scene" => Some(SelectedEntity::Scene),
+            "project" => Some(SelectedEntity::Project),
+            _ => None,
         }
     }
-    for root in roots {
-        visit(root, 0, &mut items);
-    }
-    items
 }
 
 // ── Component ────────────────────────────────────────────────────────────────
 
 /// Scene tree panel component.
 ///
-/// Renders the editor's scene hierarchy as an indented list with
-/// expand/collapse arrows and click-to-select. Uses `reactive_component_dom`
-/// to rebuild the tree when click handlers increment the revision signal.
+/// Renders the editor's scene hierarchy using rinch's `Tree` component.
+/// Hierarchy: Project → Camera + Scene → objects + lights.
 #[component]
 pub fn SceneTreePanel() -> NodeHandle {
     let editor_state = use_context::<Arc<Mutex<EditorState>>>();
     let revision = use_context::<UiRevision>();
+
+    // Persistent tree expand/select state — created once, lives in rinch context.
+    let tree_state = UseTreeReturn::new(UseTreeOptions {
+        initial_expanded: ["project".to_string(), "scene".to_string()]
+            .into_iter()
+            .collect(),
+        ..Default::default()
+    });
 
     let root = __scope.create_element("div");
     root.set_attribute(
@@ -73,103 +126,71 @@ pub fn SceneTreePanel() -> NodeHandle {
         "flex:1;overflow-y:auto;display:flex;flex-direction:column;",
     );
 
-    // Wrap tree content in reactive_component_dom so it rebuilds when
-    // the revision signal changes (incremented by click handlers).
     let es = editor_state.clone();
     rinch::core::reactive_component_dom(__scope, &root, move |__scope| {
-        // Track revision signal — this Effect re-runs when revision changes.
         revision.track();
 
-        // Read scene tree (brief lock).
-        let items = {
+        let (tree_data, obj_count) = {
             let es = es.lock().unwrap();
-            flatten_tree(&es.scene_tree.roots)
+            let data = build_tree_data(&es);
+            let count = es.scene_tree.roots.len() + es.light_editor.all_lights().len();
+
+            // Sync selection state from EditorState → tree signals.
+            // Use untracked to avoid creating reactive dependencies on tree
+            // signals (which would cause re-entrant borrow panics).
+            let sel_entity = es.selected_entity;
+            rinch::core::untracked(|| {
+                if let Some(ref sel) = sel_entity {
+                    let value = selected_to_value(sel);
+                    let current = tree_state.selected.get();
+                    if !current.contains(&value) {
+                        tree_state.controller.clear_selected();
+                        tree_state.controller.select(&value);
+                    }
+                } else {
+                    let current = tree_state.selected.get();
+                    if !current.is_empty() {
+                        tree_state.controller.clear_selected();
+                    }
+                }
+            });
+
+            (data, count)
         };
-        let obj_count = items.len();
 
         let container = __scope.create_element("div");
         container.set_attribute("style", "display:flex;flex-direction:column;");
 
-        // Header with object count.
+        // Header.
         let header = __scope.create_element("div");
         header.set_attribute("style", LABEL_STYLE);
         let header_text = __scope.create_text(&format!("Scene ({obj_count})"));
         header.append_child(&header_text);
         container.append_child(&header);
 
-        // Tree rows.
-        for item in &items {
-            let row = __scope.create_element("div");
-
-            let pad_left = 12 + item.depth * 16;
-            let bg = if item.selected {
-                "rgba(76,154,255,0.2)"
-            } else {
-                "transparent"
-            };
-            let text_color = if item.selected {
-                "rgba(255,255,255,0.95)"
-            } else {
-                "rgba(255,255,255,0.7)"
-            };
-
-            row.set_attribute(
-                "style",
-                &format!(
-                    "padding:4px 8px 4px {pad_left}px;cursor:pointer;background:{bg};\
-                     font-size:12px;color:{text_color};user-select:none;\
-                     display:flex;align-items:center;gap:4px;"
-                ),
-            );
-
-            // Expand/collapse arrow for nodes with children.
-            if item.has_children {
-                let arrow = __scope.create_element("span");
-                arrow.set_attribute(
-                    "style",
-                    "font-size:9px;width:14px;text-align:center;opacity:0.5;cursor:pointer;",
-                );
-                let arrow_char = if item.expanded { "\u{25BC}" } else { "\u{25B6}" };
-                let arrow_text = __scope.create_text(arrow_char);
-                arrow.append_child(&arrow_text);
-
-                // Arrow click → toggle expand.
-                let entity_id = item.entity_id;
-                let es = es.clone();
-                let handler_id = __scope.register_handler(move || {
-                    if let Ok(mut state) = es.lock() {
-                        state.scene_tree.toggle_expanded(entity_id);
-                    }
-                    revision.bump();
-                });
-                arrow.set_attribute("data-rid", &handler_id.to_string());
-                row.append_child(&arrow);
-            } else {
-                // Spacer for alignment.
-                let spacer = __scope.create_element("span");
-                spacer.set_attribute("style", "width:14px;");
-                row.append_child(&spacer);
-            }
-
-            // Node name.
-            let name_span = __scope.create_element("span");
-            let name_text = __scope.create_text(&item.name);
-            name_span.append_child(&name_text);
-            row.append_child(&name_span);
-
-            // Row click → select node.
-            let entity_id = item.entity_id;
-            let es = es.clone();
-            let handler_id = __scope.register_handler(move || {
-                if let Ok(mut state) = es.lock() {
-                    state.scene_tree.select_node(entity_id);
+        // Selection callback → update EditorState.selected_entity.
+        let es_cb = es.clone();
+        let onselect = ValueCallback::new(move |value: String| {
+            if let Some(entity) = parse_value(&value) {
+                if let Ok(mut state) = es_cb.lock() {
+                    state.selected_entity = Some(entity);
                 }
-                revision.bump();
-            });
-            row.set_attribute("data-rid", &handler_id.to_string());
+            }
+            revision.bump();
+        });
 
-            container.append_child(&row);
-        }
+        // Tree component.
+        let tree_component = Tree {
+            data: tree_data,
+            tree: Some(tree_state),
+            select_on_click: true,
+            expand_on_click: true,
+            level_offset: "sm".to_string(),
+            onselect: Some(onselect),
+            ..Default::default()
+        };
+        let tree = tree_component.render(__scope, &[]);
+        container.append_child(&tree);
 
         container
     });

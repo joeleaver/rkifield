@@ -170,6 +170,37 @@ impl BlitPass {
         pass.draw(0..3, 0..1);
     }
 
+    /// Draw the fullscreen blit constrained to a viewport sub-region
+    /// without clearing the target first (uses `LoadOp::Load`).
+    ///
+    /// The caller is responsible for clearing or pre-filling the target before
+    /// calling this method. Only the viewport sub-region is drawn into.
+    pub fn draw_viewport_load(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        viewport: (f32, f32, f32, f32),
+    ) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("blit pass (load)"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: None,
+            ..Default::default()
+        });
+        pass.set_viewport(viewport.0, viewport.1, viewport.2, viewport.3, 0.0, 1.0);
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
     /// Recreate the bind group with a new source texture view (e.g. after resize).
     pub fn update_source(&mut self, device: &wgpu::Device, source_view: &wgpu::TextureView) {
         self.bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {

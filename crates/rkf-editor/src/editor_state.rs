@@ -22,6 +22,21 @@ use crate::undo::UndoStack;
 use glam::Vec3;
 use rinch::prelude::Signal;
 
+/// What is currently selected in the scene tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectedEntity {
+    /// An SDF object by entity ID.
+    Object(u64),
+    /// A light by light ID.
+    Light(u64),
+    /// The main editor camera.
+    Camera,
+    /// The scene node itself.
+    Scene,
+    /// The project root node.
+    Project,
+}
+
 /// Shared reactive revision counter for triggering UI re-renders.
 ///
 /// Stored in rinch context — any component can `use_context::<UiRevision>()`
@@ -71,96 +86,32 @@ impl Default for ViewportRect {
     }
 }
 
-/// Editor tool mode — determines viewport interaction, right-panel content,
-/// and active keyboard shortcuts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Editor tool mode — determines viewport interaction behaviour.
+///
+/// Navigation (orbit/fly) and selection (click-to-pick) are always active
+/// regardless of mode. Only Sculpt and Paint change how mouse drags in the
+/// viewport are interpreted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EditorMode {
-    /// Orbit/fly camera only.
-    Navigate,
-    /// Pick entities, transform gizmo.
-    Select,
-    /// Instantiate from asset browser.
-    Place,
-    /// CSG brush strokes.
+    /// Default mode — navigate + select always active, no brush tool.
+    #[default]
+    Default,
+    /// CSG brush strokes on voxelized objects.
     Sculpt,
-    /// Material/color painting.
+    /// Material/color painting on object surfaces.
     Paint,
-    /// Place and tune lights.
-    Light,
-    /// Preview animations, pose.
-    Animate,
-    /// Tune fog/clouds/atmosphere/post-process.
-    Environment,
 }
 
 impl EditorMode {
-    /// All modes in toolbar order.
-    pub const ALL: [EditorMode; 8] = [
-        Self::Navigate,
-        Self::Select,
-        Self::Place,
-        Self::Sculpt,
-        Self::Paint,
-        Self::Light,
-        Self::Animate,
-        Self::Environment,
-    ];
+    /// Tool modes that appear as toolbar toggle buttons.
+    pub const TOOLS: [EditorMode; 2] = [Self::Sculpt, Self::Paint];
 
-    /// Display name for the status bar.
+    /// Display name for the status bar / toolbar.
     pub fn name(self) -> &'static str {
         match self {
-            Self::Navigate => "Navigate",
-            Self::Select => "Select",
-            Self::Place => "Place",
+            Self::Default => "",
             Self::Sculpt => "Sculpt",
             Self::Paint => "Paint",
-            Self::Light => "Light",
-            Self::Animate => "Animate",
-            Self::Environment => "Environment",
-        }
-    }
-
-    /// Short label for the toolbar button.
-    pub fn short_name(self) -> &'static str {
-        match self {
-            Self::Navigate => "Nav",
-            Self::Select => "Sel",
-            Self::Place => "Place",
-            Self::Sculpt => "Sculpt",
-            Self::Paint => "Paint",
-            Self::Light => "Light",
-            Self::Animate => "Anim",
-            Self::Environment => "Env",
-        }
-    }
-
-    /// Numeric index (0-7) for signal-based UI reactivity.
-    pub fn index(self) -> u8 {
-        match self {
-            Self::Navigate => 0,
-            Self::Select => 1,
-            Self::Place => 2,
-            Self::Sculpt => 3,
-            Self::Paint => 4,
-            Self::Light => 5,
-            Self::Animate => 6,
-            Self::Environment => 7,
-        }
-    }
-
-    /// Convert a numeric index (0-7) back to an `EditorMode`.
-    /// Returns `Navigate` for out-of-range values.
-    pub fn from_index(i: u8) -> Self {
-        match i {
-            0 => Self::Navigate,
-            1 => Self::Select,
-            2 => Self::Place,
-            3 => Self::Sculpt,
-            4 => Self::Paint,
-            5 => Self::Light,
-            6 => Self::Animate,
-            7 => Self::Environment,
-            _ => Self::Navigate,
         }
     }
 }
@@ -176,6 +127,7 @@ pub struct EditorState {
 
     // ── Scene ────────────────────────────────────────────────
     pub scene_tree: SceneTree,
+    pub selected_entity: Option<SelectedEntity>,
     pub selected_properties: Option<PropertySheet>,
 
     // ── Gizmo ────────────────────────────────────────────────
@@ -223,8 +175,22 @@ pub struct EditorState {
     // ── Pending commands (UI → render loop) ──────────────────
     /// Set by UI menus, consumed by the render loop.
     pub pending_debug_mode: Option<u32>,
+    /// Current debug visualization mode (0=normal, 1-6=debug).
+    pub debug_mode: u32,
     /// Set by File > Quit, consumed by the event loop.
     pub wants_exit: bool,
+    /// Set by File > Open, consumed by the event loop.
+    pub pending_open: bool,
+    /// Set by File > Save, consumed by the event loop.
+    pub pending_save: bool,
+    /// Set by File > Save As, consumed by the event loop.
+    pub pending_save_as: bool,
+    /// Set by titlebar drag handler, consumed by the event loop.
+    pub pending_drag: bool,
+    /// Set by minimize window control, consumed by the event loop.
+    pub pending_minimize: bool,
+    /// Set by maximize window control, consumed by the event loop.
+    pub pending_maximize: bool,
 
     // ── v2 Scene model ───────────────────────────────────────
     /// Optional v2 scene reference. When set, `sync_v2_scene` mirrors it
@@ -245,10 +211,11 @@ impl EditorState {
         cam.fly_speed = 5.0;
 
         Self {
-            mode: EditorMode::Navigate,
+            mode: EditorMode::Default,
             editor_camera: cam,
             editor_input: InputState::new(),
             scene_tree: SceneTree::new(),
+            selected_entity: None,
             selected_properties: None,
             gizmo: GizmoState::new(),
             sculpt: SculptState::new(),
@@ -269,10 +236,17 @@ impl EditorState {
             viewport: ViewportRect::default(),
             left_panel_width: 251,  // 250px content + 1px border-right
             right_panel_width: 301, // 300px content + 1px border-left
-            top_bar_height: 62,    // menu 32+1px border + toolbar 28+1px border
+            top_bar_height: 37,    // titlebar 36px + 1px border
             bottom_bar_height: 25, // status bar 24px + 1px border-top
             pending_debug_mode: None,
+            debug_mode: 0,
             wants_exit: false,
+            pending_open: false,
+            pending_save: false,
+            pending_save_as: false,
+            pending_drag: false,
+            pending_minimize: false,
+            pending_maximize: false,
             v2_scene: None,
         }
     }
@@ -315,6 +289,20 @@ impl EditorState {
         engine_cam.yaw = self.editor_camera.fly_yaw;
         engine_cam.pitch = self.editor_camera.fly_pitch;
         engine_cam.fov_degrees = self.editor_camera.fov_y.to_degrees();
+    }
+
+    /// Name of the current debug visualization mode (empty for normal shading).
+    pub fn debug_mode_name(&self) -> &'static str {
+        match self.debug_mode {
+            0 => "",
+            1 => "Normals",
+            2 => "Positions",
+            3 => "Material IDs",
+            4 => "Diffuse",
+            5 => "Specular",
+            6 => "GI Only",
+            _ => "Debug",
+        }
     }
 
     /// Reset per-frame input deltas (mouse delta, scroll) after processing.

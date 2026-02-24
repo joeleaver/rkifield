@@ -7,17 +7,17 @@ use std::sync::{Arc, Mutex};
 
 use rinch::prelude::*;
 
-use crate::editor_state::{EditorState, UiRevision};
+use crate::editor_state::{EditorState, SelectedEntity, UiRevision};
 
 // ── Style constants ──────────────────────────────────────────────────────────
 
-const LABEL_STYLE: &str = "font-size:11px;color:rgba(255,255,255,0.45);\
+const LABEL_STYLE: &str = "font-size:11px;color:var(--rinch-color-dimmed);\
     text-transform:uppercase;letter-spacing:1px;padding:8px 12px;";
 
-const SECTION_STYLE: &str = "font-size:12px;color:rgba(255,255,255,0.7);padding:6px 12px;";
+const SECTION_STYLE: &str = "font-size:12px;color:var(--rinch-color-text);padding:6px 12px;";
 
-const VALUE_STYLE: &str = "font-size:12px;color:rgba(255,255,255,0.55);padding:2px 12px;\
-    font-family:monospace;";
+const VALUE_STYLE: &str = "font-size:12px;color:var(--rinch-color-dimmed);padding:2px 12px;\
+    font-family:var(--rinch-font-family-monospace);";
 
 // ── Component ────────────────────────────────────────────────────────────────
 
@@ -53,48 +53,85 @@ pub fn PropertiesPanel() -> NodeHandle {
 
         // Read selected entity info.
         let es = es.lock().unwrap();
-        let selected = es.scene_tree.selected_entities();
 
-        if selected.is_empty() {
+        if let Some(ref sel) = es.selected_entity {
+            match sel {
+                SelectedEntity::Object(entity_id) => {
+                    if let Some(node) = es.scene_tree.find_node(*entity_id) {
+                        let name_row = __scope.create_element("div");
+                        name_row.set_attribute("style", SECTION_STYLE);
+                        name_row.append_child(&__scope.create_text(&node.name));
+                        container.append_child(&name_row);
+
+                        let id_row = __scope.create_element("div");
+                        id_row.set_attribute("style", VALUE_STYLE);
+                        id_row.append_child(
+                            &__scope.create_text(&format!("Entity ID: {entity_id}")),
+                        );
+                        container.append_child(&id_row);
+
+                        if !node.children.is_empty() {
+                            let cr = __scope.create_element("div");
+                            cr.set_attribute("style", VALUE_STYLE);
+                            cr.append_child(
+                                &__scope.create_text(&format!("Children: {}", node.children.len())),
+                            );
+                            container.append_child(&cr);
+                        }
+                    }
+                }
+                SelectedEntity::Light(lid) => {
+                    if let Some(light) = es.light_editor.get_light(*lid) {
+                        let name_row = __scope.create_element("div");
+                        name_row.set_attribute("style", SECTION_STYLE);
+                        let type_name = match light.light_type {
+                            crate::light_editor::EditorLightType::Point => "Point Light",
+                            crate::light_editor::EditorLightType::Spot => "Spot Light",
+                            crate::light_editor::EditorLightType::Directional => "Directional Light",
+                        };
+                        name_row.append_child(&__scope.create_text(type_name));
+                        container.append_child(&name_row);
+
+                        let detail_row = __scope.create_element("div");
+                        detail_row.set_attribute("style", VALUE_STYLE);
+                        detail_row.append_child(&__scope.create_text(
+                            &format!("Intensity: {:.2}  Range: {:.1}", light.intensity, light.range),
+                        ));
+                        container.append_child(&detail_row);
+                    }
+                }
+                SelectedEntity::Camera => {
+                    let name_row = __scope.create_element("div");
+                    name_row.set_attribute("style", SECTION_STYLE);
+                    name_row.append_child(&__scope.create_text("Camera"));
+                    container.append_child(&name_row);
+
+                    let pos = es.editor_camera.position;
+                    let detail_row = __scope.create_element("div");
+                    detail_row.set_attribute("style", VALUE_STYLE);
+                    detail_row.append_child(&__scope.create_text(
+                        &format!("Pos: ({:.1}, {:.1}, {:.1})", pos.x, pos.y, pos.z),
+                    ));
+                    container.append_child(&detail_row);
+                }
+                _ => {
+                    let msg = __scope.create_element("div");
+                    msg.set_attribute(
+                        "style",
+                        &format!("{SECTION_STYLE}color:var(--rinch-color-placeholder);"),
+                    );
+                    msg.append_child(&__scope.create_text("No properties"));
+                    container.append_child(&msg);
+                }
+            }
+        } else {
             let msg = __scope.create_element("div");
             msg.set_attribute(
                 "style",
-                &format!("{SECTION_STYLE}color:rgba(255,255,255,0.35);"),
+                &format!("{SECTION_STYLE}color:var(--rinch-color-placeholder);"),
             );
-            let msg_text = __scope.create_text("No object selected");
-            msg.append_child(&msg_text);
+            msg.append_child(&__scope.create_text("No object selected"));
             container.append_child(&msg);
-        } else {
-            for &entity_id in &selected {
-                if let Some(node) = es.scene_tree.find_node(entity_id) {
-                    // Entity name.
-                    let name_row = __scope.create_element("div");
-                    name_row.set_attribute("style", SECTION_STYLE);
-                    let name_text = __scope.create_text(&node.name);
-                    name_row.append_child(&name_text);
-                    container.append_child(&name_row);
-
-                    // Entity ID.
-                    let id_row = __scope.create_element("div");
-                    id_row.set_attribute("style", VALUE_STYLE);
-                    let id_text =
-                        __scope.create_text(&format!("Entity ID: {entity_id}"));
-                    id_row.append_child(&id_text);
-                    container.append_child(&id_row);
-
-                    // Children count.
-                    if !node.children.is_empty() {
-                        let children_row = __scope.create_element("div");
-                        children_row.set_attribute("style", VALUE_STYLE);
-                        let children_text = __scope.create_text(&format!(
-                            "Children: {}",
-                            node.children.len()
-                        ));
-                        children_row.append_child(&children_text);
-                        container.append_child(&children_row);
-                    }
-                }
-            }
         }
 
         container

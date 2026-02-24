@@ -17,10 +17,6 @@ pub struct SceneNode {
     pub name: String,
     /// Child nodes.
     pub children: Vec<SceneNode>,
-    /// Whether this node's children are visible in the tree UI.
-    pub expanded: bool,
-    /// Whether this node is currently selected.
-    pub selected: bool,
     /// Whether the entity is visible in the viewport.
     pub visible: bool,
     /// World-space position of this entity.
@@ -43,8 +39,6 @@ impl SceneNode {
             entity_id,
             name: name.into(),
             children: Vec::new(),
-            expanded: false,
-            selected: false,
             visible: true,
             position: Vec3::ZERO,
             rotation: Quat::IDENTITY,
@@ -78,24 +72,6 @@ impl SceneNode {
             }
         }
         None
-    }
-
-    /// Recursively clear selection on this node and all descendants.
-    fn clear_selection(&mut self) {
-        self.selected = false;
-        for child in &mut self.children {
-            child.clear_selection();
-        }
-    }
-
-    /// Recursively collect selected entity IDs.
-    fn collect_selected(&self, out: &mut Vec<u64>) {
-        if self.selected {
-            out.push(self.entity_id);
-        }
-        for child in &self.children {
-            child.collect_selected(out);
-        }
     }
 
     /// Remove a child (or deeper descendant) by entity ID. Returns the removed node if found.
@@ -164,44 +140,6 @@ impl SceneTree {
             }
         }
         None
-    }
-
-    /// Toggle the expanded state of a node.
-    pub fn toggle_expanded(&mut self, entity_id: u64) {
-        if let Some(node) = self.find_node_mut(entity_id) {
-            node.expanded = !node.expanded;
-        }
-    }
-
-    /// Select a single node, clearing all other selections.
-    pub fn select_node(&mut self, entity_id: u64) {
-        self.clear_selection();
-        if let Some(node) = self.find_node_mut(entity_id) {
-            node.selected = true;
-        }
-    }
-
-    /// Add a node to the selection without clearing existing selections.
-    pub fn multi_select_node(&mut self, entity_id: u64) {
-        if let Some(node) = self.find_node_mut(entity_id) {
-            node.selected = true;
-        }
-    }
-
-    /// Clear all selections in the tree.
-    pub fn clear_selection(&mut self) {
-        for root in &mut self.roots {
-            root.clear_selection();
-        }
-    }
-
-    /// Return the entity IDs of all currently selected nodes.
-    pub fn selected_entities(&self) -> Vec<u64> {
-        let mut result = Vec::new();
-        for root in &self.roots {
-            root.collect_selected(&mut result);
-        }
-        result
     }
 
     /// Move a node to be a child of a new parent.
@@ -350,58 +288,6 @@ mod tests {
     }
 
     #[test]
-    fn test_select_node_clears_previous() {
-        let mut tree = sample_tree();
-        tree.select_node(2);
-        assert!(tree.find_node(2).unwrap().selected);
-
-        tree.select_node(3);
-        assert!(!tree.find_node(2).unwrap().selected);
-        assert!(tree.find_node(3).unwrap().selected);
-    }
-
-    #[test]
-    fn test_multi_select() {
-        let mut tree = sample_tree();
-        tree.multi_select_node(2);
-        tree.multi_select_node(4);
-        assert!(tree.find_node(2).unwrap().selected);
-        assert!(tree.find_node(4).unwrap().selected);
-        assert!(!tree.find_node(1).unwrap().selected);
-    }
-
-    #[test]
-    fn test_clear_selection() {
-        let mut tree = sample_tree();
-        tree.multi_select_node(1);
-        tree.multi_select_node(2);
-        tree.multi_select_node(3);
-        tree.clear_selection();
-        assert!(tree.selected_entities().is_empty());
-    }
-
-    #[test]
-    fn test_selected_entities() {
-        let mut tree = sample_tree();
-        tree.multi_select_node(2);
-        tree.multi_select_node(4);
-        let sel = tree.selected_entities();
-        assert_eq!(sel.len(), 2);
-        assert!(sel.contains(&2));
-        assert!(sel.contains(&4));
-    }
-
-    #[test]
-    fn test_toggle_expanded() {
-        let mut tree = sample_tree();
-        assert!(!tree.find_node(1).unwrap().expanded);
-        tree.toggle_expanded(1);
-        assert!(tree.find_node(1).unwrap().expanded);
-        tree.toggle_expanded(1);
-        assert!(!tree.find_node(1).unwrap().expanded);
-    }
-
-    #[test]
     fn test_reparent_to_existing_parent() {
         let mut tree = sample_tree();
         // Move Root2 (id=4) under Parent (id=1)
@@ -441,8 +327,6 @@ mod tests {
         assert_eq!(node.entity_id, 42);
         assert_eq!(node.name, "Entity");
         assert!(node.children.is_empty());
-        assert!(!node.expanded);
-        assert!(!node.selected);
         assert!(node.visible);
         assert_eq!(node.position, Vec3::ZERO);
         assert_eq!(node.rotation, Quat::IDENTITY);
@@ -454,7 +338,6 @@ mod tests {
     fn test_empty_tree() {
         let tree = SceneTree::new();
         assert!(tree.roots.is_empty());
-        assert!(tree.selected_entities().is_empty());
         assert!(tree.find_node(1).is_none());
     }
 
