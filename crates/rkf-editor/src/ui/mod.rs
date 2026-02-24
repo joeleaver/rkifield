@@ -744,6 +744,12 @@ pub fn RightPanel() -> NodeHandle {
     let vignette_signal: Signal<f64> = Signal::new(0.0);
     let grain_signal: Signal<f64> = Signal::new(0.0);
     let chromatic_signal: Signal<f64> = Signal::new(0.0);
+    // Light editing signals.
+    let light_intensity_signal: Signal<f64> = Signal::new(1.0);
+    let light_range_signal: Signal<f64> = Signal::new(10.0);
+    // Animation signals.
+    let anim_speed_signal: Signal<f64> = Signal::new(1.0);
+    let anim_time_signal: Signal<f64> = Signal::new(0.0);
 
     let es = editor_state.clone();
     rinch::core::reactive_component_dom(__scope, &root, move |__scope| {
@@ -947,38 +953,84 @@ pub fn RightPanel() -> NodeHandle {
             container.append_child(&pos_row);
         } else {
             // ── Generic info display for non-camera entities ──
-            let info = selected_entity.and_then(|sel| {
-                let es = es.lock().ok()?;
-                match sel {
-                    SelectedEntity::Object(eid) => {
-                        let node = es.scene_tree.find_node(eid)?;
-                        Some((node.name.clone(), format!("Entity ID: {eid}"), node.children.len()))
-                    }
-                    SelectedEntity::Light(lid) => {
-                        let light = es.light_editor.get_light(lid)?;
+            // Light editing: sync signals and show sliders.
+            let mut is_light = false;
+            if let Some(SelectedEntity::Light(lid)) = selected_entity {
+                if let Ok(es_lock) = es.lock() {
+                    if let Some(light) = es_lock.light_editor.get_light(lid) {
+                        is_light = true;
+                        light_intensity_signal.set(light.intensity as f64);
+                        light_range_signal.set(light.range as f64);
+
                         let type_name = match light.light_type {
                             crate::light_editor::EditorLightType::Point => "Point Light",
                             crate::light_editor::EditorLightType::Spot => "Spot Light",
                             crate::light_editor::EditorLightType::Directional => "Directional Light",
                         };
-                        Some((
-                            type_name.to_string(),
-                            format!("Intensity: {:.2}  Range: {:.1}", light.intensity, light.range),
-                            0,
-                        ))
-                    }
-                    SelectedEntity::Camera => unreachable!(),
-                    SelectedEntity::Scene => {
-                        let name = es.v2_scene.as_ref()
-                            .map(|s| s.name.clone())
-                            .unwrap_or_else(|| "Scene".to_string());
-                        Some((name, format!("{} objects", es.scene_tree.roots.len()), 0))
-                    }
-                    SelectedEntity::Project => {
-                        Some(("Project".to_string(), String::new(), 0))
+                        let hdr = __scope.create_element("div");
+                        hdr.set_attribute("style", SECTION_STYLE);
+                        hdr.append_child(&__scope.create_text(type_name));
+                        container.append_child(&hdr);
+
+                        let pos_row = __scope.create_element("div");
+                        pos_row.set_attribute("style", VALUE_STYLE);
+                        pos_row.append_child(&__scope.create_text(
+                            &format!("Pos: ({:.1}, {:.1}, {:.1})", light.position.x, light.position.y, light.position.z),
+                        ));
+                        container.append_child(&pos_row);
                     }
                 }
-            });
+                if is_light {
+                    let lid_cap = lid;
+                    build_slider_row(
+                        __scope, &container, "Intensity", "", light_intensity_signal,
+                        0.0, 50.0, 0.1, 1,
+                        { let es = es.clone(); move |v| {
+                            if let Ok(mut es) = es.lock() {
+                                if let Some(l) = es.light_editor.get_light_mut(lid_cap) {
+                                    l.intensity = v as f32;
+                                }
+                                es.light_editor.mark_dirty();
+                            }
+                        }},
+                    );
+                    build_slider_row(
+                        __scope, &container, "Range", "m", light_range_signal,
+                        0.1, 100.0, 0.5, 1,
+                        { let es = es.clone(); move |v| {
+                            if let Ok(mut es) = es.lock() {
+                                if let Some(l) = es.light_editor.get_light_mut(lid_cap) {
+                                    l.range = v as f32;
+                                }
+                                es.light_editor.mark_dirty();
+                            }
+                        }},
+                    );
+                }
+            }
+
+            let info = if is_light { None } else {
+                selected_entity.and_then(|sel| {
+                    let es = es.lock().ok()?;
+                    match sel {
+                        SelectedEntity::Object(eid) => {
+                            let node = es.scene_tree.find_node(eid)?;
+                            Some((node.name.clone(), format!("Entity ID: {eid}"), node.children.len()))
+                        }
+                        SelectedEntity::Light(_) => None, // handled above
+                        SelectedEntity::Camera => unreachable!(),
+                        SelectedEntity::Scene => {
+                            let name = es.v2_scene.as_ref()
+                                .map(|s| s.name.clone())
+                                .unwrap_or_else(|| "Scene".to_string());
+                            Some((name, format!("{} objects", es.scene_tree.roots.len()), 0))
+                        }
+                        SelectedEntity::Project => {
+                            Some(("Project".to_string(), String::new(), 0))
+                        }
+                    }
+                })
+            };
 
             if let Some((name, detail, child_count)) = info {
                 let name_row = __scope.create_element("div");
@@ -1352,6 +1404,75 @@ pub fn RightPanel() -> NodeHandle {
             }},
         );
 
+        // ── Animation controls ──
+        {
+            let div = __scope.create_element("div");
+            div.set_attribute(
+                "style",
+                "height:1px;background:var(--rinch-color-border);margin:8px 0;",
+            );
+            container.append_child(&div);
+
+            let hdr = __scope.create_element("div");
+            hdr.set_attribute("style", SECTION_STYLE);
+            hdr.append_child(&__scope.create_text("Animation"));
+            container.append_child(&hdr);
+
+            // Play / Pause / Stop buttons.
+            let btn_row = __scope.create_element("div");
+            btn_row.set_attribute("style", "display:flex;gap:6px;padding:2px 12px;");
+
+            for (label, state) in [
+                ("Play", crate::animation_preview::PlaybackState::Playing),
+                ("Pause", crate::animation_preview::PlaybackState::Paused),
+                ("Stop", crate::animation_preview::PlaybackState::Stopped),
+            ] {
+                let btn = __scope.create_element("div");
+                let is_active = es.lock()
+                    .map(|e| e.animation.playback_state == state)
+                    .unwrap_or(false);
+                let bg = if is_active { "var(--rinch-primary-color)" } else { "var(--rinch-color-dark-7)" };
+                btn.set_attribute("style", &format!(
+                    "padding:2px 8px;border-radius:3px;cursor:pointer;\
+                     background:{bg};font-size:11px;color:var(--rinch-color-text);",
+                ));
+                btn.append_child(&__scope.create_text(label));
+
+                let hid = __scope.register_handler({
+                    let es = es.clone();
+                    let rev = revision;
+                    move || {
+                        if let Ok(mut es) = es.lock() {
+                            es.animation.playback_state = state;
+                            if matches!(state, crate::animation_preview::PlaybackState::Stopped) {
+                                es.animation.current_time = 0.0;
+                            }
+                        }
+                        rev.bump();
+                    }
+                });
+                btn.set_attribute("data-rid", &hid.to_string());
+                btn_row.append_child(&btn);
+            }
+            container.append_child(&btn_row);
+
+            // Sync animation signals from state.
+            if let Ok(es_lock) = es.lock() {
+                anim_speed_signal.set(es_lock.animation.speed as f64);
+                anim_time_signal.set(es_lock.animation.current_time as f64);
+            }
+
+            build_slider_row(
+                __scope, &container, "Speed", "x", anim_speed_signal,
+                0.0, 4.0, 0.1, 1,
+                { let es = es.clone(); move |v| {
+                    if let Ok(mut es) = es.lock() {
+                        es.animation.speed = v as f32;
+                    }
+                }},
+            );
+        }
+
         container
     });
 
@@ -1472,6 +1593,48 @@ pub fn StatusBar() -> NodeHandle {
             mode_div.set_attribute("style", "color:var(--rinch-primary-color);");
             mode_div.append_child(&__scope.create_text(&format!("{mode_name} mode")));
             container.append_child(&mode_div);
+        }
+
+        // Grid indicator.
+        {
+            let show_grid = es.lock().map(|e| e.show_grid).unwrap_or(false);
+            if show_grid {
+                let grid_div = __scope.create_element("div");
+                grid_div.set_attribute("style", "color:var(--rinch-color-dimmed);");
+                grid_div.append_child(&__scope.create_text("Grid"));
+                container.append_child(&grid_div);
+            }
+        }
+
+        // F1 shortcut reference overlay.
+        {
+            let show_shortcuts = es.lock().map(|e| e.show_shortcuts).unwrap_or(false);
+            if show_shortcuts {
+                let overlay = __scope.create_element("div");
+                overlay.set_attribute("style",
+                    "position:fixed;bottom:30px;right:310px;z-index:100;\
+                     background:var(--rinch-color-dark-9);border:1px solid var(--rinch-color-border);\
+                     border-radius:6px;padding:12px 16px;font-size:11px;\
+                     color:var(--rinch-color-text);line-height:1.8;white-space:pre;",
+                );
+                overlay.append_child(&__scope.create_text(
+                    "Keyboard Shortcuts  (F1 to close)\n\
+                     ─────────────────────────────────\n\
+                     W/E/R      Translate / Rotate / Scale\n\
+                     B / N      Sculpt / Paint mode\n\
+                     G          Toggle grid\n\
+                     F3         Cycle debug mode\n\
+                     Delete     Delete selected\n\
+                     Ctrl+D     Duplicate selected\n\
+                     Ctrl+S     Save scene\n\
+                     Ctrl+O     Open scene\n\
+                     RMB+WASD   Fly camera\n\
+                     Scroll     Zoom (orbit)\n\
+                     MMB        Pan\n\
+                     F1         This reference",
+                ));
+                container.append_child(&overlay);
+            }
         }
 
         container

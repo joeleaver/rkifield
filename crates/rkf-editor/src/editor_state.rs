@@ -193,6 +193,8 @@ pub struct EditorState {
     pub pending_duplicate: bool,
     /// Whether the ground grid overlay is visible (toggled via View menu).
     pub show_grid: bool,
+    /// Whether the shortcut reference overlay is visible (F1 toggle).
+    pub show_shortcuts: bool,
     /// Set by titlebar drag handler, consumed by the event loop.
     pub pending_drag: bool,
     /// Set by minimize window control, consumed by the event loop.
@@ -260,6 +262,7 @@ impl EditorState {
             pending_delete: false,
             pending_duplicate: false,
             show_grid: false,
+            show_shortcuts: false,
             pending_drag: false,
             pending_minimize: false,
             pending_maximize: false,

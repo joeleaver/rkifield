@@ -674,6 +674,17 @@ impl ApplicationHandler for App {
                             }
                         }
 
+                        // F1: toggle shortcut reference.
+                        if key == WinitKeyCode::F1 {
+                            if let Ok(mut es) = self.editor_state.lock() {
+                                es.show_shortcuts = !es.show_shortcuts;
+                            }
+                            if let Some(rev) = &self.ui_revision {
+                                rev.bump();
+                            }
+                            return;
+                        }
+
                         // F3: cycle debug visualization mode (0-6).
                         if key == WinitKeyCode::F3 {
                             if let Ok(mut es) = self.editor_state.lock() {
