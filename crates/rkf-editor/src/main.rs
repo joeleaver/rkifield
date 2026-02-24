@@ -28,6 +28,7 @@ mod scene_tree;
 mod sculpt;
 mod ui;
 mod undo;
+mod wireframe;
 
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -41,7 +42,7 @@ use winit::keyboard::{KeyCode as WinitKeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use automation::SharedState;
-use editor_state::EditorState;
+use editor_state::{EditorState, UiRevision};
 use engine::EditorEngine;
 use engine_viewport::{DISPLAY_HEIGHT, DISPLAY_WIDTH};
 use overlay_blit::OverlayBlit;
@@ -145,11 +146,16 @@ struct App {
     rinch_ctx: Option<RinchContext>,
     overlay_renderer: Option<RinchOverlayRenderer>,
     overlay_blit: Option<OverlayBlit>,
+    wireframe_pass: Option<wireframe::WireframePass>,
 
     // Input state for event routing
     mouse_phys: (f32, f32),
     modifiers: winit::keyboard::ModifiersState,
     pending_events: Vec<PlatformEvent>,
+
+    // Shared reactive revision — bumped on any editor state mutation
+    // to trigger rinch component re-renders.
+    ui_revision: Option<UiRevision>,
 }
 
 impl App {
@@ -174,10 +180,12 @@ impl App {
             rinch_ctx: None,
             overlay_renderer: None,
             overlay_blit: None,
+            wireframe_pass: None,
 
             mouse_phys: (0.0, 0.0),
             modifiers: winit::keyboard::ModifiersState::empty(),
             pending_events: Vec::new(),
+            ui_revision: None,
         }
     }
 
@@ -203,6 +211,98 @@ impl App {
         self.rinch_ctx
             .as_ref()
             .is_some_and(|ctx| ctx.wants_keyboard())
+    }
+
+    /// Save the current scene to .rkscene.
+    fn save_scene(&mut self) {
+        let engine = match self.engine.as_ref() {
+            Some(e) => e,
+            None => return,
+        };
+
+        let path = {
+            let es = self.editor_state.lock().unwrap();
+            es.current_scene_path.clone()
+        };
+
+        let path = if let Some(p) = path {
+            p
+        } else {
+            let dialog = rfd::FileDialog::new()
+                .set_title("Save Scene")
+                .add_filter("RKIField Scene", &["rkscene"])
+                .set_file_name("scene.rkscene");
+            match dialog.save_file() {
+                Some(p) => p.to_string_lossy().to_string(),
+                None => return,
+            }
+        };
+
+        match scene_io::save_v2_scene(&engine.scene, &path) {
+            Ok(()) => {
+                log::info!("Scene saved to: {path}");
+                if let Ok(mut es) = self.editor_state.lock() {
+                    es.current_scene_path = Some(path.clone());
+                    es.unsaved_changes.mark_saved();
+                    es.recent_files.add(&path, &engine.scene.name, 0);
+                }
+                if let Some(window) = &self.window {
+                    let name = std::path::Path::new(&path)
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "Untitled".to_string());
+                    window.set_title(&format!("RKIField Editor — {name}"));
+                }
+            }
+            Err(e) => log::error!("Failed to save scene: {e}"),
+        }
+    }
+
+    /// Open a .rkscene file.
+    fn open_scene(&mut self) {
+        let dialog = rfd::FileDialog::new()
+            .set_title("Open Scene")
+            .add_filter("RKIField Scene", &["rkscene"]);
+        let path = match dialog.pick_file() {
+            Some(p) => p.to_string_lossy().to_string(),
+            None => return,
+        };
+
+        let sf = match scene_io::load_v2_scene(&path) {
+            Ok(sf) => sf,
+            Err(e) => {
+                log::error!("Failed to load scene: {e}");
+                return;
+            }
+        };
+
+        let new_scene = scene_io::reconstruct_v2_scene(&sf);
+
+        if let Some(engine) = self.engine.as_mut() {
+            engine.replace_scene(new_scene.clone());
+        }
+
+        if let Ok(mut es) = self.editor_state.lock() {
+            es.v2_scene = Some(new_scene);
+            es.sync_v2_scene();
+            es.current_scene_path = Some(path.clone());
+            es.unsaved_changes.mark_saved();
+            es.recent_files.add(&path, &sf.name, 0);
+        }
+
+        if let Some(rev) = &self.ui_revision {
+            rev.bump();
+        }
+
+        if let Some(window) = &self.window {
+            let name = std::path::Path::new(&path)
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "Untitled".to_string());
+            window.set_title(&format!("RKIField Editor — {name}"));
+        }
+
+        log::info!("Scene loaded from: {path}");
     }
 }
 
@@ -232,6 +332,9 @@ impl ApplicationHandler for App {
         // Set up rinch context sharing — components use use_context to access these.
         create_context(Arc::clone(&self.editor_state));
         create_context(Arc::clone(&self.shared_state));
+        let ui_revision = UiRevision::new();
+        create_context(ui_revision);
+        self.ui_revision = Some(ui_revision);
 
         // Initialize rinch UI context.
         let rinch_ctx = RinchContext::new(
@@ -262,10 +365,17 @@ impl ApplicationHandler for App {
             engine_inst.surface_format(),
         );
 
+        // Initialize wireframe pass for selection highlighting.
+        let wireframe_pass = wireframe::WireframePass::new(
+            engine_inst.device(),
+            engine_inst.surface_format(),
+        );
+
         self.engine = Some(engine_inst);
         self.rinch_ctx = Some(rinch_ctx);
         self.overlay_renderer = Some(overlay_renderer);
         self.overlay_blit = Some(overlay_blit_pass);
+        self.wireframe_pass = Some(wireframe_pass);
 
         // Start IPC server for MCP agent tooling.
         let api = automation::EditorAutomationApi::new(
@@ -348,6 +458,8 @@ impl ApplicationHandler for App {
 
                 // Only route to engine if UI doesn't want the click.
                 if !wants_ui {
+                    let mut should_bump_revision = false;
+
                     if let Ok(mut es) = self.editor_state.lock() {
                         let idx = match button {
                             MouseButton::Left => 0,
@@ -377,6 +489,7 @@ impl ApplicationHandler for App {
                                     } else {
                                         es.scene_tree.clear_selection();
                                     }
+                                    should_bump_revision = true;
                                 }
                             }
                         }
@@ -386,6 +499,13 @@ impl ApplicationHandler for App {
                             if let Some(window) = &self.window {
                                 let _ = window.set_cursor_visible(state != ElementState::Pressed);
                             }
+                        }
+                    }
+                    // Lock released — now safe to bump revision (triggers reactive
+                    // Effects that re-lock editor_state for reading).
+                    if should_bump_revision {
+                        if let Some(rev) = &self.ui_revision {
+                            rev.bump();
                         }
                     }
                 }
@@ -424,6 +544,21 @@ impl ApplicationHandler for App {
                         }
                         event_loop.exit();
                         return;
+                    }
+
+                    // Ctrl+S: Save scene, Ctrl+O: Open scene.
+                    if event.state == ElementState::Pressed && self.modifiers.control_key() {
+                        match key {
+                            WinitKeyCode::KeyS => {
+                                self.save_scene();
+                                return;
+                            }
+                            WinitKeyCode::KeyO => {
+                                self.open_scene();
+                                return;
+                            }
+                            _ => {}
+                        }
                     }
 
                     let wants_kb = self.ui_wants_keyboard();
@@ -484,7 +619,7 @@ impl ApplicationHandler for App {
                 // 1. Update rinch UI with collected platform events.
                 let events: Vec<_> = self.pending_events.drain(..).collect();
                 if let Some(ctx) = self.rinch_ctx.as_mut() {
-                    let _actions = ctx.update(&events);
+                    ctx.update(&events);
                 }
 
                 // 2. Query viewport rect from rinch layout (logical pixels → physical).
@@ -541,16 +676,86 @@ impl ApplicationHandler for App {
                     es.reset_frame_deltas();
                 }
 
-                // 5. Render frame with overlay compositing.
+                // 5. Build wireframe vertices for selected object OBBs.
+                //    Read from engine.scene (live animated transforms) rather than
+                //    es.v2_scene (static snapshot) so wireframes track animation
+                //    and future in-editor transforms.
+                let wireframe_verts = {
+                    let mut verts = Vec::new();
+                    if let (Some(engine), Ok(es)) =
+                        (self.engine.as_ref(), self.editor_state.lock())
+                    {
+                        let selected = es.scene_tree.selected_entities();
+                        let color = [0.3, 0.7, 1.0, 1.0]; // Light blue
+                        let origin = rkf_core::WorldPosition::default();
+                        for &eid in &selected {
+                            for obj in &engine.scene.root_objects {
+                                let obj_id = obj.id as u64;
+                                let world_pos = obj.world_position.relative_to(&origin);
+                                let root_world = glam::Mat4::from_scale_rotation_translation(
+                                    glam::Vec3::splat(obj.scale),
+                                    obj.rotation,
+                                    world_pos,
+                                );
+
+                                if eid == obj_id {
+                                    // Root object selected: full hierarchy AABB.
+                                    if let Some((amin, amax)) = wireframe::compute_node_tree_aabb(
+                                        &obj.root_node, root_world,
+                                    ) {
+                                        verts.extend(wireframe::aabb_wireframe(
+                                            amin, amax, color,
+                                        ));
+                                    }
+                                } else if let Some((child_node, child_world)) =
+                                    wireframe::find_child_node_and_transform(
+                                        eid, obj_id, &obj.root_node, root_world,
+                                    )
+                                {
+                                    // Child node selected: AABB of that subtree.
+                                    if let Some((amin, amax)) = wireframe::compute_node_tree_aabb(
+                                        child_node, child_world,
+                                    ) {
+                                        verts.extend(wireframe::aabb_wireframe(
+                                            amin, amax, color,
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    verts
+                };
+
+                // 6. Render frame with overlay compositing.
                 //    Take overlay state out temporarily to avoid borrow conflict
                 //    with engine (both live in self).
                 let mut rinch_ctx = self.rinch_ctx.take();
                 let mut overlay_renderer = self.overlay_renderer.take();
                 let overlay_blit = self.overlay_blit.take();
+                let wireframe = self.wireframe_pass.take();
 
                 if let Some(engine) = self.engine.as_mut() {
+                    let vp_matrix = engine.view_projection();
+
                     if let Some(vp) = viewport {
                         engine.render_frame_viewport(vp, |device, queue, target_view| {
+                            // Draw wireframe selection highlights.
+                            if let Some(ref wf) = wireframe {
+                                if !wireframe_verts.is_empty() {
+                                    let mut enc = device.create_command_encoder(
+                                        &wgpu::CommandEncoderDescriptor {
+                                            label: Some("wireframe"),
+                                        },
+                                    );
+                                    wf.draw(
+                                        device, queue, &mut enc, target_view,
+                                        vp_matrix, vp, &wireframe_verts,
+                                    );
+                                    queue.submit(std::iter::once(enc.finish()));
+                                }
+                            }
+
                             // Render rinch UI to overlay texture, then composite.
                             if let (Some(ctx), Some(renderer), Some(blit)) =
                                 (&mut rinch_ctx, &mut overlay_renderer, &overlay_blit)
@@ -576,8 +781,9 @@ impl ApplicationHandler for App {
                 self.rinch_ctx = rinch_ctx;
                 self.overlay_renderer = overlay_renderer;
                 self.overlay_blit = overlay_blit;
+                self.wireframe_pass = wireframe;
 
-                // 6. Update shared state for MCP observation.
+                // 7. Update shared state for MCP observation.
                 if let Ok(es) = self.editor_state.lock() {
                     if let Ok(mut ss) = self.shared_state.lock() {
                         ss.camera_position = es.editor_camera.position;

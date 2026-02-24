@@ -4,6 +4,7 @@
 //! right panel (properties/tools), top toolbar, and bottom status bar.
 //! EditorState is shared via rinch context (create_context in main.rs).
 
+pub mod properties_panel;
 pub mod scene_tree_panel;
 
 use std::sync::{Arc, Mutex};
@@ -11,7 +12,8 @@ use std::sync::{Arc, Mutex};
 use rinch::prelude::*;
 
 use crate::automation::SharedState;
-use crate::editor_state::EditorState;
+use crate::editor_state::{EditorState, UiRevision};
+use properties_panel::PropertiesPanel;
 use scene_tree_panel::SceneTreePanel;
 
 // ── Style constants ─────────────────────────────────────────────────────────
@@ -22,9 +24,6 @@ const TOOLBAR_HEIGHT: &str = "height:38px;";
 const STATUS_HEIGHT: &str = "height:25px;";
 const LEFT_PANEL_WIDTH: &str = "width:250px;";
 const RIGHT_PANEL_WIDTH: &str = "width:300px;";
-const LABEL_STYLE: &str = "font-size:11px;color:rgba(255,255,255,0.45);\
-    text-transform:uppercase;letter-spacing:1px;padding:8px 12px;";
-const SECTION_STYLE: &str = "font-size:12px;color:rgba(255,255,255,0.7);padding:6px 12px;";
 
 // ── Root component ──────────────────────────────────────────────────────────
 
@@ -43,36 +42,16 @@ const SECTION_STYLE: &str = "font-size:12px;color:rgba(255,255,255,0.7);padding:
 /// └──────────────────────────────────────────────────┘
 /// ```
 ///
-/// Expects `Arc<Mutex<EditorState>>` and `Arc<Mutex<SharedState>>` to be
-/// available via `use_context` (set up by `create_context` in main.rs).
+/// Expects `Arc<Mutex<EditorState>>`, `Arc<Mutex<SharedState>>`, and
+/// `UiRevision` to be available via `use_context` (set up in main.rs).
 #[component]
 pub fn editor_ui() -> NodeHandle {
-    // Read editor state for toolbar mode display.
     let editor_state = use_context::<Arc<Mutex<EditorState>>>();
-    let shared_state = use_context::<Arc<Mutex<SharedState>>>();
 
-    // Read current mode and stats for status bar / toolbar.
-    let (mode_name, obj_count, frame_time_ms, selected_name) = {
+    // Read initial mode name for toolbar (static — mode switching is future work).
+    let mode_name = {
         let es = editor_state.lock().unwrap();
-        let sel_name = es
-            .scene_tree
-            .selected_entities()
-            .first()
-            .and_then(|id| es.scene_tree.find_node(*id))
-            .map(|n| n.name.clone());
-        let count = es.scene_tree.roots.len();
-        let mode = es.mode.name();
-        let ft = shared_state
-            .lock()
-            .map(|ss| ss.frame_time_ms)
-            .unwrap_or(0.0);
-        (mode.to_string(), count, ft, sel_name)
-    };
-
-    let fps = if frame_time_ms > 0.1 {
-        format!("{:.0} fps", 1000.0 / frame_time_ms)
-    } else {
-        "-- fps".to_string()
+        es.mode.name().to_string()
     };
 
     rsx! {
@@ -111,30 +90,84 @@ pub fn editor_ui() -> NodeHandle {
                 // Center viewport
                 GameViewport { name: "main", style: "flex:1;" }
 
-                // Right panel — properties / tools
+                // Right panel — properties (live component)
                 div {
                     style: {format!("{RIGHT_PANEL_WIDTH}{PANEL_BG}{PANEL_BORDER}\
                         border-left:1px solid rgba(255,255,255,0.08);\
                         display:flex;flex-direction:column;overflow:hidden;")},
-                    div { style: LABEL_STYLE, "Properties" }
-                    div {
-                        style: {format!("{SECTION_STYLE}color:rgba(255,255,255,0.35);")},
-                        {selected_name.unwrap_or_else(|| "No object selected".to_string())}
-                    }
+                    PropertiesPanel {}
                 }
             }
 
             // ── Bottom status bar ──
-            div {
-                style: {format!("display:flex;align-items:center;{STATUS_HEIGHT}\
-                    {PANEL_BG}border-top:1px solid rgba(255,255,255,0.08);\
-                    padding:0 12px;gap:16px;\
-                    font-size:11px;color:rgba(255,255,255,0.4);")},
-                div { {format!("{obj_count} objects")} }
-                div { {fps} }
-                div { style: "flex:1;" }
-                div { {format!("{mode_name} mode")} }
-            }
+            StatusBar {}
         }
     }
+}
+
+// ── Status bar ──────────────────────────────────────────────────────────────
+
+/// Reactive status bar showing object count, FPS, and current mode.
+#[component]
+pub fn StatusBar() -> NodeHandle {
+    let editor_state = use_context::<Arc<Mutex<EditorState>>>();
+    let shared_state = use_context::<Arc<Mutex<SharedState>>>();
+    let revision = use_context::<UiRevision>();
+
+    let root = __scope.create_element("div");
+    root.set_attribute(
+        "style",
+        &format!(
+            "display:flex;align-items:center;{STATUS_HEIGHT}\
+            {PANEL_BG}border-top:1px solid rgba(255,255,255,0.08);\
+            padding:0 12px;gap:16px;\
+            font-size:11px;color:rgba(255,255,255,0.4);"
+        ),
+    );
+
+    let es = editor_state.clone();
+    let ss = shared_state.clone();
+    rinch::core::reactive_component_dom(__scope, &root, move |__scope| {
+        revision.track();
+
+        let container = __scope.create_element("div");
+        container.set_attribute(
+            "style",
+            "display:flex;align-items:center;width:100%;gap:16px;",
+        );
+
+        let (obj_count, mode_name) = {
+            let es = es.lock().unwrap();
+            (es.scene_tree.roots.len(), es.mode.name().to_string())
+        };
+        let frame_time_ms = ss
+            .lock()
+            .map(|s| s.frame_time_ms)
+            .unwrap_or(0.0);
+        let fps = if frame_time_ms > 0.1 {
+            format!("{:.0} fps", 1000.0 / frame_time_ms)
+        } else {
+            "-- fps".to_string()
+        };
+
+        let obj_div = __scope.create_element("div");
+        obj_div.append_child(&__scope.create_text(&format!("{obj_count} objects")));
+        container.append_child(&obj_div);
+
+        let fps_div = __scope.create_element("div");
+        fps_div.append_child(&__scope.create_text(&fps));
+        container.append_child(&fps_div);
+
+        let spacer = __scope.create_element("div");
+        spacer.set_attribute("style", "flex:1;");
+        container.append_child(&spacer);
+
+        let mode_div = __scope.create_element("div");
+        mode_div.append_child(&__scope.create_text(&format!("{mode_name} mode")));
+        container.append_child(&mode_div);
+
+        container
+    });
+
+    root
 }

@@ -176,6 +176,140 @@ pub fn load_v2_scene(path: &str) -> anyhow::Result<rkf_runtime::scene_file::Scen
     rkf_runtime::scene_file::load_scene_file(path)
 }
 
+/// Compute the AABB for an analytical SDF primitive at a given world position and scale.
+pub fn aabb_for_analytical(
+    prim_name: &str,
+    params: &[f32],
+    position: Vec3,
+    _rotation: Quat,
+    scale: f32,
+) -> rkf_core::Aabb {
+    use rkf_core::Aabb;
+
+    let half = match prim_name {
+        "sphere" => {
+            let r = params.first().copied().unwrap_or(1.0) * scale;
+            Vec3::splat(r)
+        }
+        "box" => {
+            let hx = params.first().copied().unwrap_or(1.0) * scale;
+            let hy = params.get(1).copied().unwrap_or(1.0) * scale;
+            let hz = params.get(2).copied().unwrap_or(1.0) * scale;
+            Vec3::new(hx, hy, hz)
+        }
+        "capsule" => {
+            let r = params.first().copied().unwrap_or(0.2) * scale;
+            let hh = params.get(1).copied().unwrap_or(0.5) * scale;
+            Vec3::new(r, r + hh, r)
+        }
+        "torus" => {
+            let major = params.first().copied().unwrap_or(0.5) * scale;
+            let minor = params.get(1).copied().unwrap_or(0.15) * scale;
+            Vec3::new(major + minor, minor, major + minor)
+        }
+        "cylinder" => {
+            let r = params.first().copied().unwrap_or(0.3) * scale;
+            let hh = params.get(1).copied().unwrap_or(0.5) * scale;
+            Vec3::new(r, hh, r)
+        }
+        "plane" => Vec3::splat(50.0),
+        _ => Vec3::splat(1.0),
+    };
+    Aabb::new(position - half, position + half)
+}
+
+/// Reconstruct a v2 `Scene` from a loaded scene file.
+///
+/// Only analytical primitives are fully reconstructed; voxelized objects
+/// (with `asset_path`) are represented as empty nodes (no brick map data).
+pub fn reconstruct_v2_scene(
+    sf: &rkf_runtime::scene_file::SceneFile,
+) -> rkf_core::scene::Scene {
+    use rkf_core::scene::{Scene, SceneObject};
+    use rkf_core::scene_node::{SceneNode, SdfPrimitive};
+    use rkf_core::WorldPosition;
+
+    let mut scene = Scene::new(&sf.name);
+
+    for entry in &sf.objects {
+        let pos = Vec3::new(
+            entry.position[0] as f32,
+            entry.position[1] as f32,
+            entry.position[2] as f32,
+        );
+        let rot = Quat::from_xyzw(
+            entry.rotation[0],
+            entry.rotation[1],
+            entry.rotation[2],
+            entry.rotation[3],
+        );
+        let scale = entry.scale;
+
+        let root_node = if let (Some(analytical), Some(params)) =
+            (&entry.analytical, &entry.analytical_params)
+        {
+            let material_id = entry.material_id.unwrap_or(0);
+            let primitive = match analytical.as_str() {
+                "sphere" => SdfPrimitive::Sphere {
+                    radius: params.first().copied().unwrap_or(1.0),
+                },
+                "box" => SdfPrimitive::Box {
+                    half_extents: Vec3::new(
+                        params.first().copied().unwrap_or(1.0),
+                        params.get(1).copied().unwrap_or(1.0),
+                        params.get(2).copied().unwrap_or(1.0),
+                    ),
+                },
+                "capsule" => SdfPrimitive::Capsule {
+                    radius: params.first().copied().unwrap_or(0.2),
+                    half_height: params.get(1).copied().unwrap_or(0.5),
+                },
+                "torus" => SdfPrimitive::Torus {
+                    major_radius: params.first().copied().unwrap_or(0.5),
+                    minor_radius: params.get(1).copied().unwrap_or(0.15),
+                },
+                "cylinder" => SdfPrimitive::Cylinder {
+                    radius: params.first().copied().unwrap_or(0.3),
+                    half_height: params.get(1).copied().unwrap_or(0.5),
+                },
+                "plane" => SdfPrimitive::Plane {
+                    normal: Vec3::new(
+                        params.first().copied().unwrap_or(0.0),
+                        params.get(1).copied().unwrap_or(1.0),
+                        params.get(2).copied().unwrap_or(0.0),
+                    ),
+                    distance: params.get(3).copied().unwrap_or(0.0),
+                },
+                _ => SdfPrimitive::Sphere { radius: 1.0 },
+            };
+            SceneNode::analytical(&entry.name, primitive, material_id)
+        } else {
+            SceneNode::new(&entry.name)
+        };
+
+        let aabb = if let (Some(analytical), Some(params)) =
+            (&entry.analytical, &entry.analytical_params)
+        {
+            aabb_for_analytical(analytical, params, pos, rot, scale)
+        } else {
+            rkf_core::Aabb::new(pos - Vec3::splat(1.0), pos + Vec3::splat(1.0))
+        };
+
+        let obj = SceneObject {
+            id: 0,
+            name: entry.name.clone(),
+            world_position: WorldPosition::new(glam::IVec3::ZERO, pos),
+            rotation: rot,
+            scale,
+            root_node,
+            aabb,
+        };
+        scene.add_object_full(obj);
+    }
+
+    scene
+}
+
 /// An entry in the recent files list.
 #[derive(Debug, Clone)]
 pub struct RecentFileEntry {

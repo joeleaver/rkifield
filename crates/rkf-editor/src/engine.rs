@@ -262,8 +262,8 @@ pub struct EditorEngine {
     window_width: u32,
     window_height: u32,
     shared_state: Arc<Mutex<SharedState>>,
-    character: AnimatedCharacter,
-    character_obj_index: usize,
+    character: Option<AnimatedCharacter>,
+    character_obj_index: Option<usize>,
     last_frame_time: Instant,
 }
 
@@ -478,8 +478,8 @@ impl EditorEngine {
             window_width,
             window_height,
             shared_state,
-            character: demo.character,
-            character_obj_index: demo.character_obj_index,
+            character: Some(demo.character),
+            character_obj_index: Some(demo.character_obj_index),
             last_frame_time: Instant::now(),
         }
     }
@@ -510,6 +510,57 @@ impl EditorEngine {
     /// Set the shading debug mode (0=normal, 1=normals, 2=positions, etc).
     pub fn set_debug_mode(&mut self, mode: u32) {
         self.shade_debug_mode = mode;
+    }
+
+    /// Camera-relative view-projection matrix for overlay rendering.
+    pub fn view_projection(&self) -> glam::Mat4 {
+        self.camera.view_projection(self.render_width, self.render_height)
+    }
+
+    /// Current camera position in world space.
+    pub fn camera_position(&self) -> Vec3 {
+        self.camera.position
+    }
+
+    /// Replace the current scene with a new one.
+    ///
+    /// Rebuilds the coarse acceleration field and dependent passes.
+    /// Voxelized objects need brick maps pre-loaded in the pool.
+    pub fn replace_scene(&mut self, scene: Scene) {
+        // Clear character (loaded scene won't have the demo character).
+        self.character = None;
+        self.character_obj_index = None;
+
+        // Rebuild coarse field from new scene AABBs.
+        let scene_aabbs: Vec<(Vec3, Vec3)> = scene.root_objects.iter()
+            .map(|obj| (obj.aabb.min, obj.aabb.max))
+            .collect();
+        self.coarse_field = CoarseField::from_scene_aabbs(
+            &self.ctx.device, &scene_aabbs, COARSE_VOXEL_SIZE, 1.0,
+        );
+        self.coarse_field.populate(&scene_aabbs);
+        self.coarse_field.upload(&self.ctx.queue, Vec3::ZERO);
+
+        // Rebuild passes that reference coarse field bind groups.
+        self.ray_march = RayMarchPass::new(
+            &self.ctx.device, &self.gpu_scene, &self.gbuffer,
+            &self.tile_cull, &self.coarse_field,
+        );
+        self.radiance_inject = RadianceInjectPass::new(
+            &self.ctx.device, &self.gpu_scene, &self.material_buffer,
+            &self.light_buffer, &self.radiance_volume, &self.coarse_field,
+        );
+        self.shading_pass = ShadingPass::new(
+            &self.ctx.device, &self.gbuffer, &self.gpu_scene, &self.light_buffer,
+            &self.coarse_field, &self.radiance_volume, &self.material_buffer,
+            self.render_width, self.render_height,
+        );
+        self.vol_shadow = VolShadowPass::new(
+            &self.ctx.device, &self.ctx.queue, &self.coarse_field.bind_group_layout,
+        );
+
+        self.scene = scene;
+        log::info!("Scene replaced: {} objects", self.scene.root_objects.len());
     }
 
     /// Configure the surface with COPY_SRC for screenshot readback.
@@ -716,14 +767,15 @@ impl EditorEngine {
     where
         F: FnOnce(&wgpu::Device, &wgpu::Queue, &wgpu::TextureView),
     {
-        // Advance character animation.
+        // Advance character animation (if present).
         let now = Instant::now();
         let dt = (now - self.last_frame_time).as_secs_f32().min(0.1);
         self.last_frame_time = now;
-        self.character.advance_and_update(
-            dt,
-            &mut self.scene.root_objects[self.character_obj_index].root_node,
-        );
+        if let (Some(character), Some(idx)) = (&mut self.character, self.character_obj_index) {
+            if idx < self.scene.root_objects.len() {
+                character.advance_and_update(dt, &mut self.scene.root_objects[idx].root_node);
+            }
+        }
 
         let camera_pos = WorldPosition::new(IVec3::ZERO, self.camera.position);
 

@@ -20,6 +20,32 @@ use crate::sculpt::SculptState;
 use crate::undo::UndoStack;
 
 use glam::Vec3;
+use rinch::prelude::Signal;
+
+/// Shared reactive revision counter for triggering UI re-renders.
+///
+/// Stored in rinch context — any component can `use_context::<UiRevision>()`
+/// and track `signal.get()` inside a `reactive_component_dom` Effect.
+/// Bumped by scene tree clicks, viewport picks, and other state mutations.
+#[derive(Clone, Copy)]
+pub struct UiRevision(pub Signal<u64>);
+
+impl UiRevision {
+    /// Create a new revision counter starting at 0.
+    pub fn new() -> Self {
+        Self(Signal::new(0u64))
+    }
+
+    /// Bump the revision to trigger UI re-renders.
+    pub fn bump(&self) {
+        self.0.update(|r| *r += 1);
+    }
+
+    /// Read the revision value (creates a reactive tracking dependency).
+    pub fn track(&self) {
+        let _ = self.0.get();
+    }
+}
 
 /// Region of the window occupied by the engine viewport (excludes UI panels).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

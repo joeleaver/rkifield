@@ -67,6 +67,16 @@ where
         ((aabb_size.z / brick_world_size).ceil() as u32).max(1),
     );
 
+    // The ray march shader (sample_voxelized) centers the grid at the object's
+    // local origin: grid_pos = local_pos + grid_size * 0.5.  We must sample the
+    // SDF at the same positions the shader will read, so the grid origin is
+    // -grid_size/2 (NOT aabb.min, which may differ due to ceil rounding).
+    let grid_origin = -Vec3::new(
+        dims.x as f32 * brick_world_size * 0.5,
+        dims.y as f32 * brick_world_size * 0.5,
+        dims.z as f32 * brick_world_size * 0.5,
+    );
+
     // Narrow-band threshold: if the SDF at brick center exceeds this,
     // no voxel in the brick can be near the surface.
     // Brick diagonal = sqrt(3) * brick_world_size ≈ 1.732 * brick_world_size.
@@ -79,7 +89,7 @@ where
     for bz in 0..dims.z {
         for by in 0..dims.y {
             for bx in 0..dims.x {
-                let brick_min = aabb.min
+                let brick_min = grid_origin
                     + Vec3::new(
                         bx as f32 * brick_world_size,
                         by as f32 * brick_world_size,
@@ -120,8 +130,8 @@ where
                 slot_idx += 1;
                 brick_map.set(bx, by, bz, slot);
 
-                // Compute brick origin in local space.
-                let brick_min = aabb.min
+                // Compute brick origin in local space (grid centered at origin).
+                let brick_min = grid_origin
                     + Vec3::new(
                         bx as f32 * brick_world_size,
                         by as f32 * brick_world_size,
