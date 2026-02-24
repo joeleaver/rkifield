@@ -566,9 +566,11 @@ impl EditorEngine {
         self.tone_map.set_mode(queue, mode);
         self.tone_map.set_exposure(queue, pp.exposure);
 
-        // Depth of field.
+        // Depth of field — max_coc=0 disables the blur.
         if pp.dof_enabled {
             self.dof.update_focus(queue, pp.dof_focus_distance, pp.dof_focus_range, pp.dof_max_coc);
+        } else {
+            self.dof.update_focus(queue, pp.dof_focus_distance, pp.dof_focus_range, 0.0);
         }
 
         // Sharpen.
