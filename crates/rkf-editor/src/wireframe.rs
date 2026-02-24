@@ -405,6 +405,88 @@ pub fn directional_light_wireframe(
     verts
 }
 
+// ── Transform gizmo wireframes ──────────────────────────────────────────────
+
+/// Axis colors: R = X, G = Y, B = Z.
+const GIZMO_X_COLOR: [f32; 4] = [1.0, 0.2, 0.2, 1.0];
+const GIZMO_Y_COLOR: [f32; 4] = [0.2, 1.0, 0.2, 1.0];
+const GIZMO_Z_COLOR: [f32; 4] = [0.3, 0.3, 1.0, 1.0];
+
+/// Build a translate gizmo: 3 axis arrows from `center` with length `size`.
+///
+/// Each axis is a line + arrowhead in its respective color (R=X, G=Y, B=Z).
+/// `size` should be proportional to camera distance for constant screen size.
+pub fn translate_gizmo_wireframe(center: Vec3, size: f32) -> Vec<LineVertex> {
+    let mut verts = Vec::new();
+    let head_len = size * 0.2;
+    let head_radius = size * 0.06;
+
+    for (axis_dir, color) in [
+        (Vec3::X, GIZMO_X_COLOR),
+        (Vec3::Y, GIZMO_Y_COLOR),
+        (Vec3::Z, GIZMO_Z_COLOR),
+    ] {
+        let tip = center + axis_dir * size;
+        // Shaft.
+        verts.push(LineVertex { position: center.to_array(), color });
+        verts.push(LineVertex { position: tip.to_array(), color });
+
+        // Arrowhead: 4 lines from tip to a base ring.
+        let tangent = if axis_dir.dot(Vec3::Y).abs() < 0.99 {
+            axis_dir.cross(Vec3::Y).normalize()
+        } else {
+            axis_dir.cross(Vec3::X).normalize()
+        };
+        let bitangent = axis_dir.cross(tangent);
+        let base = tip - axis_dir * head_len;
+
+        let step = std::f32::consts::TAU / 4.0;
+        for i in 0..4 {
+            let a = step * i as f32;
+            let p = base + (tangent * a.cos() + bitangent * a.sin()) * head_radius;
+            verts.push(LineVertex { position: tip.to_array(), color });
+            verts.push(LineVertex { position: p.to_array(), color });
+        }
+    }
+    verts
+}
+
+/// Build a rotate gizmo: 3 axis rings at `center` with radius `size`.
+pub fn rotate_gizmo_wireframe(center: Vec3, size: f32) -> Vec<LineVertex> {
+    let segs = 48;
+    let mut verts = circle_wireframe(center, Vec3::X, size, GIZMO_X_COLOR, segs);
+    verts.extend(circle_wireframe(center, Vec3::Y, size, GIZMO_Y_COLOR, segs));
+    verts.extend(circle_wireframe(center, Vec3::Z, size, GIZMO_Z_COLOR, segs));
+    verts
+}
+
+/// Build a scale gizmo: 3 axis lines with small cubes at the ends.
+pub fn scale_gizmo_wireframe(center: Vec3, size: f32) -> Vec<LineVertex> {
+    let cube_half = size * 0.06;
+    let mut verts = Vec::new();
+
+    for (axis_dir, color) in [
+        (Vec3::X, GIZMO_X_COLOR),
+        (Vec3::Y, GIZMO_Y_COLOR),
+        (Vec3::Z, GIZMO_Z_COLOR),
+    ] {
+        let tip = center + axis_dir * size;
+        // Shaft.
+        verts.push(LineVertex { position: center.to_array(), color });
+        verts.push(LineVertex { position: tip.to_array(), color });
+
+        // Small cube at the tip.
+        let min = tip - Vec3::splat(cube_half);
+        let max = tip + Vec3::splat(cube_half);
+        verts.extend(aabb_wireframe(min, max, color));
+    }
+
+    // Center cube for uniform scale.
+    let cc = Vec3::splat(cube_half * 1.2);
+    verts.extend(aabb_wireframe(center - cc, center + cc, [0.9, 0.9, 0.9, 1.0]));
+    verts
+}
+
 /// Compute the world-space AABB of a scene node tree by recursing through all children.
 ///
 /// `parent_world` is the accumulated world transform (translation + rotation + scale)

@@ -1261,7 +1261,7 @@ pub fn StatusBar() -> NodeHandle {
             "display:flex;align-items:center;width:100%;gap:16px;",
         );
 
-        let (obj_count, mode_name, selected_name, debug_name) = {
+        let (obj_count, mode_name, selected_name, debug_name, gizmo_mode_name) = {
             let es = es.lock().unwrap();
             let sel_name = es.selected_entity.as_ref().map(|sel| match sel {
                 SelectedEntity::Object(eid) => {
@@ -1282,11 +1282,17 @@ pub fn StatusBar() -> NodeHandle {
                 SelectedEntity::Scene => "Scene".to_string(),
                 SelectedEntity::Project => "Project".to_string(),
             });
+            let gizmo_name = match es.gizmo.mode {
+                crate::gizmo::GizmoMode::Translate => "Translate (W)",
+                crate::gizmo::GizmoMode::Rotate => "Rotate (E)",
+                crate::gizmo::GizmoMode::Scale => "Scale (R)",
+            };
             (
                 es.scene_tree.roots.len(),
                 es.mode.name().to_string(),
                 sel_name,
                 es.debug_mode_name().to_string(),
+                gizmo_name.to_string(),
             )
         };
         let frame_time_ms = ss.lock().map(|s| s.frame_time_ms).unwrap_or(0.0);
@@ -1323,6 +1329,14 @@ pub fn StatusBar() -> NodeHandle {
         let spacer = __scope.create_element("div");
         spacer.set_attribute("style", "flex:1;");
         container.append_child(&spacer);
+
+        // Gizmo mode indicator.
+        {
+            let gizmo_div = __scope.create_element("div");
+            gizmo_div.set_attribute("style", "color:var(--rinch-color-dimmed);");
+            gizmo_div.append_child(&__scope.create_text(&gizmo_mode_name));
+            container.append_child(&gizmo_div);
+        }
 
         // Show active tool mode (only when Sculpt/Paint active).
         if !mode_name.is_empty() {

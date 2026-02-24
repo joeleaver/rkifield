@@ -613,6 +613,31 @@ impl ApplicationHandler for App {
                             return;
                         }
 
+                        // W/E/R: switch gizmo mode (Translate/Rotate/Scale).
+                        // Only when not using right mouse (camera fly/orbit).
+                        {
+                            let right_mouse_held = self.editor_state.lock()
+                                .map(|es| es.editor_input.is_mouse_button_down(1))
+                                .unwrap_or(false);
+                            if !right_mouse_held {
+                                let gizmo_mode = match key {
+                                    WinitKeyCode::KeyW => Some(gizmo::GizmoMode::Translate),
+                                    WinitKeyCode::KeyE => Some(gizmo::GizmoMode::Rotate),
+                                    WinitKeyCode::KeyR => Some(gizmo::GizmoMode::Scale),
+                                    _ => None,
+                                };
+                                if let Some(mode) = gizmo_mode {
+                                    if let Ok(mut es) = self.editor_state.lock() {
+                                        es.gizmo.mode = mode;
+                                    }
+                                    if let Some(rev) = &self.ui_revision {
+                                        rev.bump();
+                                    }
+                                    return;
+                                }
+                            }
+                        }
+
                         // F3: cycle debug visualization mode (0-6).
                         if key == WinitKeyCode::F3 {
                             if let Ok(mut es) = self.editor_state.lock() {
@@ -852,6 +877,7 @@ impl ApplicationHandler for App {
                             _ => vec![],
                         };
                         let origin = rkf_core::WorldPosition::default();
+                        let mut gizmo_center: Option<glam::Vec3> = None;
                         for &eid in &selected_ids {
                             for obj in &engine.scene.root_objects {
                                 let obj_id = obj.id as u64;
@@ -870,6 +896,7 @@ impl ApplicationHandler for App {
                                         verts.extend(wireframe::aabb_wireframe(
                                             amin, amax, color,
                                         ));
+                                        gizmo_center = Some((amin + amax) * 0.5);
                                     }
                                 } else if let Some((child_node, child_world)) =
                                     wireframe::find_child_node_and_transform(
@@ -883,7 +910,25 @@ impl ApplicationHandler for App {
                                         verts.extend(wireframe::aabb_wireframe(
                                             amin, amax, color,
                                         ));
+                                        gizmo_center = Some((amin + amax) * 0.5);
                                     }
+                                }
+                            }
+                        }
+
+                        // Transform gizmo at the center of the selected object.
+                        if let Some(gc) = gizmo_center {
+                            let cam_dist = (gc - es.editor_camera.position).length();
+                            let gizmo_size = cam_dist * 0.12; // Constant screen size
+                            match es.gizmo.mode {
+                                gizmo::GizmoMode::Translate => {
+                                    verts.extend(wireframe::translate_gizmo_wireframe(gc, gizmo_size));
+                                }
+                                gizmo::GizmoMode::Rotate => {
+                                    verts.extend(wireframe::rotate_gizmo_wireframe(gc, gizmo_size));
+                                }
+                                gizmo::GizmoMode::Scale => {
+                                    verts.extend(wireframe::scale_gizmo_wireframe(gc, gizmo_size));
                                 }
                             }
                         }
