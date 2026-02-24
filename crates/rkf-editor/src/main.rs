@@ -157,8 +157,8 @@ impl App {
         let editor_state = Arc::new(Mutex::new(EditorState::new()));
         let shared_state = Arc::new(Mutex::new(SharedState::new(
             0, 0,
-            engine::INTERNAL_WIDTH,
-            engine::INTERNAL_HEIGHT,
+            DISPLAY_WIDTH,
+            DISPLAY_HEIGHT,
         )));
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         Self {

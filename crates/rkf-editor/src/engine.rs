@@ -253,7 +253,10 @@ pub struct EditorEngine {
     frame_index: u32,
     prev_vp: [[f32; 4]; 4],
     shade_debug_mode: u32,
+    // Screenshot readback (window-resolution, captures composited output with UI)
     readback_buffer: wgpu::Buffer,
+    window_width: u32,
+    window_height: u32,
     shared_state: Arc<Mutex<SharedState>>,
     character: AnimatedCharacter,
     character_obj_index: usize,
@@ -271,7 +274,11 @@ impl EditorEngine {
         let ctx = RenderContext::new(&instance, &surface);
 
         let size = window.inner_size();
-        let surface_format = ctx.configure_surface(&surface, size.width, size.height);
+        // Configure surface with COPY_SRC so we can read back the composited
+        // frame (engine + UI overlay) for MCP screenshots.
+        let surface_format = Self::configure_surface_copy(
+            &ctx, &surface, size.width, size.height,
+        );
 
         // Build demo scene.
         let demo = build_demo_scene();
@@ -416,16 +423,13 @@ impl EditorEngine {
         camera.pitch = -0.15;
         camera.move_speed = 5.0;
 
-        // Readback buffer for MCP screenshots.
-        let bytes_per_pixel = 4u32;
-        let unpadded_row = INTERNAL_WIDTH * bytes_per_pixel;
-        let padded_row = (unpadded_row + 255) & !255;
-        let readback_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("readback"),
-            size: (padded_row * INTERNAL_HEIGHT) as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
+        // Readback buffer for MCP screenshots — at window resolution so we
+        // capture the composited output (engine viewport + rinch UI panels).
+        let window_width = size.width.max(1);
+        let window_height = size.height.max(1);
+        let readback_buffer = Self::create_readback_buffer(
+            &ctx.device, window_width, window_height,
+        );
 
         Self {
             ctx,
@@ -464,6 +468,8 @@ impl EditorEngine {
             prev_vp: [[0.0; 4]; 4],
             shade_debug_mode: 0,
             readback_buffer,
+            window_width,
+            window_height,
             shared_state,
             character: demo.character,
             character_obj_index: demo.character_obj_index,
@@ -499,10 +505,64 @@ impl EditorEngine {
         self.shade_debug_mode = mode;
     }
 
+    /// Configure the surface with COPY_SRC for screenshot readback.
+    fn configure_surface_copy(
+        ctx: &RenderContext,
+        surface: &wgpu::Surface<'_>,
+        width: u32,
+        height: u32,
+    ) -> wgpu::TextureFormat {
+        let caps = surface.get_capabilities(&ctx.adapter);
+        let format = caps
+            .formats
+            .iter()
+            .find(|f| f.is_srgb())
+            .copied()
+            .unwrap_or(caps.formats[0]);
+
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            format,
+            width: width.max(1),
+            height: height.max(1),
+            present_mode: wgpu::PresentMode::AutoVsync,
+            alpha_mode: caps.alpha_modes[0],
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
+        surface.configure(&ctx.device, &config);
+
+        log::info!("Surface configured: {width}x{height}, format={format:?} (COPY_SRC enabled)");
+        format
+    }
+
+    /// Create a readback buffer sized for the given window dimensions.
+    fn create_readback_buffer(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Buffer {
+        let bytes_per_pixel = 4u32;
+        let unpadded_row = width * bytes_per_pixel;
+        let padded_row = (unpadded_row + 255) & !255;
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("readback"),
+            size: (padded_row * height) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        })
+    }
+
     /// Reconfigure the surface for a new window size.
     pub fn resize(&mut self, width: u32, height: u32) {
         if width > 0 && height > 0 {
-            self.ctx.configure_surface(&self.surface, width, height);
+            Self::configure_surface_copy(&self.ctx, &self.surface, width, height);
+            self.window_width = width;
+            self.window_height = height;
+            self.readback_buffer = Self::create_readback_buffer(
+                &self.ctx.device, width, height,
+            );
+            // Update SharedState dimensions for MCP screenshot encoding.
+            if let Ok(mut state) = self.shared_state.lock() {
+                state.frame_width = width;
+                state.frame_height = height;
+            }
         }
     }
 
@@ -737,19 +797,32 @@ impl EditorEngine {
             self.blit.draw(&mut encoder, &target_view);
         }
 
-        // --- Screenshot readback (on demand, before submit) ---
+        // Submit engine work.
+        self.ctx.queue.submit(std::iter::once(encoder.finish()));
+
+        // Let the caller composite overlay (e.g. rinch UI) on top.
+        // This runs after engine submit (Vello needs the queue), before present.
+        post_engine(&self.ctx.device, &self.ctx.queue, &target_view);
+
+        // --- Screenshot readback (after overlay composite, captures full UI) ---
         let do_readback = self.shared_state.lock()
             .map(|s| s.screenshot_requested)
             .unwrap_or(false);
 
-        let bytes_per_pixel = 4u32;
-        let unpadded_row = INTERNAL_WIDTH * bytes_per_pixel;
-        let padded_row = (unpadded_row + 255) & !255;
-
         if do_readback {
-            encoder.copy_texture_to_buffer(
+            let w = self.window_width;
+            let h = self.window_height;
+            let bytes_per_pixel = 4u32;
+            let unpadded_row = w * bytes_per_pixel;
+            let padded_row = (unpadded_row + 255) & !255;
+
+            // Copy from composited swapchain texture to readback buffer.
+            let mut readback_enc = self.ctx.device.create_command_encoder(
+                &wgpu::CommandEncoderDescriptor { label: Some("screenshot_readback") },
+            );
+            readback_enc.copy_texture_to_buffer(
                 wgpu::TexelCopyTextureInfo {
-                    texture: &self.cosmetics.output_texture,
+                    texture: &frame.texture,
                     mip_level: 0,
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
@@ -759,28 +832,18 @@ impl EditorEngine {
                     layout: wgpu::TexelCopyBufferLayout {
                         offset: 0,
                         bytes_per_row: Some(padded_row),
-                        rows_per_image: Some(INTERNAL_HEIGHT),
+                        rows_per_image: Some(h),
                     },
                 },
                 wgpu::Extent3d {
-                    width: INTERNAL_WIDTH,
-                    height: INTERNAL_HEIGHT,
+                    width: w,
+                    height: h,
                     depth_or_array_layers: 1,
                 },
             );
-        }
+            self.ctx.queue.submit(std::iter::once(readback_enc.finish()));
 
-        // Submit engine work.
-        self.ctx.queue.submit(std::iter::once(encoder.finish()));
-
-        // Let the caller composite overlay (e.g. rinch UI) on top.
-        // This runs after engine submit (Vello needs the queue), before present.
-        post_engine(&self.ctx.device, &self.ctx.queue, &target_view);
-
-        frame.present();
-
-        // Read back pixels for MCP screenshots.
-        if do_readback {
+            // Map and read back the pixels.
             let buffer_slice = self.readback_buffer.slice(..);
             let (tx, rx) = std::sync::mpsc::channel();
             buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
@@ -790,21 +853,35 @@ impl EditorEngine {
 
             if let Ok(Ok(())) = rx.recv() {
                 let data = buffer_slice.get_mapped_range();
-                let pixel_count = (INTERNAL_WIDTH * INTERNAL_HEIGHT) as usize;
+                let pixel_count = (w * h) as usize;
                 let mut rgba8 = vec![0u8; pixel_count * 4];
+                let is_bgra = matches!(
+                    self.surface_format,
+                    wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+                );
 
-                for y in 0..INTERNAL_HEIGHT as usize {
+                for y in 0..h as usize {
                     let src_row_offset = y * padded_row as usize;
-                    let dst_row_offset = y * INTERNAL_WIDTH as usize * 4;
-                    let row_bytes = INTERNAL_WIDTH as usize * 4;
+                    let dst_row_offset = y * w as usize * 4;
+                    let row_bytes = w as usize * 4;
                     rgba8[dst_row_offset..dst_row_offset + row_bytes]
                         .copy_from_slice(&data[src_row_offset..src_row_offset + row_bytes]);
                 }
+
+                // Convert BGRA → RGBA if the surface format is BGRA.
+                if is_bgra {
+                    for pixel in rgba8.chunks_exact_mut(4) {
+                        pixel.swap(0, 2);
+                    }
+                }
+
                 drop(data);
                 self.readback_buffer.unmap();
 
                 if let Ok(mut state) = self.shared_state.lock() {
                     state.frame_pixels = rgba8;
+                    state.frame_width = w;
+                    state.frame_height = h;
                     state.screenshot_requested = false;
                 }
             } else {
@@ -814,6 +891,8 @@ impl EditorEngine {
                 }
             }
         }
+
+        frame.present();
 
         self.frame_index += 1;
     }
