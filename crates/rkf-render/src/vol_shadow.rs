@@ -122,10 +122,13 @@ impl VolShadowPass {
     ///
     /// The volume is initially centered on the world origin with the sun
     /// direction set to `(0, -1, 0.5)` (normalized).
+    ///
+    /// `coarse_field_bind_group_layout` is the bind group layout for the
+    /// v2 coarse acceleration field (texture_3d + sampler + uniform).
     pub fn new(
         device: &wgpu::Device,
         _queue: &wgpu::Queue,
-        scene_bind_group_layout: &wgpu::BindGroupLayout,
+        coarse_field_bind_group_layout: &wgpu::BindGroupLayout,
     ) -> Self {
         // --- Shader ---
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -234,7 +237,7 @@ impl VolShadowPass {
         let pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("vol shadow pipeline layout"),
-                bind_group_layouts: &[&bind_group_layout, scene_bind_group_layout],
+                bind_group_layouts: &[&bind_group_layout, coarse_field_bind_group_layout],
                 push_constant_ranges: &[],
             });
 
@@ -321,13 +324,16 @@ impl VolShadowPass {
     ///
     /// Workgroup size is 4×4×4; dispatches
     /// `(dim_x.div_ceil(4), dim_y.div_ceil(4), dim_z.div_ceil(4))` groups.
+    ///
+    /// `coarse_field_bind_group` is the v2 coarse acceleration field bind group
+    /// (texture_3d + sampler + uniform), used by the shader for geometry detection.
     pub fn dispatch(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         queue: &wgpu::Queue,
         camera_pos: [f32; 3],
         sun_dir: [f32; 3],
-        scene_bind_group: &wgpu::BindGroup,
+        coarse_field_bind_group: &wgpu::BindGroup,
     ) {
         self.update_params(queue, camera_pos, sun_dir);
 
@@ -337,7 +343,7 @@ impl VolShadowPass {
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
-        pass.set_bind_group(1, scene_bind_group, &[]);
+        pass.set_bind_group(1, coarse_field_bind_group, &[]);
         pass.dispatch_workgroups(
             VOL_SHADOW_DIM_X.div_ceil(4),
             VOL_SHADOW_DIM_Y.div_ceil(4),
