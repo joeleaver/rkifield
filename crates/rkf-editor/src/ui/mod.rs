@@ -552,12 +552,82 @@ pub fn TitleBar() -> NodeHandle {
     wrapper
 }
 
+// ── Slider helper ───────────────────────────────────────────────────────────
+
+/// Build a labeled slider row and append it to the container.
+///
+/// Creates a row with label + reactive value display on top and a Slider beneath.
+/// The slider updates `signal` on drag (fine-grained, no revision bump) and
+/// calls `on_update` to write back to editor state.
+fn build_slider_row(
+    scope: &mut RenderScope,
+    container: &NodeHandle,
+    label: &str,
+    suffix: &str,
+    signal: Signal<f64>,
+    min: f64,
+    max: f64,
+    step: f64,
+    decimals: usize,
+    on_update: impl Fn(f64) + 'static,
+) {
+    let row = scope.create_element("div");
+    row.set_attribute("style", "padding:3px 12px;");
+
+    // Label + reactive value display.
+    let label_row = scope.create_element("div");
+    label_row.set_attribute(
+        "style",
+        "display:flex;justify-content:space-between;\
+         font-size:11px;color:var(--rinch-color-dimmed);margin-bottom:2px;",
+    );
+    label_row.append_child(&scope.create_text(label));
+
+    let val_span = scope.create_element("span");
+    val_span.set_attribute(
+        "style",
+        "font-family:var(--rinch-font-family-monospace);",
+    );
+    {
+        let val_h = val_span.clone();
+        let suffix = suffix.to_string();
+        Effect::new(move || {
+            let v = signal.get();
+            let text = match decimals {
+                0 => format!("{v:.0}{suffix}"),
+                1 => format!("{v:.1}{suffix}"),
+                _ => format!("{v:.2}{suffix}"),
+            };
+            val_h.set_text(&text);
+        });
+    }
+    label_row.append_child(&val_span);
+    row.append_child(&label_row);
+
+    // Slider component.
+    let slider = Slider {
+        min: Some(min),
+        max: Some(max),
+        step: Some(step),
+        value_signal: Some(signal),
+        size: "xs".to_string(),
+        onchange: Some(ValueCallback::new(move |v: f64| {
+            signal.set(v);
+            on_update(v);
+        })),
+        ..Default::default()
+    };
+    row.append_child(&slider.render(scope, &[]));
+    container.append_child(&row);
+}
+
 // ── Mode-dependent right panel ──────────────────────────────────────────────
 
 /// Right panel — always shows properties of the selected object.
 ///
 /// When a Sculpt/Paint tool is active, shows brush settings above the
-/// properties section (placeholder for now).
+/// properties section (placeholder for now). Camera selection shows
+/// interactive FOV, fly speed, near/far sliders.
 #[component]
 pub fn RightPanel() -> NodeHandle {
     let editor_state = use_context::<Arc<Mutex<EditorState>>>();
@@ -568,6 +638,12 @@ pub fn RightPanel() -> NodeHandle {
         "style",
         "flex:1;overflow-y:auto;display:flex;flex-direction:column;",
     );
+
+    // Persistent signals for camera sliders (survive reactive rebuilds).
+    let fov_signal: Signal<f64> = Signal::new(70.0);
+    let speed_signal: Signal<f64> = Signal::new(5.0);
+    let near_signal: Signal<f64> = Signal::new(0.1);
+    let far_signal: Signal<f64> = Signal::new(1000.0);
 
     let es = editor_state.clone();
     rinch::core::reactive_component_dom(__scope, &root, move |__scope| {
@@ -636,76 +712,132 @@ pub fn RightPanel() -> NodeHandle {
         header.append_child(&__scope.create_text("Properties"));
         container.append_child(&header);
 
-        // Gather display info based on selected entity.
-        let info = selected_entity.and_then(|sel| {
-            let es = es.lock().ok()?;
-            match sel {
-                SelectedEntity::Object(eid) => {
-                    let node = es.scene_tree.find_node(eid)?;
-                    Some((node.name.clone(), format!("Entity ID: {eid}"), node.children.len()))
-                }
-                SelectedEntity::Light(lid) => {
-                    let light = es.light_editor.get_light(lid)?;
-                    let type_name = match light.light_type {
-                        crate::light_editor::EditorLightType::Point => "Point Light",
-                        crate::light_editor::EditorLightType::Spot => "Spot Light",
-                        crate::light_editor::EditorLightType::Directional => "Directional Light",
-                    };
-                    Some((
-                        type_name.to_string(),
-                        format!("Intensity: {:.2}  Range: {:.1}", light.intensity, light.range),
-                        0,
-                    ))
-                }
-                SelectedEntity::Camera => {
-                    let pos = es.editor_camera.position;
-                    Some((
-                        "Camera".to_string(),
-                        format!("Pos: ({:.1}, {:.1}, {:.1})", pos.x, pos.y, pos.z),
-                        0,
-                    ))
-                }
-                SelectedEntity::Scene => {
-                    let name = es.v2_scene.as_ref()
-                        .map(|s| s.name.clone())
-                        .unwrap_or_else(|| "Scene".to_string());
-                    Some((name, format!("{} objects", es.scene_tree.roots.len()), 0))
-                }
-                SelectedEntity::Project => {
-                    Some(("Project".to_string(), String::new(), 0))
-                }
-            }
-        });
+        // ── Camera-specific property editing with sliders ──
+        if let Some(SelectedEntity::Camera) = selected_entity {
+            // Sync persistent signals from current editor state.
+            let pos = {
+                let es = es.lock().unwrap();
+                fov_signal.set(es.editor_camera.fov_y.to_degrees() as f64);
+                speed_signal.set(es.editor_camera.fly_speed as f64);
+                near_signal.set(es.editor_camera.near as f64);
+                far_signal.set(es.editor_camera.far as f64);
+                es.editor_camera.position
+            };
 
-        if let Some((name, detail, child_count)) = info {
             let name_row = __scope.create_element("div");
             name_row.set_attribute("style", SECTION_STYLE);
-            name_row.append_child(&__scope.create_text(&name));
+            name_row.append_child(&__scope.create_text("Camera"));
             container.append_child(&name_row);
 
-            if !detail.is_empty() {
-                let detail_row = __scope.create_element("div");
-                detail_row.set_attribute("style", VALUE_STYLE);
-                detail_row.append_child(&__scope.create_text(&detail));
-                container.append_child(&detail_row);
-            }
-
-            if child_count > 0 {
-                let cr = __scope.create_element("div");
-                cr.set_attribute("style", VALUE_STYLE);
-                cr.append_child(
-                    &__scope.create_text(&format!("Children: {child_count}")),
-                );
-                container.append_child(&cr);
-            }
-        } else {
-            let msg = __scope.create_element("div");
-            msg.set_attribute(
-                "style",
-                &format!("{SECTION_STYLE}color:var(--rinch-color-placeholder);"),
+            build_slider_row(
+                __scope, &container, "FOV", "\u{00b0}", fov_signal,
+                30.0, 120.0, 1.0, 0,
+                { let es = es.clone(); move |v| {
+                    if let Ok(mut es) = es.lock() { es.editor_camera.fov_y = (v as f32).to_radians(); }
+                }},
             );
-            msg.append_child(&__scope.create_text("No object selected"));
-            container.append_child(&msg);
+            build_slider_row(
+                __scope, &container, "Fly Speed", "", speed_signal,
+                0.5, 50.0, 0.5, 1,
+                { let es = es.clone(); move |v| {
+                    if let Ok(mut es) = es.lock() { es.editor_camera.fly_speed = v as f32; }
+                }},
+            );
+            build_slider_row(
+                __scope, &container, "Near Plane", "", near_signal,
+                0.01, 10.0, 0.01, 2,
+                { let es = es.clone(); move |v| {
+                    if let Ok(mut es) = es.lock() { es.editor_camera.near = v as f32; }
+                }},
+            );
+            build_slider_row(
+                __scope, &container, "Far Plane", "", far_signal,
+                100.0, 10000.0, 100.0, 0,
+                { let es = es.clone(); move |v| {
+                    if let Ok(mut es) = es.lock() { es.editor_camera.far = v as f32; }
+                }},
+            );
+
+            // Divider before position.
+            let div = __scope.create_element("div");
+            div.set_attribute(
+                "style",
+                "height:1px;background:var(--rinch-color-border);margin:6px 12px;",
+            );
+            container.append_child(&div);
+
+            // Position (read-only).
+            let pos_row = __scope.create_element("div");
+            pos_row.set_attribute("style", VALUE_STYLE);
+            pos_row.append_child(&__scope.create_text(
+                &format!("Pos: ({:.1}, {:.1}, {:.1})", pos.x, pos.y, pos.z),
+            ));
+            container.append_child(&pos_row);
+        } else {
+            // ── Generic info display for non-camera entities ──
+            let info = selected_entity.and_then(|sel| {
+                let es = es.lock().ok()?;
+                match sel {
+                    SelectedEntity::Object(eid) => {
+                        let node = es.scene_tree.find_node(eid)?;
+                        Some((node.name.clone(), format!("Entity ID: {eid}"), node.children.len()))
+                    }
+                    SelectedEntity::Light(lid) => {
+                        let light = es.light_editor.get_light(lid)?;
+                        let type_name = match light.light_type {
+                            crate::light_editor::EditorLightType::Point => "Point Light",
+                            crate::light_editor::EditorLightType::Spot => "Spot Light",
+                            crate::light_editor::EditorLightType::Directional => "Directional Light",
+                        };
+                        Some((
+                            type_name.to_string(),
+                            format!("Intensity: {:.2}  Range: {:.1}", light.intensity, light.range),
+                            0,
+                        ))
+                    }
+                    SelectedEntity::Camera => unreachable!(),
+                    SelectedEntity::Scene => {
+                        let name = es.v2_scene.as_ref()
+                            .map(|s| s.name.clone())
+                            .unwrap_or_else(|| "Scene".to_string());
+                        Some((name, format!("{} objects", es.scene_tree.roots.len()), 0))
+                    }
+                    SelectedEntity::Project => {
+                        Some(("Project".to_string(), String::new(), 0))
+                    }
+                }
+            });
+
+            if let Some((name, detail, child_count)) = info {
+                let name_row = __scope.create_element("div");
+                name_row.set_attribute("style", SECTION_STYLE);
+                name_row.append_child(&__scope.create_text(&name));
+                container.append_child(&name_row);
+
+                if !detail.is_empty() {
+                    let detail_row = __scope.create_element("div");
+                    detail_row.set_attribute("style", VALUE_STYLE);
+                    detail_row.append_child(&__scope.create_text(&detail));
+                    container.append_child(&detail_row);
+                }
+
+                if child_count > 0 {
+                    let cr = __scope.create_element("div");
+                    cr.set_attribute("style", VALUE_STYLE);
+                    cr.append_child(
+                        &__scope.create_text(&format!("Children: {child_count}")),
+                    );
+                    container.append_child(&cr);
+                }
+            } else {
+                let msg = __scope.create_element("div");
+                msg.set_attribute(
+                    "style",
+                    &format!("{SECTION_STYLE}color:var(--rinch-color-placeholder);"),
+                );
+                msg.append_child(&__scope.create_text("No object selected"));
+                container.append_child(&msg);
+            }
         }
 
         container
