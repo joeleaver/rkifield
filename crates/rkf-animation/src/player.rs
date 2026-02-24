@@ -245,8 +245,8 @@ mod tests {
 
     fn make_blend_shape_set() -> BlendShapeSet {
         BlendShapeSet::new(vec![
-            BlendShape::new("smile", 0, 1, default_aabb()),
-            BlendShape::new("blink", 1, 1, default_aabb()),
+            BlendShape::new("smile", "Head", 0, 1, default_aabb()),
+            BlendShape::new("blink", "Head", 1, 1, default_aabb()),
         ])
     }
 

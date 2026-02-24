@@ -1,6 +1,7 @@
 //! Blend shape (morph target) support for facial and body deformation.
 //!
-//! Blend shapes are **additive distance offsets** applied to the base SDF:
+//! Blend shapes are **additive distance offsets** applied to a SceneNode's
+//! base SDF during ray march evaluation:
 //! ```text
 //! final_distance = base_distance
 //!     + weight_smile * smile_delta
@@ -9,8 +10,9 @@
 //! ```
 //!
 //! Each blend shape stores a delta-SDF as sparse bricks covering only the
-//! affected region. They are applied during head segment rebaking — only
-//! active blend shapes (non-zero weight) are evaluated.
+//! affected region. They target a specific SceneNode (`target_node`) and
+//! modify that node's voxelized SDF data. Only active blend shapes (non-zero
+//! weight) are evaluated.
 
 use rkf_core::aabb::Aabb;
 
@@ -19,12 +21,15 @@ use rkf_core::aabb::Aabb;
 /// A blend shape (morph target) for facial/body deformation.
 ///
 /// Each blend shape stores a delta-SDF: sparse bricks containing distance
-/// offsets from the base SDF. When active (weight > 0), the delta is added
-/// to the base distance during head segment rebaking.
+/// offsets from a SceneNode's base SDF. When active (weight > 0), the delta
+/// is added to the base distance during ray march evaluation of the target node.
 #[derive(Debug, Clone)]
 pub struct BlendShape {
     /// Name of the blend shape (e.g., "smile", "blink_L").
     pub name: String,
+    /// Name of the SceneNode this blend shape targets.
+    /// The delta-SDF modifies this node's voxelized brick data.
+    pub target_node: String,
     /// Current weight (0.0 = inactive, 1.0 = fully active).
     pub weight: f32,
     /// Start offset into the blend shape brick pool region.
@@ -37,14 +42,18 @@ pub struct BlendShape {
 
 impl BlendShape {
     /// Create a new blend shape with weight initialised to 0.0.
+    ///
+    /// `target_node` is the name of the SceneNode whose SDF this blend shape modifies.
     pub fn new(
         name: impl Into<String>,
+        target_node: impl Into<String>,
         brick_offset: u32,
         brick_count: u32,
         bounding_box: Aabb,
     ) -> Self {
         Self {
             name: name.into(),
+            target_node: target_node.into(),
             weight: 0.0,
             brick_offset,
             brick_count,
@@ -103,6 +112,14 @@ impl BlendShapeSet {
         } else {
             false
         }
+    }
+
+    /// Get active blend shapes targeting a specific SceneNode.
+    pub fn active_shapes_for_node(&self, node_name: &str) -> Vec<&BlendShape> {
+        self.shapes
+            .iter()
+            .filter(|s| s.is_active() && s.target_node == node_name)
+            .collect()
     }
 
     /// Reset all weights to zero.
@@ -211,8 +228,9 @@ mod tests {
     #[test]
     fn blend_shape_new_sets_correct_fields() {
         let bb = make_aabb(Vec3::new(1.0, 2.0, 3.0), Vec3::new(4.0, 5.0, 6.0));
-        let bs = BlendShape::new("smile", 10, 5, bb);
+        let bs = BlendShape::new("smile", "Head", 10, 5, bb);
         assert_eq!(bs.name, "smile");
+        assert_eq!(bs.target_node, "Head");
         assert_eq!(bs.weight, 0.0);
         assert_eq!(bs.brick_offset, 10);
         assert_eq!(bs.brick_count, 5);
@@ -222,48 +240,48 @@ mod tests {
 
     #[test]
     fn blend_shape_is_active_false_at_zero() {
-        let bs = BlendShape::new("blink_L", 0, 1, default_aabb());
+        let bs = BlendShape::new("blink_L", "Head", 0, 1, default_aabb());
         assert!(!bs.is_active());
     }
 
     #[test]
     fn blend_shape_is_active_true_at_half() {
-        let mut bs = BlendShape::new("blink_L", 0, 1, default_aabb());
+        let mut bs = BlendShape::new("blink_L", "Head", 0, 1, default_aabb());
         bs.weight = 0.5;
         assert!(bs.is_active());
     }
 
     #[test]
     fn blend_shape_is_active_true_at_tiny_nonzero() {
-        let mut bs = BlendShape::new("blink_R", 0, 1, default_aabb());
+        let mut bs = BlendShape::new("blink_R", "Head", 0, 1, default_aabb());
         bs.weight = 1e-5; // above 1e-6 threshold
         assert!(bs.is_active());
     }
 
     #[test]
     fn blend_shape_is_active_false_below_epsilon() {
-        let mut bs = BlendShape::new("blink_R", 0, 1, default_aabb());
+        let mut bs = BlendShape::new("blink_R", "Head", 0, 1, default_aabb());
         bs.weight = 1e-7; // below 1e-6 threshold
         assert!(!bs.is_active());
     }
 
     #[test]
     fn blend_shape_set_weight_clamps_above_one() {
-        let mut bs = BlendShape::new("jaw_open", 0, 2, default_aabb());
+        let mut bs = BlendShape::new("jaw_open", "Head", 0, 2, default_aabb());
         bs.set_weight(1.5);
         assert!((bs.weight - 1.0).abs() < 1e-6);
     }
 
     #[test]
     fn blend_shape_set_weight_clamps_below_zero() {
-        let mut bs = BlendShape::new("jaw_open", 0, 2, default_aabb());
+        let mut bs = BlendShape::new("jaw_open", "Head", 0, 2, default_aabb());
         bs.set_weight(-0.5);
         assert!(bs.weight.abs() < 1e-6);
     }
 
     #[test]
     fn blend_shape_set_weight_midrange_unchanged() {
-        let mut bs = BlendShape::new("brow_up", 0, 3, default_aabb());
+        let mut bs = BlendShape::new("brow_up", "Head", 0, 3, default_aabb());
         bs.set_weight(0.75);
         assert!((bs.weight - 0.75).abs() < 1e-6);
     }
@@ -272,9 +290,9 @@ mod tests {
 
     fn make_set() -> BlendShapeSet {
         let shapes = vec![
-            BlendShape::new("smile", 0, 4, make_aabb(Vec3::ZERO, Vec3::ONE)),
-            BlendShape::new("blink_L", 4, 2, make_aabb(Vec3::new(1.0, 0.0, 0.0), Vec3::new(2.0, 1.0, 1.0))),
-            BlendShape::new("blink_R", 6, 2, make_aabb(Vec3::new(2.0, 0.0, 0.0), Vec3::new(3.0, 1.0, 1.0))),
+            BlendShape::new("smile", "Head", 0, 4, make_aabb(Vec3::ZERO, Vec3::ONE)),
+            BlendShape::new("blink_L", "Head", 4, 2, make_aabb(Vec3::new(1.0, 0.0, 0.0), Vec3::new(2.0, 1.0, 1.0))),
+            BlendShape::new("blink_R", "Head", 6, 2, make_aabb(Vec3::new(2.0, 0.0, 0.0), Vec3::new(3.0, 1.0, 1.0))),
         ];
         BlendShapeSet::new(shapes)
     }
@@ -376,12 +394,41 @@ mod tests {
         assert!((bb.max.x - 2.0).abs() < 1e-6);
     }
 
+    // ── active_shapes_for_node ──────────────────────────────────────────────
+
+    #[test]
+    fn blend_shape_set_active_shapes_for_node_filters_by_target() {
+        let shapes = vec![
+            BlendShape::new("smile", "Head", 0, 4, make_aabb(Vec3::ZERO, Vec3::ONE)),
+            BlendShape::new("flex_L", "UpperArm_L", 4, 2, make_aabb(Vec3::ZERO, Vec3::ONE)),
+            BlendShape::new("blink", "Head", 6, 1, make_aabb(Vec3::ZERO, Vec3::ONE)),
+        ];
+        let mut set = BlendShapeSet::new(shapes);
+
+        // Activate smile and blink (both target Head), and flex_L (targets UpperArm_L).
+        set.shapes[0].weight = 1.0;
+        set.shapes[1].weight = 0.5;
+        set.shapes[2].weight = 0.3;
+
+        let head_shapes = set.active_shapes_for_node("Head");
+        assert_eq!(head_shapes.len(), 2);
+        assert!(head_shapes.iter().any(|s| s.name == "smile"));
+        assert!(head_shapes.iter().any(|s| s.name == "blink"));
+
+        let arm_shapes = set.active_shapes_for_node("UpperArm_L");
+        assert_eq!(arm_shapes.len(), 1);
+        assert_eq!(arm_shapes[0].name, "flex_L");
+
+        let none_shapes = set.active_shapes_for_node("Chest");
+        assert!(none_shapes.is_empty());
+    }
+
     // ── BlendShapeGpu ─────────────────────────────────────────────────────────
 
     #[test]
     fn blend_shape_gpu_from_blend_shape_produces_correct_fields() {
         let bb = make_aabb(Vec3::new(1.0, 2.0, 3.0), Vec3::new(7.0, 8.0, 9.0));
-        let mut bs = BlendShape::new("test", 42, 7, bb);
+        let mut bs = BlendShape::new("test", "Head", 42, 7, bb);
         bs.weight = 0.35;
 
         let gpu = BlendShapeGpu::from_blend_shape(&bs);
@@ -399,7 +446,7 @@ mod tests {
     #[test]
     fn blend_shape_gpu_is_pod_bytemuck_round_trip() {
         let bb = make_aabb(Vec3::new(-1.0, -2.0, -3.0), Vec3::new(4.0, 5.0, 6.0));
-        let mut bs = BlendShape::new("pod_test", 100, 3, bb);
+        let mut bs = BlendShape::new("pod_test", "Head", 100, 3, bb);
         bs.weight = 0.9;
 
         let gpu = BlendShapeGpu::from_blend_shape(&bs);
