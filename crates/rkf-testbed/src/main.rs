@@ -194,7 +194,7 @@ fn build_demo_scene() -> DemoScene {
     let skeleton = build_humanoid_skeleton();
     let visuals = build_humanoid_visuals(5); // material 5 = skin-like
     let walk_clip = build_walk_clip();
-    let character = AnimatedCharacter::new(skeleton, visuals, walk_clip, 0.05);
+    let character = AnimatedCharacter::new(skeleton, visuals, walk_clip, 0.08);
     let char_root = character.build_scene_node();
     let char_obj = SceneObject {
         id: 0,

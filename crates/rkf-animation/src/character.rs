@@ -216,17 +216,26 @@ pub fn transform_aabb(aabb: &Aabb, mat: &Mat4) -> Aabb {
 ///     13: LowerLeg_R
 /// ```
 pub fn build_humanoid_skeleton() -> Skeleton {
+    use std::f32::consts::FRAC_PI_2;
+
+    // Arm bones need rotation so capsules (Y-axis aligned) point along the arm
+    // direction (X-axis). Children inherit the parent's rotation, so only the
+    // upper arm bones carry an explicit rotation; child translations are expressed
+    // in the parent's rotated local frame (local +Y = arm extension direction).
+    let left_arm_rot = Quat::from_rotation_z(FRAC_PI_2);   // local Y → parent -X
+    let right_arm_rot = Quat::from_rotation_z(-FRAC_PI_2);  // local Y → parent +X
+
     let bones = vec![
         make_bone("Hips", Vec3::new(0.0, 0.9, 0.0)),
         make_bone("Spine", Vec3::new(0.0, 0.15, 0.0)),
         make_bone("Chest", Vec3::new(0.0, 0.15, 0.0)),
         make_bone("Head", Vec3::new(0.0, 0.2, 0.0)),
-        make_bone("UpperArm_L", Vec3::new(-0.18, 0.0, 0.0)),
-        make_bone("LowerArm_L", Vec3::new(-0.22, 0.0, 0.0)),
-        make_bone("Hand_L", Vec3::new(-0.18, 0.0, 0.0)),
-        make_bone("UpperArm_R", Vec3::new(0.18, 0.0, 0.0)),
-        make_bone("LowerArm_R", Vec3::new(0.22, 0.0, 0.0)),
-        make_bone("Hand_R", Vec3::new(0.18, 0.0, 0.0)),
+        make_bone_rotated("UpperArm_L", Vec3::new(-0.18, 0.0, 0.0), left_arm_rot),
+        make_bone("LowerArm_L", Vec3::new(0.0, 0.22, 0.0)),  // local +Y = further along arm
+        make_bone("Hand_L", Vec3::new(0.0, 0.18, 0.0)),
+        make_bone_rotated("UpperArm_R", Vec3::new(0.18, 0.0, 0.0), right_arm_rot),
+        make_bone("LowerArm_R", Vec3::new(0.0, 0.22, 0.0)),
+        make_bone("Hand_R", Vec3::new(0.0, 0.18, 0.0)),
         make_bone("UpperLeg_L", Vec3::new(-0.1, -0.05, 0.0)),
         make_bone("LowerLeg_L", Vec3::new(0.0, -0.35, 0.0)),
         make_bone("UpperLeg_R", Vec3::new(0.1, -0.05, 0.0)),
@@ -276,9 +285,14 @@ pub fn build_humanoid_visuals(material_id: u16) -> Vec<BoneVisual> {
 /// Build a simple walk animation for the humanoid skeleton.
 pub fn build_walk_clip() -> AnimationClip {
     use crate::clip::{BoneChannel, Keyframe};
-    use std::f32::consts::PI;
+    use std::f32::consts::{FRAC_PI_2, PI};
 
     let dur = 1.0; // 1 second per cycle
+
+    // Arm bind rotations must be composed into animation keyframes because
+    // evaluate_local() completely replaces the node's local_transform.
+    let left_arm_bind = Quat::from_rotation_z(FRAC_PI_2);
+    let right_arm_bind = Quat::from_rotation_z(-FRAC_PI_2);
 
     AnimationClip::new(
         "walk".to_string(),
@@ -295,22 +309,22 @@ pub fn build_walk_clip() -> AnimationClip {
                     Keyframe { time: dur, position: Vec3::new(0.0, 0.9, 0.0), rotation: Quat::IDENTITY, scale: Vec3::ONE },
                 ],
             },
-            // UpperArm_L: swing forward/back around X.
+            // UpperArm_L: swing forward/back around X, composed with bind rotation.
             BoneChannel {
                 bone_index: 4,
                 keyframes: vec![
-                    Keyframe { time: 0.0, position: Vec3::new(-0.18, 0.0, 0.0), rotation: Quat::from_rotation_x(PI / 8.0), scale: Vec3::ONE },
-                    Keyframe { time: dur * 0.5, position: Vec3::new(-0.18, 0.0, 0.0), rotation: Quat::from_rotation_x(-PI / 8.0), scale: Vec3::ONE },
-                    Keyframe { time: dur, position: Vec3::new(-0.18, 0.0, 0.0), rotation: Quat::from_rotation_x(PI / 8.0), scale: Vec3::ONE },
+                    Keyframe { time: 0.0, position: Vec3::new(-0.18, 0.0, 0.0), rotation: left_arm_bind * Quat::from_rotation_x(PI / 8.0), scale: Vec3::ONE },
+                    Keyframe { time: dur * 0.5, position: Vec3::new(-0.18, 0.0, 0.0), rotation: left_arm_bind * Quat::from_rotation_x(-PI / 8.0), scale: Vec3::ONE },
+                    Keyframe { time: dur, position: Vec3::new(-0.18, 0.0, 0.0), rotation: left_arm_bind * Quat::from_rotation_x(PI / 8.0), scale: Vec3::ONE },
                 ],
             },
-            // UpperArm_R: opposite phase to L.
+            // UpperArm_R: opposite phase to L, composed with bind rotation.
             BoneChannel {
                 bone_index: 7,
                 keyframes: vec![
-                    Keyframe { time: 0.0, position: Vec3::new(0.18, 0.0, 0.0), rotation: Quat::from_rotation_x(-PI / 8.0), scale: Vec3::ONE },
-                    Keyframe { time: dur * 0.5, position: Vec3::new(0.18, 0.0, 0.0), rotation: Quat::from_rotation_x(PI / 8.0), scale: Vec3::ONE },
-                    Keyframe { time: dur, position: Vec3::new(0.18, 0.0, 0.0), rotation: Quat::from_rotation_x(-PI / 8.0), scale: Vec3::ONE },
+                    Keyframe { time: 0.0, position: Vec3::new(0.18, 0.0, 0.0), rotation: right_arm_bind * Quat::from_rotation_x(-PI / 8.0), scale: Vec3::ONE },
+                    Keyframe { time: dur * 0.5, position: Vec3::new(0.18, 0.0, 0.0), rotation: right_arm_bind * Quat::from_rotation_x(PI / 8.0), scale: Vec3::ONE },
+                    Keyframe { time: dur, position: Vec3::new(0.18, 0.0, 0.0), rotation: right_arm_bind * Quat::from_rotation_x(-PI / 8.0), scale: Vec3::ONE },
                 ],
             },
             // UpperLeg_L: swing forward/back.
@@ -361,6 +375,15 @@ use crate::skeleton::Bone;
 
 fn make_bone(name: &str, translation: Vec3) -> Bone {
     let bind = glam::Mat4::from_translation(translation);
+    Bone {
+        name: name.to_string(),
+        bind_transform: bind,
+        inverse_bind: bind.inverse(),
+    }
+}
+
+fn make_bone_rotated(name: &str, translation: Vec3, rotation: Quat) -> Bone {
+    let bind = Mat4::from_rotation_translation(rotation, translation);
     Bone {
         name: name.to_string(),
         bind_transform: bind,
