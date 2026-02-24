@@ -254,6 +254,12 @@ pub struct EditorEngine {
     frame_index: u32,
     prev_vp: [[f32; 4]; 4],
     shade_debug_mode: u32,
+    // Cached environment vol params (updated by apply_environment).
+    env_sun_dir: [f32; 3],
+    env_sun_color: [f32; 3],
+    env_fog_color: [f32; 3],
+    env_fog_density: f32,
+    env_fog_height_falloff: f32,
     // Render resolution (tracks viewport physical pixels)
     render_width: u32,
     render_height: u32,
@@ -472,6 +478,16 @@ impl EditorEngine {
             frame_index: 0,
             prev_vp: [[0.0; 4]; 4],
             shade_debug_mode: 0,
+            // Matches EnvironmentState defaults; first frame apply_environment
+            // overwrites these with actual data model values.
+            env_sun_dir: {
+                let d = glam::Vec3::new(0.0, -1.0, 0.3).normalize();
+                [d.x, d.y, d.z]
+            },
+            env_sun_color: [1.0, 0.95, 0.9], // sun_color * sun_intensity (1.0)
+            env_fog_color: [0.7, 0.75, 0.8],
+            env_fog_density: 0.0, // fog disabled by default
+            env_fog_height_falloff: 0.1,
             render_width: INTERNAL_WIDTH,
             render_height: INTERNAL_HEIGHT,
             readback_buffer,
@@ -510,6 +526,39 @@ impl EditorEngine {
     /// Set the shading debug mode (0=normal, 1=normals, 2=positions, etc).
     pub fn set_debug_mode(&mut self, mode: u32) {
         self.shade_debug_mode = mode;
+    }
+
+    /// Apply environment settings to the render pipeline.
+    ///
+    /// Updates volumetric params (sun, fog) and post-processing passes (bloom,
+    /// exposure) from the editor's `EnvironmentState`. Only writes to the GPU
+    /// when the environment is marked dirty, then clears the flag.
+    pub fn apply_environment(&mut self, env: &mut crate::environment::EnvironmentState) {
+        if !env.is_dirty() {
+            return;
+        }
+
+        // Cache vol params for use in render_frame_inner.
+        let atmo = &env.atmosphere;
+        self.env_sun_dir = [atmo.sun_direction.x, atmo.sun_direction.y, atmo.sun_direction.z];
+        let sc = atmo.sun_color * atmo.sun_intensity;
+        self.env_sun_color = [sc.x, sc.y, sc.z];
+
+        let fog = &env.fog;
+        self.env_fog_color = [fog.color.x, fog.color.y, fog.color.z];
+        self.env_fog_density = if fog.enabled { fog.density } else { 0.0 };
+        self.env_fog_height_falloff = fog.height_falloff;
+
+        let queue = &self.ctx.queue;
+
+        // Bloom threshold + knee (knee = threshold * 0.5 is a reasonable default).
+        let t = env.post_process.bloom_threshold;
+        self.bloom.set_threshold(queue, t, t * 0.5);
+
+        // Manual exposure override.
+        self.tone_map.set_exposure(queue, env.post_process.exposure);
+
+        env.clear_dirty();
     }
 
     /// Camera-relative view-projection matrix for overlay rendering.
@@ -901,8 +950,8 @@ impl EditorEngine {
             &self.coarse_field, &self.radiance_volume,
         );
 
-        // --- Volumetric pipeline ---
-        let sun_dir = [0.5f32, 1.0, 0.3];
+        // --- Volumetric pipeline (uses cached env values) ---
+        let sun_dir = self.env_sun_dir;
         self.vol_shadow.dispatch(
             &mut encoder, &self.ctx.queue,
             [cam.x, cam.y, cam.z], sun_dir, &self.coarse_field.bind_group,
@@ -910,13 +959,16 @@ impl EditorEngine {
         self.cloud_shadow.dispatch(
             &mut encoder, &self.ctx.queue, [cam.x, cam.y, cam.z], sun_dir,
         );
+        let sc = self.env_sun_color;
+        let fc = self.env_fog_color;
+        let fog_alpha = if self.env_fog_density > 0.0 { 1.0 } else { 0.0 };
         let vol_params = rkf_render::VolMarchParams {
             cam_pos: [cam.x, cam.y, cam.z, 0.0],
             cam_forward: [self.camera.forward().x, self.camera.forward().y, self.camera.forward().z, 0.0],
             cam_right: [self.camera.right().x, self.camera.right().y, self.camera.right().z, 0.0],
             cam_up: [self.camera.up().x, self.camera.up().y, self.camera.up().z, 0.0],
             sun_dir: [sun_dir[0], sun_dir[1], sun_dir[2], 0.0],
-            sun_color: [1.0, 0.95, 0.85, 0.0],
+            sun_color: [sc[0], sc[1], sc[2], 0.0],
             width: self.render_width / 2,
             height: self.render_height / 2,
             full_width: self.render_width,
@@ -925,8 +977,8 @@ impl EditorEngine {
             step_size: 2.0,
             near: 0.5,
             far: 200.0,
-            fog_color: [0.7, 0.8, 0.9, 1.0],
-            fog_height: [0.01, -0.5, 0.15, 0.0],
+            fog_color: [fc[0], fc[1], fc[2], fog_alpha],
+            fog_height: [self.env_fog_density, -0.5, self.env_fog_height_falloff, 0.0],
             fog_distance: [0.0, 0.01, 0.001, 0.3],
             frame_index: self.frame_index,
             _pad0: 0, _pad1: 0, _pad2: 0,

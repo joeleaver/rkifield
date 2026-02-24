@@ -224,7 +224,11 @@ impl EditorState {
             asset_browser: AssetBrowser::new(),
             grid_snap: GridSnap::default(),
             light_editor: LightEditor::new(),
-            environment: EnvironmentState::new(),
+            environment: {
+                let mut env = EnvironmentState::new();
+                env.mark_dirty(); // Ensure first frame applies defaults to engine
+                env
+            },
             animation: AnimationPreview::new(),
             overlay_config: OverlayConfig::default(),
             debug_viz: DebugOverlay::new(),

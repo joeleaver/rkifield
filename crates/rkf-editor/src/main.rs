@@ -800,6 +800,10 @@ impl ApplicationHandler for App {
                             es.debug_mode = mode;
                             engine.set_debug_mode(mode);
                         }
+
+                        // Apply environment settings (sun, fog, bloom, exposure)
+                        // to render pipeline when dirty.
+                        engine.apply_environment(&mut es.environment);
                     }
 
                     // Reset per-frame deltas.
