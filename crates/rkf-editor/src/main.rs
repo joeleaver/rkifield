@@ -223,6 +223,16 @@ impl ApplicationHandler for App {
         // Initialize engine (wgpu, all render passes, demo scene).
         let engine_inst = EditorEngine::new(window.clone(), Arc::clone(&self.shared_state));
 
+        // Sync engine's demo scene into editor state.
+        if let Ok(mut es) = self.editor_state.lock() {
+            es.v2_scene = Some(engine_inst.scene.clone());
+            es.sync_v2_scene();
+        }
+
+        // Set up rinch context sharing — components use use_context to access these.
+        create_context(Arc::clone(&self.editor_state));
+        create_context(Arc::clone(&self.shared_state));
+
         // Initialize rinch UI context.
         let rinch_ctx = RinchContext::new(
             RinchContextConfig {
@@ -346,6 +356,30 @@ impl ApplicationHandler for App {
                             _ => return,
                         };
                         es.editor_input.mouse_buttons[idx] = state == ElementState::Pressed;
+
+                        // Left-click release in viewport → ray-pick to select object.
+                        if idx == 0 && state == ElementState::Released {
+                            let viewport = self.rinch_ctx.as_ref().and_then(|ctx| {
+                                ctx.viewport_rect("main").map(|r| {
+                                    let sf = self.scale_factor() as f32;
+                                    (r.x * sf, r.y * sf, r.width * sf, r.height * sf)
+                                })
+                            });
+                            if let Some((vp_x, vp_y, vp_w, vp_h)) = viewport {
+                                let (mx, my) = self.mouse_phys;
+                                let px = mx - vp_x;
+                                let py = my - vp_y;
+                                if px >= 0.0 && py >= 0.0 && px < vp_w && py < vp_h {
+                                    if let Some(entity_id) =
+                                        es.pick_object(px, py, vp_w, vp_h)
+                                    {
+                                        es.scene_tree.select_node(entity_id);
+                                    } else {
+                                        es.scene_tree.clear_selection();
+                                    }
+                                }
+                            }
+                        }
 
                         // Hide cursor when right-mouse is held (fly/orbit rotation).
                         if idx == 1 {

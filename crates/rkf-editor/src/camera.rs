@@ -294,6 +294,35 @@ impl EditorCamera {
     }
 }
 
+/// Generate a world-space ray from a screen pixel coordinate.
+///
+/// `pixel_x`, `pixel_y` are in physical (pixel) coordinates relative to the
+/// viewport origin. `vp_width`, `vp_height` are the viewport dimensions in pixels.
+///
+/// Returns `(ray_origin, ray_direction)` where `ray_direction` is normalized.
+pub fn screen_to_ray(
+    cam: &EditorCamera,
+    pixel_x: f32,
+    pixel_y: f32,
+    vp_width: f32,
+    vp_height: f32,
+) -> (Vec3, Vec3) {
+    let aspect = vp_width / vp_height;
+    let view = cam.view_matrix();
+    let proj = cam.projection_matrix(aspect);
+    let inv_vp = (proj * view).inverse();
+
+    // Normalize pixel to NDC [-1, 1].
+    let ndc_x = (pixel_x / vp_width) * 2.0 - 1.0;
+    let ndc_y = 1.0 - (pixel_y / vp_height) * 2.0; // Y flipped
+
+    let near_clip = inv_vp.project_point3(glam::Vec3::new(ndc_x, ndc_y, -1.0));
+    let far_clip = inv_vp.project_point3(glam::Vec3::new(ndc_x, ndc_y, 1.0));
+
+    let dir = (far_clip - near_clip).normalize();
+    (cam.position, dir)
+}
+
 /// Compute a direction vector from yaw and pitch angles.
 ///
 /// Matches the render camera convention: yaw=0, pitch=0 → facing -Z.

@@ -308,6 +308,47 @@ impl EditorState {
         }
     }
 
+    /// Pick a scene object by casting a ray through the viewport.
+    ///
+    /// `pixel_x`, `pixel_y` are in physical pixels relative to the viewport
+    /// origin. `vp_width`, `vp_height` are the viewport dimensions. The AABB
+    /// for each object comes from the v2 scene (if set).
+    ///
+    /// Returns the entity_id of the closest hit object, or `None`.
+    pub fn pick_object(
+        &self,
+        pixel_x: f32,
+        pixel_y: f32,
+        vp_width: f32,
+        vp_height: f32,
+    ) -> Option<u64> {
+        let (ray_o, ray_d) = crate::camera::screen_to_ray(
+            &self.editor_camera,
+            pixel_x,
+            pixel_y,
+            vp_width,
+            vp_height,
+        );
+
+        // Test against v2 scene object AABBs.
+        let scene = self.v2_scene.as_ref()?;
+        let mut best_t = f32::MAX;
+        let mut best_id = None;
+
+        for obj in &scene.root_objects {
+            let aabb_min = obj.aabb.min;
+            let aabb_max = obj.aabb.max;
+            if let Some(t) = ray_aabb_distance(ray_o, ray_d, aabb_min, aabb_max) {
+                if t < best_t {
+                    best_t = t;
+                    best_id = Some(obj.id as u64);
+                }
+            }
+        }
+
+        best_id
+    }
+
     /// Load a scene file and populate the editor state from it.
     ///
     /// Populates the scene tree with entities from the file and applies
@@ -515,6 +556,28 @@ impl EditorState {
             entities,
             environment_ron,
         }
+    }
+}
+
+/// Ray-AABB intersection returning the entry distance along the ray.
+///
+/// Returns `Some(t)` where `t >= 0` if the ray hits the box, `None` otherwise.
+fn ray_aabb_distance(ray_o: Vec3, ray_d: Vec3, min: Vec3, max: Vec3) -> Option<f32> {
+    let inv_d = Vec3::new(
+        if ray_d.x.abs() > 1e-8 { 1.0 / ray_d.x } else { f32::MAX.copysign(ray_d.x) },
+        if ray_d.y.abs() > 1e-8 { 1.0 / ray_d.y } else { f32::MAX.copysign(ray_d.y) },
+        if ray_d.z.abs() > 1e-8 { 1.0 / ray_d.z } else { f32::MAX.copysign(ray_d.z) },
+    );
+    let t1 = (min - ray_o) * inv_d;
+    let t2 = (max - ray_o) * inv_d;
+    let t_min = t1.min(t2);
+    let t_max = t1.max(t2);
+    let t_enter = t_min.x.max(t_min.y).max(t_min.z);
+    let t_exit = t_max.x.min(t_max.y).min(t_max.z);
+    if t_exit >= t_enter.max(0.0) {
+        Some(t_enter.max(0.0))
+    } else {
+        None
     }
 }
 
