@@ -91,7 +91,7 @@ pub fn editor_ui() -> NodeHandle {
                 div {
                     style: {format!("{LEFT_PANEL_WIDTH}{PANEL_BG}{PANEL_BORDER}\
                         border-right:1px solid var(--rinch-color-border);\
-                        display:flex;flex-direction:column;overflow:hidden;")},
+                        display:flex;flex-direction:column;min-height:0;")},
                     SceneTreePanel {}
                 }
 
@@ -102,7 +102,7 @@ pub fn editor_ui() -> NodeHandle {
                 div {
                     style: {format!("{RIGHT_PANEL_WIDTH}{PANEL_BG}{PANEL_BORDER}\
                         border-left:1px solid var(--rinch-color-border);\
-                        display:flex;flex-direction:column;overflow:hidden;")},
+                        display:flex;flex-direction:column;min-height:0;")},
                     RightPanel {}
                 }
             }
@@ -713,7 +713,7 @@ pub fn RightPanel() -> NodeHandle {
     let root = __scope.create_element("div");
     root.set_attribute(
         "style",
-        "flex:1;overflow-y:auto;display:flex;flex-direction:column;",
+        "flex:1;overflow-y:scroll;min-height:0;height:0;",
     );
 
     // Initialize signals from current editor state so sliders start with
