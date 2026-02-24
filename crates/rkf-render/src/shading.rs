@@ -14,6 +14,7 @@
 //! | 4 | GpuSceneV2 (brick pool, brick maps, objects, camera, scene, BVH) |
 //! | 5 | Lights (storage buffer) |
 //! | 6 | Coarse field (3D texture + sampler + uniforms) |
+//! | 7 | Radiance volume (4 clipmap levels + sampler + uniforms) |
 
 use bytemuck::{Pod, Zeroable};
 
@@ -21,6 +22,7 @@ use crate::coarse_field::CoarseField;
 use crate::gbuffer::GBuffer;
 use crate::gpu_scene::GpuSceneV2;
 use crate::light::LightBuffer;
+use crate::radiance_volume::RadianceVolume;
 
 /// GPU-uploadable shade uniforms (32 bytes).
 #[repr(C)]
@@ -90,6 +92,7 @@ impl ShadingPass {
         scene: &GpuSceneV2,
         lights: &LightBuffer,
         coarse_field: &CoarseField,
+        radiance_volume: &RadianceVolume,
         material_buffer: &wgpu::Buffer,
         width: u32,
         height: u32,
@@ -222,13 +225,14 @@ impl ShadingPass {
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("shade_pipeline_layout"),
             bind_group_layouts: &[
-                &gbuffer.read_bind_group_layout,    // group 0
-                &material_bind_group_layout,         // group 1
-                &hdr_bind_group_layout,              // group 2
-                &uniform_bind_group_layout,          // group 3
-                &scene.bind_group_layout,            // group 4
-                &light_bind_group_layout,            // group 5
-                &coarse_field.bind_group_layout,     // group 6
+                &gbuffer.read_bind_group_layout,         // group 0
+                &material_bind_group_layout,              // group 1
+                &hdr_bind_group_layout,                   // group 2
+                &uniform_bind_group_layout,               // group 3
+                &scene.bind_group_layout,                 // group 4
+                &light_bind_group_layout,                 // group 5
+                &coarse_field.bind_group_layout,          // group 6
+                &radiance_volume.read_bind_group_layout,  // group 7
             ],
             push_constant_ranges: &[],
         });
@@ -296,6 +300,7 @@ impl ShadingPass {
         gbuffer: &GBuffer,
         scene: &GpuSceneV2,
         coarse_field: &CoarseField,
+        radiance_volume: &RadianceVolume,
     ) {
         let workgroups_x = (self.width + 7) / 8;
         let workgroups_y = (self.height + 7) / 8;
@@ -313,6 +318,7 @@ impl ShadingPass {
         pass.set_bind_group(4, &scene.bind_group, &[]);
         pass.set_bind_group(5, &self.light_bind_group, &[]);
         pass.set_bind_group(6, &coarse_field.bind_group, &[]);
+        pass.set_bind_group(7, &radiance_volume.read_bind_group, &[]);
         pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
     }
 }

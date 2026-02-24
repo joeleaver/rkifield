@@ -23,10 +23,12 @@ use rkf_core::{
 };
 use rkf_render::{
     BlitPass, Camera, CoarseField, DebugMode, DebugViewPass, GBuffer, GpuObject,
-    GpuSceneV2, Light, LightBuffer, RayMarchPass, RenderContext, SceneUniforms,
-    ShadeUniforms, ShadingPass, TileObjectCullPass, ToneMapPass,
+    GpuSceneV2, Light, LightBuffer, RadianceVolume, RayMarchPass, RenderContext,
+    SceneUniforms, ShadeUniforms, ShadingPass, TileObjectCullPass, ToneMapPass,
     COARSE_VOXEL_SIZE,
 };
+use rkf_render::radiance_inject::{RadianceInjectPass, InjectUniforms};
+use rkf_render::radiance_mip::RadianceMipPass;
 use rkf_render::material_table::{MaterialTable, create_test_materials};
 
 mod automation;
@@ -202,6 +204,9 @@ struct EngineState {
     ray_march: RayMarchPass,
     debug_view: DebugViewPass,
     shading_pass: ShadingPass,
+    radiance_volume: RadianceVolume,
+    radiance_inject: RadianceInjectPass,
+    radiance_mip: RadianceMipPass,
     tone_map: ToneMapPass,
     blit: BlitPass,
     camera: Camera,
@@ -212,6 +217,8 @@ struct EngineState {
     frame_index: u32,
     prev_vp: [[f32; 4]; 4],
     debug_mode: DebugMode,
+    /// Raw shade debug mode (u32) — supports modes 0-6 for the shade shader.
+    shade_debug_mode: u32,
     /// Staging buffer for GPU readback (Rgba8Unorm → RGBA8 for MCP screenshots).
     readback_buffer: wgpu::Buffer,
     /// Shared state for MCP observation.
@@ -286,11 +293,11 @@ impl EngineState {
 
         // Lights — 1 directional (sun) + 2 point lights.
         let world_lights = vec![
-            // Sun: warm white directional, shadow casting
+            // Sun: warm white directional, from above-right-front, shadow casting
             Light::directional(
-                [-0.5, -1.0, -0.3],
+                [0.5, 1.0, 0.3],
                 [1.0, 0.95, 0.85],
-                2.0,
+                3.0,
                 true,
             ),
             // Warm point light (right side)
@@ -313,10 +320,23 @@ impl EngineState {
         let light_buffer = LightBuffer::upload(&ctx.device, &world_lights);
         log::info!("Lights: {} lights uploaded", world_lights.len());
 
-        // Shading pass — full PBR with SDF shadows and AO.
+        // Radiance volume — 4-level clipmap for voxel cone tracing GI.
+        let radiance_volume = RadianceVolume::new(&ctx.device);
+        log::info!("Radiance volume: 4 levels × 128³ Rgba16Float");
+
+        // Radiance injection — fills L0 with direct-lit radiance at surface voxels.
+        let radiance_inject = RadianceInjectPass::new(
+            &ctx.device, &gpu_scene, &material_table.buffer,
+            &light_buffer, &radiance_volume, &coarse_field,
+        );
+
+        // Radiance mip generation — downsamples L0 → L1 → L2 → L3.
+        let radiance_mip = RadianceMipPass::new(&ctx.device, &radiance_volume);
+
+        // Shading pass — full PBR with SDF shadows, AO, and GI cone tracing.
         let shading_pass = ShadingPass::new(
             &ctx.device, &gbuffer, &gpu_scene, &light_buffer,
-            &coarse_field, &material_table.buffer,
+            &coarse_field, &radiance_volume, &material_table.buffer,
             INTERNAL_WIDTH, INTERNAL_HEIGHT,
         );
 
@@ -329,7 +349,7 @@ impl EngineState {
         // Blit: LDR (Rgba8Unorm) → swapchain.
         let blit = BlitPass::new(&ctx.device, &tone_map.ldr_view, surface_format);
 
-        let mut camera = Camera::new(Vec3::new(0.0, 0.5, 1.0));
+        let mut camera = Camera::new(Vec3::new(0.0, 1.0, -0.5));
         camera.pitch = -0.15;
         camera.move_speed = 3.0;
 
@@ -356,6 +376,9 @@ impl EngineState {
             ray_march,
             debug_view,
             shading_pass,
+            radiance_volume,
+            radiance_inject,
+            radiance_mip,
             tone_map,
             blit,
             camera,
@@ -365,6 +388,7 @@ impl EngineState {
             frame_index: 0,
             prev_vp: [[0.0; 4]; 4],
             debug_mode: DebugMode::Lambert,
+            shade_debug_mode: 0,
             readback_buffer,
             shared_state,
         }
@@ -422,14 +446,8 @@ impl EngineState {
 
         // Update shade uniforms (debug_mode, lights, camera position).
         // G-buffer positions are camera-relative, so camera_pos = [0,0,0].
-        let shade_debug = match self.debug_mode {
-            DebugMode::Lambert    => 0u32, // Full PBR shading
-            DebugMode::Normals    => 1,
-            DebugMode::Positions  => 2,
-            DebugMode::MaterialIds => 3,
-        };
         self.shading_pass.update_uniforms(&self.ctx.queue, &ShadeUniforms {
-            debug_mode: shade_debug,
+            debug_mode: self.shade_debug_mode,
             num_lights: self.world_lights.len() as u32,
             _pad0: 0,
             shadow_budget_k: 0, // unlimited
@@ -480,6 +498,19 @@ impl EngineState {
         // Update coarse field uniforms (camera-relative origin changes each frame).
         self.coarse_field.update_uniforms(&self.ctx.queue, self.camera.position);
 
+        // Update radiance volume center to camera world position.
+        self.radiance_volume.update_center(
+            &self.ctx.queue,
+            [self.camera.position.x, self.camera.position.y, self.camera.position.z],
+        );
+
+        // Update inject uniforms.
+        self.radiance_inject.update_uniforms(&self.ctx.queue, &InjectUniforms {
+            num_lights: self.world_lights.len() as u32,
+            max_shadow_lights: 1,
+            _pad: [0; 2],
+        });
+
         // 1. Tile object culling → per-tile object lists
         self.tile_cull.dispatch(&mut encoder, &self.gpu_scene);
         // 2. Ray march → G-buffer (reads tile lists + coarse field)
@@ -487,13 +518,20 @@ impl EngineState {
             &mut encoder, &self.gpu_scene, &self.gbuffer,
             &self.tile_cull, &self.coarse_field,
         );
-        // 3. PBR shading → HDR output (with SDF shadows + AO)
-        self.shading_pass.dispatch(
-            &mut encoder, &self.gbuffer, &self.gpu_scene, &self.coarse_field,
+        // 3. Radiance injection → fill L0 with direct-lit surface radiance
+        self.radiance_inject.dispatch(
+            &mut encoder, &self.gpu_scene, &self.coarse_field,
         );
-        // 4. Tone map → LDR output
+        // 4. Radiance mip gen → downsample L0 → L1 → L2 → L3
+        self.radiance_mip.dispatch(&mut encoder);
+        // 5. PBR shading → HDR output (with SDF shadows + AO + GI cone tracing)
+        self.shading_pass.dispatch(
+            &mut encoder, &self.gbuffer, &self.gpu_scene,
+            &self.coarse_field, &self.radiance_volume,
+        );
+        // 6. Tone map → LDR output
         self.tone_map.dispatch(&mut encoder);
-        // 5. Blit → swapchain
+        // 7. Blit → swapchain
         self.blit.draw(&mut encoder, &target_view);
 
         // 6. If MCP screenshot requested, copy LDR output to readback buffer.
@@ -762,24 +800,28 @@ impl ApplicationHandler for App {
                                 KeyCode::Digit1 => {
                                     if let Some(e) = self.engine.as_mut() {
                                         e.debug_mode = DebugMode::Lambert;
+                                        e.shade_debug_mode = 0;
                                         log::info!("Debug mode: Lambert");
                                     }
                                 }
                                 KeyCode::Digit2 => {
                                     if let Some(e) = self.engine.as_mut() {
                                         e.debug_mode = DebugMode::Normals;
+                                        e.shade_debug_mode = 1;
                                         log::info!("Debug mode: Normals");
                                     }
                                 }
                                 KeyCode::Digit3 => {
                                     if let Some(e) = self.engine.as_mut() {
                                         e.debug_mode = DebugMode::Positions;
+                                        e.shade_debug_mode = 2;
                                         log::info!("Debug mode: Positions");
                                     }
                                 }
                                 KeyCode::Digit4 => {
                                     if let Some(e) = self.engine.as_mut() {
                                         e.debug_mode = DebugMode::MaterialIds;
+                                        e.shade_debug_mode = 3;
                                         log::info!("Debug mode: Material IDs");
                                     }
                                 }
@@ -810,6 +852,7 @@ impl ApplicationHandler for App {
                             engine.camera.pitch = cam.pitch;
                         }
                         if let Some(mode) = state.pending_debug_mode.take() {
+                            engine.shade_debug_mode = mode;
                             engine.debug_mode = match mode {
                                 0 => DebugMode::Lambert,
                                 1 => DebugMode::Normals,

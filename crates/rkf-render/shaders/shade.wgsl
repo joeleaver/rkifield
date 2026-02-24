@@ -125,6 +125,13 @@ struct CoarseFieldInfo {
     _cf_pad1: f32,
 }
 
+struct RadianceVolumeUniforms {
+    center:      vec4<f32>,
+    voxel_sizes: vec4<f32>,
+    inv_extents: vec4<f32>,
+    params:      vec4<u32>,   // x = dim, y = num_levels
+}
+
 // ---------- Bindings ----------
 
 // Group 0: G-buffer read (sampled textures)
@@ -165,6 +172,14 @@ struct ShadeUniforms {
 @group(6) @binding(0) var coarse_field: texture_3d<f32>;
 @group(6) @binding(1) var coarse_sampler: sampler;
 @group(6) @binding(2) var<uniform> coarse_info: CoarseFieldInfo;
+
+// Group 7: Radiance volume (4 clipmap levels + sampler + uniforms)
+@group(7) @binding(0) var radiance_L0: texture_3d<f32>;
+@group(7) @binding(1) var radiance_L1: texture_3d<f32>;
+@group(7) @binding(2) var radiance_L2: texture_3d<f32>;
+@group(7) @binding(3) var radiance_L3: texture_3d<f32>;
+@group(7) @binding(4) var radiance_sampler: sampler;
+@group(7) @binding(5) var<uniform> radiance_vol: RadianceVolumeUniforms;
 
 // ---------- Constants ----------
 
@@ -216,6 +231,13 @@ const SSS_WRAP: f32 = 0.3;
 
 // Coarse field threshold for switching to per-object evaluation
 const COARSE_NEAR_THRESHOLD: f32 = 0.5;
+
+// GI cone tracing parameters
+const GI_CONE_STEPS: u32 = 48u;
+const GI_MAX_STEP: f32 = 0.16;
+const GI_STRENGTH: f32 = 2.0;
+const GI_DIFFUSE_MAX_DIST: f32 = 5.0;
+const GI_SPECULAR_MAX_DIST: f32 = 8.0;
 
 // ---------- VoxelSample Helpers ----------
 
@@ -616,6 +638,106 @@ fn blend_materials(primary_id: u32, secondary_id: u32, weight: f32) -> ResolvedM
     );
 }
 
+// ---------- Radiance Volume Cone Tracing ----------
+
+/// Sample a single level of the radiance volume.
+/// `cam_rel_pos` is camera-relative (since volume center = camera world pos,
+/// this is the same as volume-center-relative).
+fn sample_radiance_level(cam_rel_pos: vec3<f32>, level: u32) -> vec4<f32> {
+    let inv_ext = radiance_vol.inv_extents[level];
+    let uvw = cam_rel_pos * inv_ext + 0.5;
+    if any(uvw < vec3<f32>(0.0)) || any(uvw > vec3<f32>(1.0)) {
+        return vec4<f32>(0.0);
+    }
+    switch level {
+        case 0u: { return textureSampleLevel(radiance_L0, radiance_sampler, uvw, 0.0); }
+        case 1u: { return textureSampleLevel(radiance_L1, radiance_sampler, uvw, 0.0); }
+        case 2u: { return textureSampleLevel(radiance_L2, radiance_sampler, uvw, 0.0); }
+        default: { return textureSampleLevel(radiance_L3, radiance_sampler, uvw, 0.0); }
+    }
+}
+
+/// Sample the radiance volume with continuous mip level (interpolate between levels).
+fn sample_radiance(cam_rel_pos: vec3<f32>, mip_f: f32) -> vec4<f32> {
+    let lo = u32(floor(mip_f));
+    let hi = u32(ceil(mip_f));
+    let lo_clamped = min(lo, 3u);
+    let hi_clamped = min(hi, 3u);
+    let s_lo = sample_radiance_level(cam_rel_pos, lo_clamped);
+    if lo_clamped == hi_clamped {
+        return s_lo;
+    }
+    let s_hi = sample_radiance_level(cam_rel_pos, hi_clamped);
+    return mix(s_lo, s_hi, fract(mip_f));
+}
+
+/// Trace a cone through the radiance volume using front-to-back compositing.
+fn trace_cone(origin: vec3<f32>, dir: vec3<f32>, tan_half_angle: f32, max_dist: f32, jitter: f32) -> vec4<f32> {
+    var color = vec3<f32>(0.0);
+    var opacity = 0.0;
+    // Start past L0 voxel to avoid self-illumination, with jitter to break banding.
+    var t = radiance_vol.voxel_sizes.x * (2.0 + jitter);
+
+    for (var i = 0u; i < GI_CONE_STEPS; i++) {
+        if opacity > 0.95 || t > max_dist {
+            break;
+        }
+        let pos = origin + dir * t;
+        let cone_radius = t * tan_half_angle;
+        // Mip selection: *0.5 accounts for 4× (not 2×) clipmap ratio between levels.
+        let mip_f = log2(max(cone_radius / radiance_vol.voxel_sizes.x, 1.0)) * 0.5;
+
+        let s = sample_radiance(pos, mip_f);
+        let step_opacity = s.a;
+
+        // Front-to-back compositing.
+        let w = (1.0 - opacity) * step_opacity;
+        color += s.rgb * w;
+        opacity += w;
+
+        // Step size increases with cone radius.
+        let step = max(cone_radius * 0.5, radiance_vol.voxel_sizes.x);
+        t += min(step, GI_MAX_STEP);
+    }
+
+    return vec4<f32>(color, opacity);
+}
+
+/// Trace 6 diffuse cones in a hemisphere around the surface normal.
+fn cone_trace_diffuse(pos: vec3<f32>, normal: vec3<f32>, jitter: f32) -> vec3<f32> {
+    // Build tangent frame.
+    let up = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(normal.y) > 0.9);
+    let tangent = normalize(cross(up, normal));
+    let bitangent = cross(normal, tangent);
+
+    let tan_half = 0.577; // tan(30°) for ~60° opening cones
+    var gi = vec3<f32>(0.0);
+
+    // 6 cones tilted 30° from normal, evenly spaced azimuthally.
+    let cos30 = 0.866;
+    let sin30 = 0.5;
+
+    for (var i = 0u; i < 6u; i++) {
+        let angle = f32(i) * PI / 3.0 + jitter * 0.5;
+        let dir = normalize(
+            normal * cos30
+            + (tangent * cos(angle) + bitangent * sin(angle)) * sin30
+        );
+        let result = trace_cone(pos, dir, tan_half, GI_DIFFUSE_MAX_DIST, jitter);
+        gi += result.rgb;
+    }
+
+    return gi / 6.0;
+}
+
+/// Trace 1 specular cone along the reflection direction.
+fn cone_trace_specular(pos: vec3<f32>, reflect_dir: vec3<f32>, roughness: f32, jitter: f32) -> vec3<f32> {
+    // Narrower cone for smoother surfaces.
+    let tan_half = max(roughness * 0.5, 0.02);
+    let result = trace_cone(pos, reflect_dir, tan_half, GI_SPECULAR_MAX_DIST, jitter);
+    return result.rgb;
+}
+
 // ---------- Entry point ----------
 
 @compute @workgroup_size(8, 8, 1)
@@ -820,24 +942,37 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
     // SDF ambient occlusion
     let ao = sdf_ao(world_pos + normal * SHADOW_BIAS, normal);
 
-    // Ambient approximation
-    let kd_ambient = 1.0 - metallic;
-    let ambient_diffuse = AMBIENT_COLOR * albedo * ao * 0.3 * kd_ambient;
+    // Per-pixel jitter to break cone tracing banding.
+    let jitter = fract(sin(dot(vec2<f32>(pixel.xy), vec2<f32>(12.9898, 78.233))) * 43758.5453);
 
+    // GI via voxel cone tracing (6 diffuse + 1 specular cone).
+    let gi_origin = world_pos + normal * SHADOW_BIAS * 2.0;
+    let gi_diffuse_raw = cone_trace_diffuse(gi_origin, normal, jitter);
+    let kd_gi = (1.0 - metallic);
+    let gi_diffuse = gi_diffuse_raw * albedo * kd_gi * ao * GI_STRENGTH;
+
+    let reflect_dir = reflect(-view_dir, normal);
+    let gi_specular_raw = cone_trace_specular(gi_origin, reflect_dir, roughness, jitter);
+    let gi_fresnel = fresnel_schlick(n_dot_v, f0);
+    let gi_specular = gi_specular_raw * gi_fresnel * ao * GI_STRENGTH;
+
+    // Minimal ambient fallback (for areas outside radiance volume coverage).
+    let kd_ambient = 1.0 - metallic;
+    let ambient_diffuse = AMBIENT_COLOR * albedo * ao * 0.15 * kd_ambient;
     let ambient_fresnel = fresnel_schlick(n_dot_v, f0);
     let reflect_env = reflect(-view_dir, normal);
     let sky_up = clamp(reflect_env.y * 0.5 + 0.5, 0.0, 1.0);
     let sky_reflect = mix(SKY_HORIZON, SKY_ZENITH, sky_up);
-    let ambient_specular = sky_reflect * ambient_fresnel * ao * SKY_REFLECT_STRENGTH;
+    let ambient_specular = sky_reflect * ambient_fresnel * ao * SKY_REFLECT_STRENGTH * 0.5;
     let ambient = ambient_diffuse + ambient_specular;
 
     // SDF junction contact shadow (gradient magnitude from ray marcher)
     let grad_mag = textureLoad(gbuf_motion, coord, 0).z;
     let contact = smoothstep(0.5, 0.8, grad_mag);
 
-    // Final color = direct + SSS + ambient + emission
+    // Final color = direct + SSS + GI + ambient + emission
     let direct = (total_diffuse + total_specular) * contact;
-    var color = direct + sss_total + ambient * contact + emission;
+    var color = direct + sss_total + (gi_diffuse + gi_specular + ambient) * contact + emission;
 
     // Debug visualization modes
     switch shade_uniforms.debug_mode {
@@ -860,6 +995,10 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
         }
         case 5u: {
             color = total_specular + ambient_specular;
+        }
+        case 6u: {
+            // GI only — indirect diffuse + specular, no direct lighting
+            color = (gi_diffuse + gi_specular) * contact;
         }
         default: {
             // Normal shading (already computed)

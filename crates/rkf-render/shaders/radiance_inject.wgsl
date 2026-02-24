@@ -1,8 +1,8 @@
-// Radiance injection compute shader — Phase 8 GI
+// Radiance injection compute shader — v2 object-centric (Phase 8).
 //
 // Dispatched over the Level 0 radiance volume (128³). For each texel:
 // 1. Compute world position from volume uniforms
-// 2. Sample SDF — classify as surface / interior / exterior
+// 2. Sample SDF via coarse field + BVH — classify as surface / interior / exterior
 // 3. Surface voxels: compute normal via SDF gradient, evaluate direct lighting
 // 4. Write radiance (RGB) + opacity (A) to the 3D storage texture
 //
@@ -12,13 +12,54 @@
 
 struct VoxelSample {
     word0: u32, // lower 16 = f16 distance, upper 16 = u16 material_id
-    word1: u32, // byte0 = blend_weight, byte1 = secondary_id, byte2 = flags, byte3 = reserved
+    word1: u32,
 }
 
-struct SceneUniforms {
-    grid_dims:    vec4<u32>,   // xyz = dimensions, w = unused
-    grid_origin:  vec4<f32>,   // xyz = origin, w = brick_extent
-    params:       vec4<f32>,   // x = voxel_size, yzw = unused
+struct GpuObject {
+    inverse_world: mat4x4<f32>,
+    aabb_min: vec4<f32>,
+    aabb_max: vec4<f32>,
+    brick_map_offset: u32,
+    brick_map_dims_x: u32,
+    brick_map_dims_y: u32,
+    brick_map_dims_z: u32,
+    voxel_size: f32,
+    material_id: u32,
+    sdf_type: u32,
+    blend_mode: u32,
+    blend_radius: f32,
+    sdf_param_0: f32,
+    sdf_param_1: f32,
+    sdf_param_2: f32,
+    sdf_param_3: f32,
+    accumulated_scale: f32,
+    lod_level: u32,
+    object_id: u32,
+    primitive_type: u32,
+    _pad0: f32, _pad1: f32, _pad2: f32, _pad3: f32,
+    _pad4: f32, _pad5: f32, _pad6: f32, _pad7: f32,
+    _pad8: f32, _pad9: f32, _pad10: f32, _pad11: f32,
+    _pad12: f32, _pad13: f32, _pad14: f32, _pad15: f32,
+    _pad16: f32, _pad17: f32, _pad18: f32, _pad19: f32,
+    _pad20: f32, _pad21: f32, _pad22: f32,
+}
+
+struct BvhNode {
+    aabb_min_x: f32,
+    aabb_min_y: f32,
+    aabb_min_z: f32,
+    left: u32,
+    aabb_max_x: f32,
+    aabb_max_y: f32,
+    aabb_max_z: f32,
+    right_or_object: u32,
+}
+
+struct SceneUniformsV2 {
+    num_objects: u32,
+    max_steps: u32,
+    max_distance: f32,
+    hit_threshold: f32,
 }
 
 struct Material {
@@ -55,14 +96,24 @@ struct RadianceVolumeUniforms {
     params:      vec4<u32>,   // x = dim, y = num_levels
 }
 
+struct CoarseFieldInfo {
+    origin_cam_rel: vec4<f32>,
+    dims: vec4<u32>,
+    voxel_size: f32,
+    inv_voxel_size: f32,
+    _cf_pad0: f32,
+    _cf_pad1: f32,
+}
+
 // ---------- Bindings ----------
 
-// Group 0: Scene SDF data (same layout as GpuScene)
+// Group 0: v2 Scene data (same layout as ray march / shade group)
 @group(0) @binding(0) var<storage, read> brick_pool: array<VoxelSample>;
-@group(0) @binding(1) var<storage, read> occupancy:  array<u32>;
-@group(0) @binding(2) var<storage, read> slots:      array<u32>;
-// binding 3 = camera uniforms (part of bind group layout, unused here)
-@group(0) @binding(4) var<uniform> scene: SceneUniforms;
+@group(0) @binding(1) var<storage, read> brick_maps: array<u32>;
+@group(0) @binding(2) var<storage, read> objects: array<GpuObject>;
+// binding 3 = camera uniforms (unused here)
+@group(0) @binding(4) var<uniform> v2_scene: SceneUniformsV2;
+@group(0) @binding(5) var<storage, read> bvh_nodes: array<BvhNode>;
 
 // Group 1: Material table
 @group(1) @binding(0) var<storage, read> materials: array<Material>;
@@ -75,18 +126,35 @@ struct RadianceVolumeUniforms {
 @group(3) @binding(0) var radiance_out: texture_storage_3d<rgba16float, write>;
 @group(3) @binding(1) var<uniform> vol: RadianceVolumeUniforms;
 
+// Group 4: Coarse acceleration field
+@group(4) @binding(0) var coarse_field: texture_3d<f32>;
+@group(4) @binding(1) var coarse_sampler: sampler;
+@group(4) @binding(2) var<uniform> coarse_info: CoarseFieldInfo;
+
 // ---------- Constants ----------
 
 const PI: f32 = 3.14159265359;
+const MAX_FLOAT: f32 = 3.402823e+38;
 const EMPTY_SLOT: u32 = 0xFFFFFFFFu;
-const CELL_EMPTY: u32    = 0u;
-const CELL_SURFACE: u32  = 1u;
-const CELL_INTERIOR: u32 = 2u;
+const BVH_INVALID: u32 = 0xFFFFFFFFu;
+const BVH_STACK_SIZE: u32 = 32u;
+
+const SDF_TYPE_NONE: u32       = 0u;
+const SDF_TYPE_ANALYTICAL: u32 = 1u;
+const SDF_TYPE_VOXELIZED: u32  = 2u;
+
+const PRIM_SPHERE: u32   = 0u;
+const PRIM_BOX: u32      = 1u;
+const PRIM_CAPSULE: u32  = 2u;
+const PRIM_TORUS: u32    = 3u;
+const PRIM_CYLINDER: u32 = 4u;
+const PRIM_PLANE: u32    = 5u;
 
 const INJECT_SHADOW_STEPS: u32 = 16u;
 const INJECT_SHADOW_MAX_DIST: f32 = 20.0;
+const COARSE_NEAR_THRESHOLD: f32 = 0.5;
 
-// ---------- SDF Sampling (same as shade.wgsl) ----------
+// ---------- VoxelSample Helpers ----------
 
 fn extract_distance(word0: u32) -> f32 {
     return unpack2x16float(word0).x;
@@ -96,116 +164,249 @@ fn extract_material_id(word0: u32) -> u32 {
     return (word0 >> 16u) & 0xFFFFu;
 }
 
-fn sdf_grid_dims() -> vec3<u32>  { return scene.grid_dims.xyz; }
-fn sdf_grid_origin() -> vec3<f32> { return scene.grid_origin.xyz; }
-fn sdf_brick_extent() -> f32     { return scene.grid_origin.w; }
-fn sdf_voxel_size() -> f32       { return scene.params.x; }
+// ---------- SDF Primitives ----------
 
-fn sdf_world_to_cell(pos: vec3<f32>) -> vec3<i32> {
-    let local = pos - sdf_grid_origin();
-    return vec3<i32>(floor(local / sdf_brick_extent()));
+fn sdf_sphere(p: vec3<f32>, radius: f32) -> f32 {
+    return length(p) - radius;
 }
 
-fn sdf_cell_in_bounds(cell: vec3<i32>) -> bool {
-    return all(cell >= vec3<i32>(0)) && all(vec3<u32>(cell) < sdf_grid_dims());
+fn sdf_box(p: vec3<f32>, half_extents: vec3<f32>) -> f32 {
+    let q = abs(p) - half_extents;
+    return length(max(q, vec3<f32>(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0);
 }
 
-fn sdf_get_cell_state(flat: u32) -> u32 {
-    let word_idx = flat / 16u;
-    let bit_offset = (flat % 16u) * 2u;
-    return (occupancy[word_idx] >> bit_offset) & 3u;
+fn sdf_capsule(p: vec3<f32>, radius: f32, half_height: f32) -> f32 {
+    let q = vec3<f32>(p.x, max(abs(p.y) - half_height, 0.0), p.z);
+    return length(q) - radius;
 }
 
-fn sdf_cell_flat_index(cell: vec3<u32>) -> u32 {
-    let d = sdf_grid_dims();
-    return cell.x + cell.y * d.x + cell.z * d.x * d.y;
+fn sdf_torus(p: vec3<f32>, major_radius: f32, minor_radius: f32) -> f32 {
+    let q = vec2<f32>(length(p.xz) - major_radius, p.y);
+    return length(q) - minor_radius;
 }
 
-fn sdf_sample_brick(pos: vec3<f32>, brick_min: vec3<f32>, slot: u32) -> f32 {
-    let vs = sdf_voxel_size();
-    let brick_local = (pos - brick_min) / vs - vec3<f32>(0.5);
-    let f = clamp(brick_local, vec3<f32>(0.0), vec3<f32>(6.9999));
-    let i0 = vec3<u32>(floor(f));
-    let i1 = min(i0 + vec3<u32>(1u), vec3<u32>(7u));
-    let t = f - floor(f);
+fn sdf_cylinder(p: vec3<f32>, radius: f32, half_height: f32) -> f32 {
+    let d = vec2<f32>(length(p.xz) - radius, abs(p.y) - half_height);
+    return min(max(d.x, d.y), 0.0) + length(max(d, vec2<f32>(0.0)));
+}
 
-    let base = slot * 512u;
-    let c000 = extract_distance(brick_pool[base + i0.x + i0.y*8u + i0.z*64u].word0);
-    let c100 = extract_distance(brick_pool[base + i1.x + i0.y*8u + i0.z*64u].word0);
-    let c010 = extract_distance(brick_pool[base + i0.x + i1.y*8u + i0.z*64u].word0);
-    let c110 = extract_distance(brick_pool[base + i1.x + i1.y*8u + i0.z*64u].word0);
-    let c001 = extract_distance(brick_pool[base + i0.x + i0.y*8u + i1.z*64u].word0);
-    let c101 = extract_distance(brick_pool[base + i1.x + i0.y*8u + i1.z*64u].word0);
-    let c011 = extract_distance(brick_pool[base + i0.x + i1.y*8u + i1.z*64u].word0);
-    let c111 = extract_distance(brick_pool[base + i1.x + i1.y*8u + i1.z*64u].word0);
+fn sdf_plane(p: vec3<f32>, normal: vec3<f32>, dist: f32) -> f32 {
+    return dot(p, normal) + dist;
+}
 
+// ---------- Object Evaluation ----------
+
+fn evaluate_analytical(local_pos: vec3<f32>, obj: GpuObject) -> f32 {
+    switch obj.primitive_type {
+        case PRIM_SPHERE: { return sdf_sphere(local_pos, obj.sdf_param_0); }
+        case PRIM_BOX: { return sdf_box(local_pos, vec3<f32>(obj.sdf_param_0, obj.sdf_param_1, obj.sdf_param_2)); }
+        case PRIM_CAPSULE: { return sdf_capsule(local_pos, obj.sdf_param_0, obj.sdf_param_1); }
+        case PRIM_TORUS: { return sdf_torus(local_pos, obj.sdf_param_0, obj.sdf_param_1); }
+        case PRIM_CYLINDER: { return sdf_cylinder(local_pos, obj.sdf_param_0, obj.sdf_param_1); }
+        case PRIM_PLANE: { return sdf_plane(local_pos, normalize(vec3<f32>(obj.sdf_param_0, obj.sdf_param_1, obj.sdf_param_2)), 0.0); }
+        default: { return MAX_FLOAT; }
+    }
+}
+
+fn sample_voxel_at(obj_offset: u32, vc: vec3<i32>, dims: vec3<u32>,
+                    total_voxels: vec3<i32>, vs: f32) -> f32 {
+    let c = clamp(vc, vec3<i32>(0), total_voxels - vec3<i32>(1));
+    let brick = vec3<u32>(c / vec3<i32>(8));
+    let local = vec3<u32>(c % vec3<i32>(8));
+    let flat_brick = brick.x + brick.y * dims.x + brick.z * dims.x * dims.y;
+    let slot = brick_maps[obj_offset + flat_brick];
+    if slot == EMPTY_SLOT {
+        return vs * 4.0;
+    }
+    let idx = slot * 512u + local.x + local.y * 8u + local.z * 64u;
+    return extract_distance(brick_pool[idx].word0);
+}
+
+fn sample_voxelized(local_pos: vec3<f32>, obj: GpuObject) -> f32 {
+    let vs = obj.voxel_size;
+    let brick_extent = vs * 8.0;
+    let dims = vec3<u32>(obj.brick_map_dims_x, obj.brick_map_dims_y, obj.brick_map_dims_z);
+    let grid_size = vec3<f32>(dims) * brick_extent;
+    let grid_pos = local_pos + grid_size * 0.5;
+    let clamped = clamp(grid_pos, vec3<f32>(vs * 0.01), grid_size - vec3<f32>(vs * 0.01));
+    let outside_dist = length(grid_pos - clamped);
+    if outside_dist > brick_extent * 2.0 {
+        return outside_dist;
+    }
+    let voxel_coord = clamped / vs - vec3<f32>(0.5);
+    let v0 = vec3<i32>(floor(voxel_coord));
+    let t = voxel_coord - vec3<f32>(v0);
+    let total_voxels = vec3<i32>(dims) * 8;
+    let c000 = sample_voxel_at(obj.brick_map_offset, v0 + vec3<i32>(0, 0, 0), dims, total_voxels, vs);
+    let c100 = sample_voxel_at(obj.brick_map_offset, v0 + vec3<i32>(1, 0, 0), dims, total_voxels, vs);
+    let c010 = sample_voxel_at(obj.brick_map_offset, v0 + vec3<i32>(0, 1, 0), dims, total_voxels, vs);
+    let c110 = sample_voxel_at(obj.brick_map_offset, v0 + vec3<i32>(1, 1, 0), dims, total_voxels, vs);
+    let c001 = sample_voxel_at(obj.brick_map_offset, v0 + vec3<i32>(0, 0, 1), dims, total_voxels, vs);
+    let c101 = sample_voxel_at(obj.brick_map_offset, v0 + vec3<i32>(1, 0, 1), dims, total_voxels, vs);
+    let c011 = sample_voxel_at(obj.brick_map_offset, v0 + vec3<i32>(0, 1, 1), dims, total_voxels, vs);
+    let c111 = sample_voxel_at(obj.brick_map_offset, v0 + vec3<i32>(1, 1, 1), dims, total_voxels, vs);
     let c00 = mix(c000, c100, t.x);
     let c10 = mix(c010, c110, t.x);
     let c01 = mix(c001, c101, t.x);
     let c11 = mix(c011, c111, t.x);
     let c0 = mix(c00, c10, t.y);
     let c1 = mix(c01, c11, t.y);
-    return mix(c0, c1, t.z);
+    return mix(c0, c1, t.z) + outside_dist;
 }
 
-fn sample_sdf(pos: vec3<f32>) -> f32 {
-    let cell_i = sdf_world_to_cell(pos);
-    let be = sdf_brick_extent();
+/// Evaluate object at a world-space position. Returns (distance, material_id).
+fn evaluate_object(world_pos: vec3<f32>, cam_rel: vec3<f32>, obj_idx: u32) -> vec2<f32> {
+    let obj = objects[obj_idx];
+    if obj.sdf_type == SDF_TYPE_NONE {
+        return vec2<f32>(MAX_FLOAT, 0.0);
+    }
+    let local_pos = (obj.inverse_world * vec4<f32>(cam_rel, 1.0)).xyz;
+    var dist: f32;
+    if obj.sdf_type == SDF_TYPE_ANALYTICAL {
+        dist = evaluate_analytical(local_pos, obj);
+    } else {
+        dist = sample_voxelized(local_pos, obj);
+    }
+    return vec2<f32>(dist * obj.accumulated_scale, f32(obj.material_id));
+}
 
-    if !sdf_cell_in_bounds(cell_i) {
-        return be;
+// ---------- Coarse Field Sampling ----------
+
+fn sample_coarse_field(cam_rel_pos: vec3<f32>) -> f32 {
+    let field_pos = cam_rel_pos - coarse_info.origin_cam_rel.xyz;
+    let uvw = field_pos * coarse_info.inv_voxel_size / vec3<f32>(coarse_info.dims.xyz);
+    if any(uvw < vec3<f32>(0.0)) || any(uvw > vec3<f32>(1.0)) {
+        return 0.0;
+    }
+    return textureSampleLevel(coarse_field, coarse_sampler, uvw, 0.0).r;
+}
+
+// ---------- v2 SDF Point Query (coarse field + BVH) ----------
+
+// Coordinate space note:
+// - BVH AABBs are in WORLD space (built from Scene object AABBs).
+// - GpuObject.inverse_world expects CAMERA-RELATIVE input.
+// - Coarse field expects CAMERA-RELATIVE input.
+// - vol.center.xyz = camera world position, so cam_rel = world_pos - vol.center.xyz.
+
+/// Convert world-space position to camera-relative.
+fn world_to_cam_rel(world_pos: vec3<f32>) -> vec3<f32> {
+    return world_pos - vol.center.xyz;
+}
+
+/// Sample SDF at a world-space position. Returns minimum distance.
+fn sample_sdf(world_pos: vec3<f32>) -> f32 {
+    let cam_rel = world_to_cam_rel(world_pos);
+
+    // Phase 1: coarse field check (camera-relative).
+    let coarse_dist = sample_coarse_field(cam_rel);
+    if coarse_dist > COARSE_NEAR_THRESHOLD {
+        return coarse_dist;
     }
 
-    let cell = vec3<u32>(cell_i);
-    let flat = sdf_cell_flat_index(cell);
-    let state = sdf_get_cell_state(flat);
+    // Phase 2: BVH traversal (world-space AABBs).
+    if v2_scene.num_objects == 0u {
+        return MAX_FLOAT;
+    }
 
-    if state == CELL_EMPTY {
-        return be * 0.5;
-    }
-    if state == CELL_INTERIOR {
-        return -be * 0.5;
-    }
-    if state == CELL_SURFACE {
-        let slot = slots[flat];
-        if slot == EMPTY_SLOT {
-            return be * 0.5;
+    var min_dist = MAX_FLOAT;
+
+    var stack: array<u32, 32>;
+    var stack_ptr = 0u;
+    stack[0] = 0u;
+    stack_ptr = 1u;
+
+    while stack_ptr > 0u {
+        stack_ptr -= 1u;
+        let node_idx = stack[stack_ptr];
+        let node = bvh_nodes[node_idx];
+
+        let node_min = vec3<f32>(node.aabb_min_x, node.aabb_min_y, node.aabb_min_z);
+        let node_max = vec3<f32>(node.aabb_max_x, node.aabb_max_y, node.aabb_max_z);
+
+        // BVH AABBs are world-space; compare with world_pos.
+        let closest = clamp(world_pos, node_min, node_max);
+        let box_dist = length(closest - world_pos);
+        if box_dist > min_dist {
+            continue;
         }
-        let brick_min = sdf_grid_origin() + vec3<f32>(cell) * be;
-        return sdf_sample_brick(pos, brick_min, slot);
+
+        if node.left == BVH_INVALID {
+            let leaf_obj_idx = node.right_or_object;
+            if leaf_obj_idx < v2_scene.num_objects {
+                // Object evaluation uses camera-relative for inverse_world transform.
+                let result = evaluate_object(world_pos, cam_rel, leaf_obj_idx);
+                min_dist = min(min_dist, result.x);
+            }
+        } else {
+            if stack_ptr < BVH_STACK_SIZE - 1u {
+                stack[stack_ptr] = node.left;
+                stack_ptr += 1u;
+                stack[stack_ptr] = node.right_or_object;
+                stack_ptr += 1u;
+            }
+        }
     }
-    return be * 0.5;
+
+    return min_dist;
 }
 
-// ---------- Material ID Sampling ----------
+/// Sample SDF and return (distance, material_id) at a world-space position.
+fn sample_sdf_with_material(world_pos: vec3<f32>) -> vec2<f32> {
+    let cam_rel = world_to_cam_rel(world_pos);
 
-fn sample_material_id(pos: vec3<f32>) -> u32 {
-    let cell_i = sdf_world_to_cell(pos);
-    if !sdf_cell_in_bounds(cell_i) {
-        return 0u;
+    if v2_scene.num_objects == 0u {
+        return vec2<f32>(MAX_FLOAT, 0.0);
     }
-    let cell = vec3<u32>(cell_i);
-    let flat = sdf_cell_flat_index(cell);
-    let state = sdf_get_cell_state(flat);
-    if state != CELL_SURFACE {
-        return 0u;
+
+    var min_dist = MAX_FLOAT;
+    var mat_id = 0.0;
+
+    var stack: array<u32, 32>;
+    var stack_ptr = 0u;
+    stack[0] = 0u;
+    stack_ptr = 1u;
+
+    while stack_ptr > 0u {
+        stack_ptr -= 1u;
+        let node_idx = stack[stack_ptr];
+        let node = bvh_nodes[node_idx];
+
+        let node_min = vec3<f32>(node.aabb_min_x, node.aabb_min_y, node.aabb_min_z);
+        let node_max = vec3<f32>(node.aabb_max_x, node.aabb_max_y, node.aabb_max_z);
+
+        let closest = clamp(world_pos, node_min, node_max);
+        let box_dist = length(closest - world_pos);
+        if box_dist > min_dist {
+            continue;
+        }
+
+        if node.left == BVH_INVALID {
+            let leaf_obj_idx = node.right_or_object;
+            if leaf_obj_idx < v2_scene.num_objects {
+                let result = evaluate_object(world_pos, cam_rel, leaf_obj_idx);
+                if result.x < min_dist {
+                    min_dist = result.x;
+                    mat_id = result.y;
+                }
+            }
+        } else {
+            if stack_ptr < BVH_STACK_SIZE - 1u {
+                stack[stack_ptr] = node.left;
+                stack_ptr += 1u;
+                stack[stack_ptr] = node.right_or_object;
+                stack_ptr += 1u;
+            }
+        }
     }
-    let slot = slots[flat];
-    if slot == EMPTY_SLOT {
-        return 0u;
-    }
-    let brick_min = sdf_grid_origin() + vec3<f32>(cell) * sdf_brick_extent();
-    let brick_local = (pos - brick_min) / sdf_voxel_size();
-    let voxel = clamp(vec3<u32>(floor(brick_local)), vec3<u32>(0u), vec3<u32>(7u));
-    let voxel_idx = voxel.x + voxel.y * 8u + voxel.z * 64u;
-    let idx = slot * 512u + voxel_idx;
-    return extract_material_id(brick_pool[idx].word0);
+
+    return vec2<f32>(min_dist, mat_id);
 }
 
 // ---------- SDF Normal via Central Differences ----------
 
 fn sdf_normal(pos: vec3<f32>) -> vec3<f32> {
-    let eps = sdf_voxel_size() * 0.5;
+    let eps = vol.voxel_sizes.x * 0.5; // L0 voxel size / 2
     let nx = sample_sdf(pos + vec3<f32>(eps, 0.0, 0.0)) - sample_sdf(pos - vec3<f32>(eps, 0.0, 0.0));
     let ny = sample_sdf(pos + vec3<f32>(0.0, eps, 0.0)) - sample_sdf(pos - vec3<f32>(0.0, eps, 0.0));
     let nz = sample_sdf(pos + vec3<f32>(0.0, 0.0, eps)) - sample_sdf(pos - vec3<f32>(0.0, 0.0, eps));
@@ -248,7 +449,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    // Compute world position of this texel centre
+    // Compute world position of this texel centre.
+    // The radiance volume center is in world space.
     let voxel_size = vol.voxel_sizes.x; // Level 0
     let half_extent = voxel_size * f32(dim) * 0.5;
     let pos = vol.center.xyz
@@ -274,19 +476,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let normal = sdf_normal(pos);
 
-    // Concavity probe: step along normal, check if we hit another surface quickly.
-    // At clean surfaces, probe_d ≈ probe_step (moving away from surface into open space).
-    // At min() junctions/fillets, the normal points ~45° outward and quickly encounters
-    // the adjacent surface → probe_d << probe_step → concavity detected → attenuate.
-    // Two probes at different distances for broader coverage of the fillet zone.
-    let vs = sdf_voxel_size();
-    let probe_d1 = sample_sdf(pos + normal * vs * 2.0);
-    let probe_d2 = sample_sdf(pos + normal * vs * 5.0);
-    let c1 = smoothstep(0.0, vs * 1.0, probe_d1);
-    let c2 = smoothstep(0.0, vs * 2.0, probe_d2);
+    // Concavity probe: step along normal, check if we quickly encounter another surface.
+    let probe_d1 = sample_sdf(pos + normal * voxel_size * 2.0);
+    let probe_d2 = sample_sdf(pos + normal * voxel_size * 5.0);
+    let c1 = smoothstep(0.0, voxel_size * 1.0, probe_d1);
+    let c2 = smoothstep(0.0, voxel_size * 2.0, probe_d2);
     let concavity = min(c1, c2);
 
-    let mat_id = sample_material_id(pos);
+    // Get material from closest object
+    let sdf_mat = sample_sdf_with_material(pos);
+    let mat_id = u32(sdf_mat.y);
     let mat = materials[mat_id];
     let albedo = vec3<f32>(mat.albedo_r, mat.albedo_g, mat.albedo_b);
 
@@ -298,7 +497,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let max_shadow = inject.max_shadow_lights;
     let num_lights_val = inject.num_lights;
 
-    // Evaluate direct lighting (lambertian diffuse — no specular for GI bounce)
+    // Evaluate direct lighting (Lambertian diffuse — no specular for GI bounce).
+    // Light positions are camera-relative in the light buffer, but injection
+    // works in world space. For directional lights this doesn't matter (only
+    // direction). For point/spot lights, this is a known approximation that
+    // works well when the radiance volume is centered on the camera.
     for (var i = 0u; i < num_lights_val; i++) {
         let light = lights[i];
         let light_color = vec3<f32>(light.color_r, light.color_g, light.color_b);
@@ -310,7 +513,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             // Directional
             light_dir = normalize(vec3<f32>(light.dir_x, light.dir_y, light.dir_z));
         } else if light.light_type == 1u {
-            // Point
+            // Point — light pos is camera-relative, pos is world-space.
+            // Approximate: treat light pos as world-space (works when camera ~ volume center).
             let light_pos = vec3<f32>(light.pos_x, light.pos_y, light.pos_z);
             let to_light = light_pos - pos;
             let dist = length(to_light);
@@ -357,7 +561,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Opacity: smooth falloff at surface band boundary.
     let opacity = clamp(1.0 - abs(d) / threshold, 0.0, 1.0);
 
-    // Apply concavity attenuation: darken radiance at min() junctions to prevent bright halos.
-    // Opacity stays full so junction voxels still occlude (dark + opaque = correct AO).
+    // Apply concavity attenuation to prevent bright halos at junctions.
     textureStore(radiance_out, vec3<i32>(gid), vec4<f32>(radiance * concavity, opacity));
 }
