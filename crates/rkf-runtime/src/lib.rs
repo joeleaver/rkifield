@@ -47,6 +47,21 @@ pub mod async_io;
 pub mod lru_eviction;
 /// Per-object streaming state machine for the v2 object-centric SDF architecture.
 pub mod object_streaming;
+/// Multi-scene management — load, activate, unload, and query simultaneous scenes.
+pub mod scene_manager;
+/// Project file format (.rkproject) — RON-serialized project descriptor.
+pub mod project;
+/// Scene file format v2 (.rkscene) — RON-serialized scene descriptor.
+pub mod scene_file;
+/// Environment profiles (.rkenv) — sky, fog, ambient, volumetric, and post-process hints
+/// with blending, overrides, and RON serialisation.
+pub mod environment;
+/// Game state management — scene tracking, environment control, and typed key-value store.
+pub mod game_manager;
+/// Main camera with environment ownership and zone-based environment transitions.
+pub mod main_camera;
+/// Save/load system (.rksave) — full game-state snapshots with RON serialization.
+pub mod save_system;
 
 pub use asset_registry::{AssetEntry, AssetRegistry, AssetState, Handle};
 pub use components::{
@@ -95,4 +110,23 @@ pub use lru_eviction::{
 };
 pub use object_streaming::{
     LoadRequest, ObjectStreamState, ObjectStreamingSystem, StreamingConfig, StreamingObject,
+};
+pub use scene_manager::{
+    LoadMode, ManagedScene, SceneHandle, SceneManager, SceneStatus,
+};
+pub use project::{ProjectFile, SceneRef, load_project, save_project};
+pub use scene_file::{
+    CameraEntry, LightEntry, LightType, ObjectEntry, SceneFile,
+    load_scene_file, save_scene_file,
+};
+pub use environment::{
+    AmbientConfig, EnvironmentOverrides, EnvironmentProfile, FogConfig, PostProcessHints,
+    SkyMode, VolumetricHints, apply_overrides, lerp_profiles, load_environment,
+    resolve_environment, save_environment,
+};
+pub use game_manager::{GameEvent, GameManager, GameState, GameValue};
+pub use main_camera::{EnvironmentZone, MainCamera};
+pub use save_system::{
+    CameraSnapshot, EntityOverride, EnvironmentSnapshot, SaveFile, SaveInfo,
+    create_save, load_game, list_saves, save_game,
 };
