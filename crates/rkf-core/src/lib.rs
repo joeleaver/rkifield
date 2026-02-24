@@ -26,6 +26,8 @@ pub mod companion;
 pub mod constants;
 /// Per-object LOD (Level of Detail) selection — screen-space driven.
 pub mod lod;
+/// LOD manager — per-frame LOD selection and brick map transitions.
+pub mod lod_manager;
 /// Material properties for the global GPU material table.
 pub mod material;
 /// CPU reference trilinear sampling within a brick.
@@ -55,6 +57,7 @@ pub use brick_map::{BrickMap, BrickMapAllocator, EMPTY_SLOT};
 pub use brick_pool::{BonePool, BrickPool, ColorPool, Pool, VolumetricPool};
 pub use companion::{BoneBrick, BoneVoxel, ColorBrick, ColorVoxel, VolumetricBrick, VolumetricVoxel};
 pub use lod::{LodLevel, LodSelection, ObjectLod, select_lod};
+pub use lod_manager::{LodManager, LodTransition};
 pub use material::Material;
 pub use voxel::VoxelSample;
 pub use voxelize_object::{evaluate_primitive, voxelize_sdf};
