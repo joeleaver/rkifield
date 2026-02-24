@@ -716,40 +716,41 @@ pub fn RightPanel() -> NodeHandle {
         "flex:1;overflow-y:auto;display:flex;flex-direction:column;",
     );
 
-    // Persistent signals for camera sliders (survive reactive rebuilds).
-    let fov_signal: Signal<f64> = Signal::new(70.0);
-    let speed_signal: Signal<f64> = Signal::new(5.0);
-    let near_signal: Signal<f64> = Signal::new(0.1);
-    let far_signal: Signal<f64> = Signal::new(1000.0);
-
-    // Persistent signals for environment sliders.
-    let sun_azimuth_signal: Signal<f64> = Signal::new(0.0);
-    let sun_elevation_signal: Signal<f64> = Signal::new(45.0);
-    let sun_intensity_signal: Signal<f64> = Signal::new(3.0);
-    let fog_density_signal: Signal<f64> = Signal::new(0.02);
-    let fog_height_falloff_signal: Signal<f64> = Signal::new(0.1);
-    let bloom_intensity_signal: Signal<f64> = Signal::new(0.3);
-    let bloom_threshold_signal: Signal<f64> = Signal::new(1.0);
-    let exposure_signal: Signal<f64> = Signal::new(1.0);
-    // Brush settings signals.
-    let brush_radius_signal: Signal<f64> = Signal::new(1.0);
-    let brush_strength_signal: Signal<f64> = Signal::new(0.5);
-    let brush_falloff_signal: Signal<f64> = Signal::new(0.5);
-    // Extended post-processing signals.
-    let sharpen_signal: Signal<f64> = Signal::new(0.5);
-    let dof_focus_dist_signal: Signal<f64> = Signal::new(2.0);
-    let dof_focus_range_signal: Signal<f64> = Signal::new(3.0);
-    let dof_max_coc_signal: Signal<f64> = Signal::new(8.0);
-    let motion_blur_signal: Signal<f64> = Signal::new(1.0);
-    let vignette_signal: Signal<f64> = Signal::new(0.0);
-    let grain_signal: Signal<f64> = Signal::new(0.0);
-    let chromatic_signal: Signal<f64> = Signal::new(0.0);
-    // Light editing signals.
-    let light_intensity_signal: Signal<f64> = Signal::new(1.0);
-    let light_range_signal: Signal<f64> = Signal::new(10.0);
-    // Animation signals.
-    let anim_speed_signal: Signal<f64> = Signal::new(1.0);
-    let anim_time_signal: Signal<f64> = Signal::new(0.0);
+    // Initialize signals from current editor state so sliders start with
+    // correct values. All signals are created outside the reactive closure
+    // to survive rebuilds. We NEVER call .set() inside the reactive closure
+    // to avoid re-entrant effect flushes.
+    let init = editor_state.lock().unwrap();
+    let fov_signal: Signal<f64> = Signal::new(init.editor_camera.fov_y.to_degrees() as f64);
+    let speed_signal: Signal<f64> = Signal::new(init.editor_camera.fly_speed as f64);
+    let near_signal: Signal<f64> = Signal::new(init.editor_camera.near as f64);
+    let far_signal: Signal<f64> = Signal::new(init.editor_camera.far as f64);
+    let sun_azimuth_signal: Signal<f64> = Signal::new({
+        let d = &init.environment.atmosphere.sun_direction;
+        d.x.atan2(d.z).to_degrees().rem_euclid(360.0) as f64
+    });
+    let sun_elevation_signal: Signal<f64> = Signal::new(
+        init.environment.atmosphere.sun_direction.y.asin().to_degrees() as f64,
+    );
+    let sun_intensity_signal: Signal<f64> = Signal::new(init.environment.atmosphere.sun_intensity as f64);
+    let fog_density_signal: Signal<f64> = Signal::new(init.environment.fog.density as f64);
+    let fog_height_falloff_signal: Signal<f64> = Signal::new(init.environment.fog.height_falloff as f64);
+    let pp = &init.environment.post_process;
+    let bloom_intensity_signal: Signal<f64> = Signal::new(pp.bloom_intensity as f64);
+    let bloom_threshold_signal: Signal<f64> = Signal::new(pp.bloom_threshold as f64);
+    let exposure_signal: Signal<f64> = Signal::new(pp.exposure as f64);
+    let sharpen_signal: Signal<f64> = Signal::new(pp.sharpen_strength as f64);
+    let dof_focus_dist_signal: Signal<f64> = Signal::new(pp.dof_focus_distance as f64);
+    let dof_focus_range_signal: Signal<f64> = Signal::new(pp.dof_focus_range as f64);
+    let dof_max_coc_signal: Signal<f64> = Signal::new(pp.dof_max_coc as f64);
+    let motion_blur_signal: Signal<f64> = Signal::new(pp.motion_blur_intensity as f64);
+    let vignette_signal: Signal<f64> = Signal::new(pp.vignette_intensity as f64);
+    let grain_signal: Signal<f64> = Signal::new(pp.grain_intensity as f64);
+    let chromatic_signal: Signal<f64> = Signal::new(pp.chromatic_aberration as f64);
+    let brush_radius_signal: Signal<f64> = Signal::new(init.sculpt.current_settings.radius as f64);
+    let brush_strength_signal: Signal<f64> = Signal::new(init.sculpt.current_settings.strength as f64);
+    let brush_falloff_signal: Signal<f64> = Signal::new(init.sculpt.current_settings.falloff as f64);
+    drop(init);
 
     let es = editor_state.clone();
     rinch::core::reactive_component_dom(__scope, &root, move |__scope| {
@@ -770,14 +771,6 @@ pub fn RightPanel() -> NodeHandle {
                 header.set_attribute("style", LABEL_STYLE);
                 header.append_child(&__scope.create_text("Sculpt Brush"));
                 container.append_child(&header);
-
-                // Sync brush signals.
-                {
-                    let es_lock = es.lock().unwrap();
-                    brush_radius_signal.set(es_lock.sculpt.current_settings.radius as f64);
-                    brush_strength_signal.set(es_lock.sculpt.current_settings.strength as f64);
-                    brush_falloff_signal.set(es_lock.sculpt.current_settings.falloff as f64);
-                }
 
                 // Brush type (read-only for now).
                 {
@@ -837,14 +830,6 @@ pub fn RightPanel() -> NodeHandle {
                 header.append_child(&__scope.create_text("Paint Brush"));
                 container.append_child(&header);
 
-                // Sync brush signals (paint uses the same radius/strength/falloff).
-                {
-                    let es_lock = es.lock().unwrap();
-                    brush_radius_signal.set(es_lock.paint.current_settings.radius as f64);
-                    brush_strength_signal.set(es_lock.paint.current_settings.strength as f64);
-                    brush_falloff_signal.set(es_lock.paint.current_settings.falloff as f64);
-                }
-
                 build_slider_row(
                     __scope, &container, "Radius", "", brush_radius_signal,
                     0.1, 10.0, 0.1, 1,
@@ -892,13 +877,8 @@ pub fn RightPanel() -> NodeHandle {
 
         // ── Camera-specific property editing with sliders ──
         if let Some(SelectedEntity::Camera) = selected_entity {
-            // Sync persistent signals from current editor state.
             let pos = {
                 let es = es.lock().unwrap();
-                fov_signal.set(es.editor_camera.fov_y.to_degrees() as f64);
-                speed_signal.set(es.editor_camera.fly_speed as f64);
-                near_signal.set(es.editor_camera.near as f64);
-                far_signal.set(es.editor_camera.far as f64);
                 es.editor_camera.position
             };
 
@@ -954,33 +934,33 @@ pub fn RightPanel() -> NodeHandle {
         } else {
             // ── Generic info display for non-camera entities ──
             // Light editing: sync signals and show sliders.
-            let mut is_light = false;
             if let Some(SelectedEntity::Light(lid)) = selected_entity {
-                if let Ok(es_lock) = es.lock() {
-                    if let Some(light) = es_lock.light_editor.get_light(lid) {
-                        is_light = true;
-                        light_intensity_signal.set(light.intensity as f64);
-                        light_range_signal.set(light.range as f64);
+                let light_data = es.lock().ok().and_then(|es_lock| {
+                    es_lock.light_editor.get_light(lid).map(|light| {
+                        (light.intensity, light.range, light.light_type, light.position)
+                    })
+                });
+                if let Some((intensity, range, light_type, position)) = light_data {
+                    let light_intensity_signal: Signal<f64> = Signal::new(intensity as f64);
+                    let light_range_signal: Signal<f64> = Signal::new(range as f64);
 
-                        let type_name = match light.light_type {
-                            crate::light_editor::EditorLightType::Point => "Point Light",
-                            crate::light_editor::EditorLightType::Spot => "Spot Light",
-                            crate::light_editor::EditorLightType::Directional => "Directional Light",
-                        };
-                        let hdr = __scope.create_element("div");
-                        hdr.set_attribute("style", SECTION_STYLE);
-                        hdr.append_child(&__scope.create_text(type_name));
-                        container.append_child(&hdr);
+                    let type_name = match light_type {
+                        crate::light_editor::EditorLightType::Point => "Point Light",
+                        crate::light_editor::EditorLightType::Spot => "Spot Light",
+                        crate::light_editor::EditorLightType::Directional => "Directional Light",
+                    };
+                    let hdr = __scope.create_element("div");
+                    hdr.set_attribute("style", SECTION_STYLE);
+                    hdr.append_child(&__scope.create_text(type_name));
+                    container.append_child(&hdr);
 
-                        let pos_row = __scope.create_element("div");
-                        pos_row.set_attribute("style", VALUE_STYLE);
-                        pos_row.append_child(&__scope.create_text(
-                            &format!("Pos: ({:.1}, {:.1}, {:.1})", light.position.x, light.position.y, light.position.z),
-                        ));
-                        container.append_child(&pos_row);
-                    }
-                }
-                if is_light {
+                    let pos_row = __scope.create_element("div");
+                    pos_row.set_attribute("style", VALUE_STYLE);
+                    pos_row.append_child(&__scope.create_text(
+                        &format!("Pos: ({:.1}, {:.1}, {:.1})", position.x, position.y, position.z),
+                    ));
+                    container.append_child(&pos_row);
+
                     let lid_cap = lid;
                     build_slider_row(
                         __scope, &container, "Intensity", "", light_intensity_signal,
@@ -1009,7 +989,7 @@ pub fn RightPanel() -> NodeHandle {
                 }
             }
 
-            let info = if is_light { None } else {
+            let info = if matches!(selected_entity, Some(SelectedEntity::Light(_))) { None } else {
                 selected_entity.and_then(|sel| {
                     let es = es.lock().ok()?;
                     match sel {
@@ -1073,35 +1053,6 @@ pub fn RightPanel() -> NodeHandle {
         container.append_child(&div);
 
         // ── Environment (always visible) ──
-
-        // Sync environment signals from editor state.
-        {
-            let es = es.lock().unwrap();
-            let atmo = &es.environment.atmosphere;
-            // Convert sun_direction → azimuth/elevation.
-            let d = atmo.sun_direction.normalize_or_zero();
-            let elevation = d.y.asin().to_degrees();
-            let azimuth = d.x.atan2(d.z).to_degrees().rem_euclid(360.0);
-            sun_azimuth_signal.set(azimuth as f64);
-            sun_elevation_signal.set(elevation as f64);
-            sun_intensity_signal.set(atmo.sun_intensity as f64);
-
-            fog_density_signal.set(es.environment.fog.density as f64);
-            fog_height_falloff_signal.set(es.environment.fog.height_falloff as f64);
-
-            let pp = &es.environment.post_process;
-            bloom_intensity_signal.set(pp.bloom_intensity as f64);
-            bloom_threshold_signal.set(pp.bloom_threshold as f64);
-            exposure_signal.set(pp.exposure as f64);
-            sharpen_signal.set(pp.sharpen_strength as f64);
-            dof_focus_dist_signal.set(pp.dof_focus_distance as f64);
-            dof_focus_range_signal.set(pp.dof_focus_range as f64);
-            dof_max_coc_signal.set(pp.dof_max_coc as f64);
-            motion_blur_signal.set(pp.motion_blur_intensity as f64);
-            vignette_signal.set(pp.vignette_intensity as f64);
-            grain_signal.set(pp.grain_intensity as f64);
-            chromatic_signal.set(pp.chromatic_aberration as f64);
-        }
 
         // ── Atmosphere section ──
         let atmo_header = __scope.create_element("div");
@@ -1456,11 +1407,9 @@ pub fn RightPanel() -> NodeHandle {
             }
             container.append_child(&btn_row);
 
-            // Sync animation signals from state.
-            if let Ok(es_lock) = es.lock() {
-                anim_speed_signal.set(es_lock.animation.speed as f64);
-                anim_time_signal.set(es_lock.animation.current_time as f64);
-            }
+            let anim_speed_signal: Signal<f64> = Signal::new(
+                es.lock().map(|e| e.animation.speed as f64).unwrap_or(1.0),
+            );
 
             build_slider_row(
                 __scope, &container, "Speed", "x", anim_speed_signal,
