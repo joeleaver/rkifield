@@ -353,6 +353,17 @@ impl ApplicationHandler for App {
                 });
             }
             es.light_editor.clear_dirty();
+
+            // Seed environment atmosphere from the first directional light
+            // so the sun controls start in sync with the actual shading.
+            if let Some(dl) = engine_inst.world_lights.iter().find(|l| l.light_type == 0) {
+                let dir = glam::Vec3::new(dl.dir_x, dl.dir_y, dl.dir_z);
+                es.environment.atmosphere.sun_direction = dir;
+                es.environment.atmosphere.sun_color =
+                    glam::Vec3::new(dl.color_r, dl.color_g, dl.color_b);
+                es.environment.atmosphere.sun_intensity = dl.intensity;
+                es.environment.clear_dirty();
+            }
         }
 
         // Set up rinch context sharing — components use use_context to access these.
@@ -871,6 +882,25 @@ impl ApplicationHandler for App {
                         if let Some(mode) = es.pending_debug_mode.take() {
                             es.debug_mode = mode;
                             engine.set_debug_mode(mode);
+                        }
+
+                        // When environment sun changes, propagate to the
+                        // first directional light so shading matches volumetrics.
+                        if es.environment.is_dirty() {
+                            let sun_dir = es.environment.atmosphere.sun_direction;
+                            let sun_color = es.environment.atmosphere.sun_color;
+                            let sun_intensity = es.environment.atmosphere.sun_intensity;
+                            let dir_id = es.light_editor.all_lights().iter()
+                                .find(|l| l.light_type == crate::light_editor::EditorLightType::Directional)
+                                .map(|l| l.id);
+                            if let Some(id) = dir_id {
+                                if let Some(l) = es.light_editor.get_light_mut(id) {
+                                    l.direction = sun_dir;
+                                    l.color = sun_color;
+                                    l.intensity = sun_intensity;
+                                }
+                                es.light_editor.mark_dirty();
+                            }
                         }
 
                         // Apply environment settings (sun, fog, bloom, exposure)
