@@ -679,6 +679,10 @@ pub fn RightPanel() -> NodeHandle {
     let bloom_intensity_signal: Signal<f64> = Signal::new(0.3);
     let bloom_threshold_signal: Signal<f64> = Signal::new(1.0);
     let exposure_signal: Signal<f64> = Signal::new(1.0);
+    // Brush settings signals.
+    let brush_radius_signal: Signal<f64> = Signal::new(1.0);
+    let brush_strength_signal: Signal<f64> = Signal::new(0.5);
+    let brush_falloff_signal: Signal<f64> = Signal::new(0.5);
     // Extended post-processing signals.
     let sharpen_signal: Signal<f64> = Signal::new(0.5);
     let dof_focus_dist_signal: Signal<f64> = Signal::new(2.0);
@@ -709,13 +713,57 @@ pub fn RightPanel() -> NodeHandle {
                 header.append_child(&__scope.create_text("Sculpt Brush"));
                 container.append_child(&header);
 
-                let msg = __scope.create_element("div");
-                msg.set_attribute(
-                    "style",
-                    &format!("{SECTION_STYLE}color:var(--rinch-color-placeholder);"),
+                // Sync brush signals.
+                {
+                    let es_lock = es.lock().unwrap();
+                    brush_radius_signal.set(es_lock.sculpt.current_settings.radius as f64);
+                    brush_strength_signal.set(es_lock.sculpt.current_settings.strength as f64);
+                    brush_falloff_signal.set(es_lock.sculpt.current_settings.falloff as f64);
+                }
+
+                // Brush type (read-only for now).
+                {
+                    let es_lock = es.lock().unwrap();
+                    let type_name = match es_lock.sculpt.current_settings.brush_type {
+                        crate::sculpt::BrushType::Add => "Add",
+                        crate::sculpt::BrushType::Subtract => "Subtract",
+                        crate::sculpt::BrushType::Smooth => "Smooth",
+                        crate::sculpt::BrushType::Flatten => "Flatten",
+                        crate::sculpt::BrushType::Sharpen => "Sharpen",
+                    };
+                    let row = __scope.create_element("div");
+                    row.set_attribute("style", VALUE_STYLE);
+                    row.append_child(&__scope.create_text(&format!("Type: {type_name}")));
+                    container.append_child(&row);
+                }
+
+                build_slider_row(
+                    __scope, &container, "Radius", "", brush_radius_signal,
+                    0.1, 10.0, 0.1, 1,
+                    { let es = es.clone(); move |v| {
+                        if let Ok(mut es) = es.lock() {
+                            es.sculpt.set_radius(v as f32);
+                        }
+                    }},
                 );
-                msg.append_child(&__scope.create_text("Brush settings coming soon"));
-                container.append_child(&msg);
+                build_slider_row(
+                    __scope, &container, "Strength", "", brush_strength_signal,
+                    0.0, 1.0, 0.01, 2,
+                    { let es = es.clone(); move |v| {
+                        if let Ok(mut es) = es.lock() {
+                            es.sculpt.set_strength(v as f32);
+                        }
+                    }},
+                );
+                build_slider_row(
+                    __scope, &container, "Falloff", "", brush_falloff_signal,
+                    0.0, 1.0, 0.01, 2,
+                    { let es = es.clone(); move |v| {
+                        if let Ok(mut es) = es.lock() {
+                            es.sculpt.current_settings.falloff = v as f32;
+                        }
+                    }},
+                );
 
                 // Divider.
                 let div = __scope.create_element("div");
@@ -731,13 +779,41 @@ pub fn RightPanel() -> NodeHandle {
                 header.append_child(&__scope.create_text("Paint Brush"));
                 container.append_child(&header);
 
-                let msg = __scope.create_element("div");
-                msg.set_attribute(
-                    "style",
-                    &format!("{SECTION_STYLE}color:var(--rinch-color-placeholder);"),
+                // Sync brush signals (paint uses the same radius/strength/falloff).
+                {
+                    let es_lock = es.lock().unwrap();
+                    brush_radius_signal.set(es_lock.paint.current_settings.radius as f64);
+                    brush_strength_signal.set(es_lock.paint.current_settings.strength as f64);
+                    brush_falloff_signal.set(es_lock.paint.current_settings.falloff as f64);
+                }
+
+                build_slider_row(
+                    __scope, &container, "Radius", "", brush_radius_signal,
+                    0.1, 10.0, 0.1, 1,
+                    { let es = es.clone(); move |v| {
+                        if let Ok(mut es) = es.lock() {
+                            es.paint.current_settings.radius = v as f32;
+                        }
+                    }},
                 );
-                msg.append_child(&__scope.create_text("Paint settings coming soon"));
-                container.append_child(&msg);
+                build_slider_row(
+                    __scope, &container, "Strength", "", brush_strength_signal,
+                    0.0, 1.0, 0.01, 2,
+                    { let es = es.clone(); move |v| {
+                        if let Ok(mut es) = es.lock() {
+                            es.paint.current_settings.strength = v as f32;
+                        }
+                    }},
+                );
+                build_slider_row(
+                    __scope, &container, "Falloff", "", brush_falloff_signal,
+                    0.0, 1.0, 0.01, 2,
+                    { let es = es.clone(); move |v| {
+                        if let Ok(mut es) = es.lock() {
+                            es.paint.current_settings.falloff = v as f32;
+                        }
+                    }},
+                );
 
                 // Divider.
                 let div = __scope.create_element("div");
