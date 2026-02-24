@@ -12,6 +12,8 @@
 #![warn(missing_docs)]
 
 pub mod aabb;
+/// .rkf v2 file format — serialization and deserialization for voxelized objects.
+pub mod asset_file;
 pub mod automation;
 /// Bounding volume hierarchy over scene objects for spatial acceleration.
 pub mod bvh;
@@ -47,6 +49,10 @@ pub mod voxel;
 pub mod world_position;
 
 pub use aabb::{Aabb, WorldAabb};
+pub use asset_file::{
+    AssetError, LodData, LodEntryInfo, ObjectHeader, SaveLodLevel, load_object_header,
+    load_object_lod, save_object,
+};
 pub use bvh::{Bvh, BvhNode};
 pub use scene::{Scene, SceneObject};
 pub use scene_node::{
