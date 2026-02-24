@@ -6,8 +6,11 @@
 //! [`BlendShapeAnimation`] provides per-blend-shape weight tracks with
 //! keyframe interpolation, applied to a [`BlendShapeSet`].
 
+use rkf_core::scene_node::Transform;
+
 use crate::blend_shape::BlendShapeSet;
 use crate::clip::AnimationClip;
+use crate::skeleton::Skeleton;
 
 // ─── LoopMode ────────────────────────────────────────────────────────────────
 
@@ -124,6 +127,14 @@ impl AnimationPlayer {
     /// Whether the animation has finished (only relevant for LoopMode::Once).
     pub fn is_finished(&self) -> bool {
         self.loop_mode == LoopMode::Once && self.current_time >= self.clip.duration
+    }
+
+    /// Evaluate per-bone local transforms at the current time.
+    ///
+    /// Returns a `Transform` per bone suitable for writing directly to
+    /// SceneNode `local_transform` fields.
+    pub fn evaluate_local(&self, skeleton: &Skeleton) -> Vec<Transform> {
+        skeleton.evaluate_local(&self.clip, self.current_time)
     }
 
     /// Advance the animation by `dt` seconds.
@@ -452,6 +463,43 @@ mod tests {
             3.0,
             "new clip should be active"
         );
+    }
+
+    // ── evaluate_local ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn player_evaluate_local_returns_transforms() {
+        use crate::clip::{AnimationClip, BoneChannel, Keyframe};
+        use crate::skeleton::{Bone, Skeleton};
+        use glam::{Mat4, Quat, Vec3};
+
+        let bones = vec![
+            Bone {
+                name: "root".into(),
+                bind_transform: Mat4::IDENTITY,
+                inverse_bind: Mat4::IDENTITY,
+            },
+        ];
+        let skel = Skeleton::new(bones, vec![-1]).unwrap();
+
+        let clip = AnimationClip::new(
+            "test".to_string(),
+            1.0,
+            vec![BoneChannel {
+                bone_index: 0,
+                keyframes: vec![
+                    Keyframe { time: 0.0, position: Vec3::ZERO, rotation: Quat::IDENTITY, scale: Vec3::ONE },
+                    Keyframe { time: 1.0, position: Vec3::new(10.0, 0.0, 0.0), rotation: Quat::IDENTITY, scale: Vec3::ONE },
+                ],
+            }],
+        );
+
+        let mut player = AnimationPlayer::new(clip);
+        player.advance(0.5);
+
+        let locals = player.evaluate_local(&skel);
+        assert_eq!(locals.len(), 1);
+        assert!((locals[0].position.x - 5.0).abs() < 1e-4, "expected x=5.0, got {}", locals[0].position.x);
     }
 
     // ── BlendShapeChannel ─────────────────────────────────────────────────────

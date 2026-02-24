@@ -5,6 +5,7 @@
 //! during animation evaluation to produce final bone matrices.
 
 use glam::{Mat4, Quat, Vec3};
+use rkf_core::scene_node::Transform;
 use thiserror::Error;
 
 use crate::clip::AnimationClip;
@@ -176,6 +177,36 @@ impl Skeleton {
         }
 
         bone_matrices
+    }
+
+    /// Evaluate per-bone local transforms for the given clip at the specified time.
+    ///
+    /// Returns a `Transform` per bone — these are the local-space transforms
+    /// that should be written directly to SceneNode `local_transform` fields.
+    ///
+    /// For bones not present in the clip, the bind-pose is decomposed into
+    /// position/rotation/scale and returned as-is.
+    pub fn evaluate_local(&self, clip: &AnimationClip, time: f32) -> Vec<Transform> {
+        let bone_count = self.bones.len();
+        let mut transforms = Vec::with_capacity(bone_count);
+
+        for (i, bone) in self.bones.iter().enumerate() {
+            let t = if let Some(channel) = clip.channel_for_bone(i as u32) {
+                let (pos, rot, scl) = channel.sample(time);
+                // SDF engine requires uniform scale — take average of x/y/z.
+                let uniform_scale = (scl.x + scl.y + scl.z) / 3.0;
+                Transform::new(pos, rot, uniform_scale)
+            } else {
+                // Decompose bind-pose matrix to Transform.
+                let (scale, rotation, translation) =
+                    bone.bind_transform.to_scale_rotation_translation();
+                let uniform_scale = (scale.x + scale.y + scale.z) / 3.0;
+                Transform::new(translation, rotation, uniform_scale)
+            };
+            transforms.push(t);
+        }
+
+        transforms
     }
 
     /// Decompose a Mat4 into (scale, rotation, translation) components.
@@ -428,6 +459,68 @@ mod tests {
         // Child: world = identity * translation(2,0,0), bone_mat = translation(2,0,0) * translation(-2,0,0) = identity
         let diff = (matrices[1] - Mat4::IDENTITY).abs().to_cols_array();
         assert!(diff.iter().cloned().fold(0.0f32, f32::max) < 1e-5);
+    }
+
+    #[test]
+    fn test_evaluate_local_returns_correct_transforms() {
+        use crate::clip::{AnimationClip, BoneChannel, Keyframe};
+
+        let bones = vec![
+            bone("root", Vec3::ZERO),
+            bone("child", Vec3::new(0.0, 1.0, 0.0)),
+        ];
+        let hierarchy = vec![-1, 0];
+        let skel = Skeleton::new(bones, hierarchy).unwrap();
+
+        let clip = AnimationClip::new(
+            "test".to_string(),
+            1.0,
+            vec![
+                BoneChannel {
+                    bone_index: 0,
+                    keyframes: vec![Keyframe {
+                        time: 0.0,
+                        position: Vec3::new(1.0, 2.0, 3.0),
+                        rotation: Quat::IDENTITY,
+                        scale: Vec3::splat(2.0),
+                    }],
+                },
+            ],
+        );
+
+        let locals = skel.evaluate_local(&clip, 0.0);
+        assert_eq!(locals.len(), 2);
+
+        // Bone 0: from clip keyframe.
+        assert!((locals[0].position - Vec3::new(1.0, 2.0, 3.0)).length() < 1e-5);
+        assert_eq!(locals[0].rotation, Quat::IDENTITY);
+        assert!((locals[0].scale - 2.0).abs() < 1e-5);
+
+        // Bone 1: from bind pose (translation 0,1,0, identity rotation, scale 1).
+        assert!((locals[1].position - Vec3::new(0.0, 1.0, 0.0)).length() < 1e-5);
+        assert!((locals[1].scale - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_evaluate_local_empty_clip_uses_bind() {
+        use crate::clip::AnimationClip;
+
+        let bones = vec![
+            bone("root", Vec3::ZERO),
+            bone("child", Vec3::new(3.0, 0.0, 0.0)),
+        ];
+        let hierarchy = vec![-1, 0];
+        let skel = Skeleton::new(bones, hierarchy).unwrap();
+
+        let clip = AnimationClip::new("empty".to_string(), 1.0, vec![]);
+        let locals = skel.evaluate_local(&clip, 0.0);
+
+        // Root: identity bind → position=0, scale=1.
+        assert!((locals[0].position).length() < 1e-5);
+        assert!((locals[0].scale - 1.0).abs() < 1e-5);
+
+        // Child: bind_transform = translation(3,0,0) → position=(3,0,0).
+        assert!((locals[1].position - Vec3::new(3.0, 0.0, 0.0)).length() < 1e-5);
     }
 
     #[test]
