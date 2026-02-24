@@ -1,4 +1,4 @@
-// CSG edit compute shader — Phase 16 (Procedural Editing).
+// CSG edit compute shader — v2 object-local editing.
 //
 // One workgroup (8x8x8 = 512 threads) processes one brick.
 // Each thread handles one voxel: evaluates the analytic SDF primitive
@@ -14,7 +14,7 @@ struct VoxelSample {
 
 struct EditParams {
     // Spatial (3 x vec4 = 48 bytes)
-    position:   vec4<f32>,  // xyz = world pos, w = unused
+    position:   vec4<f32>,  // xyz = object-local pos, w = unused
     rotation:   vec4<f32>,  // quaternion xyzw
     dimensions: vec4<f32>,  // xyz = half-extents/radius, w = unused
 
@@ -32,7 +32,7 @@ struct EditParams {
 
     // Brick info (1 x vec4 = 16 bytes)
     brick_base_index: u32,
-    brick_world_min:  vec3<f32>,
+    brick_local_min:  vec3<f32>,
 
     // Grid info (1 x vec4 = 16 bytes)
     voxel_size: f32,
@@ -350,10 +350,10 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
     let existing_flags = extract_flags(voxel.word1);
     let existing_reserved = (voxel.word1 >> 24u) & 0xFFu;
 
-    // Compute world position of this voxel
-    let voxel_pos = edit.brick_world_min + (vec3<f32>(f32(ix), f32(iy), f32(iz)) + 0.5) * edit.voxel_size;
+    // Compute object-local position of this voxel
+    let voxel_pos = edit.brick_local_min + (vec3<f32>(f32(ix), f32(iy), f32(iz)) + 0.5) * edit.voxel_size;
 
-    // Transform to edit-local space
+    // Transform from object-local to edit-local space
     let local_pos = quat_rotate_inverse(edit.rotation, voxel_pos - edit.position.xyz);
 
     // Evaluate SDF primitive in local space

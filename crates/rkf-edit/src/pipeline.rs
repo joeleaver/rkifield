@@ -143,11 +143,44 @@ impl CsgEditPipeline {
         pass.dispatch_workgroups(1, 1, 1); // 1 workgroup = 1 brick (8x8x8)
     }
 
+    /// Dispatch a complete edit operation for all affected bricks in an object.
+    ///
+    /// This is the main v2 entry point: given an [`EditOp`](crate::edit_op::EditOp)
+    /// targeting an object, it finds all overlapping bricks in the object's brick
+    /// map, prepares per-brick [`EditParams`], and dispatches the compute shader.
+    ///
+    /// Returns the number of bricks processed.
+    pub fn dispatch_edit(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        device: &wgpu::Device,
+        brick_pool_buffer: &wgpu::Buffer,
+        op: &crate::edit_op::EditOp,
+        handle: &rkf_core::scene_node::BrickMapHandle,
+        allocator: &rkf_core::brick_map::BrickMapAllocator,
+        voxel_size: f32,
+        object_aabb_min: glam::Vec3,
+    ) -> usize {
+        let affected =
+            crate::edit_op::find_affected_bricks(op, handle, allocator, voxel_size, object_aabb_min);
+        if affected.is_empty() {
+            return 0;
+        }
+
+        let params_list: Vec<EditParams> = affected
+            .iter()
+            .map(|brick| op.to_edit_params(brick))
+            .collect();
+
+        self.dispatch_multi(encoder, device, brick_pool_buffer, &params_list);
+        affected.len()
+    }
+
     /// Dispatch the CSG edit shader for multiple bricks in a single compute pass.
     ///
     /// More efficient than calling [`dispatch`](Self::dispatch) in a loop because
     /// it reuses the same compute pass. Each brick gets its own bind group with
-    /// a unique uniform buffer (different `brick_base_index` / `brick_world_min`).
+    /// a unique uniform buffer (different `brick_base_index` / `brick_local_min`).
     pub fn dispatch_multi(
         &self,
         encoder: &mut wgpu::CommandEncoder,

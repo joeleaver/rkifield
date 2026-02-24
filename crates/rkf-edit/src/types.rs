@@ -157,19 +157,19 @@ impl FalloffCurve {
 ///
 /// | Offset | Size | Field | Description |
 /// |--------|------|-------|-------------|
-/// | 0 | 16 | `position` | xyz = world pos, w = unused |
+/// | 0 | 16 | `position` | xyz = object-local pos, w = unused |
 /// | 16 | 16 | `rotation` | quaternion xyzw |
 /// | 32 | 16 | `dimensions` | xyz = half-extents/radius, w = unused |
 /// | 48 | 16 | `strength`, `blend_k`, `falloff`, `material_id` | |
 /// | 64 | 16 | `edit_type`, `shape_type`, `secondary_id`, `color_packed` | |
-/// | 80 | 16 | `brick_base_index`, `brick_world_min[3]` | |
+/// | 80 | 16 | `brick_base_index`, `brick_local_min[3]` | |
 /// | 96 | 16 | `voxel_size`, `_pad[3]` | |
 /// | 112 | 16 | `_pad2[4]` | padding to 128 bytes |
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Pod, Zeroable)]
 pub struct EditParams {
     // -- Spatial (48 bytes, 3 x vec4) --
-    /// World-space position of the edit center. `[x, y, z, 0.0]`.
+    /// Object-local position of the edit center. `[x, y, z, 0.0]`.
     pub position: [f32; 4],
     /// Rotation quaternion (edit-local to world). `[x, y, z, w]`.
     pub rotation: [f32; 4],
@@ -200,8 +200,8 @@ pub struct EditParams {
     // -- Brick info (16 bytes, 1 x vec4) --
     /// Base index into the brick pool storage buffer for the target brick.
     pub brick_base_index: u32,
-    /// World-space minimum corner of the target brick. `[x, y, z]`.
-    pub brick_world_min: [f32; 3],
+    /// Object-local minimum corner of the target brick. `[x, y, z]`.
+    pub brick_local_min: [f32; 3],
 
     // -- Grid info (16 bytes, 1 x vec4) --
     /// Voxel size in world units for the target brick's resolution tier.
@@ -223,7 +223,7 @@ impl EditParams {
     /// Create an `EditParams` for a CSG operation with the given shape.
     ///
     /// This is a convenience builder — sets common fields and leaves
-    /// brick-specific fields (brick_base_index, brick_world_min, voxel_size)
+    /// brick-specific fields (brick_base_index, brick_local_min, voxel_size)
     /// to be filled per-brick at dispatch time.
     #[allow(clippy::too_many_arguments)]
     pub fn csg(
@@ -250,7 +250,7 @@ impl EditParams {
             secondary_id: 0,
             color_packed: 0,
             brick_base_index: 0,
-            brick_world_min: [0.0; 3],
+            brick_local_min: [0.0; 3],
             voxel_size: 0.0,
             _pad: [0.0; 3],
             _pad2: [0.0; 4],
@@ -277,7 +277,7 @@ impl EditParams {
             secondary_id: 0,
             color_packed: 0,
             brick_base_index: 0,
-            brick_world_min: [0.0; 3],
+            brick_local_min: [0.0; 3],
             voxel_size: 0.0,
             _pad: [0.0; 3],
             _pad2: [0.0; 4],
@@ -290,11 +290,11 @@ impl EditParams {
     pub fn with_brick_info(
         mut self,
         brick_base_index: u32,
-        brick_world_min: [f32; 3],
+        brick_local_min: [f32; 3],
         voxel_size: f32,
     ) -> Self {
         self.brick_base_index = brick_base_index;
-        self.brick_world_min = brick_world_min;
+        self.brick_local_min = brick_local_min;
         self.voxel_size = voxel_size;
         self
     }
@@ -407,7 +407,7 @@ mod tests {
     fn with_brick_info_sets_per_brick_fields() {
         let params = EditParams::zeroed().with_brick_info(42, [10.0, 20.0, 30.0], 0.02);
         assert_eq!(params.brick_base_index, 42);
-        assert_eq!(params.brick_world_min, [10.0, 20.0, 30.0]);
+        assert_eq!(params.brick_local_min, [10.0, 20.0, 30.0]);
         assert_eq!(params.voxel_size, 0.02);
     }
 }
