@@ -47,7 +47,6 @@ fn build_tree_data(es: &EditorState) -> Vec<TreeNodeData> {
         let label = match light.light_type {
             EditorLightType::Point => format!("Point Light {}", light.id),
             EditorLightType::Spot => format!("Spot Light {}", light.id),
-            EditorLightType::Directional => format!("Directional Light {}", light.id),
         };
         let node = TreeNodeData::new(value, label)
             .with_icon(TablerIcon::Bulb);
@@ -130,33 +129,34 @@ pub fn SceneTreePanel() -> NodeHandle {
     rinch::core::reactive_component_dom(__scope, &root, move |__scope| {
         revision.track();
 
-        let (tree_data, obj_count) = {
+        // Read tree data and selection from editor state, then RELEASE the
+        // lock before syncing tree signals. clear_selected()/select() trigger
+        // reactive cascades (→ RightPanel::render) that also need the lock;
+        // holding it here would deadlock (std::Mutex is not reentrant).
+        let (tree_data, obj_count, sel_entity) = {
             let es = es.lock().unwrap();
             let data = build_tree_data(&es);
             let count = es.scene_tree.roots.len() + es.light_editor.all_lights().len();
-
-            // Sync selection state from EditorState → tree signals.
-            // Use untracked to avoid creating reactive dependencies on tree
-            // signals (which would cause re-entrant borrow panics).
-            let sel_entity = es.selected_entity;
-            rinch::core::untracked(|| {
-                if let Some(ref sel) = sel_entity {
-                    let value = selected_to_value(sel);
-                    let current = tree_state.selected.get();
-                    if !current.contains(&value) {
-                        tree_state.controller.clear_selected();
-                        tree_state.controller.select(&value);
-                    }
-                } else {
-                    let current = tree_state.selected.get();
-                    if !current.is_empty() {
-                        tree_state.controller.clear_selected();
-                    }
-                }
-            });
-
-            (data, count)
+            let sel = es.selected_entity;
+            (data, count, sel)
         };
+
+        // Sync selection state from EditorState → tree signals (lock released).
+        rinch::core::untracked(|| {
+            if let Some(ref sel) = sel_entity {
+                let value = selected_to_value(sel);
+                let current = tree_state.selected.get();
+                if !current.contains(&value) {
+                    tree_state.controller.clear_selected();
+                    tree_state.controller.select(&value);
+                }
+            } else {
+                let current = tree_state.selected.get();
+                if !current.is_empty() {
+                    tree_state.controller.clear_selected();
+                }
+            }
+        });
 
         let container = __scope.create_element("div");
         container.set_attribute("style", "display:flex;flex-direction:column;");

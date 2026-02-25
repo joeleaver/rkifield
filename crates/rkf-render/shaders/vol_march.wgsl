@@ -134,7 +134,7 @@ fn sample_vol_shadow(pos: vec3<f32>) -> f32 {
 }
 
 // ---------------------------------------------------------------------------
-// Sample cloud shadow map at a world position.
+// Sample cloud shadow map at a world position (vertical projection).
 // Returns transmittance in [0, 1] (1 = fully lit, 0 = fully shadowed).
 //
 // The cloud shadow map is a 2D texture centered on the camera, covering
@@ -142,11 +142,46 @@ fn sample_vol_shadow(pos: vec3<f32>) -> f32 {
 // smoothly fade to 1.0 (fully lit) to avoid hard cutoff.
 // ---------------------------------------------------------------------------
 fn sample_cloud_shadow(pos: vec3<f32>) -> f32 {
+    return sample_cloud_shadow_at(pos.xz);
+}
+
+// ---------------------------------------------------------------------------
+// Directional cloud shadow: traces from a fog position toward the sun to
+// find where the ray enters the cloud layer, then looks up the shadow map
+// at that XZ coordinate.  This produces correct shadow columns for low-angle
+// sunlight, which is what creates visible god rays in volumetric fog.
+//
+// For positions inside or above the cloud layer, falls back to vertical.
+// ---------------------------------------------------------------------------
+fn sample_cloud_shadow_directional(pos: vec3<f32>) -> f32 {
     let coverage = cloud_params.flags.y;
-    // If coverage is zero or clouds disabled, return fully lit.
     if (coverage <= 0.0 || cloud_params.flags.x < 0.5) { return 1.0; }
 
-    let cloud_uv = (pos.xz - params.cam_pos.xz) / coverage + 0.5;
+    let cloud_base = cloud_params.altitude.x;
+    let dy = cloud_base - pos.y;
+
+    var query_xz = pos.xz;
+
+    // Only offset when below the cloud layer and sun has a horizontal component.
+    let sun_horiz = length(params.sun_dir.xz);
+    if (dy > 0.0 && sun_horiz > 0.001) {
+        let sun_vert    = max(params.sun_dir.y, 0.001);
+        let offset_dist = dy * sun_horiz / sun_vert;
+        let offset_dir  = params.sun_dir.xz / sun_horiz;
+        query_xz = pos.xz + offset_dir * offset_dist;
+    }
+
+    return sample_cloud_shadow_at(query_xz);
+}
+
+// ---------------------------------------------------------------------------
+// Core cloud shadow lookup at an arbitrary XZ position.
+// ---------------------------------------------------------------------------
+fn sample_cloud_shadow_at(query_xz: vec2<f32>) -> f32 {
+    let coverage = cloud_params.flags.y;
+    if (coverage <= 0.0 || cloud_params.flags.x < 0.5) { return 1.0; }
+
+    let cloud_uv = (query_xz - params.cam_pos.xz) / coverage + 0.5;
 
     // Edge fade: smoothstep from boundary to 10% inward.
     let FADE = 0.1;
@@ -225,10 +260,13 @@ fn cloud_density(pos: vec3<f32>) -> f32 {
     if (pos.y < cloud_min || pos.y > cloud_max) { return 0.0; }
     if (cloud_params.flags.x < 0.5)             { return 0.0; }
 
-    // Height gradient: ramp up over bottom 10%, ramp down over top 40%.
-    let height_frac     = (pos.y - cloud_min) / (cloud_max - cloud_min);
-    let height_gradient = smoothstep(0.0, 0.1, height_frac)
-                        * smoothstep(1.0, 0.6, height_frac);
+    // Height gradient: ramp up over bottom 50 m, fade out over top 200 m.
+    // Absolute distances so the dense region stays near the base altitude
+    // regardless of slab thickness.
+    let height_above_base = pos.y - cloud_min;
+    let height_below_top  = cloud_max - pos.y;
+    let height_gradient = smoothstep(0.0, 50.0, height_above_base)
+                        * smoothstep(0.0, 200.0, height_below_top);
 
     // Wind scrolling (XZ plane).
     let wind_dir    = vec2<f32>(cloud_params.wind.x, cloud_params.wind.y);
@@ -370,7 +408,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let cloud_g_back: f32 = -0.2;    // slight back-scatter lobe
     let cloud_forward_weight: f32 = 0.3; // 30% directional, 70% isotropic-ish
     // Ambient sky light illuminates clouds from all directions (multi-scatter approx).
-    let sky_ambient = vec3<f32>(0.4, 0.5, 0.7) * 0.6; // blue-ish sky ambient
+    // Blend between blue sky at noon and warm tint at sunset based on sun elevation.
+    let noon_ambient = vec3<f32>(0.4, 0.5, 0.7) * 0.6;
+    let sun_elev = params.sun_dir.y; // ~1 at noon, ~0 at horizon
+    let warm_factor = 1.0 - smoothstep(0.0, 0.3, sun_elev);
+    let warm_ambient = normalize(params.sun_color.xyz + vec3<f32>(0.01)) * 0.35;
+    let sky_ambient = mix(noon_ambient, warm_ambient, warm_factor);
 
     for (var i = 0u; i < params.max_steps; i++) {
         let t = params.near + (f32(i) + jitter) * params.step_size;
@@ -389,7 +432,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         // In-scattering: fog and clouds use different albedo and phase.
         // Combine object volumetric shadows with cloud shadow map.
-        let sun_vis = sample_vol_shadow(pos) * sample_cloud_shadow(pos);
+        // Directional cloud shadow: traces toward the sun so cloud gaps
+        // create proper light shafts (god rays) in the fog volume.
+        let sun_vis = sample_vol_shadow(pos) * sample_cloud_shadow_directional(pos);
         let fog_in  = fog_dens * sun_vis * henyey_greenstein(cos_sun, dust_g)
                     * params.sun_color.xyz * scatter_albedo;
         // Two-lobe HG phase for clouds (multi-scatter approximation).
@@ -409,6 +454,85 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         // Early exit once transmittance is negligible.
         if (transmittance < 0.01) { break; }
+    }
+
+    // ── Dedicated cloud march ───────────────────────────────────────────────
+    // The fog loop above covers 0..64 m (32 steps × 2 m).  Clouds typically
+    // live at higher altitudes, so we intersect the cloud altitude slab and
+    // march through it separately with its own step budget.
+    if (cloud_params.flags.x > 0.5 && transmittance > 0.01) {
+        let cloud_min = cloud_params.altitude.x;
+        let cloud_max = cloud_params.altitude.y;
+        let cam_y = params.cam_pos.y;
+        let dir_y = ray_dir.y;
+
+        // Ray–slab intersection.
+        var cloud_t_enter: f32 = 0.0;
+        var cloud_t_exit:  f32 = 0.0;
+        var cloud_valid = false;
+
+        if (abs(dir_y) > 1e-5) {
+            let t_lo = (cloud_min - cam_y) / dir_y;
+            let t_hi = (cloud_max - cam_y) / dir_y;
+            cloud_t_enter = max(min(t_lo, t_hi), 0.0);
+            cloud_t_exit  = max(max(t_lo, t_hi), 0.0);
+            cloud_valid   = cloud_t_exit > cloud_t_enter;
+        } else if (cam_y >= cloud_min && cam_y <= cloud_max) {
+            // Ray is horizontal and camera is inside the cloud band.
+            cloud_t_enter = 0.0;
+            cloud_t_exit  = 100000.0;
+            cloud_valid   = true;
+        }
+
+        if (cloud_valid) {
+            // Clamp to scene depth; sky pixels (depth=0) get full cloud range.
+            // No artificial distance cap — the slab intersection already limits
+            // the march to the cloud volume, and transmittance drops to zero
+            // long before all steps complete for distant clouds.
+            let cloud_cap = select(100000.0, max_t, depth_value > 0.0);
+            let t_end = min(cloud_t_exit, cloud_cap);
+            let slab  = t_end - cloud_t_enter;
+
+            if (slab > 0.0) {
+                // March through at most 6 km of the slab — the height gradient
+                // concentrates density in the 10-60% height range, so anything
+                // beyond ~6 km is negligible.  48 steps keeps the per-step
+                // spacing ≤ 125 m, avoiding FBM aliasing / visible banding.
+                let cloud_steps = 48u;
+                let effective_slab = min(slab, 6000.0);
+                let cloud_step = effective_slab / f32(cloud_steps);
+
+                // Temporally stable jitter — no frame_index, so the offset
+                // is fixed per pixel. Prevents flicker when steps are large.
+                let cloud_jitter = interleaved_gradient_noise(pixel, 0u);
+
+                for (var ci = 0u; ci < cloud_steps; ci++) {
+                    let t = cloud_t_enter + (f32(ci) + cloud_jitter) * cloud_step;
+                    let pos = params.cam_pos.xyz + ray_dir * t;
+
+                    var cd = cloud_density(pos);
+                    if (cd <= 0.001) { continue; }
+
+                    // Fade density near the camera so being inside the cloud
+                    // band shows wisps rather than a solid gray wall.
+                    cd *= smoothstep(0.0, 150.0, t);
+
+                    let step_tr = exp(-cd * cloud_step);
+                    let sun_vis = sample_cloud_shadow(pos);
+                    let cloud_phase = mix(
+                        henyey_greenstein(cos_sun, cloud_g_back),
+                        henyey_greenstein(cos_sun, cloud_g_forward),
+                        cloud_forward_weight
+                    );
+                    let cloud_sun = cd * sun_vis * cloud_phase * params.sun_color.xyz * cloud_albedo;
+                    let cloud_sky = cd * sky_ambient * cloud_albedo;
+
+                    scatter      += (cloud_sun + cloud_sky) * transmittance * cloud_step;
+                    transmittance *= step_tr;
+                    if (transmittance < 0.01) { break; }
+                }
+            }
+        }
     }
 
     textureStore(output_scatter, vec2<i32>(gid.xy), vec4<f32>(scatter, transmittance));

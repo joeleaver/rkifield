@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashSet;
 
 /// JSON-RPC 2.0 request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -392,13 +393,33 @@ pub fn handle_request_locked(
         "notifications/initialized" => None,
 
         "tools/list" => {
-            let tool_defs: Vec<McpToolDef> = registry
+            // Local meta tools (connect, disconnect, status)
+            let local_defs: Vec<McpToolDef> = registry
                 .list_tools(mode)
                 .into_iter()
                 .map(tool_def_to_mcp)
                 .collect();
 
-            let result = ToolsListResult { tools: tool_defs };
+            // Remote engine tools (fetched via IPC)
+            let api: std::sync::Arc<dyn rkf_core::automation::AutomationApi> =
+                api_slot.read().unwrap().clone();
+            let remote_defs: Vec<McpToolDef> = api
+                .list_tools_json()
+                .ok()
+                .and_then(|v| serde_json::from_value(v).ok())
+                .unwrap_or_default();
+
+            // Merge: local tools take priority over remote tools with the same name
+            let local_names: HashSet<String> =
+                local_defs.iter().map(|t| t.name.clone()).collect();
+            let mut all_tools = local_defs;
+            all_tools.extend(
+                remote_defs
+                    .into_iter()
+                    .filter(|t| !local_names.contains(&t.name)),
+            );
+
+            let result = ToolsListResult { tools: all_tools };
             Some(JsonRpcResponse::success(
                 request.id.clone(),
                 serde_json::to_value(result).unwrap(),
@@ -436,7 +457,8 @@ pub fn handle_request_locked(
             let api: std::sync::Arc<dyn rkf_core::automation::AutomationApi> =
                 api_slot.read().unwrap().clone();
 
-            match registry.call(&call_params.name, mode, &*api, tool_args) {
+            // Try local registry first (meta tools: connect, disconnect, status)
+            match registry.call(&call_params.name, mode, &*api, tool_args.clone()) {
                 Ok(response) => {
                     let content = tool_response_to_content(response);
                     let result = ToolsCallResult {
@@ -447,6 +469,26 @@ pub fn handle_request_locked(
                         request.id.clone(),
                         serde_json::to_value(result).unwrap(),
                     ))
+                }
+                Err(crate::registry::ToolError::NotFound(_)) => {
+                    // Not a local tool — forward to engine via IPC
+                    match api.call_tool_json(&call_params.name, tool_args) {
+                        Ok(result) => {
+                            Some(JsonRpcResponse::success(request.id.clone(), result))
+                        }
+                        Err(e) => {
+                            let result = ToolsCallResult {
+                                content: vec![ContentBlock::Text {
+                                    text: format!("Error: {e}"),
+                                }],
+                                is_error: Some(true),
+                            };
+                            Some(JsonRpcResponse::success(
+                                request.id.clone(),
+                                serde_json::to_value(result).unwrap(),
+                            ))
+                        }
+                    }
                 }
                 Err(e) => {
                     let result = ToolsCallResult {

@@ -9,14 +9,15 @@
 use glam::Vec3;
 
 /// The type of editor light.
+///
+/// Directional/sun light is driven by `EnvironmentState` (under Camera),
+/// not the light editor. Only point and spot lights are editor-managed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditorLightType {
     /// Omnidirectional light with position and range.
     Point,
     /// Cone-shaped light with inner/outer angles.
     Spot,
-    /// Infinitely distant light affecting the entire scene.
-    Directional,
 }
 
 /// An individual light in the editor scene.
@@ -121,19 +122,6 @@ impl LightEditor {
                 range: 15.0,
                 spot_inner_angle: 0.3,
                 spot_outer_angle: 0.5,
-                cast_shadows: true,
-                cookie_path: None,
-            },
-            EditorLightType::Directional => EditorLight {
-                id,
-                light_type,
-                position: Vec3::ZERO,
-                direction: Vec3::new(0.0, -1.0, 0.0),
-                color: Vec3::ONE,
-                intensity: 0.8,
-                range: f32::INFINITY,
-                spot_inner_angle: 0.0,
-                spot_outer_angle: 0.0,
                 cast_shadows: true,
                 cookie_path: None,
             },
@@ -284,21 +272,11 @@ mod tests {
     }
 
     #[test]
-    fn test_add_directional_light() {
-        let mut editor = LightEditor::new();
-        let id = editor.add_light(EditorLightType::Directional);
-        let light = editor.get_light(id).unwrap();
-        assert_eq!(light.light_type, EditorLightType::Directional);
-        assert!(approx_eq(light.intensity, 0.8));
-        assert!(approx_eq(light.direction.y, -1.0));
-    }
-
-    #[test]
     fn test_unique_ids() {
         let mut editor = LightEditor::new();
         let id1 = editor.add_light(EditorLightType::Point);
         let id2 = editor.add_light(EditorLightType::Spot);
-        let id3 = editor.add_light(EditorLightType::Directional);
+        let id3 = editor.add_light(EditorLightType::Point);
         assert_ne!(id1, id2);
         assert_ne!(id2, id3);
         assert_ne!(id1, id3);
@@ -465,7 +443,7 @@ mod tests {
         let mut editor = LightEditor::new();
         editor.add_light(EditorLightType::Point);
         editor.add_light(EditorLightType::Spot);
-        editor.add_light(EditorLightType::Directional);
+        editor.add_light(EditorLightType::Point);
         assert_eq!(editor.all_lights().len(), 3);
     }
 

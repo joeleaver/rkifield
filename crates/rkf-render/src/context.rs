@@ -54,6 +54,14 @@ impl RenderContext {
         ))
         .expect("failed to create GPU device");
 
+        // Log GPU device errors and device lost events to stderr for diagnostics.
+        device.on_uncaptured_error(std::sync::Arc::new(|error: wgpu::Error| {
+            eprintln!("[GPU ERROR] {error}");
+        }));
+        device.set_device_lost_callback(|reason, msg| {
+            eprintln!("[GPU DEVICE LOST] reason={reason:?} msg={msg}");
+        });
+
         Self {
             device,
             queue,

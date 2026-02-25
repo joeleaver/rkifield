@@ -54,6 +54,24 @@ impl BridgeAutomationApi {
         name: &str,
         args: serde_json::Value,
     ) -> AutomationResult<serde_json::Value> {
+        self.send_request_async(
+            "tools/call",
+            Some(serde_json::json!({
+                "name": name,
+                "arguments": args
+            })),
+        )
+        .await
+    }
+
+    /// Send an arbitrary JSON-RPC request over IPC and return the result.
+    ///
+    /// Checks for JSON-RPC-level errors and tool-level `isError` flags.
+    async fn send_request_async(
+        &self,
+        method: &str,
+        params: Option<serde_json::Value>,
+    ) -> AutomationResult<serde_json::Value> {
         let mut client = IpcClient::connect_unix(&self.socket_path)
             .await
             .map_err(|e| AutomationError::EngineError(format!("IPC connect failed: {e}")))?;
@@ -61,11 +79,8 @@ impl BridgeAutomationApi {
         let req = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             id: Some(serde_json::json!(1)),
-            method: "tools/call".to_string(),
-            params: Some(serde_json::json!({
-                "name": name,
-                "arguments": args
-            })),
+            method: method.to_string(),
+            params,
         };
 
         let resp = client
@@ -94,6 +109,17 @@ impl BridgeAutomationApi {
         }
 
         Ok(result)
+    }
+
+    /// Send an arbitrary JSON-RPC request (blocking wrapper).
+    fn send_request(
+        &self,
+        method: &str,
+        params: Option<serde_json::Value>,
+    ) -> AutomationResult<serde_json::Value> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.send_request_async(method, params))
+        })
     }
 }
 
@@ -301,6 +327,25 @@ impl AutomationApi for BridgeAutomationApi {
                 "unknown command: {command}"
             ))),
         }
+    }
+
+    // --- Tool discovery (forwarded over IPC) --------------------------------
+
+    fn list_tools_json(&self) -> AutomationResult<serde_json::Value> {
+        let result = self.send_request("tools/list", None)?;
+        // Extract the "tools" array from the ToolsListResult
+        Ok(result
+            .get("tools")
+            .cloned()
+            .unwrap_or(serde_json::json!([])))
+    }
+
+    fn call_tool_json(
+        &self,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> AutomationResult<serde_json::Value> {
+        self.call_tool_raw(name, arguments)
     }
 
     // --- v2 object-centric methods (forwarded over IPC) --------------------

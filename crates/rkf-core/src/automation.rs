@@ -344,6 +344,28 @@ pub trait AutomationApi: Send + Sync {
     /// Execute an engine console command and return its output string.
     fn execute_command(&self, command: &str) -> AutomationResult<String>;
 
+    // --- Tool discovery (default: empty/unsupported) -----------------------
+
+    /// List available MCP tools from the engine as a JSON array of tool definition objects.
+    ///
+    /// Each element has `name`, `description`, and `inputSchema` fields matching
+    /// the MCP `tools/list` response schema.
+    fn list_tools_json(&self) -> AutomationResult<serde_json::Value> {
+        Ok(serde_json::json!([]))
+    }
+
+    /// Forward a raw MCP tool call to the engine.
+    ///
+    /// Returns the full `ToolsCallResult` JSON (content array + isError flag).
+    #[allow(unused_variables)]
+    fn call_tool_json(
+        &self,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> AutomationResult<serde_json::Value> {
+        Err(AutomationError::NotImplemented("call_tool_json"))
+    }
+
     // --- v2 object-centric methods (default: unsupported) ------------------
 
     /// Spawn a new SDF object in the v2 scene and return its object ID.
@@ -794,6 +816,19 @@ mod tests {
             let back: QualityPreset = serde_json::from_str(&json).unwrap();
             assert_eq!(back, preset);
         }
+    }
+
+    // --- Tool discovery default method tests --------------------------------
+
+    #[test]
+    fn default_list_tools_json_returns_empty_array() {
+        let result = make_stub().list_tools_json().unwrap();
+        assert_eq!(result, serde_json::json!([]));
+    }
+
+    #[test]
+    fn default_call_tool_json_returns_not_implemented() {
+        assert_not_implemented(make_stub().call_tool_json("foo", serde_json::json!({})));
     }
 
     // --- v2 default method tests -------------------------------------------

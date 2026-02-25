@@ -24,7 +24,7 @@ use crate::gpu_scene::GpuSceneV2;
 use crate::light::LightBuffer;
 use crate::radiance_volume::RadianceVolume;
 
-/// GPU-uploadable shade uniforms (32 bytes).
+/// GPU-uploadable shade uniforms (128 bytes).
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Pod, Zeroable)]
 pub struct ShadeUniforms {
@@ -38,6 +38,18 @@ pub struct ShadeUniforms {
     pub shadow_budget_k: u32,
     /// Camera world-space position (xyz) + unused (w).
     pub camera_pos: [f32; 4],
+    /// Sun direction toward the sun (xyz) + sun intensity (w).
+    pub sun_dir: [f32; 4],
+    /// Sun color in linear RGB (xyz) + unused (w).
+    pub sun_color: [f32; 4],
+    /// Atmosphere params: x=rayleigh_scale, y=mie_scale, z=atmosphere_enabled (1.0/0.0), w=unused.
+    pub sky_params: [f32; 4],
+    /// Camera forward unit vector (xyz) + unused (w).
+    pub cam_forward: [f32; 4],
+    /// Camera right vector pre-scaled by tan(fov/2)*aspect (xyz) + unused (w).
+    pub cam_right: [f32; 4],
+    /// Camera up vector pre-scaled by tan(fov/2) (xyz) + unused (w).
+    pub cam_up: [f32; 4],
 }
 
 /// Format of the HDR output texture.
@@ -328,8 +340,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn shade_uniforms_size_is_32_bytes() {
-        assert_eq!(std::mem::size_of::<ShadeUniforms>(), 32);
+    fn shade_uniforms_size_is_128_bytes() {
+        assert_eq!(std::mem::size_of::<ShadeUniforms>(), 128);
     }
 
     #[test]
@@ -340,18 +352,31 @@ mod tests {
             _pad0: 0,
             shadow_budget_k: 4,
             camera_pos: [1.0, 2.0, 3.0, 0.0],
+            sun_dir: [0.5, 1.0, 0.3, 3.0],
+            sun_color: [1.0, 0.95, 0.85, 0.0],
+            sky_params: [1.0, 1.0, 1.0, 0.0],
+            cam_forward: [0.0, 0.0, -1.0, 0.0],
+            cam_right: [1.0, 0.0, 0.0, 0.0],
+            cam_up: [0.0, 1.0, 0.0, 0.0],
         };
         let bytes = bytemuck::bytes_of(&u);
-        assert_eq!(bytes.len(), 32);
+        assert_eq!(bytes.len(), 128);
         let u2: &ShadeUniforms = bytemuck::from_bytes(bytes);
         assert_eq!(u.debug_mode, u2.debug_mode);
         assert_eq!(u.camera_pos, u2.camera_pos);
+        assert_eq!(u.sun_dir, u2.sun_dir);
     }
 
     #[test]
     fn shade_uniforms_camera_pos_offset_is_16() {
         let offset = std::mem::offset_of!(ShadeUniforms, camera_pos);
         assert_eq!(offset, 16);
+    }
+
+    #[test]
+    fn shade_uniforms_sun_dir_offset_is_32() {
+        let offset = std::mem::offset_of!(ShadeUniforms, sun_dir);
+        assert_eq!(offset, 32);
     }
 
     #[test]

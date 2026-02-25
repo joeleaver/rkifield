@@ -458,9 +458,8 @@ impl EditorState {
                 {
                     use crate::light_editor::EditorLightType;
                     let lt = match light_type.as_str() {
-                        "point" => EditorLightType::Point,
                         "spot" => EditorLightType::Spot,
-                        _ => EditorLightType::Directional,
+                        _ => EditorLightType::Point,
                     };
                     let id = self.light_editor.add_light(lt);
                     self.light_editor.set_position(id, entity.position);
@@ -542,14 +541,12 @@ impl EditorState {
             let light_type_str = match light.light_type {
                 EditorLightType::Point => "point",
                 EditorLightType::Spot => "spot",
-                EditorLightType::Directional => "directional",
             };
             let name = format!(
                 "{} Light {}",
                 match light.light_type {
                     EditorLightType::Point => "Point",
                     EditorLightType::Spot => "Spot",
-                    EditorLightType::Directional => "Directional",
                 },
                 idx + 1
             );

@@ -4,9 +4,14 @@
 //! `rkf-mcp` can connect to this socket (or fall back to localhost TCP).
 //! Messages are newline-delimited JSON-RPC 2.0.
 
-use crate::protocol::{self, JsonRpcRequest, JsonRpcResponse};
-use crate::registry::{ToolMode, ToolRegistry};
+use crate::protocol::{
+    self, InitializeResult, JsonRpcRequest, JsonRpcResponse, McpToolDef, ServerCapabilities,
+    ServerInfo, ToolsCallParams, ToolsCapability, ToolsListResult, INVALID_PARAMS,
+    METHOD_NOT_FOUND,
+};
+use crate::registry::ToolMode;
 use rkf_core::automation::AutomationApi;
+use serde_json::Value;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, UnixListener};
@@ -35,7 +40,6 @@ impl IpcConfig {
 /// The server runs until the tokio runtime is shut down.
 pub async fn run_server(
     config: IpcConfig,
-    registry: Arc<ToolRegistry>,
     api: Arc<dyn AutomationApi>,
 ) -> anyhow::Result<()> {
     if let Some(ref path) = config.socket_path {
@@ -47,13 +51,11 @@ pub async fn run_server(
 
         loop {
             let (stream, _addr) = listener.accept().await?;
-            let registry = Arc::clone(&registry);
             let api = Arc::clone(&api);
-            let mode = config.mode;
 
             tokio::spawn(async move {
                 let (reader, writer) = stream.into_split();
-                if let Err(e) = handle_connection(reader, writer, &registry, mode, &*api).await {
+                if let Err(e) = handle_connection(reader, writer, &*api).await {
                     log::error!("Connection error: {e}");
                 }
             });
@@ -66,13 +68,11 @@ pub async fn run_server(
         loop {
             let (stream, peer) = listener.accept().await?;
             log::info!("TCP connection from {peer}");
-            let registry = Arc::clone(&registry);
             let api = Arc::clone(&api);
-            let mode = config.mode;
 
             tokio::spawn(async move {
                 let (reader, writer) = stream.into_split();
-                if let Err(e) = handle_connection(reader, writer, &registry, mode, &*api).await {
+                if let Err(e) = handle_connection(reader, writer, &*api).await {
                     log::error!("Connection error from {peer}: {e}");
                 }
             });
@@ -81,11 +81,13 @@ pub async fn run_server(
 }
 
 /// Handle a single connection — read newline-delimited JSON-RPC messages and respond.
+///
+/// Dispatches `initialize`, `tools/list`, and `tools/call` directly through
+/// `AutomationApi::list_tools_json` / `call_tool_json`, with no `ToolRegistry`
+/// dependency.
 async fn handle_connection<R, W>(
     reader: R,
     mut writer: W,
-    registry: &ToolRegistry,
-    mode: ToolMode,
     api: &dyn AutomationApi,
 ) -> anyhow::Result<()>
 where
@@ -102,7 +104,7 @@ where
         }
 
         let response = match protocol::parse_request(&line) {
-            Ok(request) => protocol::handle_request(&request, registry, mode, api),
+            Ok(request) => dispatch_ipc_request(&request, api),
             Err(err_response) => Some(err_response),
         };
 
@@ -115,6 +117,95 @@ where
     }
 
     Ok(())
+}
+
+/// Dispatch a JSON-RPC request for the IPC server.
+///
+/// Uses `AutomationApi::list_tools_json` and `call_tool_json` instead of a
+/// `ToolRegistry`, so tools are self-describing from the engine implementation.
+fn dispatch_ipc_request(
+    request: &JsonRpcRequest,
+    api: &dyn AutomationApi,
+) -> Option<JsonRpcResponse> {
+    match request.method.as_str() {
+        "initialize" => {
+            let result = InitializeResult {
+                protocol_version: "2024-11-05".to_string(),
+                capabilities: ServerCapabilities {
+                    tools: ToolsCapability {
+                        list_changed: false,
+                    },
+                },
+                server_info: ServerInfo {
+                    name: "rkf-mcp".to_string(),
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                },
+            };
+            Some(JsonRpcResponse::success(
+                request.id.clone(),
+                serde_json::to_value(result).unwrap(),
+            ))
+        }
+
+        "notifications/initialized" => None,
+
+        "tools/list" => {
+            let tool_defs: Vec<McpToolDef> = api
+                .list_tools_json()
+                .ok()
+                .and_then(|v| serde_json::from_value(v).ok())
+                .unwrap_or_default();
+
+            let result = ToolsListResult { tools: tool_defs };
+            Some(JsonRpcResponse::success(
+                request.id.clone(),
+                serde_json::to_value(result).unwrap(),
+            ))
+        }
+
+        "tools/call" => {
+            let params = match &request.params {
+                Some(p) => p.clone(),
+                None => {
+                    return Some(JsonRpcResponse::error(
+                        request.id.clone(),
+                        INVALID_PARAMS,
+                        "missing params for tools/call",
+                    ));
+                }
+            };
+
+            let call_params: ToolsCallParams = match serde_json::from_value(params) {
+                Ok(p) => p,
+                Err(e) => {
+                    return Some(JsonRpcResponse::error(
+                        request.id.clone(),
+                        INVALID_PARAMS,
+                        format!("invalid tools/call params: {e}"),
+                    ));
+                }
+            };
+
+            let tool_args = call_params.arguments.unwrap_or(Value::Null);
+
+            match api.call_tool_json(&call_params.name, tool_args) {
+                Ok(result) => Some(JsonRpcResponse::success(request.id.clone(), result)),
+                Err(e) => {
+                    let result = serde_json::json!({
+                        "content": [{ "type": "text", "text": format!("Error: {e}") }],
+                        "isError": true
+                    });
+                    Some(JsonRpcResponse::success(request.id.clone(), result))
+                }
+            }
+        }
+
+        _ => Some(JsonRpcResponse::error(
+            request.id.clone(),
+            METHOD_NOT_FOUND,
+            format!("method not found: {}", request.method),
+        )),
+    }
 }
 
 /// Connect to an engine's IPC socket as a client.
@@ -193,46 +284,17 @@ impl TcpClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::*;
+    use crate::registry::ToolMode;
     use rkf_core::automation::StubAutomationApi;
-    use serde_json::Value;
-
-    struct EchoHandler;
-    impl ToolHandler for EchoHandler {
-        fn call(&self, _api: &dyn AutomationApi, params: Value) -> Result<ToolResponse, ToolError> {
-            Ok(serde_json::json!({"echo": params}).into())
-        }
-    }
-
-    fn test_registry() -> ToolRegistry {
-        let mut reg = ToolRegistry::new();
-        reg.register(
-            ToolDefinition {
-                name: "test_tool".to_string(),
-                description: "A test tool".to_string(),
-                category: ToolCategory::Observation,
-                parameters: vec![],
-                return_type: ReturnTypeDef {
-                    description: "test".to_string(),
-                    return_type: ParamType::Object,
-                },
-                mode: ToolMode::Both,
-            },
-            Arc::new(EchoHandler),
-        );
-        reg
-    }
 
     #[tokio::test]
     async fn unix_socket_roundtrip() {
         let socket_path = format!("/tmp/rkf-test-{}.sock", std::process::id());
         let _ = std::fs::remove_file(&socket_path);
 
-        let registry = Arc::new(test_registry());
         let api: Arc<dyn AutomationApi> = Arc::new(StubAutomationApi);
 
         // Start server in background
-        let server_registry = Arc::clone(&registry);
         let server_api = Arc::clone(&api);
         let server_path = socket_path.clone();
         let server_handle = tokio::spawn(async move {
@@ -242,7 +304,6 @@ mod tests {
                     tcp_port: 0,
                     mode: ToolMode::Editor,
                 },
-                server_registry,
                 server_api,
             )
             .await;
@@ -265,7 +326,7 @@ mod tests {
         assert!(resp.error.is_none());
         assert!(resp.result.is_some());
 
-        // Send tools/list
+        // Send tools/list — StubAutomationApi returns empty array (default)
         let req = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             id: Some(Value::Number(2.into())),
@@ -276,18 +337,19 @@ mod tests {
         assert!(resp.error.is_none());
         let result = resp.result.unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0]["name"], "test_tool");
+        assert_eq!(tools.len(), 0); // StubAutomationApi has no tools
 
-        // Send tools/call
+        // Send tools/call — should return isError since stub doesn't implement tools
         let req = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             id: Some(Value::Number(3.into())),
             method: "tools/call".to_string(),
-            params: Some(serde_json::json!({"name": "test_tool", "arguments": {"hello": "world"}})),
+            params: Some(serde_json::json!({"name": "screenshot", "arguments": {}})),
         };
         let resp = client.request(&req).await.unwrap();
         assert!(resp.error.is_none());
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], true);
 
         // Cleanup
         server_handle.abort();
@@ -296,7 +358,6 @@ mod tests {
 
     #[tokio::test]
     async fn tcp_fallback_roundtrip() {
-        let registry = Arc::new(test_registry());
         let api: Arc<dyn AutomationApi> = Arc::new(StubAutomationApi);
 
         // Use port 0 to get OS-assigned port, but we need to pick one
@@ -304,7 +365,6 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
 
-        let server_registry = Arc::clone(&registry);
         let server_api = Arc::clone(&api);
         let server_handle = tokio::spawn(async move {
             let _ = run_server(
@@ -313,7 +373,6 @@ mod tests {
                     tcp_port: port,
                     mode: ToolMode::Debug,
                 },
-                server_registry,
                 server_api,
             )
             .await;

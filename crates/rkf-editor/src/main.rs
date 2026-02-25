@@ -109,12 +109,8 @@ fn start_ipc_server(
         mode: rkf_mcp::registry::ToolMode::Editor,
     };
 
-    let mut registry = rkf_mcp::registry::ToolRegistry::new();
-    rkf_mcp::tools::observation::register_observation_tools(&mut registry);
-    let registry = Arc::new(registry);
-
     let handle = rt.spawn(async move {
-        if let Err(e) = rkf_mcp::ipc::run_server(config, registry, api).await {
+        if let Err(e) = rkf_mcp::ipc::run_server(config, api).await {
             log::error!("IPC server error: {e}");
         }
     });
@@ -330,11 +326,15 @@ impl ApplicationHandler for App {
             es.v2_scene = Some(engine_inst.scene.clone());
             es.sync_v2_scene();
 
-            // Seed editor light list from render lights.
+            // Seed editor light list from render lights (point/spot only —
+            // directional sun is driven by environment, not the light editor).
             for rl in &engine_inst.world_lights {
                 use crate::light_editor::{EditorLight, EditorLightType};
+                // Skip directional lights (type 0) — sun is environment-only.
+                if rl.light_type == 0 {
+                    continue;
+                }
                 let light_type = match rl.light_type {
-                    0 => EditorLightType::Directional,
                     2 => EditorLightType::Spot,
                     _ => EditorLightType::Point,
                 };
@@ -353,17 +353,6 @@ impl ApplicationHandler for App {
                 });
             }
             es.light_editor.clear_dirty();
-
-            // Seed environment atmosphere from the first directional light
-            // so the sun controls start in sync with the actual shading.
-            if let Some(dl) = engine_inst.world_lights.iter().find(|l| l.light_type == 0) {
-                let dir = glam::Vec3::new(dl.dir_x, dl.dir_y, dl.dir_z);
-                es.environment.atmosphere.sun_direction = dir;
-                es.environment.atmosphere.sun_color =
-                    glam::Vec3::new(dl.color_r, dl.color_g, dl.color_b);
-                es.environment.atmosphere.sun_intensity = dl.intensity;
-                es.environment.clear_dirty();
-            }
         }
 
         // Set up rinch context sharing — components use use_context to access these.
@@ -576,12 +565,14 @@ impl ApplicationHandler for App {
 
             WindowEvent::KeyboardInput { event, .. } => {
                 if let PhysicalKey::Code(key) = event.physical_key {
-                    // Escape always exits.
+                    // Escape deselects the current selection (if any).
                     if key == WinitKeyCode::Escape && event.state == ElementState::Pressed {
-                        if let Some(ref path) = self.socket_path {
-                            cleanup_ipc(path);
+                        if let Ok(mut es) = self.editor_state.lock() {
+                            es.selected_entity = None;
                         }
-                        event_loop.exit();
+                        if let Some(rev) = &self.ui_revision {
+                            rev.bump();
+                        }
                         return;
                     }
 
@@ -766,7 +757,23 @@ impl ApplicationHandler for App {
                 self.last_frame = now;
 
                 // 1. Update rinch UI with collected platform events.
-                let events: Vec<_> = self.pending_events.drain(..).collect();
+                //    Collapse consecutive MouseMove events — during slider drags
+                //    the mouse can generate many moves per frame. Rinch only needs
+                //    the latest position; intermediate moves waste 10-15 ms each.
+                let raw_events: Vec<_> = self.pending_events.drain(..).collect();
+                let events: Vec<_> = {
+                    let mut out = Vec::with_capacity(raw_events.len());
+                    for evt in raw_events {
+                        if matches!(&evt, PlatformEvent::MouseMove { .. }) {
+                            if matches!(out.last(), Some(PlatformEvent::MouseMove { .. })) {
+                                *out.last_mut().unwrap() = evt;
+                                continue;
+                            }
+                        }
+                        out.push(evt);
+                    }
+                    out
+                };
                 if let Some(ctx) = self.rinch_ctx.as_mut() {
                     ctx.update(&events);
                 }
@@ -884,27 +891,9 @@ impl ApplicationHandler for App {
                             engine.set_debug_mode(mode);
                         }
 
-                        // When environment sun changes, propagate to the
-                        // first directional light so shading matches volumetrics.
-                        if es.environment.is_dirty() {
-                            let sun_dir = es.environment.atmosphere.sun_direction;
-                            let sun_color = es.environment.atmosphere.sun_color;
-                            let sun_intensity = es.environment.atmosphere.sun_intensity;
-                            let dir_id = es.light_editor.all_lights().iter()
-                                .find(|l| l.light_type == crate::light_editor::EditorLightType::Directional)
-                                .map(|l| l.id);
-                            if let Some(id) = dir_id {
-                                if let Some(l) = es.light_editor.get_light_mut(id) {
-                                    l.direction = sun_dir;
-                                    l.color = sun_color;
-                                    l.intensity = sun_intensity;
-                                }
-                                es.light_editor.mark_dirty();
-                            }
-                        }
-
                         // Apply environment settings (sun, fog, bloom, exposure)
-                        // to render pipeline when dirty.
+                        // to render pipeline when dirty. The directional sun light
+                        // is synthesized from env in render_frame_inner each frame.
                         engine.apply_environment(&mut es.environment);
 
                         // Sync editor lights → render lights when dirty.
@@ -913,7 +902,6 @@ impl ApplicationHandler for App {
                                 use crate::light_editor::EditorLightType;
                                 rkf_render::Light {
                                     light_type: match el.light_type {
-                                        EditorLightType::Directional => 0,
                                         EditorLightType::Point => 1,
                                         EditorLightType::Spot => 2,
                                     },
@@ -1037,11 +1025,6 @@ impl ApplicationHandler for App {
                                         verts.extend(wireframe::spot_light_wireframe(
                                             light.position, light.direction,
                                             light.range, light.spot_outer_angle, lc,
-                                        ));
-                                    }
-                                    light_editor::EditorLightType::Directional => {
-                                        verts.extend(wireframe::directional_light_wireframe(
-                                            light.position, light.direction, lc,
                                         ));
                                     }
                                 }

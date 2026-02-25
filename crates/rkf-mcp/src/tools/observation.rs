@@ -1,10 +1,13 @@
-//! Observation tool stubs — read-only tools available in both Editor and Debug modes.
+//! Observation tool handlers and shared dispatch functions.
 //!
 //! Each tool calls the corresponding `AutomationApi` method and returns the result
-//! as JSON. Tools return placeholder data until engine features are built.
+//! as JSON. The shared functions `standard_tool_definitions()` and
+//! `dispatch_tool_call()` allow any `AutomationApi` implementor to serve all 13
+//! observation tools without needing a `ToolRegistry`.
 
 use crate::registry::*;
-use rkf_core::automation::AutomationApi;
+use rkf_core::automation::{AutomationApi, AutomationError, AutomationResult};
+use serde_json::Value;
 use std::sync::Arc;
 
 // --- Screenshot tool ---
@@ -193,6 +196,56 @@ impl ToolHandler for CameraSetHandler {
                 "yaw": yaw_deg,
                 "pitch": pitch_deg,
             }).into()),
+            Err(e) => Err(ToolError::EngineError(e.to_string())),
+        }
+    }
+}
+
+// --- Environment Set tool ---
+
+struct EnvSetHandler;
+
+impl ToolHandler for EnvSetHandler {
+    fn call(&self, api: &dyn AutomationApi, params: serde_json::Value) -> Result<ToolResponse, ToolError> {
+        let property = params
+            .get("property")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidParams("property is required".to_string()))?;
+        // Accept both numbers and strings as value.
+        let value = params
+            .get("value")
+            .ok_or_else(|| ToolError::InvalidParams("value is required".to_string()))?;
+        let value_str = if let Some(s) = value.as_str() {
+            s.to_string()
+        } else if let Some(b) = value.as_bool() {
+            b.to_string()
+        } else {
+            // Numeric — use Display to get clean float/int representation.
+            value.to_string()
+        };
+
+        let cmd = format!("env_set {property} {value_str}");
+        match api.execute_command(&cmd) {
+            Ok(msg) => Ok(serde_json::json!({ "status": "ok", "message": msg }).into()),
+            Err(e) => Err(ToolError::EngineError(e.to_string())),
+        }
+    }
+}
+
+// --- Environment Get tool ---
+
+struct EnvGetHandler;
+
+impl ToolHandler for EnvGetHandler {
+    fn call(&self, api: &dyn AutomationApi, params: serde_json::Value) -> Result<ToolResponse, ToolError> {
+        let property = params
+            .get("property")
+            .and_then(|v| v.as_str())
+            .unwrap_or("all");
+
+        let cmd = format!("env_get {property}");
+        match api.execute_command(&cmd) {
+            Ok(val) => Ok(serde_json::json!({ "property": property, "value": val }).into()),
             Err(e) => Err(ToolError::EngineError(e.to_string())),
         }
     }
@@ -476,6 +529,362 @@ pub fn register_observation_tools(registry: &mut ToolRegistry) {
         },
         Arc::new(CameraSetHandler),
     );
+
+    registry.register(
+        ToolDefinition {
+            name: "env_set".to_string(),
+            description: "Set an environment property (atmosphere, fog, clouds, post-processing). Use env_get with property='all' to see available properties.".to_string(),
+            category: ToolCategory::Observation,
+            parameters: vec![
+                ParameterDef {
+                    name: "property".to_string(),
+                    description: "Property path, e.g. 'clouds.enabled', 'atmosphere.sun_intensity', 'post_process.exposure', 'fog.density'".to_string(),
+                    param_type: ParamType::String,
+                    required: true,
+                    default: None,
+                },
+                ParameterDef {
+                    name: "value".to_string(),
+                    description: "Value to set (number, boolean, or string)".to_string(),
+                    param_type: ParamType::String,
+                    required: true,
+                    default: None,
+                },
+            ],
+            return_type: ReturnTypeDef {
+                description: "Confirmation of property change".to_string(),
+                return_type: ParamType::Object,
+            },
+            mode: ToolMode::Both,
+        },
+        Arc::new(EnvSetHandler),
+    );
+
+    registry.register(
+        ToolDefinition {
+            name: "env_get".to_string(),
+            description: "Get an environment property value. Use property='all' for a summary of all settings.".to_string(),
+            category: ToolCategory::Observation,
+            parameters: vec![ParameterDef {
+                name: "property".to_string(),
+                description: "Property path (e.g. 'clouds.enabled', 'atmosphere.sun_intensity') or 'all' for summary".to_string(),
+                param_type: ParamType::String,
+                required: false,
+                default: Some(serde_json::json!("all")),
+            }],
+            return_type: ReturnTypeDef {
+                description: "Property value".to_string(),
+                return_type: ParamType::Object,
+            },
+            mode: ToolMode::Both,
+        },
+        Arc::new(EnvGetHandler),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Shared dispatch functions — used by EditorAutomationApi & TestbedAutomationApi
+// ---------------------------------------------------------------------------
+
+/// Wrap a successful JSON value as an MCP `ToolsCallResult` text content block.
+fn tool_ok_json(value: Value) -> Value {
+    let text = serde_json::to_string_pretty(&value).unwrap_or_default();
+    serde_json::json!({
+        "content": [{ "type": "text", "text": text }]
+    })
+}
+
+/// Wrap an error message as an MCP `ToolsCallResult` with `isError: true`.
+fn tool_err_json(msg: &str) -> Value {
+    serde_json::json!({
+        "content": [{ "type": "text", "text": format!("Error: {msg}") }],
+        "isError": true
+    })
+}
+
+/// Wrap raw PNG bytes as an MCP `ToolsCallResult` image content block.
+fn tool_image_json(data: Vec<u8>) -> Value {
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+    serde_json::json!({
+        "content": [{ "type": "image", "data": b64, "mimeType": "image/png" }]
+    })
+}
+
+/// Return a JSON array of all 13 standard observation tool definitions.
+///
+/// Each element has `name`, `description`, and `inputSchema` fields matching
+/// the MCP `tools/list` response schema. Engines that implement
+/// `AutomationApi::list_tools_json` should return this directly.
+pub fn standard_tool_definitions() -> Value {
+    serde_json::json!([
+        {
+            "name": "screenshot",
+            "description": "Capture current viewport as PNG image",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "width":  { "type": "integer", "description": "Image width in pixels",  "default": 1920 },
+                    "height": { "type": "integer", "description": "Image height in pixels", "default": 1080 }
+                },
+                "required": []
+            }
+        },
+        {
+            "name": "scene_graph",
+            "description": "List all entities with hierarchy, types, and transforms",
+            "inputSchema": { "type": "object", "properties": {}, "required": [] }
+        },
+        {
+            "name": "entity_inspect",
+            "description": "Read all components of a specific entity",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "entity_id": { "type": "integer", "description": "Entity ID to inspect" }
+                },
+                "required": ["entity_id"]
+            }
+        },
+        {
+            "name": "render_stats",
+            "description": "Frame time, pass timings, brick pool usage, memory stats",
+            "inputSchema": { "type": "object", "properties": {}, "required": [] }
+        },
+        {
+            "name": "log_read",
+            "description": "Read recent engine log entries",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "lines": { "type": "integer", "description": "Number of log lines to return", "default": 50 }
+                },
+                "required": []
+            }
+        },
+        {
+            "name": "camera_get",
+            "description": "Current camera position, orientation, and FOV",
+            "inputSchema": { "type": "object", "properties": {}, "required": [] }
+        },
+        {
+            "name": "brick_pool_stats",
+            "description": "Brick pool occupancy, free list size, LRU state",
+            "inputSchema": { "type": "object", "properties": {}, "required": [] }
+        },
+        {
+            "name": "spatial_query",
+            "description": "Query SDF distance and material at a world position",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "chunk_x": { "type": "integer", "description": "Chunk X coordinate" },
+                    "chunk_y": { "type": "integer", "description": "Chunk Y coordinate" },
+                    "chunk_z": { "type": "integer", "description": "Chunk Z coordinate" },
+                    "local_x": { "type": "number",  "description": "Local X position within chunk" },
+                    "local_y": { "type": "number",  "description": "Local Y position within chunk" },
+                    "local_z": { "type": "number",  "description": "Local Z position within chunk" }
+                },
+                "required": ["chunk_x", "chunk_y", "chunk_z", "local_x", "local_y", "local_z"]
+            }
+        },
+        {
+            "name": "asset_status",
+            "description": "Loading progress, loaded chunks, pending uploads",
+            "inputSchema": { "type": "object", "properties": {}, "required": [] }
+        },
+        {
+            "name": "debug_mode",
+            "description": "Set shading debug visualization mode. 0=normal, 1=normals, 2=positions, 3=material IDs, 4=diffuse only, 5=specular only",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "mode": { "type": "integer", "description": "Debug mode (0=normal shading, 1=normals, 2=positions, 3=material IDs, 4=diffuse only, 5=specular only)" }
+                },
+                "required": ["mode"]
+            }
+        },
+        {
+            "name": "camera_set",
+            "description": "Set camera position and orientation",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "x":     { "type": "number", "description": "X position" },
+                    "y":     { "type": "number", "description": "Y position" },
+                    "z":     { "type": "number", "description": "Z position" },
+                    "yaw":   { "type": "number", "description": "Yaw in degrees",   "default": 0.0 },
+                    "pitch": { "type": "number", "description": "Pitch in degrees", "default": 0.0 }
+                },
+                "required": ["x", "y", "z"]
+            }
+        },
+        {
+            "name": "env_set",
+            "description": "Set an environment property (atmosphere, fog, clouds, post-processing). Use env_get with property='all' to see available properties.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "property": { "type": "string", "description": "Property path, e.g. 'clouds.enabled', 'atmosphere.sun_intensity', 'post_process.exposure', 'fog.density'" },
+                    "value":    { "type": "string", "description": "Value to set (number, boolean, or string)" }
+                },
+                "required": ["property", "value"]
+            }
+        },
+        {
+            "name": "env_get",
+            "description": "Get an environment property value. Use property='all' for a summary of all settings.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "property": { "type": "string", "description": "Property path (e.g. 'clouds.enabled', 'atmosphere.sun_intensity') or 'all' for summary", "default": "all" }
+                },
+                "required": []
+            }
+        }
+    ])
+}
+
+/// Dispatch a tool call to the corresponding `AutomationApi` method.
+///
+/// Returns the full `ToolsCallResult` JSON (content array + optional isError flag).
+/// Returns `AutomationError::NotImplemented` for unknown tool names.
+pub fn dispatch_tool_call(
+    api: &dyn AutomationApi,
+    name: &str,
+    args: Value,
+) -> AutomationResult<Value> {
+    match name {
+        "screenshot" => {
+            let width = args.get("width").and_then(|v| v.as_u64()).unwrap_or(1920) as u32;
+            let height = args.get("height").and_then(|v| v.as_u64()).unwrap_or(1080) as u32;
+            match api.screenshot(width, height) {
+                Ok(data) => Ok(tool_image_json(data)),
+                Err(e) => Ok(tool_err_json(&e.to_string())),
+            }
+        }
+        "scene_graph" => match api.scene_graph() {
+            Ok(snap) => Ok(tool_ok_json(serde_json::to_value(snap).unwrap())),
+            Err(e) => Ok(tool_err_json(&e.to_string())),
+        },
+        "entity_inspect" => {
+            let entity_id = match args.get("entity_id").and_then(|v| v.as_u64()) {
+                Some(id) => id,
+                None => return Ok(tool_err_json("entity_id is required")),
+            };
+            match api.entity_inspect(entity_id) {
+                Ok(snap) => Ok(tool_ok_json(serde_json::to_value(snap).unwrap())),
+                Err(e) => Ok(tool_err_json(&e.to_string())),
+            }
+        }
+        "render_stats" => match api.render_stats() {
+            Ok(stats) => Ok(tool_ok_json(serde_json::to_value(stats).unwrap())),
+            Err(e) => Ok(tool_err_json(&e.to_string())),
+        },
+        "log_read" => {
+            let lines = args.get("lines").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+            match api.read_log(lines) {
+                Ok(entries) => Ok(tool_ok_json(serde_json::to_value(entries).unwrap())),
+                Err(e) => Ok(tool_err_json(&e.to_string())),
+            }
+        }
+        "camera_get" => match api.camera_state() {
+            Ok(state) => Ok(tool_ok_json(serde_json::to_value(state).unwrap())),
+            Err(e) => Ok(tool_err_json(&e.to_string())),
+        },
+        "brick_pool_stats" => match api.brick_pool_stats() {
+            Ok(stats) => Ok(tool_ok_json(serde_json::to_value(stats).unwrap())),
+            Err(e) => Ok(tool_err_json(&e.to_string())),
+        },
+        "spatial_query" => {
+            let chunk = [
+                args.get("chunk_x").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+                args.get("chunk_y").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+                args.get("chunk_z").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+            ];
+            let local = [
+                args.get("local_x").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+                args.get("local_y").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+                args.get("local_z").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+            ];
+            match api.spatial_query(chunk, local) {
+                Ok(result) => Ok(tool_ok_json(serde_json::to_value(result).unwrap())),
+                Err(e) => Ok(tool_err_json(&e.to_string())),
+            }
+        }
+        "asset_status" => match api.asset_status() {
+            Ok(status) => Ok(tool_ok_json(serde_json::to_value(status).unwrap())),
+            Err(e) => Ok(tool_err_json(&e.to_string())),
+        },
+        "debug_mode" => {
+            let mode = match args.get("mode").and_then(|v| v.as_u64()) {
+                Some(m) => m as u32,
+                None => return Ok(tool_err_json("mode is required (0-5)")),
+            };
+            match api.execute_command(&format!("debug_mode {mode}")) {
+                Ok(msg) => Ok(tool_ok_json(serde_json::json!({ "status": "ok", "message": msg }))),
+                Err(e) => Ok(tool_err_json(&e.to_string())),
+            }
+        }
+        "camera_set" => {
+            let x = match args.get("x").and_then(|v| v.as_f64()) {
+                Some(v) => v as f32,
+                None => return Ok(tool_err_json("x is required")),
+            };
+            let y = match args.get("y").and_then(|v| v.as_f64()) {
+                Some(v) => v as f32,
+                None => return Ok(tool_err_json("y is required")),
+            };
+            let z = match args.get("z").and_then(|v| v.as_f64()) {
+                Some(v) => v as f32,
+                None => return Ok(tool_err_json("z is required")),
+            };
+            let yaw_deg = args.get("yaw").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+            let pitch_deg = args.get("pitch").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+            let cmd = format!("camera_set {x} {y} {z} {yaw_deg} {pitch_deg}");
+            match api.execute_command(&cmd) {
+                Ok(msg) => Ok(tool_ok_json(serde_json::json!({
+                    "status": "ok",
+                    "message": msg,
+                    "position": [x, y, z],
+                    "yaw": yaw_deg,
+                    "pitch": pitch_deg,
+                }))),
+                Err(e) => Ok(tool_err_json(&e.to_string())),
+            }
+        }
+        "env_set" => {
+            let property = match args.get("property").and_then(|v| v.as_str()) {
+                Some(p) => p,
+                None => return Ok(tool_err_json("property is required")),
+            };
+            let value = match args.get("value") {
+                Some(v) => v,
+                None => return Ok(tool_err_json("value is required")),
+            };
+            let value_str = if let Some(s) = value.as_str() {
+                s.to_string()
+            } else if let Some(b) = value.as_bool() {
+                b.to_string()
+            } else {
+                value.to_string()
+            };
+            let cmd = format!("env_set {property} {value_str}");
+            match api.execute_command(&cmd) {
+                Ok(msg) => Ok(tool_ok_json(serde_json::json!({ "status": "ok", "message": msg }))),
+                Err(e) => Ok(tool_err_json(&e.to_string())),
+            }
+        }
+        "env_get" => {
+            let property = args.get("property").and_then(|v| v.as_str()).unwrap_or("all");
+            let cmd = format!("env_get {property}");
+            match api.execute_command(&cmd) {
+                Ok(val) => Ok(tool_ok_json(serde_json::json!({ "property": property, "value": val }))),
+                Err(e) => Ok(tool_err_json(&e.to_string())),
+            }
+        }
+        _ => Err(AutomationError::NotImplemented("unknown tool")),
+    }
 }
 
 #[cfg(test)]
@@ -487,7 +896,7 @@ mod tests {
     fn register_all_observation_tools() {
         let mut registry = ToolRegistry::new();
         register_observation_tools(&mut registry);
-        assert_eq!(registry.len(), 11);
+        assert_eq!(registry.len(), 13);
     }
 
     #[test]
@@ -495,7 +904,7 @@ mod tests {
         let mut registry = ToolRegistry::new();
         register_observation_tools(&mut registry);
         let tools = registry.list_tools(ToolMode::Debug);
-        assert_eq!(tools.len(), 11);
+        assert_eq!(tools.len(), 13);
     }
 
     #[test]
@@ -503,7 +912,7 @@ mod tests {
         let mut registry = ToolRegistry::new();
         register_observation_tools(&mut registry);
         let tools = registry.list_tools(ToolMode::Editor);
-        assert_eq!(tools.len(), 11);
+        assert_eq!(tools.len(), 13);
     }
 
     #[test]

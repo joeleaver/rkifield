@@ -87,7 +87,6 @@ pub fn PropertiesPanel() -> NodeHandle {
                         let type_name = match light.light_type {
                             crate::light_editor::EditorLightType::Point => "Point Light",
                             crate::light_editor::EditorLightType::Spot => "Spot Light",
-                            crate::light_editor::EditorLightType::Directional => "Directional Light",
                         };
                         name_row.append_child(&__scope.create_text(type_name));
                         container.append_child(&name_row);

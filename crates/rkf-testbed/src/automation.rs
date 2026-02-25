@@ -81,6 +81,14 @@ impl TestbedAutomationApi {
 }
 
 impl AutomationApi for TestbedAutomationApi {
+    fn list_tools_json(&self) -> AutomationResult<serde_json::Value> {
+        Ok(rkf_mcp::tools::observation::standard_tool_definitions())
+    }
+
+    fn call_tool_json(&self, name: &str, args: serde_json::Value) -> AutomationResult<serde_json::Value> {
+        rkf_mcp::tools::observation::dispatch_tool_call(self, name, args)
+    }
+
     fn screenshot(&self, _width: u32, _height: u32) -> AutomationResult<Vec<u8>> {
         // Request the render loop to capture pixels.
         {

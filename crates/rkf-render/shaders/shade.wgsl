@@ -153,6 +153,14 @@ struct ShadeUniforms {
     _su_pad0: u32,
     shadow_budget_k: u32,
     camera_pos: vec4<f32>,
+    // Atmosphere
+    sun_dir: vec4<f32>,        // xyz = direction toward sun, w = sun_intensity
+    sun_color: vec4<f32>,      // xyz = sun color (linear RGB), w = unused
+    sky_params: vec4<f32>,     // x = rayleigh_scale, y = mie_scale, z = atmosphere_enabled, w = unused
+    // Camera basis for sky ray reconstruction
+    cam_forward: vec4<f32>,    // xyz = camera forward (unit), w = unused
+    cam_right: vec4<f32>,      // xyz = camera right * tan(fov/2) * aspect, w = unused
+    cam_up: vec4<f32>,         // xyz = camera up * tan(fov/2), w = unused
 }
 @group(3) @binding(0) var<uniform> shade_uniforms: ShadeUniforms;
 
@@ -738,6 +746,72 @@ fn cone_trace_specular(pos: vec3<f32>, reflect_dir: vec3<f32>, roughness: f32, j
     return result.rgb;
 }
 
+// ---------- Analytic Atmosphere ----------
+
+/// Henyey-Greenstein phase function for sky Mie scattering.
+fn henyey_greenstein_sky(cos_theta: f32, g: f32) -> f32 {
+    let g2 = g * g;
+    let denom = 1.0 + g2 - 2.0 * g * cos_theta;
+    return (1.0 - g2) / (4.0 * PI * pow(max(denom, 1e-6), 1.5));
+}
+
+/// Compute sky color for a given view ray using analytic Rayleigh + Mie scattering.
+/// Returns linear HDR RGB.
+fn atmosphere_sky(ray_dir: vec3<f32>, sun_dir: vec3<f32>) -> vec3<f32> {
+    let cos_theta = ray_dir.y;  // elevation: dot(ray_dir, up)
+    let cos_sun = dot(ray_dir, sun_dir);
+
+    let rayleigh_scale = shade_uniforms.sky_params.x;
+    let mie_scale = shade_uniforms.sky_params.y;
+    let sun_intensity = shade_uniforms.sun_dir.w;
+    let sun_col = shade_uniforms.sun_color.xyz;
+
+    // Height-integrated optical depth coefficients (β × scale_height).
+    // Rayleigh: β_R(λ) × H_R(8400m), Mie: β_M × H_M(1200m).
+    let tau_r = vec3<f32>(0.032, 0.114, 0.278) * rayleigh_scale;
+    let tau_m = 0.025 * mie_scale;
+
+    // Path length through atmosphere (longer at horizon, ~1 at zenith).
+    let path = 1.0 / max(cos_theta + 0.025, 0.01);
+
+    // Extinction along the view ray.
+    let total_tau = tau_r + vec3<f32>(tau_m);
+    let extinction = exp(-total_tau * path);
+
+    // Phase functions.
+    let phase_r = 0.75 * (1.0 + cos_sun * cos_sun);
+    let g = 0.76;
+    let phase_m = henyey_greenstein_sky(cos_sun, g);
+
+    // In-scattered radiance (single scattering).
+    // inscatter_i = (β_i * phase_i / Σβ) * (1 - exp(-Σβ * path)) * L_sun
+    let scatter_r = tau_r * phase_r;
+    let scatter_m = vec3<f32>(tau_m * phase_m);
+    let safe_total = max(total_tau, vec3<f32>(1e-6));
+    let inscatter = (scatter_r + scatter_m) / safe_total * (vec3<f32>(1.0) - extinction);
+    let sky = inscatter * sun_col * sun_intensity;
+
+    // Sun disk + bloom.
+    let sun_angular_radius = 0.00465;  // ~0.267 degrees
+    let sun_disk = smoothstep(cos(sun_angular_radius * 3.0), cos(sun_angular_radius), cos_sun);
+    let sun_bloom = pow(max(cos_sun, 0.0), 256.0) * 2.0;
+    let sun_contribution = (sun_disk * 50.0 + sun_bloom) * sun_col * sun_intensity * extinction;
+
+    return sky + sun_contribution;
+}
+
+/// Compute view ray direction from pixel coordinates using camera basis.
+fn compute_view_ray(pixel: vec2<u32>, dims: vec2<u32>) -> vec3<f32> {
+    let uv = (vec2<f32>(pixel) + 0.5) / vec2<f32>(dims);
+    let ndc = uv * 2.0 - 1.0;
+    // cam_right and cam_up are pre-scaled by tan(fov/2)*aspect and tan(fov/2).
+    return normalize(
+        shade_uniforms.cam_forward.xyz
+        + ndc.x * shade_uniforms.cam_right.xyz
+        - ndc.y * shade_uniforms.cam_up.xyz  // -y: screen y is top-down
+    );
+}
+
 // ---------- Entry point ----------
 
 @compute @workgroup_size(8, 8, 1)
@@ -753,10 +827,18 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
     let pos_data = textureLoad(gbuf_position, coord, 0);
     let hit_dist = pos_data.w;
 
-    // Sky pixel
+    // Sky pixel — analytic atmosphere or fallback gradient.
     if hit_dist >= MAX_FLOAT * 0.5 {
-        let uv_y = f32(pixel.y) / f32(dims.y);
-        let sky = mix(SKY_HORIZON, SKY_ZENITH, uv_y);
+        var sky: vec3<f32>;
+        if shade_uniforms.sky_params.z > 0.5 {
+            // Analytic Rayleigh + Mie atmosphere with sun disk.
+            let ray_dir = compute_view_ray(pixel.xy, dims);
+            sky = atmosphere_sky(ray_dir, normalize(shade_uniforms.sun_dir.xyz));
+        } else {
+            // Fallback: simple gradient.
+            let uv_y = f32(pixel.y) / f32(dims.y);
+            sky = mix(SKY_HORIZON, SKY_ZENITH, uv_y);
+        }
         textureStore(hdr_output, coord, vec4<f32>(sky, 1.0));
         return;
     }
@@ -957,13 +1039,24 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
     let gi_specular = gi_specular_raw * gi_fresnel * ao * GI_STRENGTH;
 
     // Minimal ambient fallback (for areas outside radiance volume coverage).
+    // Derive ambient from sky color so it responds to sun position.
+    var ambient_sky_color: vec3<f32>;
+    var ambient_reflect_color: vec3<f32>;
+    if shade_uniforms.sky_params.z > 0.5 {
+        let sun_d = normalize(shade_uniforms.sun_dir.xyz);
+        ambient_sky_color = atmosphere_sky(vec3<f32>(0.0, 1.0, 0.0), sun_d) * 0.1;
+        let reflect_env = reflect(-view_dir, normal);
+        ambient_reflect_color = atmosphere_sky(reflect_env, sun_d);
+    } else {
+        ambient_sky_color = AMBIENT_COLOR;
+        let reflect_env = reflect(-view_dir, normal);
+        let sky_up_frac = clamp(reflect_env.y * 0.5 + 0.5, 0.0, 1.0);
+        ambient_reflect_color = mix(SKY_HORIZON, SKY_ZENITH, sky_up_frac);
+    }
     let kd_ambient = 1.0 - metallic;
-    let ambient_diffuse = AMBIENT_COLOR * albedo * ao * 0.15 * kd_ambient;
+    let ambient_diffuse = ambient_sky_color * albedo * ao * 0.15 * kd_ambient;
     let ambient_fresnel = fresnel_schlick(n_dot_v, f0);
-    let reflect_env = reflect(-view_dir, normal);
-    let sky_up = clamp(reflect_env.y * 0.5 + 0.5, 0.0, 1.0);
-    let sky_reflect = mix(SKY_HORIZON, SKY_ZENITH, sky_up);
-    let ambient_specular = sky_reflect * ambient_fresnel * ao * SKY_REFLECT_STRENGTH * 0.5;
+    let ambient_specular = ambient_reflect_color * ambient_fresnel * ao * SKY_REFLECT_STRENGTH * 0.5;
     let ambient = ambient_diffuse + ambient_specular;
 
     // SDF junction contact shadow (gradient magnitude from ray marcher)
