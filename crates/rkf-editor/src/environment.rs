@@ -23,6 +23,10 @@ pub struct FogSettings {
     pub end_distance: f32,
     /// Height-based falloff exponent (higher = fog thins faster with altitude).
     pub height_falloff: f32,
+    /// Ambient dust particle density for god rays (0.0 = no dust, higher = more visible shafts).
+    pub ambient_dust_density: f32,
+    /// Henyey-Greenstein asymmetry parameter for dust scattering (0.0 = isotropic, ~0.7 = strong forward).
+    pub dust_asymmetry: f32,
 }
 
 impl Default for FogSettings {
@@ -34,6 +38,8 @@ impl Default for FogSettings {
             start_distance: 10.0,
             end_distance: 500.0,
             height_falloff: 0.1,
+            ambient_dust_density: 0.005,
+            dust_asymmetry: 0.3,
         }
     }
 }
@@ -61,9 +67,9 @@ impl Default for AtmosphereSettings {
             enabled: true,
             rayleigh_scale: 1.0,
             mie_scale: 1.0,
-            sun_direction: Vec3::new(0.0, -1.0, 0.3).normalize(),
-            sun_intensity: 1.0,
-            sun_color: Vec3::new(1.0, 0.95, 0.9),
+            sun_direction: Vec3::new(0.5, 1.0, 0.3).normalize(),
+            sun_intensity: 3.0,
+            sun_color: Vec3::new(1.0, 0.95, 0.85),
         }
     }
 }
@@ -94,7 +100,7 @@ impl Default for CloudSettings {
             coverage: 0.5,
             density: 1.0,
             altitude: 200.0,
-            thickness: 50.0,
+            thickness: 1000.0,
             wind_direction: Vec3::new(1.0, 0.0, 0.0),
             wind_speed: 5.0,
         }
@@ -132,6 +138,8 @@ pub struct PostProcessSettings {
     pub dof_max_coc: f32,
     /// Motion blur intensity (0.0 = off).
     pub motion_blur_intensity: f32,
+    /// Screen-space god rays blur intensity (0.0 = off).
+    pub god_rays_intensity: f32,
     /// Film grain intensity (0.0 = off).
     pub grain_intensity: f32,
     /// Chromatic aberration strength (0.0 = off).
@@ -155,6 +163,7 @@ impl Default for PostProcessSettings {
             dof_focus_range: 3.0,
             dof_max_coc: 8.0,
             motion_blur_intensity: 1.0,
+            god_rays_intensity: 0.5,
             grain_intensity: 0.0,
             chromatic_aberration: 0.0,
         }
@@ -274,7 +283,7 @@ mod tests {
         assert!(atmo.enabled);
         assert!(approx_eq(atmo.rayleigh_scale, 1.0));
         assert!(approx_eq(atmo.mie_scale, 1.0));
-        assert!(approx_eq(atmo.sun_intensity, 1.0));
+        assert!(approx_eq(atmo.sun_intensity, 3.0));
     }
 
     #[test]
@@ -284,7 +293,7 @@ mod tests {
         assert!(approx_eq(clouds.coverage, 0.5));
         assert!(approx_eq(clouds.density, 1.0));
         assert!(approx_eq(clouds.altitude, 200.0));
-        assert!(approx_eq(clouds.thickness, 50.0));
+        assert!(approx_eq(clouds.thickness, 1000.0));
         assert!(approx_eq(clouds.wind_speed, 5.0));
     }
 

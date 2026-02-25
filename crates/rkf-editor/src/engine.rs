@@ -18,10 +18,10 @@ use rkf_core::{
 use rkf_render::{
     AutoExposurePass, BlitPass, BloomCompositePass, BloomPass, Camera, CloudShadowPass,
     CoarseField, ColorGradePass, CosmeticsPass, DebugMode, DebugViewPass, DofPass,
-    GBuffer, GpuObject, GpuSceneV2, Light, LightBuffer, MotionBlurPass, RadianceVolume,
-    RayMarchPass, RenderContext, SceneUniforms, ShadeUniforms, ShadingPass, SharpenPass,
-    TileObjectCullPass, ToneMapPass, VolCompositePass, VolMarchPass, VolShadowPass,
-    VolUpscalePass, COARSE_VOXEL_SIZE,
+    GBuffer, GodRaysBlurPass, GpuObject, GpuSceneV2, Light, LightBuffer, MotionBlurPass,
+    RadianceVolume, RayMarchPass, RenderContext, SceneUniforms, ShadeUniforms, ShadingPass,
+    SharpenPass, TileObjectCullPass, ToneMapPass, VolCompositePass, VolMarchPass,
+    VolShadowPass, VolUpscalePass, COARSE_VOXEL_SIZE,
 };
 use rkf_render::radiance_inject::{RadianceInjectPass, InjectUniforms};
 use rkf_render::radiance_mip::RadianceMipPass;
@@ -234,6 +234,7 @@ pub struct EditorEngine {
     vol_upscale: VolUpscalePass,
     vol_composite: VolCompositePass,
     // Post-processing pipeline
+    god_rays_blur: GodRaysBlurPass,
     bloom: BloomPass,
     auto_exposure: AutoExposurePass,
     dof: DofPass,
@@ -260,6 +261,18 @@ pub struct EditorEngine {
     env_fog_color: [f32; 3],
     env_fog_density: f32,
     env_fog_height_falloff: f32,
+    // Atmosphere params for analytic sky.
+    env_sun_intensity: f32,
+    env_sun_color_raw: [f32; 3],
+    env_rayleigh_scale: f32,
+    env_mie_scale: f32,
+    env_atmosphere_enabled: bool,
+    // Dust params for god rays.
+    env_ambient_dust: f32,
+    env_dust_g: f32,
+    // Cloud params from environment.
+    env_cloud_settings: rkf_render::CloudSettings,
+    accumulated_time: f32,
     // Render resolution (tracks viewport physical pixels)
     render_width: u32,
     render_height: u32,
@@ -344,14 +357,22 @@ impl EditorEngine {
         let material_table = MaterialTable::upload(&ctx.device, &materials);
         log::info!("Material table: {} materials uploaded", material_table.count);
 
-        // Lights.
+        // Lights (point/spot only — directional sun is synthesized from environment each frame).
         let world_lights = vec![
-            Light::directional([0.5, 1.0, 0.3], [1.0, 0.95, 0.85], 3.0, true),
             Light::point([2.0, 1.5, -1.0], [1.0, 0.8, 0.5], 5.0, 8.0, true),
             Light::point([-2.0, 1.0, -3.0], [0.5, 0.7, 1.0], 3.0, 6.0, false),
         ];
-        let light_buffer = LightBuffer::upload(&ctx.device, &world_lights);
-        log::info!("Lights: {} lights uploaded", world_lights.len());
+        // Allocate light buffer with headroom (1 sun + up to 63 point/spot).
+        // Slot 0 is reserved for the sun light synthesized from environment each frame.
+        let mut init_lights = Vec::with_capacity(64);
+        init_lights.push(Light::point([0.0; 3], [0.0; 3], 0.0, 0.0, false)); // placeholder for sun
+        init_lights.extend(&world_lights);
+        // Pad to 64 lights so the buffer can accommodate runtime additions.
+        while init_lights.len() < 64 {
+            init_lights.push(Light::point([0.0; 3], [0.0; 3], 0.0, 0.0, false));
+        }
+        let light_buffer = LightBuffer::upload(&ctx.device, &init_lights);
+        log::info!("Lights: {} point/spot + 1 env sun", world_lights.len());
 
         // Radiance volume for GI.
         let radiance_volume = RadianceVolume::new(&ctx.device);
@@ -390,14 +411,18 @@ impl EditorEngine {
         );
 
         // Post-processing pipeline.
+        let god_rays_blur = GodRaysBlurPass::new(
+            &ctx.device, &vol_composite.output_view, &gbuffer.position_view,
+            INTERNAL_WIDTH, INTERNAL_HEIGHT,
+        );
         let bloom = BloomPass::new(
-            &ctx.device, &vol_composite.output_view, INTERNAL_WIDTH, INTERNAL_HEIGHT,
+            &ctx.device, &god_rays_blur.output_view, INTERNAL_WIDTH, INTERNAL_HEIGHT,
         );
         let auto_exposure = AutoExposurePass::new(
-            &ctx.device, &vol_composite.output_view, INTERNAL_WIDTH, INTERNAL_HEIGHT,
+            &ctx.device, &god_rays_blur.output_view, INTERNAL_WIDTH, INTERNAL_HEIGHT,
         );
         let dof = DofPass::new(
-            &ctx.device, &vol_composite.output_view, &gbuffer.position_view,
+            &ctx.device, &god_rays_blur.output_view, &gbuffer.position_view,
             INTERNAL_WIDTH, INTERNAL_HEIGHT,
         );
         let motion_blur = MotionBlurPass::new(
@@ -460,6 +485,7 @@ impl EditorEngine {
             vol_march,
             vol_upscale,
             vol_composite,
+            god_rays_blur,
             bloom,
             auto_exposure,
             dof,
@@ -481,13 +507,22 @@ impl EditorEngine {
             // Matches EnvironmentState defaults; first frame apply_environment
             // overwrites these with actual data model values.
             env_sun_dir: {
-                let d = glam::Vec3::new(0.0, -1.0, 0.3).normalize();
+                let d = glam::Vec3::new(0.5, 1.0, 0.3).normalize();
                 [d.x, d.y, d.z]
             },
-            env_sun_color: [1.0, 0.95, 0.9], // sun_color * sun_intensity (1.0)
+            env_sun_color: [3.0, 2.85, 2.55], // sun_color * sun_intensity ([1.0,0.95,0.85] * 3.0)
             env_fog_color: [0.7, 0.75, 0.8],
             env_fog_density: 0.0, // fog disabled by default
             env_fog_height_falloff: 0.1,
+            env_sun_intensity: 3.0,
+            env_sun_color_raw: [1.0, 0.95, 0.85],
+            env_rayleigh_scale: 1.0,
+            env_mie_scale: 1.0,
+            env_atmosphere_enabled: true,
+            env_ambient_dust: 0.005,
+            env_dust_g: 0.3,
+            env_cloud_settings: rkf_render::CloudSettings::default(),
+            accumulated_time: 0.0,
             render_width: INTERNAL_WIDTH,
             render_height: INTERNAL_HEIGHT,
             readback_buffer,
@@ -541,13 +576,55 @@ impl EditorEngine {
         // Cache vol params for use in render_frame_inner.
         let atmo = &env.atmosphere;
         self.env_sun_dir = [atmo.sun_direction.x, atmo.sun_direction.y, atmo.sun_direction.z];
-        let sc = atmo.sun_color * atmo.sun_intensity;
+
+        // Tint sun color based on elevation: at low angles the light path
+        // through the atmosphere is much longer, scattering away blue/green
+        // and leaving orange/red (Rayleigh extinction approximation).
+        // Uses fixed gentle coefficients — the user's rayleigh/mie_scale
+        // control sky scattering, not direct sun color.
+        let sun_elevation = atmo.sun_direction.y.asin(); // radians
+        let base_color = atmo.sun_color;
+        let tinted_color = {
+            let path = (1.0 / sun_elevation.max(0.02).sin()).min(12.0);
+            let tau = glam::Vec3::new(0.02, 0.06, 0.15);
+            let extinction = glam::Vec3::new(
+                (-tau.x * path).exp(),
+                (-tau.y * path).exp(),
+                (-tau.z * path).exp(),
+            );
+            base_color * extinction
+        };
+        let sc = tinted_color * atmo.sun_intensity;
         self.env_sun_color = [sc.x, sc.y, sc.z];
+        self.env_sun_intensity = atmo.sun_intensity;
+        self.env_sun_color_raw = [tinted_color.x, tinted_color.y, tinted_color.z];
+        self.env_rayleigh_scale = atmo.rayleigh_scale;
+        self.env_mie_scale = atmo.mie_scale;
+        self.env_atmosphere_enabled = atmo.enabled;
 
         let fog = &env.fog;
         self.env_fog_color = [fog.color.x, fog.color.y, fog.color.z];
         self.env_fog_density = if fog.enabled { fog.density } else { 0.0 };
         self.env_fog_height_falloff = fog.height_falloff;
+        self.env_ambient_dust = fog.ambient_dust_density;
+        self.env_dust_g = fog.dust_asymmetry;
+
+        // Cloud settings → GPU CloudParams.
+        let clouds = &env.clouds;
+        self.env_cloud_settings.procedural_enabled = clouds.enabled;
+        self.env_cloud_settings.cloud_min = clouds.altitude;
+        self.env_cloud_settings.cloud_max = clouds.altitude + clouds.thickness;
+        self.env_cloud_settings.cloud_density_scale = clouds.density;
+        // Coverage → threshold: the FBM product (shape * weather * height_gradient)
+        // is concentrated near 0 (three [0,1] values multiplied), so threshold
+        // must drop quickly to reveal clouds. A power curve (coverage^0.35)
+        // makes the slider response perceptually linear instead of bunching
+        // all visible change into the last 20% of the range.
+        self.env_cloud_settings.cloud_threshold =
+            (1.0 - clouds.coverage.clamp(0.0, 1.0).powf(0.35)) * 0.4;
+        self.env_cloud_settings.wind_direction = [clouds.wind_direction.x, clouds.wind_direction.z];
+        self.env_cloud_settings.wind_speed = clouds.wind_speed;
+        self.env_cloud_settings.shadow_enabled = clouds.enabled;
 
         let queue = &self.ctx.queue;
         let pp = &env.post_process;
@@ -578,6 +655,9 @@ impl EditorEngine {
 
         // Motion blur.
         self.motion_blur.set_intensity(queue, pp.motion_blur_intensity);
+
+        // God rays blur.
+        self.god_rays_blur.set_intensity(queue, pp.god_rays_intensity);
 
         // Cosmetics (vignette, grain, chromatic aberration).
         self.cosmetics.set_vignette(queue, pp.vignette_intensity);
@@ -758,14 +838,18 @@ impl EditorEngine {
         );
 
         // --- Post-processing pipeline ---
+        self.god_rays_blur = GodRaysBlurPass::new(
+            device, &self.vol_composite.output_view, &self.gbuffer.position_view,
+            width, height,
+        );
         self.bloom = BloomPass::new(
-            device, &self.vol_composite.output_view, width, height,
+            device, &self.god_rays_blur.output_view, width, height,
         );
         self.auto_exposure = AutoExposurePass::new(
-            device, &self.vol_composite.output_view, width, height,
+            device, &self.god_rays_blur.output_view, width, height,
         );
         self.dof = DofPass::new(
-            device, &self.vol_composite.output_view, &self.gbuffer.position_view,
+            device, &self.god_rays_blur.output_view, &self.gbuffer.position_view,
             width, height,
         );
         self.motion_blur = MotionBlurPass::new(
@@ -894,16 +978,25 @@ impl EditorEngine {
         };
         self.gpu_scene.update_scene_uniforms(&self.ctx.queue, &scene_uniforms);
 
-        // Shade uniforms.
-        self.shading_pass.update_uniforms(&self.ctx.queue, &ShadeUniforms {
-            debug_mode: self.shade_debug_mode,
-            num_lights: self.world_lights.len() as u32,
-            _pad0: 0,
-            shadow_budget_k: 0,
-            camera_pos: [0.0, 0.0, 0.0, 0.0],
-        });
+        // Synthesize directional light from environment sun settings.
+        let sun_light = Light {
+            light_type: 0, // directional
+            pos_x: 0.0, pos_y: 0.0, pos_z: 0.0,
+            dir_x: self.env_sun_dir[0],
+            dir_y: self.env_sun_dir[1],
+            dir_z: self.env_sun_dir[2],
+            color_r: self.env_sun_color[0],
+            color_g: self.env_sun_color[1],
+            color_b: self.env_sun_color[2],
+            intensity: 1.0, // already baked into env_sun_color (sun_color * sun_intensity)
+            range: 0.0,
+            inner_angle: 0.0,
+            outer_angle: 0.0,
+            cookie_index: -1,
+            shadow_caster: 1,
+        };
 
-        // Camera-relative lights.
+        // Camera-relative point/spot lights.
         let cam = self.camera.position;
         let cam_rel_lights: Vec<Light> = self.world_lights.iter().map(|l| {
             let mut cl = *l;
@@ -914,7 +1007,34 @@ impl EditorEngine {
             }
             cl
         }).collect();
-        self.light_buffer.update(&self.ctx.queue, &cam_rel_lights);
+
+        // Sun (directional) + point/spot lights.
+        let total_lights = 1 + cam_rel_lights.len() as u32;
+        let mut all_lights = vec![sun_light];
+        all_lights.extend(cam_rel_lights);
+        self.light_buffer.update(&self.ctx.queue, &all_lights);
+
+        // Shade uniforms — includes atmosphere + camera basis for sky rendering.
+        let fov_rad = self.camera.fov_degrees.to_radians();
+        let half_fov_tan = (fov_rad * 0.5).tan();
+        let aspect = self.render_width as f32 / self.render_height as f32;
+        let fwd = self.camera.forward();
+        let right = self.camera.right() * half_fov_tan * aspect;
+        let up = self.camera.up() * half_fov_tan;
+
+        self.shading_pass.update_uniforms(&self.ctx.queue, &ShadeUniforms {
+            debug_mode: self.shade_debug_mode,
+            num_lights: total_lights,
+            _pad0: 0,
+            shadow_budget_k: 0,
+            camera_pos: [0.0, 0.0, 0.0, 0.0],
+            sun_dir: [self.env_sun_dir[0], self.env_sun_dir[1], self.env_sun_dir[2], self.env_sun_intensity],
+            sun_color: [self.env_sun_color_raw[0], self.env_sun_color_raw[1], self.env_sun_color_raw[2], 0.0],
+            sky_params: [self.env_rayleigh_scale, self.env_mie_scale, if self.env_atmosphere_enabled { 1.0 } else { 0.0 }, 0.0],
+            cam_forward: [fwd.x, fwd.y, fwd.z, 0.0],
+            cam_right: [right.x, right.y, right.z, 0.0],
+            cam_up: [up.x, up.y, up.z, 0.0],
+        });
 
         // Debug view (kept for fallback).
         let debug_mode = match self.shade_debug_mode {
@@ -929,6 +1049,11 @@ impl EditorEngine {
         // Store VP for next frame's motion vectors.
         self.prev_vp = self.camera.view_projection(self.render_width, self.render_height)
             .to_cols_array_2d();
+
+        // Poll the GPU device to acknowledge completed work from previous frames.
+        // Without this, heavy compute (cloud FBM) can fill the swapchain during
+        // rapid slider drags, causing get_current_texture() to block permanently.
+        let _ = self.ctx.device.poll(wgpu::PollType::Poll);
 
         // Get swapchain texture.
         let frame = match self.surface.get_current_texture() {
@@ -958,7 +1083,7 @@ impl EditorEngine {
             [self.camera.position.x, self.camera.position.y, self.camera.position.z],
         );
         self.radiance_inject.update_uniforms(&self.ctx.queue, &InjectUniforms {
-            num_lights: self.world_lights.len() as u32,
+            num_lights: total_lights,
             max_shadow_lights: 1,
             _pad: [0; 2],
         });
@@ -977,22 +1102,53 @@ impl EditorEngine {
         );
 
         // --- Volumetric pipeline (uses cached env values) ---
+        // Upload cloud parameters each frame (time advances for wind animation).
+        self.accumulated_time += 1.0 / 60.0;
+        let cloud_params = rkf_render::CloudParams::from_settings(
+            &self.env_cloud_settings, self.accumulated_time,
+        );
+
+        // DEBUG: Save cloud params for post-frame diagnostic.
+        let cloud_params_snapshot = [
+            cloud_params.flags[0],     // enabled
+            cloud_params.altitude[0],  // cloud_min
+            cloud_params.altitude[1],  // cloud_max
+            cloud_params.altitude[2],  // threshold
+            cloud_params.altitude[3],  // density_scale
+        ];
+        let cam_snapshot = [cam.x, cam.y, cam.z];
+
+        self.vol_march.set_cloud_params(&self.ctx.queue, &cloud_params);
+        self.cloud_shadow.set_cloud_params(&self.ctx.queue, &cloud_params);
+
         let sun_dir = self.env_sun_dir;
         self.vol_shadow.dispatch(
             &mut encoder, &self.ctx.queue,
             [cam.x, cam.y, cam.z], sun_dir, &self.coarse_field.bind_group,
         );
-        self.cloud_shadow.dispatch(
-            &mut encoder, &self.ctx.queue, [cam.x, cam.y, cam.z], sun_dir,
+        // Use the actual cloud altitude from cloud_params, not the defaults
+        // (DEFAULT_CLOUD_MIN=1000, DEFAULT_CLOUD_MAX=3000).  The shadow map must
+        // march through the same altitude band as the visible clouds.
+        self.cloud_shadow.update_params_ex(
+            &self.ctx.queue,
+            [cam.x, cam.y, cam.z],
+            sun_dir,
+            cloud_params.altitude[0],  // cloud_min
+            cloud_params.altitude[1],  // cloud_max
+            rkf_render::cloud_shadow::DEFAULT_CLOUD_SHADOW_COVERAGE,
+            rkf_render::cloud_shadow::DEFAULT_CLOUD_SHADOW_EXTINCTION,
         );
+        self.cloud_shadow.dispatch_only(&mut encoder);
         let sc = self.env_sun_color;
         let fc = self.env_fog_color;
         let fog_alpha = if self.env_fog_density > 0.0 { 1.0 } else { 0.0 };
+        // Reuse the FOV-scaled camera basis from the shade pass so vol march
+        // rays match the G-buffer exactly (same fwd/right/up from line ~990).
         let vol_params = rkf_render::VolMarchParams {
             cam_pos: [cam.x, cam.y, cam.z, 0.0],
-            cam_forward: [self.camera.forward().x, self.camera.forward().y, self.camera.forward().z, 0.0],
-            cam_right: [self.camera.right().x, self.camera.right().y, self.camera.right().z, 0.0],
-            cam_up: [self.camera.up().x, self.camera.up().y, self.camera.up().z, 0.0],
+            cam_forward: [fwd.x, fwd.y, fwd.z, 0.0],
+            cam_right: [right.x, right.y, right.z, 0.0],
+            cam_up: [up.x, up.y, up.z, 0.0],
             sun_dir: [sun_dir[0], sun_dir[1], sun_dir[2], 0.0],
             sun_color: [sc[0], sc[1], sc[2], 0.0],
             width: self.render_width / 2,
@@ -1005,7 +1161,7 @@ impl EditorEngine {
             far: 200.0,
             fog_color: [fc[0], fc[1], fc[2], fog_alpha],
             fog_height: [self.env_fog_density, -0.5, self.env_fog_height_falloff, 0.0],
-            fog_distance: [0.0, 0.01, 0.001, 0.3],
+            fog_distance: [0.0, 0.01, self.env_ambient_dust, self.env_dust_g],
             frame_index: self.frame_index,
             _pad0: 0, _pad1: 0, _pad2: 0,
             vol_shadow_min: [cam.x - 40.0, cam.y - 10.0, cam.z - 40.0, 0.0],
@@ -1016,6 +1172,21 @@ impl EditorEngine {
         self.vol_composite.dispatch(&mut encoder);
 
         // --- Post-processing pipeline ---
+        // Project sun to screen UV for radial blur god rays.
+        {
+            let sun_dir = glam::Vec3::from(self.env_sun_dir).normalize_or_zero();
+            let cam_fwd = self.camera.forward();
+            let sun_dot = sun_dir.dot(cam_fwd);
+            let (sun_uv_x, sun_uv_y) = if sun_dot > 0.0 {
+                let ndc_x = sun_dir.dot(right) / sun_dot;
+                let ndc_y = -sun_dir.dot(up) / sun_dot;
+                (ndc_x * 0.5 + 0.5, ndc_y * 0.5 + 0.5)
+            } else {
+                (0.5, 0.5)
+            };
+            self.god_rays_blur.update_sun(&self.ctx.queue, sun_uv_x, sun_uv_y, sun_dot);
+        }
+        self.god_rays_blur.dispatch(&mut encoder);
         self.bloom.dispatch(&mut encoder);
         self.auto_exposure.dispatch(&mut encoder, &self.ctx.queue, 1.0 / 60.0);
         self.dof.dispatch(&mut encoder);
@@ -1129,6 +1300,22 @@ impl EditorEngine {
         }
 
         frame.present();
+
+        // DEBUG: Mark frame completed (pair with pre-dispatch write above).
+        {
+            let diag = format!(
+                "f={} en={} min={:.1} max={:.1} thr={:.4} dens={:.2} cam=[{:.1},{:.1},{:.1}] res={}x{} OK\n",
+                self.frame_index,
+                cloud_params_snapshot[0] > 0.5,
+                cloud_params_snapshot[1],
+                cloud_params_snapshot[2],
+                cloud_params_snapshot[3],
+                cloud_params_snapshot[4],
+                cam_snapshot[0], cam_snapshot[1], cam_snapshot[2],
+                self.render_width / 2, self.render_height / 2,
+            );
+            let _ = std::fs::write("/tmp/rkf-cloud-diag.txt", &diag);
+        }
 
         self.frame_index += 1;
     }

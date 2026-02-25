@@ -16,6 +16,8 @@ pub const PP_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PostProcessPassId {
     // Pre-upscale passes
+    /// Screen-space radial blur god rays (pre-upscale).
+    GodRaysBlur,
     /// Bloom blur (pre-upscale).
     Bloom,
     /// Depth of field (pre-upscale).
@@ -40,12 +42,13 @@ pub enum PostProcessPassId {
 impl PostProcessPassId {
     /// Returns `true` for passes that run before the temporal upscale (at internal resolution).
     pub fn is_pre_upscale(self) -> bool {
-        matches!(self, Self::Bloom | Self::DepthOfField | Self::MotionBlur)
+        matches!(self, Self::GodRaysBlur | Self::Bloom | Self::DepthOfField | Self::MotionBlur)
     }
 
     /// Ordered slice of all pre-upscale pass IDs.
     fn all_pre_upscale() -> &'static [PostProcessPassId] {
         &[
+            PostProcessPassId::GodRaysBlur,
             PostProcessPassId::Bloom,
             PostProcessPassId::DepthOfField,
             PostProcessPassId::MotionBlur,
@@ -256,6 +259,7 @@ mod tests {
 
     #[test]
     fn pre_upscale_classification() {
+        assert!(PostProcessPassId::GodRaysBlur.is_pre_upscale());
         assert!(PostProcessPassId::Bloom.is_pre_upscale());
         assert!(PostProcessPassId::DepthOfField.is_pre_upscale());
         assert!(PostProcessPassId::MotionBlur.is_pre_upscale());
@@ -270,6 +274,7 @@ mod tests {
         assert_eq!(
             pre,
             vec![
+                PostProcessPassId::GodRaysBlur,
                 PostProcessPassId::Bloom,
                 PostProcessPassId::DepthOfField,
                 PostProcessPassId::MotionBlur,
@@ -302,7 +307,7 @@ mod tests {
         let pre = config.enabled_pre_upscale();
         assert_eq!(
             pre,
-            vec![PostProcessPassId::Bloom, PostProcessPassId::MotionBlur]
+            vec![PostProcessPassId::GodRaysBlur, PostProcessPassId::Bloom, PostProcessPassId::MotionBlur]
         );
         let post = config.enabled_post_upscale();
         assert!(!post.contains(&PostProcessPassId::FilmGrain));

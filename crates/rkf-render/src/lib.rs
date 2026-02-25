@@ -70,6 +70,8 @@ pub mod bloom;
 pub mod dof;
 /// Motion blur compute pass (pre-upscale).
 pub mod motion_blur;
+/// Screen-space radial blur god rays compute pass (pre-upscale).
+pub mod god_rays_blur;
 /// Bloom composite compute pass (post-upscale).
 pub mod bloom_composite;
 /// Auto-exposure compute pass.
@@ -133,6 +135,7 @@ pub use post_process::{PostProcessPassId, PostProcessConfig, PostProcessContext,
 pub use bloom::{BloomPass, BloomParams, BLOOM_MIP_LEVELS, DEFAULT_BLOOM_THRESHOLD, DEFAULT_BLOOM_KNEE};
 pub use dof::{DofPass, DofParams, DEFAULT_FOCUS_DISTANCE, DEFAULT_FOCUS_RANGE, DEFAULT_MAX_COC, COC_FORMAT};
 pub use motion_blur::{MotionBlurPass, MotionBlurParams, DEFAULT_MOTION_BLUR_INTENSITY, DEFAULT_MAX_MOTION_SAMPLES};
+pub use god_rays_blur::{GodRaysBlurPass, GodRaysBlurParams, DEFAULT_GOD_RAYS_INTENSITY, DEFAULT_GOD_RAYS_SAMPLES, DEFAULT_GOD_RAYS_DECAY};
 pub use bloom_composite::{BloomCompositePass, BloomCompositeParams, DEFAULT_BLOOM_INTENSITY};
 pub use auto_exposure::{AutoExposurePass, ExposureParams, HISTOGRAM_BINS, DEFAULT_MIN_EV, DEFAULT_MAX_EV, DEFAULT_ADAPT_SPEED};
 pub use color_grade::{ColorGradePass, ColorGradeParams, DEFAULT_LUT_SIZE, DEFAULT_COLOR_GRADE_INTENSITY};

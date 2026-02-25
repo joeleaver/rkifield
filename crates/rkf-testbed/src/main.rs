@@ -24,10 +24,10 @@ use rkf_core::{
 use rkf_render::{
     AutoExposurePass, BlitPass, BloomCompositePass, BloomPass, Camera, CloudShadowPass,
     CoarseField, ColorGradePass, CosmeticsPass, DebugMode, DebugViewPass, DofPass,
-    GBuffer, GpuObject, GpuSceneV2, Light, LightBuffer, MotionBlurPass, RadianceVolume,
-    RayMarchPass, RenderContext, SceneUniforms, ShadeUniforms, ShadingPass, SharpenPass,
-    TileObjectCullPass, ToneMapPass, VolCompositePass, VolMarchPass, VolShadowPass,
-    VolUpscalePass, COARSE_VOXEL_SIZE,
+    GBuffer, GodRaysBlurPass, GpuObject, GpuSceneV2, Light, LightBuffer, MotionBlurPass,
+    RadianceVolume, RayMarchPass, RenderContext, SceneUniforms, ShadeUniforms, ShadingPass,
+    SharpenPass, TileObjectCullPass, ToneMapPass, VolCompositePass, VolMarchPass,
+    VolShadowPass, VolUpscalePass, COARSE_VOXEL_SIZE,
 };
 use rkf_render::radiance_inject::{RadianceInjectPass, InjectUniforms};
 use rkf_render::radiance_mip::RadianceMipPass;
@@ -243,6 +243,7 @@ struct EngineState {
     vol_upscale: VolUpscalePass,
     vol_composite: VolCompositePass,
     // Post-processing pipeline
+    god_rays_blur: GodRaysBlurPass,
     bloom: BloomPass,
     auto_exposure: AutoExposurePass,
     dof: DofPass,
@@ -430,21 +431,27 @@ impl EngineState {
 
         // --- Post-processing pipeline ---
 
-        // Bloom extraction + downsample (from composited HDR → 4-level mip pyramid).
-        let bloom = BloomPass::new(
-            &ctx.device, &vol_composite.output_view,
-            INTERNAL_WIDTH, INTERNAL_HEIGHT,
-        );
-
-        // Auto-exposure (histogram from composited HDR → adapted EV).
-        let auto_exposure = AutoExposurePass::new(
-            &ctx.device, &vol_composite.output_view,
-            INTERNAL_WIDTH, INTERNAL_HEIGHT,
-        );
-
-        // Depth of field (composited HDR + depth → blurred HDR).
-        let dof = DofPass::new(
+        // Screen-space radial blur god rays (composited HDR → HDR + light shafts).
+        let god_rays_blur = GodRaysBlurPass::new(
             &ctx.device, &vol_composite.output_view, &gbuffer.position_view,
+            INTERNAL_WIDTH, INTERNAL_HEIGHT,
+        );
+
+        // Bloom extraction + downsample (from god rays HDR → 4-level mip pyramid).
+        let bloom = BloomPass::new(
+            &ctx.device, &god_rays_blur.output_view,
+            INTERNAL_WIDTH, INTERNAL_HEIGHT,
+        );
+
+        // Auto-exposure (histogram from god rays HDR → adapted EV).
+        let auto_exposure = AutoExposurePass::new(
+            &ctx.device, &god_rays_blur.output_view,
+            INTERNAL_WIDTH, INTERNAL_HEIGHT,
+        );
+
+        // Depth of field (god rays HDR + depth → blurred HDR).
+        let dof = DofPass::new(
+            &ctx.device, &god_rays_blur.output_view, &gbuffer.position_view,
             INTERNAL_WIDTH, INTERNAL_HEIGHT,
         );
 
@@ -485,7 +492,7 @@ impl EngineState {
             &ctx.device, &vol_composite.output_view, &gbuffer,
             INTERNAL_WIDTH, INTERNAL_HEIGHT,
         );
-        log::info!("Post-processing pipeline wired: bloom → dof → motion_blur → bloom_composite → tone_map → color_grade → cosmetics");
+        log::info!("Post-processing pipeline wired: god_rays_blur → bloom → dof → motion_blur → bloom_composite → tone_map → color_grade → cosmetics");
 
         // Blit: final LDR → swapchain.
         let blit = BlitPass::new(&ctx.device, &cosmetics.output_view, surface_format);
@@ -525,6 +532,7 @@ impl EngineState {
             vol_march,
             vol_upscale,
             vol_composite,
+            god_rays_blur,
             bloom,
             auto_exposure,
             dof,
@@ -611,12 +619,26 @@ impl EngineState {
 
         // Update shade uniforms (debug_mode, lights, camera position).
         // G-buffer positions are camera-relative, so camera_pos = [0,0,0].
+        let fwd = self.camera.forward();
+        let fov_rad = self.camera.fov_degrees.to_radians();
+        let half_fov_tan = (fov_rad * 0.5).tan();
+        let aspect = INTERNAL_WIDTH as f32 / INTERNAL_HEIGHT as f32;
+        let right = self.camera.right() * half_fov_tan * aspect;
+        let up = self.camera.up() * half_fov_tan;
+        // Default sun direction for testbed (matches legacy directional light).
+        let sun_dir = glam::Vec3::new(0.5, 1.0, 0.3).normalize();
         self.shading_pass.update_uniforms(&self.ctx.queue, &ShadeUniforms {
             debug_mode: self.shade_debug_mode,
             num_lights: self.world_lights.len() as u32,
             _pad0: 0,
             shadow_budget_k: 0, // unlimited
             camera_pos: [0.0, 0.0, 0.0, 0.0], // camera-relative origin
+            sun_dir: [sun_dir.x, sun_dir.y, sun_dir.z, 3.0],
+            sun_color: [1.0, 0.95, 0.85, 0.0],
+            sky_params: [1.0, 1.0, 1.0, 0.0], // atmosphere enabled with default Rayleigh/Mie
+            cam_forward: [fwd.x, fwd.y, fwd.z, 0.0],
+            cam_right: [right.x, right.y, right.z, 0.0],
+            cam_up: [up.x, up.y, up.z, 0.0],
         });
 
         // Upload camera-relative light positions each frame.
@@ -639,6 +661,9 @@ impl EngineState {
         // Store current VP for next frame's motion vectors.
         self.prev_vp = self.camera.view_projection(INTERNAL_WIDTH, INTERNAL_HEIGHT)
             .to_cols_array_2d();
+
+        // Poll the GPU device to acknowledge completed work from previous frames.
+        let _ = self.ctx.device.poll(wgpu::PollType::Poll);
 
         // Get swapchain texture.
         let frame = match self.surface.get_current_texture() {
@@ -751,6 +776,21 @@ impl EngineState {
         self.vol_composite.dispatch(&mut encoder);
 
         // --- Post-processing pipeline ---
+        // 10.5. Screen-space radial blur god rays
+        {
+            let sun_dir_vec = glam::Vec3::new(0.5, 1.0, 0.3).normalize();
+            let cam_fwd = self.camera.forward();
+            let sun_dot = sun_dir_vec.dot(cam_fwd);
+            let (sun_uv_x, sun_uv_y) = if sun_dot > 0.0 {
+                let ndc_x = sun_dir_vec.dot(right) / sun_dot;
+                let ndc_y = -sun_dir_vec.dot(up) / sun_dot;
+                (ndc_x * 0.5 + 0.5, ndc_y * 0.5 + 0.5)
+            } else {
+                (0.5, 0.5)
+            };
+            self.god_rays_blur.update_sun(&self.ctx.queue, sun_uv_x, sun_uv_y, sun_dot);
+        }
+        self.god_rays_blur.dispatch(&mut encoder);
         // 11. Bloom extraction + downsample
         self.bloom.dispatch(&mut encoder);
         // 12. Auto-exposure (histogram + adapted EV)
@@ -873,12 +913,8 @@ fn start_ipc_server(
         mode: rkf_mcp::registry::ToolMode::Editor,
     };
 
-    let mut registry = rkf_mcp::registry::ToolRegistry::new();
-    rkf_mcp::tools::observation::register_observation_tools(&mut registry);
-    let registry = Arc::new(registry);
-
     let handle = rt.spawn(async move {
-        if let Err(e) = rkf_mcp::ipc::run_server(config, registry, api).await {
+        if let Err(e) = rkf_mcp::ipc::run_server(config, api).await {
             log::error!("IPC server error: {e}");
         }
     });
