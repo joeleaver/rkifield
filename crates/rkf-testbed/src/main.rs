@@ -669,7 +669,9 @@ impl EngineState {
         self.gpu_scene.update_scene_uniforms(&self.ctx.queue, &scene_uniforms);
 
         // Update shade uniforms (debug_mode, lights, camera position).
-        // G-buffer positions are camera-relative, so camera_pos = [0,0,0].
+        // G-buffer positions are world-space (ray_origin + dir*t), so camera_pos
+        // must be the actual world position for correct view direction, shadow
+        // queries (sample_sdf converts world→camera-relative), and GI.
         let fwd = self.camera.forward();
         let fov_rad = self.camera.fov_degrees.to_radians();
         let half_fov_tan = (fov_rad * 0.5).tan();
@@ -678,12 +680,13 @@ impl EngineState {
         let up = self.camera.up() * half_fov_tan;
         // Default sun direction for testbed (matches legacy directional light).
         let sun_dir = glam::Vec3::new(0.5, 1.0, 0.3).normalize();
+        let cam = self.camera.position;
         self.shading_pass.update_uniforms(&self.ctx.queue, &ShadeUniforms {
             debug_mode: self.shade_debug_mode,
             num_lights: self.world_lights.len() as u32,
             _pad0: 0,
             shadow_budget_k: 0, // unlimited
-            camera_pos: [0.0, 0.0, 0.0, 0.0], // camera-relative origin
+            camera_pos: [cam.x, cam.y, cam.z, 0.0],
             sun_dir: [sun_dir.x, sun_dir.y, sun_dir.z, 3.0],
             sun_color: [1.0, 0.95, 0.85, 0.0],
             sky_params: [1.0, 1.0, 1.0, 0.0], // atmosphere enabled with default Rayleigh/Mie
@@ -693,7 +696,6 @@ impl EngineState {
         });
 
         // Upload camera-relative light positions each frame.
-        let cam = self.camera.position;
         let cam_rel_lights: Vec<Light> = self.world_lights.iter().map(|l| {
             let mut cl = *l;
             // Only point/spot lights have meaningful positions.

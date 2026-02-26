@@ -25,6 +25,7 @@ pub enum CameraMode {
 ///
 /// Supports orbit mode (rotate/pan/zoom around a target), fly mode (WASD + mouse-look),
 /// and follow mode (track an entity). All angles are in radians.
+#[derive(Clone, Copy)]
 pub struct EditorCamera {
     /// Current world-space position.
     pub position: Vec3,

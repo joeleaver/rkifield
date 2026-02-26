@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use rinch::prelude::*;
 
 use crate::automation::SharedState;
-use crate::editor_state::{EditorMode, EditorState, SelectedEntity, UiRevision, UiSignals};
+use crate::editor_state::{EditorMode, EditorState, SelectedEntity, SliderSignals, UiRevision, UiSignals};
 use crate::gizmo;
 use crate::input::{InputState, KeyCode, Modifiers};
 use crate::wireframe;
@@ -1100,6 +1100,31 @@ fn build_slider_row(
     container.append_child(&row);
 }
 
+/// Build a slider row bound to a `SliderSignals` signal (no lock closure).
+///
+/// The slider updates `signal` on drag. The batch sync `Effect` in
+/// `RightPanel` writes all signal values to `EditorState` once per frame.
+fn build_synced_slider(
+    scope: &mut RenderScope,
+    container: &NodeHandle,
+    label: &str,
+    suffix: &str,
+    signal: Signal<f64>,
+    min: f64,
+    max: f64,
+    step: f64,
+    decimals: usize,
+) {
+    build_slider_row(
+        scope, container, label, suffix, signal,
+        min, max, step, decimals,
+        move |_v| {
+            // No-op — signal already set by build_slider_row's onchange.
+            // Sync happens in the batch Effect.
+        },
+    );
+}
+
 // ── Mode-dependent right panel ──────────────────────────────────────────────
 
 /// Right panel — always shows properties of the selected object + environment.
@@ -1121,51 +1146,40 @@ pub fn RightPanel() -> NodeHandle {
         "flex:1;overflow-y:scroll;min-height:0;height:0;",
     );
 
-    // Initialize signals from current editor state so sliders start with
-    // correct values. All signals are created outside the reactive closure
-    // to survive rebuilds. We NEVER call .set() inside the reactive closure
-    // to avoid re-entrant effect flushes.
-    let init = editor_state.lock().unwrap();
-    let fov_signal: Signal<f64> = Signal::new(init.editor_camera.fov_y.to_degrees() as f64);
-    let speed_signal: Signal<f64> = Signal::new(init.editor_camera.fly_speed as f64);
-    let near_signal: Signal<f64> = Signal::new(init.editor_camera.near as f64);
-    let far_signal: Signal<f64> = Signal::new(init.editor_camera.far as f64);
-    let sun_azimuth_signal: Signal<f64> = Signal::new({
-        let d = &init.environment.atmosphere.sun_direction;
-        d.x.atan2(d.z).to_degrees().rem_euclid(360.0) as f64
-    });
-    let sun_elevation_signal: Signal<f64> = Signal::new(
-        init.environment.atmosphere.sun_direction.y.asin().to_degrees() as f64,
-    );
-    let sun_intensity_signal: Signal<f64> = Signal::new(init.environment.atmosphere.sun_intensity as f64);
-    let rayleigh_signal: Signal<f64> = Signal::new(init.environment.atmosphere.rayleigh_scale as f64);
-    let mie_signal: Signal<f64> = Signal::new(init.environment.atmosphere.mie_scale as f64);
-    let fog_density_signal: Signal<f64> = Signal::new(init.environment.fog.density as f64);
-    let fog_height_falloff_signal: Signal<f64> = Signal::new(init.environment.fog.height_falloff as f64);
-    let dust_density_signal: Signal<f64> = Signal::new(init.environment.fog.ambient_dust_density as f64);
-    let dust_asymmetry_signal: Signal<f64> = Signal::new(init.environment.fog.dust_asymmetry as f64);
-    let cloud_coverage_signal: Signal<f64> = Signal::new(init.environment.clouds.coverage as f64);
-    let cloud_density_signal: Signal<f64> = Signal::new(init.environment.clouds.density as f64);
-    let cloud_altitude_signal: Signal<f64> = Signal::new(init.environment.clouds.altitude as f64);
-    let cloud_thickness_signal: Signal<f64> = Signal::new(init.environment.clouds.thickness as f64);
-    let cloud_wind_speed_signal: Signal<f64> = Signal::new(init.environment.clouds.wind_speed as f64);
-    let pp = &init.environment.post_process;
-    let bloom_intensity_signal: Signal<f64> = Signal::new(pp.bloom_intensity as f64);
-    let bloom_threshold_signal: Signal<f64> = Signal::new(pp.bloom_threshold as f64);
-    let exposure_signal: Signal<f64> = Signal::new(pp.exposure as f64);
-    let sharpen_signal: Signal<f64> = Signal::new(pp.sharpen_strength as f64);
-    let dof_focus_dist_signal: Signal<f64> = Signal::new(pp.dof_focus_distance as f64);
-    let dof_focus_range_signal: Signal<f64> = Signal::new(pp.dof_focus_range as f64);
-    let dof_max_coc_signal: Signal<f64> = Signal::new(pp.dof_max_coc as f64);
-    let motion_blur_signal: Signal<f64> = Signal::new(pp.motion_blur_intensity as f64);
-    let god_rays_signal: Signal<f64> = Signal::new(pp.god_rays_intensity as f64);
-    let vignette_signal: Signal<f64> = Signal::new(pp.vignette_intensity as f64);
-    let grain_signal: Signal<f64> = Signal::new(pp.grain_intensity as f64);
-    let chromatic_signal: Signal<f64> = Signal::new(pp.chromatic_aberration as f64);
-    let brush_radius_signal: Signal<f64> = Signal::new(init.sculpt.current_settings.radius as f64);
-    let brush_strength_signal: Signal<f64> = Signal::new(init.sculpt.current_settings.strength as f64);
-    let brush_falloff_signal: Signal<f64> = Signal::new(init.sculpt.current_settings.falloff as f64);
-    drop(init);
+    // Centralized slider signals — created once in main.rs, stored in rinch context.
+    // A single batch Effect (below) syncs all values to EditorState per frame.
+    let sliders = use_context::<SliderSignals>();
+
+    // ── Batch sync Effect: slider signals + toggle signals → EditorState ──
+    // This is the ONLY place that locks EditorState for slider/toggle updates.
+    // One lock per frame, regardless of how many sliders changed.
+    {
+        let es = editor_state.clone();
+        Effect::new(move || {
+            // Subscribe to all slider signals.
+            sliders.track_all();
+            // Subscribe to toggle signals (from UiSignals).
+            let _ = ui.atmo_enabled.get();
+            let _ = ui.fog_enabled.get();
+            let _ = ui.clouds_enabled.get();
+            let _ = ui.bloom_enabled.get();
+            let _ = ui.dof_enabled.get();
+            let _ = ui.tone_map_mode.get();
+
+            // Batch write to EditorState.
+            if let Ok(mut es) = es.lock() {
+                sliders.sync_to_state(&mut es);
+                // Sync toggles.
+                es.environment.atmosphere.enabled = ui.atmo_enabled.get();
+                es.environment.fog.enabled = ui.fog_enabled.get();
+                es.environment.clouds.enabled = ui.clouds_enabled.get();
+                es.environment.post_process.bloom_enabled = ui.bloom_enabled.get();
+                es.environment.post_process.dof_enabled = ui.dof_enabled.get();
+                es.environment.post_process.tone_map_mode = ui.tone_map_mode.get();
+                es.environment.mark_dirty();
+            }
+        });
+    }
 
     let es = editor_state.clone();
     rinch::core::reactive_component_dom(__scope, &root, move |__scope| {
@@ -1214,33 +1228,12 @@ pub fn RightPanel() -> NodeHandle {
                     container.append_child(&row);
                 }
 
-                build_slider_row(
-                    __scope, &container, "Radius", "", brush_radius_signal,
-                    0.1, 10.0, 0.1, 1,
-                    { let es = es.clone(); move |v| {
-                        if let Ok(mut es) = es.lock() {
-                            es.sculpt.set_radius(v as f32);
-                        }
-                    }},
-                );
-                build_slider_row(
-                    __scope, &container, "Strength", "", brush_strength_signal,
-                    0.0, 1.0, 0.01, 2,
-                    { let es = es.clone(); move |v| {
-                        if let Ok(mut es) = es.lock() {
-                            es.sculpt.set_strength(v as f32);
-                        }
-                    }},
-                );
-                build_slider_row(
-                    __scope, &container, "Falloff", "", brush_falloff_signal,
-                    0.0, 1.0, 0.01, 2,
-                    { let es = es.clone(); move |v| {
-                        if let Ok(mut es) = es.lock() {
-                            es.sculpt.current_settings.falloff = v as f32;
-                        }
-                    }},
-                );
+                build_synced_slider(__scope, &container, "Radius", "",
+                    sliders.brush_radius, 0.1, 10.0, 0.1, 1);
+                build_synced_slider(__scope, &container, "Strength", "",
+                    sliders.brush_strength, 0.0, 1.0, 0.01, 2);
+                build_synced_slider(__scope, &container, "Falloff", "",
+                    sliders.brush_falloff, 0.0, 1.0, 0.01, 2);
 
                 // Divider.
                 let div = __scope.create_element("div");
@@ -1256,33 +1249,12 @@ pub fn RightPanel() -> NodeHandle {
                 header.append_child(&__scope.create_text("Paint Brush"));
                 container.append_child(&header);
 
-                build_slider_row(
-                    __scope, &container, "Radius", "", brush_radius_signal,
-                    0.1, 10.0, 0.1, 1,
-                    { let es = es.clone(); move |v| {
-                        if let Ok(mut es) = es.lock() {
-                            es.paint.current_settings.radius = v as f32;
-                        }
-                    }},
-                );
-                build_slider_row(
-                    __scope, &container, "Strength", "", brush_strength_signal,
-                    0.0, 1.0, 0.01, 2,
-                    { let es = es.clone(); move |v| {
-                        if let Ok(mut es) = es.lock() {
-                            es.paint.current_settings.strength = v as f32;
-                        }
-                    }},
-                );
-                build_slider_row(
-                    __scope, &container, "Falloff", "", brush_falloff_signal,
-                    0.0, 1.0, 0.01, 2,
-                    { let es = es.clone(); move |v| {
-                        if let Ok(mut es) = es.lock() {
-                            es.paint.current_settings.falloff = v as f32;
-                        }
-                    }},
-                );
+                build_synced_slider(__scope, &container, "Radius", "",
+                    sliders.brush_radius, 0.1, 10.0, 0.1, 1);
+                build_synced_slider(__scope, &container, "Strength", "",
+                    sliders.brush_strength, 0.0, 1.0, 0.01, 2);
+                build_synced_slider(__scope, &container, "Falloff", "",
+                    sliders.brush_falloff, 0.0, 1.0, 0.01, 2);
 
                 // Divider.
                 let div = __scope.create_element("div");
@@ -1313,34 +1285,14 @@ pub fn RightPanel() -> NodeHandle {
             name_row.append_child(&__scope.create_text("Camera"));
             container.append_child(&name_row);
 
-            build_slider_row(
-                __scope, &container, "FOV", "\u{00b0}", fov_signal,
-                30.0, 120.0, 1.0, 0,
-                { let es = es.clone(); move |v| {
-                    if let Ok(mut es) = es.lock() { es.editor_camera.fov_y = (v as f32).to_radians(); }
-                }},
-            );
-            build_slider_row(
-                __scope, &container, "Fly Speed", "", speed_signal,
-                0.5, 500.0, 0.5, 1,
-                { let es = es.clone(); move |v| {
-                    if let Ok(mut es) = es.lock() { es.editor_camera.fly_speed = v as f32; }
-                }},
-            );
-            build_slider_row(
-                __scope, &container, "Near Plane", "", near_signal,
-                0.01, 10.0, 0.01, 2,
-                { let es = es.clone(); move |v| {
-                    if let Ok(mut es) = es.lock() { es.editor_camera.near = v as f32; }
-                }},
-            );
-            build_slider_row(
-                __scope, &container, "Far Plane", "", far_signal,
-                100.0, 10000.0, 100.0, 0,
-                { let es = es.clone(); move |v| {
-                    if let Ok(mut es) = es.lock() { es.editor_camera.far = v as f32; }
-                }},
-            );
+            build_synced_slider(__scope, &container, "FOV", "\u{00b0}",
+                sliders.fov, 30.0, 120.0, 1.0, 0);
+            build_synced_slider(__scope, &container, "Fly Speed", "",
+                sliders.fly_speed, 0.5, 500.0, 0.5, 1);
+            build_synced_slider(__scope, &container, "Near Plane", "",
+                sliders.near, 0.01, 10.0, 0.01, 2);
+            build_synced_slider(__scope, &container, "Far Plane", "",
+                sliders.far, 100.0, 10000.0, 100.0, 0);
 
             // Divider before position.
             let div = __scope.create_element("div");
@@ -1372,45 +1324,12 @@ pub fn RightPanel() -> NodeHandle {
             atmo_header.append_child(&__scope.create_text("Atmosphere"));
             container.append_child(&atmo_header);
 
-            build_slider_row(
-                __scope, &container, "Sun Azimuth", "\u{00b0}", sun_azimuth_signal,
-                0.0, 360.0, 1.0, 0,
-                { let es = es.clone(); move |v| {
-                    if let Ok(mut es) = es.lock() {
-                        let az = (v as f32).to_radians();
-                        let el = es.environment.atmosphere.sun_direction.y.asin();
-                        let cos_el = el.cos();
-                        es.environment.atmosphere.sun_direction =
-                            glam::Vec3::new(az.sin() * cos_el, el.sin(), az.cos() * cos_el).normalize();
-                        es.environment.mark_dirty();
-                    }
-                }},
-            );
-            build_slider_row(
-                __scope, &container, "Sun Elevation", "\u{00b0}", sun_elevation_signal,
-                -90.0, 90.0, 1.0, 0,
-                { let es = es.clone(); move |v| {
-                    if let Ok(mut es) = es.lock() {
-                        let d = es.environment.atmosphere.sun_direction.normalize_or_zero();
-                        let az = d.x.atan2(d.z);
-                        let el = (v as f32).to_radians();
-                        let cos_el = el.cos();
-                        es.environment.atmosphere.sun_direction =
-                            glam::Vec3::new(az.sin() * cos_el, el.sin(), az.cos() * cos_el).normalize();
-                        es.environment.mark_dirty();
-                    }
-                }},
-            );
-            build_slider_row(
-                __scope, &container, "Sun Intensity", "", sun_intensity_signal,
-                0.0, 10.0, 0.1, 1,
-                { let es = es.clone(); move |v| {
-                    if let Ok(mut es) = es.lock() {
-                        es.environment.atmosphere.sun_intensity = v as f32;
-                        es.environment.mark_dirty();
-                    }
-                }},
-            );
+            build_synced_slider(__scope, &container, "Sun Azimuth", "\u{00b0}",
+                sliders.sun_azimuth, 0.0, 360.0, 1.0, 0);
+            build_synced_slider(__scope, &container, "Sun Elevation", "\u{00b0}",
+                sliders.sun_elevation, -90.0, 90.0, 1.0, 0);
+            build_synced_slider(__scope, &container, "Sun Intensity", "",
+                sliders.sun_intensity, 0.0, 10.0, 0.1, 1);
 
             // Sun color (read-only display).
             {
@@ -1426,7 +1345,7 @@ pub fn RightPanel() -> NodeHandle {
 
             // Atmosphere enable toggle.
             {
-                let atmo_on = es.lock().map(|e| e.environment.atmosphere.enabled).unwrap_or(true);
+                let atmo_on = ui.atmo_enabled.get();
                 let toggle_row = __scope.create_element("div");
                 toggle_row.set_attribute(
                     "style",
@@ -1435,41 +1354,17 @@ pub fn RightPanel() -> NodeHandle {
                 );
                 let label = if atmo_on { "Atmosphere: ON" } else { "Atmosphere: OFF" };
                 toggle_row.append_child(&__scope.create_text(label));
-                let es_toggle = es.clone();
-                let rev = revision;
                 let hid = __scope.register_handler(move || {
-                    let new_val = es_toggle.lock().ok().map(|mut es| {
-                        es.environment.atmosphere.enabled = !es.environment.atmosphere.enabled;
-                        es.environment.mark_dirty();
-                        es.environment.atmosphere.enabled
-                    }).unwrap_or(true);
-                    ui.atmo_enabled.set(new_val);
-                    rev.bump();
+                    ui.atmo_enabled.update(|v| *v = !*v);
                 });
                 toggle_row.set_attribute("data-rid", &hid.to_string());
                 container.append_child(&toggle_row);
             }
 
-            build_slider_row(
-                __scope, &container, "Rayleigh Scale", "", rayleigh_signal,
-                0.0, 5.0, 0.1, 1,
-                { let es = es.clone(); move |v| {
-                    if let Ok(mut es) = es.lock() {
-                        es.environment.atmosphere.rayleigh_scale = v as f32;
-                        es.environment.mark_dirty();
-                    }
-                }},
-            );
-            build_slider_row(
-                __scope, &container, "Mie Scale", "", mie_signal,
-                0.0, 5.0, 0.1, 1,
-                { let es = es.clone(); move |v| {
-                    if let Ok(mut es) = es.lock() {
-                        es.environment.atmosphere.mie_scale = v as f32;
-                        es.environment.mark_dirty();
-                    }
-                }},
-            );
+            build_synced_slider(__scope, &container, "Rayleigh Scale", "",
+                sliders.rayleigh_scale, 0.0, 5.0, 0.1, 1);
+            build_synced_slider(__scope, &container, "Mie Scale", "",
+                sliders.mie_scale, 0.0, 5.0, 0.1, 1);
 
             // ── Fog section ──
             let fog_header = __scope.create_element("div");
@@ -1477,72 +1372,32 @@ pub fn RightPanel() -> NodeHandle {
             fog_header.append_child(&__scope.create_text("Fog"));
             container.append_child(&fog_header);
 
-            // Fog enable toggle (simple clickable label).
+            // Fog enable toggle.
             {
-                let fog_enabled = es.lock().map(|e| e.environment.fog.enabled).unwrap_or(false);
+                let fog_on = ui.fog_enabled.get();
                 let toggle_row = __scope.create_element("div");
                 toggle_row.set_attribute(
                     "style",
                     "padding:3px 12px;font-size:11px;color:var(--rinch-color-dimmed);\
                      cursor:pointer;user-select:none;",
                 );
-                let label = if fog_enabled { "Fog: ON" } else { "Fog: OFF" };
+                let label = if fog_on { "Fog: ON" } else { "Fog: OFF" };
                 toggle_row.append_child(&__scope.create_text(label));
-                let es_toggle = es.clone();
-                let rev = revision;
                 let hid = __scope.register_handler(move || {
-                    let new_val = es_toggle.lock().ok().map(|mut es| {
-                        es.environment.fog.enabled = !es.environment.fog.enabled;
-                        es.environment.mark_dirty();
-                        es.environment.fog.enabled
-                    }).unwrap_or(false);
-                    ui.fog_enabled.set(new_val);
-                    rev.bump();
+                    ui.fog_enabled.update(|v| *v = !*v);
                 });
                 toggle_row.set_attribute("data-rid", &hid.to_string());
                 container.append_child(&toggle_row);
             }
 
-            build_slider_row(
-                __scope, &container, "Fog Density", "", fog_density_signal,
-                0.0, 0.5, 0.001, 3,
-                { let es = es.clone(); move |v| {
-                    if let Ok(mut es) = es.lock() {
-                        es.environment.fog.density = v as f32;
-                        es.environment.mark_dirty();
-                    }
-                }},
-            );
-            build_slider_row(
-                __scope, &container, "Height Falloff", "", fog_height_falloff_signal,
-                0.0, 1.0, 0.01, 2,
-                { let es = es.clone(); move |v| {
-                    if let Ok(mut es) = es.lock() {
-                        es.environment.fog.height_falloff = v as f32;
-                        es.environment.mark_dirty();
-                    }
-                }},
-            );
-            build_slider_row(
-                __scope, &container, "Dust Density", "", dust_density_signal,
-                0.0, 0.1, 0.001, 3,
-                { let es = es.clone(); move |v| {
-                    if let Ok(mut es) = es.lock() {
-                        es.environment.fog.ambient_dust_density = v as f32;
-                        es.environment.mark_dirty();
-                    }
-                }},
-            );
-            build_slider_row(
-                __scope, &container, "Dust Asymmetry", "", dust_asymmetry_signal,
-                0.0, 0.95, 0.05, 2,
-                { let es = es.clone(); move |v| {
-                    if let Ok(mut es) = es.lock() {
-                        es.environment.fog.dust_asymmetry = v as f32;
-                        es.environment.mark_dirty();
-                    }
-                }},
-            );
+            build_synced_slider(__scope, &container, "Fog Density", "",
+                sliders.fog_density, 0.0, 0.5, 0.001, 3);
+            build_synced_slider(__scope, &container, "Height Falloff", "",
+                sliders.fog_height_falloff, 0.0, 1.0, 0.01, 2);
+            build_synced_slider(__scope, &container, "Dust Density", "",
+                sliders.dust_density, 0.0, 0.1, 0.001, 3);
+            build_synced_slider(__scope, &container, "Dust Asymmetry", "",
+                sliders.dust_asymmetry, 0.0, 0.95, 0.05, 2);
 
             // ── Clouds section ──
             let cloud_header = __scope.create_element("div");
@@ -1552,7 +1407,7 @@ pub fn RightPanel() -> NodeHandle {
 
             // Cloud enable toggle.
             {
-                let cloud_on = es.lock().map(|e| e.environment.clouds.enabled).unwrap_or(false);
+                let cloud_on = ui.clouds_enabled.get();
                 let toggle_row = __scope.create_element("div");
                 toggle_row.set_attribute(
                     "style",
@@ -1561,71 +1416,23 @@ pub fn RightPanel() -> NodeHandle {
                 );
                 let label = if cloud_on { "Clouds: ON" } else { "Clouds: OFF" };
                 toggle_row.append_child(&__scope.create_text(label));
-                let es_toggle = es.clone();
-                let rev = revision;
                 let hid = __scope.register_handler(move || {
-                    let new_val = es_toggle.lock().ok().map(|mut es| {
-                        es.environment.clouds.enabled = !es.environment.clouds.enabled;
-                        es.environment.mark_dirty();
-                        es.environment.clouds.enabled
-                    }).unwrap_or(false);
-                    ui.clouds_enabled.set(new_val);
-                    rev.bump();
+                    ui.clouds_enabled.update(|v| *v = !*v);
                 });
                 toggle_row.set_attribute("data-rid", &hid.to_string());
                 container.append_child(&toggle_row);
             }
 
-            build_slider_row(
-                __scope, &container, "Coverage", "", cloud_coverage_signal,
-                0.0, 1.0, 0.01, 2,
-                { let es = es.clone(); move |v| {
-                    if let Ok(mut es) = es.lock() {
-                        es.environment.clouds.coverage = v as f32;
-                        es.environment.mark_dirty();
-                    }
-                }},
-            );
-            build_slider_row(
-                __scope, &container, "Cloud Density", "", cloud_density_signal,
-                0.0, 5.0, 0.1, 1,
-                { let es = es.clone(); move |v| {
-                    if let Ok(mut es) = es.lock() {
-                        es.environment.clouds.density = v as f32;
-                        es.environment.mark_dirty();
-                    }
-                }},
-            );
-            build_slider_row(
-                __scope, &container, "Altitude", "m", cloud_altitude_signal,
-                0.0, 5000.0, 50.0, 0,
-                { let es = es.clone(); move |v| {
-                    if let Ok(mut es) = es.lock() {
-                        es.environment.clouds.altitude = v as f32;
-                        es.environment.mark_dirty();
-                    }
-                }},
-            );
-            build_slider_row(
-                __scope, &container, "Thickness", "m", cloud_thickness_signal,
-                10.0, 10000.0, 50.0, 0,
-                { let es = es.clone(); move |v| {
-                    if let Ok(mut es) = es.lock() {
-                        es.environment.clouds.thickness = v as f32;
-                        es.environment.mark_dirty();
-                    }
-                }},
-            );
-            build_slider_row(
-                __scope, &container, "Wind Speed", "", cloud_wind_speed_signal,
-                0.0, 50.0, 0.5, 1,
-                { let es = es.clone(); move |v| {
-                    if let Ok(mut es) = es.lock() {
-                        es.environment.clouds.wind_speed = v as f32;
-                        es.environment.mark_dirty();
-                    }
-                }},
-            );
+            build_synced_slider(__scope, &container, "Coverage", "",
+                sliders.cloud_coverage, 0.0, 1.0, 0.01, 2);
+            build_synced_slider(__scope, &container, "Cloud Density", "",
+                sliders.cloud_density, 0.0, 5.0, 0.1, 1);
+            build_synced_slider(__scope, &container, "Altitude", "m",
+                sliders.cloud_altitude, 0.0, 5000.0, 50.0, 0);
+            build_synced_slider(__scope, &container, "Thickness", "m",
+                sliders.cloud_thickness, 10.0, 10000.0, 50.0, 0);
+            build_synced_slider(__scope, &container, "Wind Speed", "",
+                sliders.cloud_wind_speed, 0.0, 50.0, 0.5, 1);
 
             // ── Post-Processing section ──
             let pp_header = __scope.create_element("div");
@@ -1635,7 +1442,7 @@ pub fn RightPanel() -> NodeHandle {
 
             // Bloom enable toggle.
             {
-                let bloom_on = es.lock().map(|e| e.environment.post_process.bloom_enabled).unwrap_or(true);
+                let bloom_on = ui.bloom_enabled.get();
                 let toggle_row = __scope.create_element("div");
                 toggle_row.set_attribute(
                     "style",
@@ -1644,55 +1451,23 @@ pub fn RightPanel() -> NodeHandle {
                 );
                 let label = if bloom_on { "Bloom: ON" } else { "Bloom: OFF" };
                 toggle_row.append_child(&__scope.create_text(label));
-                let es_toggle = es.clone();
-                let rev = revision;
                 let hid = __scope.register_handler(move || {
-                    let new_val = es_toggle.lock().ok().map(|mut es| {
-                        es.environment.post_process.bloom_enabled = !es.environment.post_process.bloom_enabled;
-                        es.environment.mark_dirty();
-                        es.environment.post_process.bloom_enabled
-                    }).unwrap_or(true);
-                    ui.bloom_enabled.set(new_val);
-                    rev.bump();
+                    ui.bloom_enabled.update(|v| *v = !*v);
                 });
                 toggle_row.set_attribute("data-rid", &hid.to_string());
                 container.append_child(&toggle_row);
             }
 
-            build_slider_row(
-                __scope, &container, "Bloom Intensity", "", bloom_intensity_signal,
-                0.0, 2.0, 0.01, 2,
-                { let es = es.clone(); move |v| {
-                    if let Ok(mut es) = es.lock() {
-                        es.environment.post_process.bloom_intensity = v as f32;
-                        es.environment.mark_dirty();
-                    }
-                }},
-            );
-            build_slider_row(
-                __scope, &container, "Bloom Threshold", "", bloom_threshold_signal,
-                0.0, 5.0, 0.1, 1,
-                { let es = es.clone(); move |v| {
-                    if let Ok(mut es) = es.lock() {
-                        es.environment.post_process.bloom_threshold = v as f32;
-                        es.environment.mark_dirty();
-                    }
-                }},
-            );
-            build_slider_row(
-                __scope, &container, "Exposure", "", exposure_signal,
-                0.1, 10.0, 0.1, 1,
-                { let es = es.clone(); move |v| {
-                    if let Ok(mut es) = es.lock() {
-                        es.environment.post_process.exposure = v as f32;
-                        es.environment.mark_dirty();
-                    }
-                }},
-            );
+            build_synced_slider(__scope, &container, "Bloom Intensity", "",
+                sliders.bloom_intensity, 0.0, 2.0, 0.01, 2);
+            build_synced_slider(__scope, &container, "Bloom Threshold", "",
+                sliders.bloom_threshold, 0.0, 5.0, 0.1, 1);
+            build_synced_slider(__scope, &container, "Exposure", "",
+                sliders.exposure, 0.1, 10.0, 0.1, 1);
 
             // Tone map mode toggle (ACES / AgX).
             {
-                let tm_mode = es.lock().map(|e| e.environment.post_process.tone_map_mode).unwrap_or(0);
+                let tm_mode = ui.tone_map_mode.get();
                 let toggle_row = __scope.create_element("div");
                 toggle_row.set_attribute(
                     "style",
@@ -1701,36 +1476,19 @@ pub fn RightPanel() -> NodeHandle {
                 );
                 let label = if tm_mode == 0 { "Tone Map: ACES" } else { "Tone Map: AgX" };
                 toggle_row.append_child(&__scope.create_text(label));
-                let es_toggle = es.clone();
-                let rev = revision;
                 let hid = __scope.register_handler(move || {
-                    let new_mode = es_toggle.lock().ok().map(|mut es| {
-                        es.environment.post_process.tone_map_mode =
-                            if es.environment.post_process.tone_map_mode == 0 { 1 } else { 0 };
-                        es.environment.mark_dirty();
-                        es.environment.post_process.tone_map_mode
-                    }).unwrap_or(0);
-                    ui.tone_map_mode.set(new_mode);
-                    rev.bump();
+                    ui.tone_map_mode.update(|v| *v = if *v == 0 { 1 } else { 0 });
                 });
                 toggle_row.set_attribute("data-rid", &hid.to_string());
                 container.append_child(&toggle_row);
             }
 
-            build_slider_row(
-                __scope, &container, "Sharpen", "", sharpen_signal,
-                0.0, 2.0, 0.05, 2,
-                { let es = es.clone(); move |v| {
-                    if let Ok(mut es) = es.lock() {
-                        es.environment.post_process.sharpen_strength = v as f32;
-                        es.environment.mark_dirty();
-                    }
-                }},
-            );
+            build_synced_slider(__scope, &container, "Sharpen", "",
+                sliders.sharpen, 0.0, 2.0, 0.05, 2);
 
             // DoF enable toggle.
             {
-                let dof_on = es.lock().map(|e| e.environment.post_process.dof_enabled).unwrap_or(false);
+                let dof_on = ui.dof_enabled.get();
                 let toggle_row = __scope.create_element("div");
                 toggle_row.set_attribute(
                     "style",
@@ -1739,101 +1497,29 @@ pub fn RightPanel() -> NodeHandle {
                 );
                 let label = if dof_on { "DoF: ON" } else { "DoF: OFF" };
                 toggle_row.append_child(&__scope.create_text(label));
-                let es_toggle = es.clone();
-                let rev = revision;
                 let hid = __scope.register_handler(move || {
-                    let new_val = es_toggle.lock().ok().map(|mut es| {
-                        es.environment.post_process.dof_enabled = !es.environment.post_process.dof_enabled;
-                        es.environment.mark_dirty();
-                        es.environment.post_process.dof_enabled
-                    }).unwrap_or(false);
-                    ui.dof_enabled.set(new_val);
-                    rev.bump();
+                    ui.dof_enabled.update(|v| *v = !*v);
                 });
                 toggle_row.set_attribute("data-rid", &hid.to_string());
                 container.append_child(&toggle_row);
             }
 
-            build_slider_row(
-                __scope, &container, "Focus Distance", "", dof_focus_dist_signal,
-                0.1, 50.0, 0.1, 1,
-                { let es = es.clone(); move |v| {
-                    if let Ok(mut es) = es.lock() {
-                        es.environment.post_process.dof_focus_distance = v as f32;
-                        es.environment.mark_dirty();
-                    }
-                }},
-            );
-            build_slider_row(
-                __scope, &container, "Focus Range", "", dof_focus_range_signal,
-                0.1, 20.0, 0.1, 1,
-                { let es = es.clone(); move |v| {
-                    if let Ok(mut es) = es.lock() {
-                        es.environment.post_process.dof_focus_range = v as f32;
-                        es.environment.mark_dirty();
-                    }
-                }},
-            );
-            build_slider_row(
-                __scope, &container, "Max CoC", "px", dof_max_coc_signal,
-                1.0, 32.0, 1.0, 0,
-                { let es = es.clone(); move |v| {
-                    if let Ok(mut es) = es.lock() {
-                        es.environment.post_process.dof_max_coc = v as f32;
-                        es.environment.mark_dirty();
-                    }
-                }},
-            );
-            build_slider_row(
-                __scope, &container, "Motion Blur", "", motion_blur_signal,
-                0.0, 3.0, 0.1, 1,
-                { let es = es.clone(); move |v| {
-                    if let Ok(mut es) = es.lock() {
-                        es.environment.post_process.motion_blur_intensity = v as f32;
-                        es.environment.mark_dirty();
-                    }
-                }},
-            );
-            build_slider_row(
-                __scope, &container, "God Rays", "", god_rays_signal,
-                0.0, 2.0, 0.05, 2,
-                { let es = es.clone(); move |v| {
-                    if let Ok(mut es) = es.lock() {
-                        es.environment.post_process.god_rays_intensity = v as f32;
-                        es.environment.mark_dirty();
-                    }
-                }},
-            );
-            build_slider_row(
-                __scope, &container, "Vignette", "", vignette_signal,
-                0.0, 1.0, 0.01, 2,
-                { let es = es.clone(); move |v| {
-                    if let Ok(mut es) = es.lock() {
-                        es.environment.post_process.vignette_intensity = v as f32;
-                        es.environment.mark_dirty();
-                    }
-                }},
-            );
-            build_slider_row(
-                __scope, &container, "Grain", "", grain_signal,
-                0.0, 1.0, 0.01, 2,
-                { let es = es.clone(); move |v| {
-                    if let Ok(mut es) = es.lock() {
-                        es.environment.post_process.grain_intensity = v as f32;
-                        es.environment.mark_dirty();
-                    }
-                }},
-            );
-            build_slider_row(
-                __scope, &container, "Chromatic Ab.", "", chromatic_signal,
-                0.0, 1.0, 0.01, 2,
-                { let es = es.clone(); move |v| {
-                    if let Ok(mut es) = es.lock() {
-                        es.environment.post_process.chromatic_aberration = v as f32;
-                        es.environment.mark_dirty();
-                    }
-                }},
-            );
+            build_synced_slider(__scope, &container, "Focus Distance", "",
+                sliders.dof_focus_dist, 0.1, 50.0, 0.1, 1);
+            build_synced_slider(__scope, &container, "Focus Range", "",
+                sliders.dof_focus_range, 0.1, 20.0, 0.1, 1);
+            build_synced_slider(__scope, &container, "Max CoC", "px",
+                sliders.dof_max_coc, 1.0, 32.0, 1.0, 0);
+            build_synced_slider(__scope, &container, "Motion Blur", "",
+                sliders.motion_blur, 0.0, 3.0, 0.1, 1);
+            build_synced_slider(__scope, &container, "God Rays", "",
+                sliders.god_rays, 0.0, 2.0, 0.05, 2);
+            build_synced_slider(__scope, &container, "Vignette", "",
+                sliders.vignette, 0.0, 1.0, 0.01, 2);
+            build_synced_slider(__scope, &container, "Grain", "",
+                sliders.grain, 0.0, 1.0, 0.01, 2);
+            build_synced_slider(__scope, &container, "Chromatic Ab.", "",
+                sliders.chromatic_ab, 0.0, 1.0, 0.01, 2);
 
             // ── Animation controls ──
             {

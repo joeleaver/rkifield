@@ -36,7 +36,7 @@ use std::sync::{Arc, Mutex};
 use rinch::prelude::*;
 
 use automation::SharedState;
-use editor_state::{EditorState, UiRevision, UiSignals};
+use editor_state::{EditorState, SliderSignals, UiRevision, UiSignals};
 use engine::EditorEngine;
 use engine_viewport::{DISPLAY_HEIGHT, DISPLAY_WIDTH};
 
@@ -172,10 +172,14 @@ fn engine_thread(data: EngineThreadData) {
     let mut last_fps_push = std::time::Instant::now();
     let mut current_vp = engine.viewport_size();
 
+    // Frame pacing: cap the engine thread to ~120 fps so it doesn't
+    // monopolise the editor_state mutex and starve the UI thread.
+    let target_frame_time = std::time::Duration::from_micros(8333); // ~120 fps
+
     loop {
-        let now = std::time::Instant::now();
-        let dt = now.duration_since(last_frame).as_secs_f32();
-        last_frame = now;
+        let frame_start = std::time::Instant::now();
+        let dt = frame_start.duration_since(last_frame).as_secs_f32();
+        last_frame = frame_start;
 
         // a. Check viewport size from layout — the compositor updates
         //    gpu_registrar.layout_size() each frame with the physical pixel
@@ -214,145 +218,73 @@ fn engine_thread(data: EngineThreadData) {
             }
         }
 
-        // Wireframe data — extracted from editor_state while the lock is held,
-        // used to build wireframe vertices after the lock is released.
-        let mut wf_selected: Option<editor_state::SelectedEntity> = None;
-        let mut wf_gizmo_mode = gizmo::GizmoMode::Translate;
-        let mut wf_hovered_axis = gizmo::GizmoAxis::None;
-        let mut wf_cam_pos = glam::Vec3::ZERO;
-        let mut wf_show_grid = false;
-        let mut wf_mode = editor_state::EditorMode::Default;
-        let mut wf_brush_radius = 1.0f32;
+        // c. Single brief lock: snapshot everything → release → apply.
+        //    All extraction logic lives in EditorState::take_engine_snapshot().
+        let mut snap = {
+            let mut es = match editor_state.lock() {
+                Ok(es) => es,
+                Err(_) => continue, // poisoned — skip frame
+            };
 
-        // c. Brief lock: camera update + read snapshot for rendering.
-        //    All editor logic (gizmo, mode switching, undo) is handled on the
-        //    main thread in the event handler. This lock only reads state and
-        //    applies camera/environment/lights to the GPU.
-        {
+            // Apply pending MCP commands (mutate before snapshot).
+            if let Some(cam) = pending_camera {
+                es.editor_camera.position = cam.position;
+                es.editor_camera.fly_yaw = cam.yaw;
+                es.editor_camera.fly_pitch = cam.pitch;
+                let dir = glam::Vec3::new(
+                    -cam.yaw.sin() * cam.pitch.cos(),
+                    cam.pitch.sin(),
+                    -cam.yaw.cos() * cam.pitch.cos(),
+                );
+                es.editor_camera.target = es.editor_camera.position
+                    + dir * es.editor_camera.orbit_distance;
+            }
+            if let Some(mode) = pending_debug {
+                es.pending_debug_mode = Some(mode);
+            }
+
+            // Camera update (mutates EditorState input state).
+            es.update_camera(dt);
+
+            // Snapshot + release lock.
+            es.take_engine_snapshot()
+        };
+
+        // d. Apply snapshot to engine (no lock held — UI thread runs freely).
+        engine.sync_camera(&snap.camera);
+        if let Some(mode) = snap.debug_mode {
+            engine.set_debug_mode(mode);
+        }
+        if let Some(ref env) = snap.environment {
+            engine.apply_environment_snapshot(env);
+        }
+        if let Some(lights) = snap.lights {
+            engine.world_lights = lights;
+        }
+
+        // e. Process pending re-voxelize (needs brief lock for scene mutation).
+        if let Some(obj_id) = snap.revoxelize {
             if let Ok(mut es) = editor_state.lock() {
-                // Apply pending MCP camera teleport.
-                if let Some(cam) = pending_camera {
-                    es.editor_camera.position = cam.position;
-                    es.editor_camera.fly_yaw = cam.yaw;
-                    es.editor_camera.fly_pitch = cam.pitch;
-                    let dir = glam::Vec3::new(
-                        -cam.yaw.sin() * cam.pitch.cos(),
-                        cam.pitch.sin(),
-                        -cam.yaw.cos() * cam.pitch.cos(),
-                    );
-                    es.editor_camera.target = es.editor_camera.position
-                        + dir * es.editor_camera.orbit_distance;
-                }
-                if let Some(mode) = pending_debug {
-                    es.pending_debug_mode = Some(mode);
-                }
-
-                // Camera fly/orbit update — kept here for zero-latency response.
-                es.update_camera(dt);
-
-                // Sync editor camera → render camera.
-                engine.sync_camera(&es.editor_camera);
-
-                // Apply pending debug mode.
-                if let Some(mode) = es.pending_debug_mode.take() {
-                    es.debug_mode = mode;
-                    engine.set_debug_mode(mode);
-                }
-
-                // Apply environment settings.
-                engine.apply_environment(&mut es.environment);
-
-                // Sync editor lights → render lights when dirty.
-                if es.light_editor.is_dirty() {
-                    engine.world_lights = es.light_editor.all_lights().iter().map(|el| {
-                        use crate::light_editor::EditorLightType;
-                        rkf_render::Light {
-                            light_type: match el.light_type {
-                                EditorLightType::Point => 1,
-                                EditorLightType::Spot => 2,
-                            },
-                            pos_x: el.position.x,
-                            pos_y: el.position.y,
-                            pos_z: el.position.z,
-                            dir_x: el.direction.x,
-                            dir_y: el.direction.y,
-                            dir_z: el.direction.z,
-                            color_r: el.color.x,
-                            color_g: el.color.y,
-                            color_b: el.color.z,
-                            intensity: el.intensity,
-                            range: el.range,
-                            inner_angle: el.spot_inner_angle,
-                            outer_angle: el.spot_outer_angle,
-                            cookie_index: -1,
-                            shadow_caster: el.cast_shadows as u32,
-                        }
-                    }).collect();
-                    es.light_editor.clear_dirty();
-                }
-
-                // Recompute AABBs from current transforms each frame.
                 if let Some(ref mut scene) = es.v2_scene {
-                    for obj in &mut scene.objects {
-                        obj.aabb = placement::compute_object_local_aabb(obj);
-                    }
+                    engine.process_revoxelize(scene, obj_id);
                 }
-
-                // Extract wireframe data while we hold the lock.
-                wf_selected = es.selected_entity;
-                wf_gizmo_mode = es.gizmo.mode;
-                wf_hovered_axis = if es.gizmo.dragging {
-                    es.gizmo.active_axis
-                } else {
-                    es.gizmo.hovered_axis
-                };
-                wf_cam_pos = es.editor_camera.position;
-                wf_show_grid = es.show_grid;
-                wf_mode = es.mode;
-                wf_brush_radius = match es.mode {
-                    editor_state::EditorMode::Sculpt => es.sculpt.current_settings.radius,
-                    editor_state::EditorMode::Paint => es.paint.current_settings.radius,
-                    _ => 1.0,
-                };
-
-                // Reset per-frame input deltas.
-                es.reset_frame_deltas();
+                es.sync_v2_scene();
             }
         }
-
-        // d. Process pending re-voxelize request (must happen before scene clone).
-        {
-            let revox_id = editor_state.lock().ok()
-                .and_then(|mut es| es.pending_revoxelize.take());
-            if let Some(obj_id) = revox_id {
-                if let Ok(mut es) = editor_state.lock() {
-                    if let Some(ref mut scene) = es.v2_scene {
-                        engine.process_revoxelize(scene, obj_id);
-                    }
-                    es.sync_v2_scene();
-                }
-            }
-        }
-
-        // e. Clone v2_scene for render — character animation mutates bone
-        //    transforms on the clone, discarded after render.
-        let mut render_scene = editor_state.lock()
-            .ok()
-            .and_then(|es| es.v2_scene.clone())
-            .unwrap_or_else(|| rkf_core::Scene::new("empty"));
 
         // f. Advance character animation on the render clone.
-        engine.advance_character(&mut render_scene);
+        engine.advance_character(&mut snap.scene);
 
         // g. Render frame to offscreen texture.
-        engine.render_frame_offscreen(&render_scene);
+        engine.render_frame_offscreen(&snap.scene);
 
         // h. Build and draw wireframe overlays (selection, gizmos, grid).
         {
             let mut wf_verts: Vec<wireframe::LineVertex> = Vec::new();
+            let cam_pos = snap.camera.position;
 
             // Light gizmo for selected light.
-            if let Some(editor_state::SelectedEntity::Light(lid)) = wf_selected {
+            if let Some(editor_state::SelectedEntity::Light(lid)) = snap.selected_entity {
                 if let Ok(es) = editor_state.lock() {
                     if let Some(light) = es.light_editor.get_light(lid) {
                         let lc = [1.0, 0.9, 0.5, 1.0];
@@ -374,11 +306,11 @@ fn engine_thread(data: EngineThreadData) {
             }
 
             // Selection AABB + transform gizmo for selected objects.
-            if let Some(editor_state::SelectedEntity::Object(eid)) = wf_selected {
+            if let Some(editor_state::SelectedEntity::Object(eid)) = snap.selected_entity {
                 let color = [0.3, 0.7, 1.0, 1.0]; // Light blue
                 let mut gizmo_center: Option<glam::Vec3> = None;
 
-                for obj in &render_scene.objects {
+                for obj in &snap.scene.objects {
                     let obj_id = obj.id as u64;
                     let root_world = glam::Mat4::from_scale_rotation_translation(
                         obj.scale,
@@ -417,22 +349,22 @@ fn engine_thread(data: EngineThreadData) {
 
                 // Transform gizmo at the center of the selected object.
                 if let Some(gc) = gizmo_center {
-                    let cam_dist = (gc - wf_cam_pos).length();
+                    let cam_dist = (gc - cam_pos).length();
                     let gizmo_size = cam_dist * 0.12;
-                    match wf_gizmo_mode {
+                    match snap.gizmo_mode {
                         gizmo::GizmoMode::Translate => {
                             wf_verts.extend(wireframe::translate_gizmo_wireframe(
-                                gc, gizmo_size, wf_hovered_axis, wf_cam_pos,
+                                gc, gizmo_size, snap.gizmo_axis, cam_pos,
                             ));
                         }
                         gizmo::GizmoMode::Rotate => {
                             wf_verts.extend(wireframe::rotate_gizmo_wireframe(
-                                gc, gizmo_size, wf_hovered_axis, wf_cam_pos,
+                                gc, gizmo_size, snap.gizmo_axis, cam_pos,
                             ));
                         }
                         gizmo::GizmoMode::Scale => {
                             wf_verts.extend(wireframe::scale_gizmo_wireframe(
-                                gc, gizmo_size, wf_hovered_axis, wf_cam_pos,
+                                gc, gizmo_size, snap.gizmo_axis, cam_pos,
                             ));
                         }
                     }
@@ -440,9 +372,9 @@ fn engine_thread(data: EngineThreadData) {
             }
 
             // Ground grid overlay.
-            if wf_show_grid {
+            if snap.show_grid {
                 wf_verts.extend(wireframe::ground_grid_wireframe(
-                    wf_cam_pos,
+                    cam_pos,
                     40.0,
                     1.0,
                     [0.3, 0.3, 0.3, 0.4],
@@ -450,17 +382,17 @@ fn engine_thread(data: EngineThreadData) {
             }
 
             // Brush preview sphere in Sculpt/Paint modes.
-            if matches!(wf_mode, editor_state::EditorMode::Sculpt | editor_state::EditorMode::Paint) {
+            if matches!(snap.editor_mode, editor_state::EditorMode::Sculpt | editor_state::EditorMode::Paint) {
                 let brush_pos = shared_state.lock().ok()
                     .and_then(|s| s.brush_preview_pos);
                 if let Some(pos) = brush_pos {
-                    let brush_color = match wf_mode {
+                    let brush_color = match snap.editor_mode {
                         editor_state::EditorMode::Sculpt => [0.0, 1.0, 1.0, 0.8],
                         editor_state::EditorMode::Paint  => [1.0, 0.8, 0.0, 0.8],
                         _ => [1.0, 1.0, 1.0, 0.8],
                     };
                     wf_verts.extend(wireframe::sphere_wireframe(
-                        pos, wf_brush_radius, brush_color,
+                        pos, snap.brush_radius, brush_color,
                     ));
                 }
             }
@@ -471,23 +403,15 @@ fn engine_thread(data: EngineThreadData) {
         // i. Tell the compositor that new content is ready so it repaints.
         gpu_registrar.notify_frame_ready();
 
-        // j. Update shared_state for MCP observation.
-        //    Read camera snapshot from editor_state first, then write to shared_state.
-        //    Never hold both locks simultaneously.
-        let cam_snapshot = editor_state.lock().ok().map(|es| {
-            (es.editor_camera.position, es.editor_camera.fly_yaw,
-             es.editor_camera.fly_pitch, es.editor_camera.fov_y.to_degrees())
-        });
-        if let Some((pos, yaw, pitch, fov)) = cam_snapshot {
-            if let Ok(mut ss) = shared_state.lock() {
-                ss.camera_position = pos;
-                ss.camera_yaw = yaw;
-                ss.camera_pitch = pitch;
-                ss.camera_fov = fov;
-                ss.frame_time_ms = dt as f64 * 1000.0;
-                ss.frame_width = current_vp.0;
-                ss.frame_height = current_vp.1;
-            }
+        // j. Update shared_state for MCP observation (uses snapshot, no editor_state lock).
+        if let Ok(mut ss) = shared_state.lock() {
+            ss.camera_position = snap.camera.position;
+            ss.camera_yaw = snap.camera.fly_yaw;
+            ss.camera_pitch = snap.camera.fly_pitch;
+            ss.camera_fov = snap.camera.fov_y.to_degrees();
+            ss.frame_time_ms = dt as f64 * 1000.0;
+            ss.frame_width = current_vp.0;
+            ss.frame_height = current_vp.1;
         }
 
         // k. Screenshot readback and GPU pick are handled inside render_frame_offscreen,
@@ -575,6 +499,13 @@ fn engine_thread(data: EngineThreadData) {
                 }
             });
         }
+
+        // o. Frame pacing — sleep if we finished early so the engine thread
+        //    doesn't spin-lock the editor_state mutex and starve the UI thread.
+        let elapsed = frame_start.elapsed();
+        if elapsed < target_frame_time {
+            std::thread::sleep(target_frame_time - elapsed);
+        }
     }
 }
 
@@ -659,6 +590,9 @@ fn main() -> anyhow::Result<()> {
     rinch::shell::run_with_window_props_and_menu(
         move |_scope| {
             // Register contexts so components can call use_context().
+            // Centralized slider signals — one batch sync Effect replaces 33 lock closures.
+            // Must be created before editor_state_ctx is moved into create_context.
+            let slider_signals = SliderSignals::new(&editor_state_ctx.lock().unwrap());
             create_context(editor_state_ctx);
             create_context(shared_state_ctx);
             // Surface handle context — editor_ui uses it to wire SurfaceEvent → editor input.
@@ -666,6 +600,7 @@ fn main() -> anyhow::Result<()> {
             // Per-property UI signals — replaces the single UiRevision counter.
             let ui_signals = UiSignals::new();
             create_context(ui_signals);
+            create_context(slider_signals);
             // Legacy: UiRevision and FpsSignal kept during migration.
             let ui_revision = UiRevision::new();
             create_context(ui_revision);

@@ -22,6 +22,39 @@ use crate::undo::UndoStack;
 use glam::Vec3;
 use rinch::prelude::Signal;
 
+use crate::gizmo::GizmoAxis;
+
+/// Per-frame snapshot of everything the engine thread needs from EditorState.
+///
+/// Produced by [`EditorState::take_engine_snapshot`] under a brief lock, then
+/// consumed after the lock is released. Adding new engine-visible state means
+/// adding a field here and a line in `take_engine_snapshot` — nothing else.
+pub struct EngineSnapshot {
+    // Camera (Copy — zero cost).
+    pub camera: EditorCamera,
+
+    // Pending commands consumed from EditorState.
+    pub debug_mode: Option<u32>,
+    pub revoxelize: Option<u32>,
+
+    // Environment (cloned only when dirty, otherwise None).
+    pub environment: Option<EnvironmentState>,
+
+    // Lights (converted only when dirty, otherwise None).
+    pub lights: Option<Vec<rkf_render::Light>>,
+
+    // Scene clone for rendering (character animation mutates the clone).
+    pub scene: rkf_core::scene::Scene,
+
+    // Wireframe overlay data (all Copy).
+    pub selected_entity: Option<SelectedEntity>,
+    pub gizmo_mode: GizmoMode,
+    pub gizmo_axis: GizmoAxis,
+    pub show_grid: bool,
+    pub editor_mode: EditorMode,
+    pub brush_radius: f32,
+}
+
 /// What is currently selected in the scene tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelectedEntity {
@@ -107,6 +140,207 @@ impl UiSignals {
     /// Increment scene_revision to trigger tree/count rebuilds.
     pub fn bump_scene(&self) {
         self.scene_revision.update(|r| *r += 1);
+    }
+}
+
+/// Centralized reactive signals for all persistent slider properties.
+///
+/// Each signal holds the actual slider value (f64). The UI creates sliders
+/// bound to these signals via `build_synced_slider`, and a single batch
+/// `Effect` in `RightPanel` syncs all values to `EditorState` in one lock
+/// per frame — eliminating per-slider lock closures.
+///
+/// **Adding a new slider property:**
+/// 1. Add `pub field_name: Signal<f64>` here
+/// 2. Init from `EditorState` in `new()`
+/// 3. Add sync line in `sync_to_state()`
+/// 4. Call `build_synced_slider()` in the UI
+#[derive(Clone, Copy)]
+pub struct SliderSignals {
+    // Camera
+    pub fov: Signal<f64>,
+    pub fly_speed: Signal<f64>,
+    pub near: Signal<f64>,
+    pub far: Signal<f64>,
+    // Atmosphere
+    pub sun_azimuth: Signal<f64>,
+    pub sun_elevation: Signal<f64>,
+    pub sun_intensity: Signal<f64>,
+    pub rayleigh_scale: Signal<f64>,
+    pub mie_scale: Signal<f64>,
+    // Fog
+    pub fog_density: Signal<f64>,
+    pub fog_height_falloff: Signal<f64>,
+    pub dust_density: Signal<f64>,
+    pub dust_asymmetry: Signal<f64>,
+    // Clouds
+    pub cloud_coverage: Signal<f64>,
+    pub cloud_density: Signal<f64>,
+    pub cloud_altitude: Signal<f64>,
+    pub cloud_thickness: Signal<f64>,
+    pub cloud_wind_speed: Signal<f64>,
+    // Post-processing
+    pub bloom_intensity: Signal<f64>,
+    pub bloom_threshold: Signal<f64>,
+    pub exposure: Signal<f64>,
+    pub sharpen: Signal<f64>,
+    pub dof_focus_dist: Signal<f64>,
+    pub dof_focus_range: Signal<f64>,
+    pub dof_max_coc: Signal<f64>,
+    pub motion_blur: Signal<f64>,
+    pub god_rays: Signal<f64>,
+    pub vignette: Signal<f64>,
+    pub grain: Signal<f64>,
+    pub chromatic_ab: Signal<f64>,
+    // Brush
+    pub brush_radius: Signal<f64>,
+    pub brush_strength: Signal<f64>,
+    pub brush_falloff: Signal<f64>,
+}
+
+impl SliderSignals {
+    /// Create slider signals initialized from the current `EditorState`.
+    /// Must be called on the main thread (signals use thread-local reactive state).
+    pub fn new(es: &EditorState) -> Self {
+        let d = &es.environment.atmosphere.sun_direction;
+        let pp = &es.environment.post_process;
+        Self {
+            fov: Signal::new(es.editor_camera.fov_y.to_degrees() as f64),
+            fly_speed: Signal::new(es.editor_camera.fly_speed as f64),
+            near: Signal::new(es.editor_camera.near as f64),
+            far: Signal::new(es.editor_camera.far as f64),
+            sun_azimuth: Signal::new(d.x.atan2(d.z).to_degrees().rem_euclid(360.0) as f64),
+            sun_elevation: Signal::new(d.y.asin().to_degrees() as f64),
+            sun_intensity: Signal::new(es.environment.atmosphere.sun_intensity as f64),
+            rayleigh_scale: Signal::new(es.environment.atmosphere.rayleigh_scale as f64),
+            mie_scale: Signal::new(es.environment.atmosphere.mie_scale as f64),
+            fog_density: Signal::new(es.environment.fog.density as f64),
+            fog_height_falloff: Signal::new(es.environment.fog.height_falloff as f64),
+            dust_density: Signal::new(es.environment.fog.ambient_dust_density as f64),
+            dust_asymmetry: Signal::new(es.environment.fog.dust_asymmetry as f64),
+            cloud_coverage: Signal::new(es.environment.clouds.coverage as f64),
+            cloud_density: Signal::new(es.environment.clouds.density as f64),
+            cloud_altitude: Signal::new(es.environment.clouds.altitude as f64),
+            cloud_thickness: Signal::new(es.environment.clouds.thickness as f64),
+            cloud_wind_speed: Signal::new(es.environment.clouds.wind_speed as f64),
+            bloom_intensity: Signal::new(pp.bloom_intensity as f64),
+            bloom_threshold: Signal::new(pp.bloom_threshold as f64),
+            exposure: Signal::new(pp.exposure as f64),
+            sharpen: Signal::new(pp.sharpen_strength as f64),
+            dof_focus_dist: Signal::new(pp.dof_focus_distance as f64),
+            dof_focus_range: Signal::new(pp.dof_focus_range as f64),
+            dof_max_coc: Signal::new(pp.dof_max_coc as f64),
+            motion_blur: Signal::new(pp.motion_blur_intensity as f64),
+            god_rays: Signal::new(pp.god_rays_intensity as f64),
+            vignette: Signal::new(pp.vignette_intensity as f64),
+            grain: Signal::new(pp.grain_intensity as f64),
+            chromatic_ab: Signal::new(pp.chromatic_aberration as f64),
+            brush_radius: Signal::new(es.sculpt.current_settings.radius as f64),
+            brush_strength: Signal::new(es.sculpt.current_settings.strength as f64),
+            brush_falloff: Signal::new(es.sculpt.current_settings.falloff as f64),
+        }
+    }
+
+    /// Subscribe the current reactive scope to every signal.
+    /// Call inside an `Effect` to re-run whenever any slider changes.
+    pub fn track_all(&self) {
+        let _ = self.fov.get();
+        let _ = self.fly_speed.get();
+        let _ = self.near.get();
+        let _ = self.far.get();
+        let _ = self.sun_azimuth.get();
+        let _ = self.sun_elevation.get();
+        let _ = self.sun_intensity.get();
+        let _ = self.rayleigh_scale.get();
+        let _ = self.mie_scale.get();
+        let _ = self.fog_density.get();
+        let _ = self.fog_height_falloff.get();
+        let _ = self.dust_density.get();
+        let _ = self.dust_asymmetry.get();
+        let _ = self.cloud_coverage.get();
+        let _ = self.cloud_density.get();
+        let _ = self.cloud_altitude.get();
+        let _ = self.cloud_thickness.get();
+        let _ = self.cloud_wind_speed.get();
+        let _ = self.bloom_intensity.get();
+        let _ = self.bloom_threshold.get();
+        let _ = self.exposure.get();
+        let _ = self.sharpen.get();
+        let _ = self.dof_focus_dist.get();
+        let _ = self.dof_focus_range.get();
+        let _ = self.dof_max_coc.get();
+        let _ = self.motion_blur.get();
+        let _ = self.god_rays.get();
+        let _ = self.vignette.get();
+        let _ = self.grain.get();
+        let _ = self.chromatic_ab.get();
+        let _ = self.brush_radius.get();
+        let _ = self.brush_strength.get();
+        let _ = self.brush_falloff.get();
+    }
+
+    /// Write all signal values back to `EditorState` in one shot.
+    ///
+    /// Called from the batch sync `Effect` after `track_all()`. Toggle
+    /// signals (atmosphere enabled, fog enabled, etc.) are synced by the
+    /// caller from `UiSignals`.
+    pub fn sync_to_state(&self, es: &mut EditorState) {
+        // Camera
+        es.editor_camera.fov_y = (self.fov.get() as f32).to_radians();
+        es.editor_camera.fly_speed = self.fly_speed.get() as f32;
+        es.editor_camera.near = self.near.get() as f32;
+        es.editor_camera.far = self.far.get() as f32;
+
+        // Atmosphere — compute sun_direction from azimuth + elevation
+        let az = (self.sun_azimuth.get() as f32).to_radians();
+        let el = (self.sun_elevation.get() as f32).to_radians();
+        let cos_el = el.cos();
+        es.environment.atmosphere.sun_direction =
+            Vec3::new(az.sin() * cos_el, el.sin(), az.cos() * cos_el).normalize();
+        es.environment.atmosphere.sun_intensity = self.sun_intensity.get() as f32;
+        es.environment.atmosphere.rayleigh_scale = self.rayleigh_scale.get() as f32;
+        es.environment.atmosphere.mie_scale = self.mie_scale.get() as f32;
+
+        // Fog
+        es.environment.fog.density = self.fog_density.get() as f32;
+        es.environment.fog.height_falloff = self.fog_height_falloff.get() as f32;
+        es.environment.fog.ambient_dust_density = self.dust_density.get() as f32;
+        es.environment.fog.dust_asymmetry = self.dust_asymmetry.get() as f32;
+
+        // Clouds
+        es.environment.clouds.coverage = self.cloud_coverage.get() as f32;
+        es.environment.clouds.density = self.cloud_density.get() as f32;
+        es.environment.clouds.altitude = self.cloud_altitude.get() as f32;
+        es.environment.clouds.thickness = self.cloud_thickness.get() as f32;
+        es.environment.clouds.wind_speed = self.cloud_wind_speed.get() as f32;
+
+        // Post-processing
+        es.environment.post_process.bloom_intensity = self.bloom_intensity.get() as f32;
+        es.environment.post_process.bloom_threshold = self.bloom_threshold.get() as f32;
+        es.environment.post_process.exposure = self.exposure.get() as f32;
+        es.environment.post_process.sharpen_strength = self.sharpen.get() as f32;
+        es.environment.post_process.dof_focus_distance = self.dof_focus_dist.get() as f32;
+        es.environment.post_process.dof_focus_range = self.dof_focus_range.get() as f32;
+        es.environment.post_process.dof_max_coc = self.dof_max_coc.get() as f32;
+        es.environment.post_process.motion_blur_intensity = self.motion_blur.get() as f32;
+        es.environment.post_process.god_rays_intensity = self.god_rays.get() as f32;
+        es.environment.post_process.vignette_intensity = self.vignette.get() as f32;
+        es.environment.post_process.grain_intensity = self.grain.get() as f32;
+        es.environment.post_process.chromatic_aberration = self.chromatic_ab.get() as f32;
+
+        // Brush — sync to both sculpt and paint settings
+        let radius = self.brush_radius.get() as f32;
+        let strength = self.brush_strength.get() as f32;
+        let falloff = self.brush_falloff.get() as f32;
+        es.sculpt.set_radius(radius);
+        es.sculpt.set_strength(strength);
+        es.sculpt.current_settings.falloff = falloff;
+        es.paint.current_settings.radius = radius;
+        es.paint.current_settings.strength = strength;
+        es.paint.current_settings.falloff = falloff;
+
+        // Mark environment dirty so the engine picks up changes.
+        es.environment.mark_dirty();
     }
 }
 
@@ -413,6 +647,104 @@ impl EditorState {
         self.editor_input.mouse_delta = glam::Vec2::ZERO;
         self.editor_input.scroll_delta = 0.0;
         self.editor_input.keys_just_pressed.clear();
+    }
+
+    /// Snapshot everything the engine thread needs, consuming pending commands.
+    ///
+    /// Call this under the `editor_state` lock, then release the lock before
+    /// applying the snapshot to the engine. This keeps lock hold time minimal
+    /// (no GPU work while locked) and avoids per-property boilerplate — adding
+    /// new engine-visible state means adding a field to [`EngineSnapshot`] and
+    /// a line here.
+    pub fn take_engine_snapshot(&mut self) -> EngineSnapshot {
+        // Consume pending commands.
+        let debug_mode = self.pending_debug_mode.take();
+        if let Some(mode) = debug_mode {
+            self.debug_mode = mode;
+        }
+        let revoxelize = self.pending_revoxelize.take();
+
+        // Environment: clone only when dirty, then clear the flag.
+        let environment = if self.environment.is_dirty() {
+            let env = self.environment.clone();
+            self.environment.clear_dirty();
+            Some(env)
+        } else {
+            None
+        };
+
+        // Lights: convert only when dirty, then clear the flag.
+        let lights = if self.light_editor.is_dirty() {
+            let converted = self.light_editor.all_lights().iter().map(|el| {
+                use crate::light_editor::EditorLightType;
+                rkf_render::Light {
+                    light_type: match el.light_type {
+                        EditorLightType::Point => 1,
+                        EditorLightType::Spot => 2,
+                    },
+                    pos_x: el.position.x,
+                    pos_y: el.position.y,
+                    pos_z: el.position.z,
+                    dir_x: el.direction.x,
+                    dir_y: el.direction.y,
+                    dir_z: el.direction.z,
+                    color_r: el.color.x,
+                    color_g: el.color.y,
+                    color_b: el.color.z,
+                    intensity: el.intensity,
+                    range: el.range,
+                    inner_angle: el.spot_inner_angle,
+                    outer_angle: el.spot_outer_angle,
+                    cookie_index: -1,
+                    shadow_caster: el.cast_shadows as u32,
+                }
+            }).collect();
+            self.light_editor.clear_dirty();
+            Some(converted)
+        } else {
+            None
+        };
+
+        // Recompute AABBs before cloning the scene.
+        if let Some(ref mut scene) = self.v2_scene {
+            for obj in &mut scene.objects {
+                obj.aabb = crate::placement::compute_object_local_aabb(obj);
+            }
+        }
+
+        // Scene clone (character animation mutates the clone, discarded after render).
+        let scene = self.v2_scene.clone()
+            .unwrap_or_else(|| rkf_core::scene::Scene::new("empty"));
+
+        // Wireframe overlay data (all Copy — free).
+        let gizmo_axis = if self.gizmo.dragging {
+            self.gizmo.active_axis
+        } else {
+            self.gizmo.hovered_axis
+        };
+        let brush_radius = match self.mode {
+            EditorMode::Sculpt => self.sculpt.current_settings.radius,
+            EditorMode::Paint => self.paint.current_settings.radius,
+            _ => 1.0,
+        };
+
+        // Reset per-frame deltas last.
+        self.reset_frame_deltas();
+
+        EngineSnapshot {
+            camera: self.editor_camera,
+            debug_mode,
+            revoxelize,
+            environment,
+            lights,
+            scene,
+            selected_entity: self.selected_entity,
+            gizmo_mode: self.gizmo.mode,
+            gizmo_axis,
+            show_grid: self.show_grid,
+            editor_mode: self.mode,
+            brush_radius,
+        }
     }
 
     /// Mirror the v2 scene into the editor scene tree.

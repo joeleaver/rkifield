@@ -503,8 +503,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Evaluate direct lighting (Lambertian diffuse — no specular for GI bounce).
     // Light positions are camera-relative in the light buffer, but injection
     // works in world space. For directional lights this doesn't matter (only
-    // direction). For point/spot lights, this is a known approximation that
-    // works well when the radiance volume is centered on the camera.
+    // direction). For point/spot lights, convert camera-relative → world-space
+    // by adding vol.center.xyz (which equals the camera world position).
     for (var i = 0u; i < num_lights_val; i++) {
         let light = lights[i];
         let light_color = vec3<f32>(light.color_r, light.color_g, light.color_b);
@@ -516,16 +516,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             // Directional
             light_dir = normalize(vec3<f32>(light.dir_x, light.dir_y, light.dir_z));
         } else if light.light_type == 1u {
-            // Point — light pos is camera-relative, pos is world-space.
-            // Approximate: treat light pos as world-space (works when camera ~ volume center).
-            let light_pos = vec3<f32>(light.pos_x, light.pos_y, light.pos_z);
+            // Point — light pos is camera-relative; convert to world-space.
+            let light_pos = vec3<f32>(light.pos_x, light.pos_y, light.pos_z) + vol.center.xyz;
             let to_light = light_pos - pos;
             let dist = length(to_light);
             light_dir = to_light / max(dist, 0.0001);
             atten = distance_attenuation(dist, light.range);
         } else {
-            // Spot
-            let light_pos = vec3<f32>(light.pos_x, light.pos_y, light.pos_z);
+            // Spot — light pos is camera-relative; convert to world-space.
+            let light_pos = vec3<f32>(light.pos_x, light.pos_y, light.pos_z) + vol.center.xyz;
             let spot_dir = normalize(vec3<f32>(light.dir_x, light.dir_y, light.dir_z));
             let to_light = light_pos - pos;
             let dist = length(to_light);

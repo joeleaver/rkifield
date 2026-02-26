@@ -377,6 +377,10 @@ fn sample_coarse_field(cam_rel_pos: vec3<f32>) -> f32 {
 
 /// Sample the SDF at a world-space position using the v2 coarse field + BVH.
 /// Returns the minimum signed distance to any object surface.
+///
+/// Internally converts from world-space to camera-relative for the coarse field
+/// and object evaluation (inverse_world matrices are camera-relative), while
+/// BVH traversal uses world-space positions against world-space AABBs.
 fn sample_sdf(pos: vec3<f32>) -> f32 {
     let cam_pos = shade_uniforms.camera_pos.xyz;
     let cam_rel = pos - cam_pos;
@@ -683,6 +687,8 @@ fn sample_radiance(cam_rel_pos: vec3<f32>, mip_f: f32) -> vec4<f32> {
 }
 
 /// Trace a cone through the radiance volume using front-to-back compositing.
+/// `origin` is in world-space; positions are converted to camera-relative
+/// before sampling the radiance volume (which is centered at the camera).
 fn trace_cone(origin: vec3<f32>, dir: vec3<f32>, tan_half_angle: f32, max_dist: f32, jitter: f32) -> vec4<f32> {
     var color = vec3<f32>(0.0);
     var opacity = 0.0;
@@ -698,7 +704,9 @@ fn trace_cone(origin: vec3<f32>, dir: vec3<f32>, tan_half_angle: f32, max_dist: 
         // Mip selection: *0.5 accounts for 4× (not 2×) clipmap ratio between levels.
         let mip_f = log2(max(cone_radius / radiance_vol.voxel_sizes.x, 1.0)) * 0.5;
 
-        let s = sample_radiance(pos, mip_f);
+        // Convert world-space position to camera-relative for radiance volume sampling.
+        let cam_rel_pos = pos - shade_uniforms.camera_pos.xyz;
+        let s = sample_radiance(cam_rel_pos, mip_f);
         let step_opacity = s.a;
 
         // Front-to-back compositing.
@@ -941,7 +949,8 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
                          * radiance * shadow;
 
         } else if light.light_type == LIGHT_TYPE_POINT {
-            let light_pos = vec3<f32>(light.pos_x, light.pos_y, light.pos_z);
+            // Light positions are camera-relative in the buffer; convert to world-space.
+            let light_pos = vec3<f32>(light.pos_x, light.pos_y, light.pos_z) + shade_uniforms.camera_pos.xyz;
             let to_light = light_pos - world_pos;
             let dist = length(to_light);
             let light_dir = to_light / max(dist, 0.0001);
@@ -979,7 +988,8 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
             }
 
         } else if light.light_type == LIGHT_TYPE_SPOT {
-            let light_pos = vec3<f32>(light.pos_x, light.pos_y, light.pos_z);
+            // Light positions are camera-relative in the buffer; convert to world-space.
+            let light_pos = vec3<f32>(light.pos_x, light.pos_y, light.pos_z) + shade_uniforms.camera_pos.xyz;
             let spot_dir = normalize(vec3<f32>(light.dir_x, light.dir_y, light.dir_z));
             let to_light = light_pos - world_pos;
             let dist = length(to_light);

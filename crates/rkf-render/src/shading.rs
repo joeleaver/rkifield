@@ -37,6 +37,9 @@ pub struct ShadeUniforms {
     /// Shadow budget: max shadow-casting lights per pixel (0 = unlimited).
     pub shadow_budget_k: u32,
     /// Camera world-space position (xyz) + unused (w).
+    /// Must match the camera position used by `flatten_object()` and the ray marcher.
+    /// G-buffer positions are world-space, so this is needed for world→camera-relative
+    /// conversion in shadow/AO/GI queries and for correct view direction computation.
     pub camera_pos: [f32; 4],
     /// Sun direction toward the sun (xyz) + sun intensity (w).
     pub sun_dir: [f32; 4],
