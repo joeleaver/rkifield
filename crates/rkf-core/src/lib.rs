@@ -42,6 +42,8 @@ pub mod terrain;
 pub mod scene_node;
 /// SDF generation utilities for testing and offline voxelization.
 pub mod sdf;
+/// Transform baking — compute world transforms from parent-local hierarchy.
+pub mod transform_bake;
 /// v2 transform flattening — depth-first traversal producing GPU-ready flat nodes.
 pub mod transform_flatten;
 /// Per-object voxelization — SDF to brick map conversion.

@@ -67,6 +67,7 @@ impl GBuffer {
         };
 
         let usage = wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING;
+        let usage_copy_src = usage | wgpu::TextureUsages::COPY_SRC;
 
         // Target 0: position + hit_distance
         let position_texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -76,7 +77,7 @@ impl GBuffer {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: GBUFFER_POSITION_FORMAT,
-            usage,
+            usage: usage_copy_src,
             view_formats: &[],
         });
         let position_view = position_texture.create_view(&Default::default());
@@ -94,7 +95,7 @@ impl GBuffer {
         });
         let normal_view = normal_texture.create_view(&Default::default());
 
-        // Target 2: material_id + secondary_id_and_flags
+        // Target 2: material_id + secondary_id_and_flags + object_id (bits 24-31)
         let material_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("gbuffer material"),
             size,
@@ -102,7 +103,7 @@ impl GBuffer {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: GBUFFER_MATERIAL_FORMAT,
-            usage,
+            usage: usage_copy_src,
             view_formats: &[],
         });
         let material_view = material_texture.create_view(&Default::default());

@@ -193,15 +193,12 @@ impl Skeleton {
         for (i, bone) in self.bones.iter().enumerate() {
             let t = if let Some(channel) = clip.channel_for_bone(i as u32) {
                 let (pos, rot, scl) = channel.sample(time);
-                // SDF engine requires uniform scale — take average of x/y/z.
-                let uniform_scale = (scl.x + scl.y + scl.z) / 3.0;
-                Transform::new(pos, rot, uniform_scale)
+                Transform::new(pos, rot, scl)
             } else {
                 // Decompose bind-pose matrix to Transform.
                 let (scale, rotation, translation) =
                     bone.bind_transform.to_scale_rotation_translation();
-                let uniform_scale = (scale.x + scale.y + scale.z) / 3.0;
-                Transform::new(translation, rotation, uniform_scale)
+                Transform::new(translation, rotation, scale)
             };
             transforms.push(t);
         }
@@ -494,11 +491,11 @@ mod tests {
         // Bone 0: from clip keyframe.
         assert!((locals[0].position - Vec3::new(1.0, 2.0, 3.0)).length() < 1e-5);
         assert_eq!(locals[0].rotation, Quat::IDENTITY);
-        assert!((locals[0].scale - 2.0).abs() < 1e-5);
+        assert!((locals[0].scale - Vec3::splat(2.0)).length() < 1e-5);
 
         // Bone 1: from bind pose (translation 0,1,0, identity rotation, scale 1).
         assert!((locals[1].position - Vec3::new(0.0, 1.0, 0.0)).length() < 1e-5);
-        assert!((locals[1].scale - 1.0).abs() < 1e-5);
+        assert!((locals[1].scale - Vec3::ONE).length() < 1e-5);
     }
 
     #[test]
@@ -517,7 +514,7 @@ mod tests {
 
         // Root: identity bind → position=0, scale=1.
         assert!((locals[0].position).length() < 1e-5);
-        assert!((locals[0].scale - 1.0).abs() < 1e-5);
+        assert!((locals[0].scale - Vec3::ONE).length() < 1e-5);
 
         // Child: bind_transform = translation(3,0,0) → position=(3,0,0).
         assert!((locals[1].position - Vec3::new(3.0, 0.0, 0.0)).length() < 1e-5);

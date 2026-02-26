@@ -10,15 +10,15 @@ use serde::{Deserialize, Serialize};
 /// Local transform relative to parent (or world if no parent).
 ///
 /// Position uses [`WorldPosition`] for float-precision safety.
-/// Scale is uniform-only (non-uniform scale breaks SDF distances).
+/// Scale is per-axis (non-uniform scale uses conservative `min(sx,sy,sz)` for SDF distances).
 #[derive(Debug, Clone)]
 pub struct Transform {
     /// World-space position (chunk + local).
     pub position: WorldPosition,
     /// Rotation quaternion.
     pub rotation: Quat,
-    /// Uniform scale factor (must be > 0).
-    pub scale: f32,
+    /// Per-axis scale factor (all components must be > 0).
+    pub scale: Vec3,
 }
 
 impl Default for Transform {
@@ -26,7 +26,7 @@ impl Default for Transform {
         Self {
             position: WorldPosition::default(),
             rotation: Quat::IDENTITY,
-            scale: 1.0,
+            scale: Vec3::ONE,
         }
     }
 }
@@ -141,7 +141,7 @@ mod tests {
         let t = Transform::default();
         assert_eq!(t.position, WorldPosition::default());
         assert_eq!(t.rotation, Quat::IDENTITY);
-        assert_eq!(t.scale, 1.0);
+        assert_eq!(t.scale, Vec3::ONE);
     }
 
     #[test]

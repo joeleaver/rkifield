@@ -204,6 +204,11 @@ impl GpuSceneV2 {
         queue.write_buffer(&self.scene_buffer, 0, bytemuck::bytes_of(uniforms));
     }
 
+    /// Get a reference to the brick pool GPU buffer (for direct writes).
+    pub fn brick_pool_buffer(&self) -> &wgpu::Buffer {
+        &self.brick_pool_buffer
+    }
+
     /// Replace the brick pool buffer reference and rebuild the bind group.
     pub fn set_brick_pool(&mut self, device: &wgpu::Device, buffer: wgpu::Buffer) {
         self.brick_pool_buffer = buffer;

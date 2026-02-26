@@ -14,12 +14,40 @@ members = [
     "crates/rkf-convert",
     "crates/rkf-game",
     "crates/rkf-testbed",
+    # Vendored rinch crates
+    "vendor/rinch/crates/rinch",
+    "vendor/rinch/crates/rinch-core",
+    "vendor/rinch/crates/rinch-macros",
+    "vendor/rinch/crates/rinch-platform",
+    "vendor/rinch/crates/rinch-renderer",
+    "vendor/rinch/crates/rinch-theme",
+    "vendor/rinch/crates/rinch-components",
+    "vendor/rinch/crates/rinch-tabler-icons",
+    "vendor/rinch/crates/rinch-dom",
+    "vendor/rinch/crates/rinch-editor",
+    "vendor/rinch/crates/rinch-editor-macros",
+    "vendor/rinch/crates/rinch-editor-components",
+    "vendor/rinch/crates/rinch-debug",
+    "vendor/rinch/crates/rinch-editable",
+    "vendor/rinch/crates/rinch-clipboard",
+    "vendor/rinch/crates/rinch-video",
+    "vendor/rinch/crates/rinch-web",
+    "vendor/rinch/crates/stylo-taffy",
+]
+exclude = [
+    "vendor/rinch/crates/rinch-mcp-server",
+    "vendor/rinch/crates/rinch-test",
+    "vendor/rinch/crates/rinch-test-cli",
+    "vendor/rinch/crates/rinch-visual-test",
+    "vendor/rinch/examples",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/user/rinch"
 
 [workspace.dependencies]
 # External dependencies
@@ -47,9 +75,52 @@ rayon = "1"
 tobj = "4"
 base64 = "0.22"
 pollster = "0.4"
-rinch = { git = "https://github.com/joeleaver/rinch.git", features = ["desktop", "components", "theme", "debug"] }
-rinch-platform = { git = "https://github.com/joeleaver/rinch.git" }
-rinch-tabler-icons = { git = "https://github.com/joeleaver/rinch.git" }
+
+# Rinch workspace dependencies (vendored)
+rinch = { path = "vendor/rinch/crates/rinch", default-features = false }
+rinch-core = { path = "vendor/rinch/crates/rinch-core" }
+rinch-macros = { path = "vendor/rinch/crates/rinch-macros" }
+rinch-renderer = { path = "vendor/rinch/crates/rinch-renderer" }
+rinch-theme = { path = "vendor/rinch/crates/rinch-theme" }
+rinch-components = { path = "vendor/rinch/crates/rinch-components" }
+rinch-tabler-icons = { path = "vendor/rinch/crates/rinch-tabler-icons" }
+rinch-dom = { path = "vendor/rinch/crates/rinch-dom" }
+rinch-editor = { path = "vendor/rinch/crates/rinch-editor" }
+rinch-editor-macros = { path = "vendor/rinch/crates/rinch-editor-macros" }
+rinch-editor-components = { path = "vendor/rinch/crates/rinch-editor-components" }
+rinch-debug = { path = "vendor/rinch/crates/rinch-debug" }
+rinch-editable = { path = "vendor/rinch/crates/rinch-editable" }
+rinch-platform = { path = "vendor/rinch/crates/rinch-platform" }
+rinch-web = { path = "vendor/rinch/crates/rinch-web" }
+rinch-video = { path = "vendor/rinch/crates/rinch-video" }
+rinch-clipboard = { path = "vendor/rinch/crates/rinch-clipboard" }
+stylo_taffy = { path = "vendor/rinch/crates/stylo-taffy" }
+
+# Rinch external deps
+anyrender = "0.7"
+anyrender_vello = "0.7"
+vello = "0.7"
+accesskit = "0.16"
+accesskit_winit = "0.22"
+muda = "0.15"
+tray-icon = "0.19"
+ksni = { version = "0.3", default-features = false, features = ["blocking", "tokio"] }
+rfd = "0.15"
+arboard = "3"
+parley = { git = "https://github.com/linebender/parley", rev = "f6a8485c35367b581b03bd6da55c8465f24e16ef" }
+stylo = "0.11"
+stylo_traits = "0.11"
+stylo_dom = "0.11"
+stylo_atoms = "0.11"
+stylo_config = "0.11"
+servo_arc = "0.4"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+notify = "7"
+peniko = "0.6"
+keyboard-types = "0.7"
+png = "0.17"
+futures-util = "0.3"
 
 # Internal crate cross-references
 rkf-core = { path = "crates/rkf-core" }

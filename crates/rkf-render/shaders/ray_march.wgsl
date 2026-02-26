@@ -62,17 +62,19 @@ struct GpuObject {
     sdf_param_1: f32,            // 4 bytes @ offset 136
     sdf_param_2: f32,            // 4 bytes @ offset 140
     sdf_param_3: f32,            // 4 bytes @ offset 144
-    accumulated_scale: f32,      // 4 bytes @ offset 148
-    lod_level: u32,              // 4 bytes @ offset 152
-    object_id: u32,              // 4 bytes @ offset 156
-    primitive_type: u32,         // 4 bytes @ offset 160
-    // 92 bytes of padding (23 × f32)
+    accumulated_scale_x: f32,    // 4 bytes @ offset 148
+    accumulated_scale_y: f32,    // 4 bytes @ offset 152
+    accumulated_scale_z: f32,    // 4 bytes @ offset 156
+    lod_level: u32,              // 4 bytes @ offset 160
+    object_id: u32,              // 4 bytes @ offset 164
+    primitive_type: u32,         // 4 bytes @ offset 168
+    // 84 bytes of padding (21 × f32)
     _pad0: f32, _pad1: f32, _pad2: f32, _pad3: f32,
     _pad4: f32, _pad5: f32, _pad6: f32, _pad7: f32,
     _pad8: f32, _pad9: f32, _pad10: f32, _pad11: f32,
     _pad12: f32, _pad13: f32, _pad14: f32, _pad15: f32,
     _pad16: f32, _pad17: f32, _pad18: f32, _pad19: f32,
-    _pad20: f32, _pad21: f32, _pad22: f32,
+    _pad20: f32,
 }
 
 struct BvhNode {
@@ -432,9 +434,10 @@ fn evaluate_object(cam_rel_pos: vec3<f32>, obj_idx: u32) -> vec2<f32> {
         }
     }
 
-    // Scale correction: SDF distance in local space needs to be scaled back
-    // to world space by the accumulated uniform scale.
-    dist = dist * obj.accumulated_scale;
+    // Scale correction: conservative min-component scale preserves SDF validity.
+    // Never overshoots; extra march steps proportional to scale ratio.
+    let min_scale = min(obj.accumulated_scale_x, min(obj.accumulated_scale_y, obj.accumulated_scale_z));
+    dist = dist * min_scale;
 
     return vec2<f32>(dist, f32(mat_id));
 }
@@ -702,7 +705,8 @@ fn compute_normal_for_object(pos: vec3<f32>, obj_idx: u32) -> vec3<f32> {
     if obj.sdf_type == SDF_TYPE_VOXELIZED {
         // Epsilon spans ~4 voxels: wide enough to average over trilinear
         // cell boundary discontinuities for smooth normals.
-        e = obj.voxel_size * obj.accumulated_scale * 4.0;
+        let normal_min_scale = min(obj.accumulated_scale_x, min(obj.accumulated_scale_y, obj.accumulated_scale_z));
+        e = obj.voxel_size * normal_min_scale * 4.0;
     } else {
         // Small epsilon for analytical SDFs (smooth gradients everywhere).
         e = scene.hit_threshold * 10.0;
@@ -755,7 +759,7 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
         // Write G-buffer.
         textureStore(gbuf_position, coord, vec4<f32>(hit_pos, result.t));
         textureStore(gbuf_normal, coord, vec4<f32>(normal, 0.0));
-        textureStore(gbuf_material, coord, vec4<u32>(result.material_id, 0u, 0u, 0u));
+        textureStore(gbuf_material, coord, vec4<u32>(result.material_id | (result.object_id << 24u), 0u, 0u, 0u));
 
         // Motion vectors.
         let prev_clip = camera.prev_vp * vec4<f32>(hit_pos, 1.0);

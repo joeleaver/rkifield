@@ -29,14 +29,14 @@ pub fn camera_relative_position(pos: &WorldPosition, camera: &WorldPosition) -> 
 /// for camera-relative positioning).
 pub fn local_matrix(transform: &Transform) -> Mat4 {
     Mat4::from_rotation_translation(transform.rotation, Vec3::ZERO)
-        * Mat4::from_scale(Vec3::splat(transform.scale))
+        * Mat4::from_scale(transform.scale)
 }
 
 /// Build a camera-relative model matrix from Transform.
 pub fn camera_relative_matrix(transform: &Transform, camera_pos: &WorldPosition) -> Mat4 {
     let pos = camera_relative_position(&transform.position, camera_pos);
     Mat4::from_rotation_translation(transform.rotation, pos)
-        * Mat4::from_scale(Vec3::splat(transform.scale))
+        * Mat4::from_scale(transform.scale)
 }
 
 /// Update all WorldTransform components in the ECS world.
@@ -92,7 +92,7 @@ pub fn update_transforms(world: &mut World, camera_pos: &WorldPosition) {
         // space as the parent matrix.
         let local_pos = transform.position.relative_to(&WorldPosition::default());
         let local_mat = Mat4::from_rotation_translation(transform.rotation, local_pos)
-            * Mat4::from_scale(Vec3::splat(transform.scale));
+            * Mat4::from_scale(transform.scale);
 
         // TODO: If bone_index is set, multiply by bone_matrices[bone_index]
         // (Phase 13+ — skeletal animation)
@@ -116,12 +116,16 @@ pub fn flatten_sdf_scene(
     scene: &RuntimeScene,
     camera_pos: &WorldPosition,
 ) -> Vec<(u32, Vec<FlatNode>)> {
+    let world_transforms = rkf_core::transform_bake::bake_world_transforms(&scene.sdf_scene.objects);
+    let default_wt = rkf_core::transform_bake::WorldTransform::default();
     scene
         .sdf_scene
-        .root_objects
+        .objects
         .iter()
         .map(|obj| {
-            let flat = transform_flatten::flatten_object(obj, camera_pos);
+            let wt = world_transforms.get(&obj.id).unwrap_or(&default_wt);
+            let camera_rel = wt.position - camera_pos.to_vec3();
+            let flat = transform_flatten::flatten_object(obj, camera_rel);
             (obj.id, flat)
         })
         .collect()
@@ -203,7 +207,7 @@ mod tests {
         let t = Transform {
             position: make_pos(10.0, 0.0, 0.0),
             rotation: Quat::IDENTITY,
-            scale: 1.0,
+            scale: Vec3::ONE,
         };
         let e = world.spawn((t, WorldTransform::default()));
 
@@ -220,7 +224,7 @@ mod tests {
         let t = Transform {
             position: make_pos(10.0, 5.0, 0.0),
             rotation: Quat::IDENTITY,
-            scale: 1.0,
+            scale: Vec3::ONE,
         };
         let e = world.spawn((t, WorldTransform::default()));
         let cam = make_pos(3.0, 2.0, 0.0);
@@ -239,14 +243,14 @@ mod tests {
         let parent_t = Transform {
             position: make_pos(10.0, 0.0, 0.0),
             rotation: Quat::IDENTITY,
-            scale: 1.0,
+            scale: Vec3::ONE,
         };
         let parent_e = world.spawn((parent_t, WorldTransform::default()));
 
         let child_t = Transform {
             position: make_pos(5.0, 0.0, 0.0), // local offset from parent
             rotation: Quat::IDENTITY,
-            scale: 1.0,
+            scale: Vec3::ONE,
         };
         let child_e = world.spawn((
             child_t,
@@ -271,7 +275,7 @@ mod tests {
         let t = Transform {
             position: make_pos(0.0, 0.0, 0.0),
             rotation: Quat::IDENTITY,
-            scale: 2.0,
+            scale: Vec3::splat(2.0),
         };
         let e = world.spawn((t, WorldTransform::default()));
 
@@ -288,7 +292,7 @@ mod tests {
         let t = Transform {
             position: make_pos(99.0, 99.0, 99.0), // should be ignored
             rotation: Quat::IDENTITY,
-            scale: 3.0,
+            scale: Vec3::splat(3.0),
         };
         let m = local_matrix(&t);
         // Translation column should be zero
@@ -316,7 +320,7 @@ mod tests {
         let t = Transform {
             position: make_pos(0.0, 0.0, 0.0),
             rotation: rot,
-            scale: 1.0,
+            scale: Vec3::ONE,
         };
         let e = world.spawn((t, WorldTransform::default()));
 
@@ -349,7 +353,7 @@ mod tests {
             SdfPrimitive::Sphere { radius: 0.5 },
             1,
         );
-        scene.sdf_scene.add_object("sphere_obj", WorldPosition::default(), node);
+        scene.sdf_scene.add_object("sphere_obj", Vec3::ZERO, node);
 
         let flat = flatten_sdf_scene(&scene, &zero_pos());
         assert_eq!(flat.len(), 1);
@@ -363,8 +367,8 @@ mod tests {
         let mut scene = RuntimeScene::new("test");
         let n1 = SceneNode::analytical("s1", SdfPrimitive::Sphere { radius: 0.3 }, 1);
         let n2 = SceneNode::analytical("s2", SdfPrimitive::Sphere { radius: 0.7 }, 2);
-        scene.sdf_scene.add_object("obj1", WorldPosition::default(), n1);
-        scene.sdf_scene.add_object("obj2", WorldPosition::default(), n2);
+        scene.sdf_scene.add_object("obj1", Vec3::ZERO, n1);
+        scene.sdf_scene.add_object("obj2", Vec3::ZERO, n2);
 
         let flat = flatten_sdf_scene(&scene, &zero_pos());
         assert_eq!(flat.len(), 2);
@@ -386,15 +390,15 @@ mod tests {
         let mut scene = RuntimeScene::new("test");
         let n1 = SceneNode::analytical("s1", SdfPrimitive::Sphere { radius: 0.5 }, 1);
         let n2 = SceneNode::analytical("s2", SdfPrimitive::Sphere { radius: 0.5 }, 2);
-        scene.sdf_scene.add_object("obj1", WorldPosition::default(), n1);
-        scene.sdf_scene.add_object("obj2", WorldPosition::default(), n2);
+        scene.sdf_scene.add_object("obj1", Vec3::ZERO, n1);
+        scene.sdf_scene.add_object("obj2", Vec3::ZERO, n2);
 
         // Set AABBs
-        scene.sdf_scene.root_objects[0].aabb = Aabb::new(
+        scene.sdf_scene.objects[0].aabb = Aabb::new(
             Vec3::new(-1.0, -1.0, -1.0),
             Vec3::new(1.0, 1.0, 1.0),
         );
-        scene.sdf_scene.root_objects[1].aabb = Aabb::new(
+        scene.sdf_scene.objects[1].aabb = Aabb::new(
             Vec3::new(5.0, -1.0, -1.0),
             Vec3::new(7.0, 1.0, 1.0),
         );
@@ -409,14 +413,14 @@ mod tests {
 
         let mut scene = RuntimeScene::new("test");
         let n1 = SceneNode::analytical("s1", SdfPrimitive::Sphere { radius: 0.5 }, 1);
-        scene.sdf_scene.add_object("obj1", WorldPosition::default(), n1);
-        scene.sdf_scene.root_objects[0].aabb = Aabb::new(Vec3::ZERO, Vec3::ONE);
+        scene.sdf_scene.add_object("obj1", Vec3::ZERO, n1);
+        scene.sdf_scene.objects[0].aabb = Aabb::new(Vec3::ZERO, Vec3::ONE);
 
         let mut bvh = build_scene_bvh(&scene);
         assert!(bvh.nodes[0].aabb.max.x <= 1.0 + 1e-5);
 
         // Move object
-        scene.sdf_scene.root_objects[0].aabb = Aabb::new(
+        scene.sdf_scene.objects[0].aabb = Aabb::new(
             Vec3::new(50.0, 0.0, 0.0),
             Vec3::new(52.0, 1.0, 1.0),
         );
@@ -430,7 +434,7 @@ mod tests {
 
         // SDF object
         let node = SceneNode::analytical("sphere", SdfPrimitive::Sphere { radius: 0.5 }, 1);
-        scene.sdf_scene.add_object("obj", WorldPosition::default(), node);
+        scene.sdf_scene.add_object("obj", Vec3::ZERO, node);
 
         // ECS camera entity
         scene.spawn_camera(Transform::default(), CameraComponent::default());

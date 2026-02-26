@@ -10,7 +10,7 @@ This is a novel engine — not a wrapper around an existing renderer. Many subsy
 
 1. **No meshes, ever.** Every geometric primitive is an SDF stored in voxel bricks. If you're tempted to add a mesh path, you're solving the wrong problem.
 2. **No textures on surfaces.** Materials are volumetric — PBR properties come from a global material table indexed by `material_id`. Per-voxel color comes from companion color bricks, not UV-mapped textures.
-3. **Uniform scale only.** Non-uniform scale distorts SDF distances and breaks ray marching. Objects that need stretching must be re-voxelized.
+3. **Non-uniform scale uses conservative correction.** Per-axis `Vec3` scale is supported. SDF distances are multiplied by `min(sx, sy, sz)` to keep ray marching safe (never overshoots). For voxelized objects, the editor offers a "Re-voxelize" button that resamples the brick volume at the current stretched dimensions and resets scale to `(1,1,1)`, eliminating the extra march-step overhead.
 4. **All rendering is compute shaders.** No rasterization pipeline except editor gizmo wireframes.
 5. **WorldPosition everywhere.** Never use raw `Vec3` for world-space positions. Always `WorldPosition { chunk: IVec3, local: Vec3 }` to avoid float precision loss. GPU receives camera-relative f32 only.
 6. **Brick pool is the central resource.** All voxel data lives in a single GPU brick pool with companion pools (bone, volumetric, color). The `BrickPoolManager` coordinates streaming, animation, and editing.
@@ -77,7 +77,7 @@ cargo run -p rkf-convert -- input.glb -o output.rkf  # asset conversion
 struct WorldPosition { chunk: IVec3, local: Vec3 }
 
 // Scene hierarchy — objects own SDF in local space
-SceneObject { id: u32, world_position: WorldPosition, rotation: Quat, scale: f32, root_node: SceneNode, aabb: Aabb }
+SceneObject { id: u32, world_position: WorldPosition, rotation: Quat, scale: Vec3, root_node: SceneNode, aabb: Aabb }
 SceneNode { name, local_transform: Transform, sdf_source: SdfSource, blend_mode: BlendMode, children: Vec<SceneNode> }
 SdfSource::Analytical { primitive, material_id } | SdfSource::Voxelized { brick_map_handle, voxel_size, aabb }
 

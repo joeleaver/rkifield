@@ -39,7 +39,7 @@ pub enum KeyCode {
     // Gizmo mode (grab, rotate, scale)
     G,
     R,
-    T,
+    L,
     // Axis constraint
     X,
     Y,
@@ -101,6 +101,8 @@ pub struct InputState {
     pub mouse_buttons: [bool; 3],
     pub scroll_delta: f32,
     pub keys_pressed: HashSet<KeyCode>,
+    /// Keys pressed this frame (cleared each frame by reset_frame_deltas).
+    pub keys_just_pressed: HashSet<KeyCode>,
     pub modifiers: Modifiers,
 }
 
@@ -120,6 +122,7 @@ impl InputState {
             mouse_buttons: [false; 3],
             scroll_delta: 0.0,
             keys_pressed: HashSet::new(),
+            keys_just_pressed: HashSet::new(),
             modifiers: Modifiers::default(),
         }
     }

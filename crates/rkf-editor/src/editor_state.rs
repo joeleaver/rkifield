@@ -191,6 +191,10 @@ pub struct EditorState {
     pub pending_delete: bool,
     /// Set by Ctrl+D, consumed by the event loop.
     pub pending_duplicate: bool,
+    /// Set by Edit > Undo, consumed by the event loop.
+    pub pending_undo: bool,
+    /// Set by Edit > Redo, consumed by the event loop.
+    pub pending_redo: bool,
     /// Whether the ground grid overlay is visible (toggled via View menu).
     pub show_grid: bool,
     /// Whether the shortcut reference overlay is visible (F1 toggle).
@@ -201,6 +205,10 @@ pub struct EditorState {
     pub pending_minimize: bool,
     /// Set by maximize window control, consumed by the event loop.
     pub pending_maximize: bool,
+    /// Set by "Re-voxelize" button in properties panel. Contains the object ID
+    /// of the voxelized object whose brick map should be resampled at the
+    /// current non-uniform scale, resetting scale to (1,1,1) afterwards.
+    pub pending_revoxelize: Option<u32>,
 
     // ── v2 Scene model ───────────────────────────────────────
     /// Optional v2 scene reference. When set, `sync_v2_scene` mirrors it
@@ -261,11 +269,14 @@ impl EditorState {
             pending_spawn: None,
             pending_delete: false,
             pending_duplicate: false,
+            pending_undo: false,
+            pending_redo: false,
             show_grid: false,
             show_shortcuts: false,
             pending_drag: false,
             pending_minimize: false,
             pending_maximize: false,
+            pending_revoxelize: None,
             v2_scene: None,
         }
     }
@@ -328,6 +339,7 @@ impl EditorState {
     pub fn reset_frame_deltas(&mut self) {
         self.editor_input.mouse_delta = glam::Vec2::ZERO;
         self.editor_input.scroll_delta = 0.0;
+        self.editor_input.keys_just_pressed.clear();
     }
 
     /// Mirror the v2 scene into the editor scene tree.
@@ -341,14 +353,12 @@ impl EditorState {
         }
     }
 
-    /// Pick a scene object by casting a ray through the viewport.
+    /// Pick a scene object via ray-AABB intersection (CPU fallback).
     ///
-    /// `pixel_x`, `pixel_y` are in physical pixels relative to the viewport
-    /// origin. `vp_width`, `vp_height` are the viewport dimensions. The AABB
-    /// for each object comes from the v2 scene (if set).
-    ///
-    /// Returns the entity_id of the closest hit object, or `None`.
-    pub fn pick_object(
+    /// Returns the nearest hit object's id, or `None`. This is a rough
+    /// approximation — the primary pick path uses GPU readback from the
+    /// material G-buffer (see `pending_pick`/`pick_result` in SharedState).
+    pub fn pick_object_aabb(
         &self,
         pixel_x: f32,
         pixel_y: f32,
@@ -363,15 +373,31 @@ impl EditorState {
             vp_height,
         );
 
-        // Test against v2 scene object AABBs.
         let scene = self.v2_scene.as_ref()?;
+        let world_transforms = rkf_core::transform_bake::bake_world_transforms(&scene.objects);
+        let default_wt = rkf_core::transform_bake::WorldTransform::default();
+
         let mut best_t = f32::MAX;
         let mut best_id = None;
 
-        for obj in &scene.root_objects {
-            let aabb_min = obj.aabb.min;
-            let aabb_max = obj.aabb.max;
-            if let Some(t) = ray_aabb_distance(ray_o, ray_d, aabb_min, aabb_max) {
+        for obj in &scene.objects {
+            let wt = world_transforms.get(&obj.id).unwrap_or(&default_wt);
+            let smin = obj.aabb.min * wt.scale;
+            let smax = obj.aabb.max * wt.scale;
+            let corners = [
+                glam::Vec3::new(smin.x, smin.y, smin.z), glam::Vec3::new(smax.x, smin.y, smin.z),
+                glam::Vec3::new(smin.x, smax.y, smin.z), glam::Vec3::new(smax.x, smax.y, smin.z),
+                glam::Vec3::new(smin.x, smin.y, smax.z), glam::Vec3::new(smax.x, smin.y, smax.z),
+                glam::Vec3::new(smin.x, smax.y, smax.z), glam::Vec3::new(smax.x, smax.y, smax.z),
+            ];
+            let mut wmin = glam::Vec3::splat(f32::MAX);
+            let mut wmax = glam::Vec3::splat(f32::MIN);
+            for c in &corners {
+                let r = wt.rotation * *c + wt.position;
+                wmin = wmin.min(r);
+                wmax = wmax.max(r);
+            }
+            if let Some(t) = ray_aabb_distance(ray_o, ray_d, wmin, wmax) {
                 if t < best_t {
                     best_t = t;
                     best_id = Some(obj.id as u64);
@@ -785,12 +811,10 @@ mod tests {
     fn test_sync_v2_scene_populates_tree() {
         use rkf_core::scene::Scene;
         use rkf_core::scene_node::SceneNode as CoreNode;
-        use rkf_core::WorldPosition;
-
         let mut state = EditorState::new();
         let mut v2 = Scene::new("test");
-        v2.add_object("SphereObj", WorldPosition::default(), CoreNode::new("root"));
-        v2.add_object("BoxObj", WorldPosition::default(), CoreNode::new("root2"));
+        v2.add_object("SphereObj", Vec3::ZERO, CoreNode::new("root"));
+        v2.add_object("BoxObj", Vec3::ZERO, CoreNode::new("root2"));
 
         state.v2_scene = Some(v2);
         state.sync_v2_scene();

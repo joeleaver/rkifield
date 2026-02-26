@@ -7,15 +7,14 @@
 //!
 //! # Camera-relative precision
 //!
-//! The root position is converted from [`WorldPosition`] to camera-relative
-//! `f32` using `f64` arithmetic on the CPU. The GPU never sees absolute
+//! The caller provides a camera-relative `Vec3` for the object's baked world
+//! position (computed from the parent chain). The GPU never sees absolute
 //! world positions — only camera-relative offsets.
 
 use glam::{Mat4, Vec3};
 
 use crate::scene::SceneObject;
 use crate::scene_node::{BlendMode, SceneNode, SdfSource};
-use crate::world_position::WorldPosition;
 
 /// A flattened node ready for GPU upload.
 ///
@@ -25,8 +24,8 @@ pub struct FlatNode {
     /// Pre-computed inverse world transform (camera-relative).
     /// Used in ray marching to transform ray into local space.
     pub inverse_world: Mat4,
-    /// Product of all scales from root to this node.
-    pub accumulated_scale: f32,
+    /// Product of all per-axis scales from root to this node.
+    pub accumulated_scale: Vec3,
     /// Reference to the SDF source (cloned from the source node).
     pub sdf_source: SdfSource,
     /// How this node blends with siblings.
@@ -42,30 +41,27 @@ pub struct FlatNode {
 /// Flatten an object's node tree into a GPU-ready array.
 ///
 /// Performs a depth-first traversal, accumulating transforms from root to leaf.
-/// The root position is converted to camera-relative coordinates using `f64`
-/// arithmetic for precision safety.
+/// The caller provides a pre-computed camera-relative world position for the
+/// object (baked from the parent chain using `f64` arithmetic for precision).
 ///
 /// # Arguments
 ///
 /// - `object` — the scene object whose tree to flatten
-/// - `camera_pos` — current camera world position (for camera-relative transform)
+/// - `camera_rel_position` — object's baked world position, camera-relative (f32)
 ///
 /// # Returns
 ///
 /// A flat array of nodes in depth-first order. Only nodes with non-None
 /// `sdf_source` contribute to rendering, but all nodes are included for
 /// correct transform propagation.
-pub fn flatten_object(object: &SceneObject, camera_pos: &WorldPosition) -> Vec<FlatNode> {
+pub fn flatten_object(object: &SceneObject, camera_rel_position: Vec3) -> Vec<FlatNode> {
     let mut result = Vec::new();
-
-    // Compute camera-relative root position using f64 arithmetic.
-    let camera_rel: Vec3 = object.world_position.relative_to(camera_pos);
 
     // Build root's camera-relative world transform.
     let root_world = Mat4::from_scale_rotation_translation(
-        Vec3::splat(object.scale),
+        object.scale,
         object.rotation,
-        camera_rel,
+        camera_rel_position,
     );
     let root_accumulated_scale = object.scale;
 
@@ -85,7 +81,7 @@ pub fn flatten_object(object: &SceneObject, camera_pos: &WorldPosition) -> Vec<F
 fn flatten_node(
     node: &SceneNode,
     parent_world: Mat4,
-    parent_scale: f32,
+    parent_scale: Vec3,
     depth: u32,
     parent_index: u32,
     result: &mut Vec<FlatNode>,
@@ -125,23 +121,20 @@ fn flatten_node(
 mod tests {
     use super::*;
     use crate::scene_node::{SdfPrimitive, Transform};
-    use glam::{IVec3, Quat};
+    use glam::Quat;
     use std::f32::consts::FRAC_PI_2;
 
     fn make_object(root_node: SceneNode) -> SceneObject {
         SceneObject {
             id: 1,
             name: "test".into(),
-            world_position: WorldPosition::default(),
+            parent_id: None,
+            position: Vec3::ZERO,
             rotation: Quat::IDENTITY,
-            scale: 1.0,
+            scale: Vec3::ONE,
             root_node,
             aabb: crate::aabb::Aabb::new(Vec3::ZERO, Vec3::ZERO),
         }
-    }
-
-    fn camera_origin() -> WorldPosition {
-        WorldPosition::default()
     }
 
     #[test]
@@ -152,11 +145,11 @@ mod tests {
             1,
         );
         let obj = make_object(root);
-        let flat = flatten_object(&obj, &camera_origin());
+        let flat = flatten_object(&obj, Vec3::ZERO);
 
         assert_eq!(flat.len(), 1);
         assert_eq!(flat[0].name, "sphere");
-        assert!((flat[0].accumulated_scale - 1.0).abs() < 1e-6);
+        assert!((flat[0].accumulated_scale - Vec3::ONE).length() < 1e-6);
         assert_eq!(flat[0].depth, 0);
         assert_eq!(flat[0].parent_index, u32::MAX);
 
@@ -176,14 +169,14 @@ mod tests {
         .with_transform(Transform::new(
             Vec3::new(2.0, 0.0, 0.0),
             Quat::IDENTITY,
-            1.0,
+            Vec3::ONE,
         ));
 
         let mut root = SceneNode::new("root");
         root.add_child(child);
 
         let obj = make_object(root);
-        let flat = flatten_object(&obj, &camera_origin());
+        let flat = flatten_object(&obj, Vec3::ZERO);
 
         assert_eq!(flat.len(), 2);
         assert_eq!(flat[0].name, "root");
@@ -200,47 +193,47 @@ mod tests {
     #[test]
     fn scale_accumulation() {
         let child = SceneNode::new("child")
-            .with_transform(Transform::new(Vec3::ZERO, Quat::IDENTITY, 0.5));
+            .with_transform(Transform::new(Vec3::ZERO, Quat::IDENTITY, Vec3::splat(0.5)));
 
         let mut root = SceneNode::new("root");
-        root.local_transform.scale = 1.0; // Root node's own scale
+        root.local_transform.scale = Vec3::ONE; // Root node's own scale
         root.add_child(child);
 
         let mut obj = make_object(root);
-        obj.scale = 2.0; // Object root scale
+        obj.scale = Vec3::splat(2.0); // Object root scale
 
-        let flat = flatten_object(&obj, &camera_origin());
+        let flat = flatten_object(&obj, Vec3::ZERO);
 
         // Root: object.scale * root_node.scale = 2.0 * 1.0 = 2.0
-        assert!((flat[0].accumulated_scale - 2.0).abs() < 1e-6);
+        assert!((flat[0].accumulated_scale - Vec3::splat(2.0)).length() < 1e-6);
         // Child: 2.0 * 0.5 = 1.0
-        assert!((flat[1].accumulated_scale - 1.0).abs() < 1e-6);
+        assert!((flat[1].accumulated_scale - Vec3::ONE).length() < 1e-6);
     }
 
     #[test]
     fn deep_scale_accumulation() {
         let grandchild = SceneNode::new("gc")
-            .with_transform(Transform::new(Vec3::ZERO, Quat::IDENTITY, 0.5));
+            .with_transform(Transform::new(Vec3::ZERO, Quat::IDENTITY, Vec3::splat(0.5)));
         let mut child = SceneNode::new("child")
-            .with_transform(Transform::new(Vec3::ZERO, Quat::IDENTITY, 3.0));
+            .with_transform(Transform::new(Vec3::ZERO, Quat::IDENTITY, Vec3::splat(3.0)));
         child.add_child(grandchild);
         let mut root = SceneNode::new("root");
         root.add_child(child);
 
         let mut obj = make_object(root);
-        obj.scale = 2.0;
+        obj.scale = Vec3::splat(2.0);
 
-        let flat = flatten_object(&obj, &camera_origin());
+        let flat = flatten_object(&obj, Vec3::ZERO);
         assert_eq!(flat.len(), 3);
         // root: 2.0, child: 2.0*3.0=6.0, gc: 6.0*0.5=3.0
-        assert!((flat[0].accumulated_scale - 2.0).abs() < 1e-6);
-        assert!((flat[1].accumulated_scale - 6.0).abs() < 1e-6);
-        assert!((flat[2].accumulated_scale - 3.0).abs() < 1e-6);
+        assert!((flat[0].accumulated_scale - Vec3::splat(2.0)).length() < 1e-6);
+        assert!((flat[1].accumulated_scale - Vec3::splat(6.0)).length() < 1e-6);
+        assert!((flat[2].accumulated_scale - Vec3::splat(3.0)).length() < 1e-6);
     }
 
     #[test]
     fn inverse_world_correctness() {
-        // Object at (5, 0, 0) with child at local (3, 0, 0)
+        // Object at camera-relative (5, 0, 0) with child at local (3, 0, 0)
         let child = SceneNode::analytical(
             "child",
             SdfPrimitive::Sphere { radius: 0.1 },
@@ -249,16 +242,17 @@ mod tests {
         .with_transform(Transform::new(
             Vec3::new(3.0, 0.0, 0.0),
             Quat::IDENTITY,
-            1.0,
+            Vec3::ONE,
         ));
 
         let mut root = SceneNode::new("root");
         root.add_child(child);
 
         let mut obj = make_object(root);
-        obj.world_position = WorldPosition::new(IVec3::ZERO, Vec3::new(5.0, 0.0, 0.0));
+        obj.position = Vec3::new(5.0, 0.0, 0.0);
 
-        let flat = flatten_object(&obj, &camera_origin());
+        // Camera-relative position is (5, 0, 0)
+        let flat = flatten_object(&obj, Vec3::new(5.0, 0.0, 0.0));
 
         // Child is at world (5+3, 0, 0) = (8, 0, 0)
         // Its inverse should map world (8,0,0) to local (0,0,0)
@@ -268,20 +262,15 @@ mod tests {
 
     #[test]
     fn camera_relative_precision() {
-        // Object very far away, camera at same chunk
-        let far_chunk = IVec3::new(1_000_000, 0, 0);
-        let obj_pos = WorldPosition::new(far_chunk, Vec3::new(1.0, 0.0, 0.0));
-        let cam_pos = WorldPosition::new(far_chunk, Vec3::new(0.0, 0.0, 0.0));
-
+        // Camera-relative position is (1, 0, 0) — pre-computed by caller
         let root = SceneNode::analytical(
             "sphere",
             SdfPrimitive::Sphere { radius: 0.1 },
             1,
         );
-        let mut obj = make_object(root);
-        obj.world_position = obj_pos;
+        let obj = make_object(root);
 
-        let flat = flatten_object(&obj, &cam_pos);
+        let flat = flatten_object(&obj, Vec3::new(1.0, 0.0, 0.0));
 
         // Object is 1 metre from camera — inverse should map (1,0,0) to (0,0,0)
         let local = flat[0].inverse_world.transform_point3(Vec3::new(1.0, 0.0, 0.0));
@@ -299,7 +288,7 @@ mod tests {
         .with_transform(Transform::new(
             Vec3::new(1.0, 0.0, 0.0),
             Quat::IDENTITY,
-            1.0,
+            Vec3::ONE,
         ));
 
         let mut root = SceneNode::new("root");
@@ -308,7 +297,7 @@ mod tests {
         let mut obj = make_object(root);
         obj.rotation = Quat::from_rotation_z(FRAC_PI_2);
 
-        let flat = flatten_object(&obj, &camera_origin());
+        let flat = flatten_object(&obj, Vec3::ZERO);
 
         // After 90° Z rotation, child at local (1,0,0) should be at world (0,1,0)
         let world = flat[1].inverse_world.inverse().transform_point3(Vec3::ZERO);
@@ -335,7 +324,7 @@ mod tests {
         root.add_child(invisible);
 
         let obj = make_object(root);
-        let flat = flatten_object(&obj, &camera_origin());
+        let flat = flatten_object(&obj, Vec3::ZERO);
 
         // Root + visible child only (invisible skipped)
         assert_eq!(flat.len(), 2);
@@ -354,7 +343,7 @@ mod tests {
         root.add_child(b);
 
         let obj = make_object(root);
-        let flat = flatten_object(&obj, &camera_origin());
+        let flat = flatten_object(&obj, Vec3::ZERO);
 
         assert_eq!(flat.len(), 4);
         assert_eq!(flat[0].name, "root");
@@ -374,7 +363,7 @@ mod tests {
         root.add_child(b);
 
         let obj = make_object(root);
-        let flat = flatten_object(&obj, &camera_origin());
+        let flat = flatten_object(&obj, Vec3::ZERO);
 
         assert_eq!(flat[0].parent_index, u32::MAX); // root
         assert_eq!(flat[1].parent_index, 0);         // A → root
@@ -389,7 +378,7 @@ mod tests {
         root.add_child(child);
 
         let obj = make_object(root);
-        let flat = flatten_object(&obj, &camera_origin());
+        let flat = flatten_object(&obj, Vec3::ZERO);
 
         assert!(matches!(flat[0].blend_mode, BlendMode::SmoothUnion(_)));
         assert!(matches!(flat[1].blend_mode, BlendMode::Subtract));
@@ -406,7 +395,7 @@ mod tests {
         root.add_child(child);
 
         let obj = make_object(root);
-        let flat = flatten_object(&obj, &camera_origin());
+        let flat = flatten_object(&obj, Vec3::ZERO);
 
         assert!(matches!(flat[0].sdf_source, SdfSource::None));
         match &flat[1].sdf_source {

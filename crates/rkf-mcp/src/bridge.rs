@@ -391,7 +391,7 @@ impl AutomationApi for BridgeAutomationApi {
         object_id: u32,
         position: [f32; 3],
         rotation: [f32; 4],
-        scale: f32,
+        scale: [f32; 3],
     ) -> Result<(), String> {
         self.call_tool(
             "node_set_transform",

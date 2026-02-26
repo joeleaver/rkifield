@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::Result;
-use glam::{IVec3, Quat, Vec3};
+use glam::{Quat, Vec3};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::{DeviceEvent, ElementState, MouseButton, WindowEvent};
@@ -18,7 +18,7 @@ use winit::window::{Window, WindowAttributes, WindowId};
 
 use rkf_core::{
     Aabb, BrickMapAllocator, BrickPool, Scene, SceneNode, SceneObject,
-    SdfPrimitive, SdfSource, WorldPosition, voxelize_sdf,
+    SdfPrimitive, SdfSource, voxelize_sdf,
     transform_flatten::flatten_object,
 };
 use rkf_render::{
@@ -60,7 +60,7 @@ struct DemoScene {
     brick_map_alloc: BrickMapAllocator,
     /// Animated character (stored separately for per-frame pose updates).
     character: AnimatedCharacter,
-    /// Index of the character's SceneObject in scene.root_objects.
+    /// Index of the character's SceneObject in scene.objects.
     character_obj_index: usize,
 }
 
@@ -75,11 +75,12 @@ fn build_demo_scene() -> DemoScene {
     let ground_obj = SceneObject {
         id: 0,
         name: "ground".into(),
-        world_position: WorldPosition::new(IVec3::ZERO, Vec3::new(0.0, -0.6, 0.0)),
+        parent_id: None,
+        position: Vec3::new(0.0, -0.6, 0.0),
         rotation: Quat::IDENTITY,
-        scale: 1.0,
+        scale: Vec3::ONE,
         root_node: ground,
-        aabb: Aabb::new(Vec3::new(-10.0, -0.7, -10.0), Vec3::new(10.0, -0.5, 10.0)),
+        aabb: Aabb::new(Vec3::new(-10.0, -0.1, -10.0), Vec3::new(10.0, 0.1, 10.0)),
     };
     scene.add_object_full(ground_obj);
 
@@ -88,11 +89,12 @@ fn build_demo_scene() -> DemoScene {
     let sphere_obj = SceneObject {
         id: 0,
         name: "sphere".into(),
-        world_position: WorldPosition::new(IVec3::ZERO, Vec3::new(-1.5, 0.0, -2.0)),
+        parent_id: None,
+        position: Vec3::new(-1.5, 0.0, -2.0),
         rotation: Quat::IDENTITY,
-        scale: 1.0,
+        scale: Vec3::ONE,
         root_node: sphere,
-        aabb: Aabb::new(Vec3::new(-2.0, -0.5, -2.5), Vec3::new(-1.0, 0.5, -1.5)),
+        aabb: Aabb::new(Vec3::new(-0.5, -0.5, -0.5), Vec3::new(0.5, 0.5, 0.5)),
     };
     scene.add_object_full(sphere_obj);
 
@@ -103,11 +105,12 @@ fn build_demo_scene() -> DemoScene {
     let box_obj = SceneObject {
         id: 0,
         name: "box".into(),
-        world_position: WorldPosition::new(IVec3::ZERO, Vec3::new(0.0, 0.0, -2.0)),
+        parent_id: None,
+        position: Vec3::new(0.0, 0.0, -2.0),
         rotation: Quat::from_rotation_y(0.5),
-        scale: 1.0,
+        scale: Vec3::ONE,
         root_node: box_node,
-        aabb: Aabb::new(Vec3::new(-0.5, -0.5, -2.5), Vec3::new(0.5, 0.5, -1.5)),
+        aabb: Aabb::new(Vec3::new(-0.5, -0.5, -0.5), Vec3::new(0.5, 0.5, 0.5)),
     };
     scene.add_object_full(box_obj);
 
@@ -119,11 +122,12 @@ fn build_demo_scene() -> DemoScene {
     let capsule_obj = SceneObject {
         id: 0,
         name: "capsule".into(),
-        world_position: WorldPosition::new(IVec3::ZERO, Vec3::new(1.5, 0.0, -2.0)),
+        parent_id: None,
+        position: Vec3::new(1.5, 0.0, -2.0),
         rotation: Quat::IDENTITY,
-        scale: 1.0,
+        scale: Vec3::ONE,
         root_node: capsule,
-        aabb: Aabb::new(Vec3::new(1.0, -0.6, -2.5), Vec3::new(2.0, 0.6, -1.5)),
+        aabb: Aabb::new(Vec3::new(-0.5, -0.6, -0.5), Vec3::new(0.5, 0.6, 0.5)),
     };
     scene.add_object_full(capsule_obj);
 
@@ -135,11 +139,12 @@ fn build_demo_scene() -> DemoScene {
     let torus_obj = SceneObject {
         id: 0,
         name: "torus".into(),
-        world_position: WorldPosition::new(IVec3::ZERO, Vec3::new(0.0, 0.3, -3.5)),
+        parent_id: None,
+        position: Vec3::new(0.0, 0.3, -3.5),
         rotation: Quat::IDENTITY,
-        scale: 1.0,
+        scale: Vec3::ONE,
         root_node: torus,
-        aabb: Aabb::new(Vec3::new(-0.6, -0.2, -4.1), Vec3::new(0.6, 0.8, -2.9)),
+        aabb: Aabb::new(Vec3::new(-0.6, -0.5, -0.6), Vec3::new(0.6, 0.5, 0.6)),
     };
     scene.add_object_full(torus_obj);
 
@@ -179,13 +184,14 @@ fn build_demo_scene() -> DemoScene {
     let vox_obj = SceneObject {
         id: 0,
         name: "vox_sphere".into(),
-        world_position: WorldPosition::new(IVec3::ZERO, Vec3::new(3.0, 0.0, -2.0)),
+        parent_id: None,
+        position: Vec3::new(3.0, 0.0, -2.0),
         rotation: Quat::IDENTITY,
-        scale: 1.0,
+        scale: Vec3::ONE,
         root_node: vox_node,
         aabb: Aabb::new(
-            Vec3::new(3.0 - vox_radius - margin, -vox_radius - margin, -2.0 - vox_radius - margin),
-            Vec3::new(3.0 + vox_radius + margin, vox_radius + margin, -2.0 + vox_radius + margin),
+            Vec3::new(-vox_radius - margin, -vox_radius - margin, -vox_radius - margin),
+            Vec3::new(vox_radius + margin, vox_radius + margin, vox_radius + margin),
         ),
     };
     scene.add_object_full(vox_obj);
@@ -199,14 +205,15 @@ fn build_demo_scene() -> DemoScene {
     let char_obj = SceneObject {
         id: 0,
         name: "humanoid".into(),
-        world_position: WorldPosition::new(IVec3::ZERO, Vec3::new(-3.0, 0.0, -2.0)),
+        parent_id: None,
+        position: Vec3::new(-3.0, 0.0, -2.0),
         rotation: Quat::IDENTITY,
-        scale: 1.0,
+        scale: Vec3::ONE,
         root_node: char_root,
-        aabb: Aabb::new(Vec3::new(-3.6, -0.5, -2.5), Vec3::new(-2.4, 2.0, -1.5)),
+        aabb: Aabb::new(Vec3::new(-0.6, -0.5, -0.5), Vec3::new(0.6, 2.0, 0.5)),
     };
     scene.add_object_full(char_obj);
-    let character_obj_index = scene.root_objects.len() - 1;
+    let character_obj_index = scene.objects.len() - 1;
 
     DemoScene {
         scene,
@@ -271,7 +278,7 @@ struct EngineState {
     shared_state: Arc<Mutex<SharedState>>,
     /// Animated character (updated each frame).
     character: AnimatedCharacter,
-    /// Index of the character's SceneObject in scene.root_objects.
+    /// Index of the character's SceneObject in scene.objects.
     character_obj_index: usize,
     /// Last frame time for animation advancement.
     last_frame_time: Instant,
@@ -318,9 +325,29 @@ impl EngineState {
             &ctx.device, &gpu_scene, INTERNAL_WIDTH, INTERNAL_HEIGHT,
         );
 
-        // Build coarse acceleration field from scene AABBs.
-        let scene_aabbs: Vec<(Vec3, Vec3)> = scene.root_objects.iter()
-            .map(|obj| (obj.aabb.min, obj.aabb.max))
+        // Build coarse acceleration field from world-space AABBs.
+        let init_wts = rkf_core::transform_bake::bake_world_transforms(&scene.objects);
+        let init_def_wt = rkf_core::transform_bake::WorldTransform::default();
+        let scene_aabbs: Vec<(Vec3, Vec3)> = scene.objects.iter()
+            .map(|obj| {
+                let wt = init_wts.get(&obj.id).unwrap_or(&init_def_wt);
+                let smin = obj.aabb.min * wt.scale;
+                let smax = obj.aabb.max * wt.scale;
+                let corners = [
+                    Vec3::new(smin.x, smin.y, smin.z), Vec3::new(smax.x, smin.y, smin.z),
+                    Vec3::new(smin.x, smax.y, smin.z), Vec3::new(smax.x, smax.y, smin.z),
+                    Vec3::new(smin.x, smin.y, smax.z), Vec3::new(smax.x, smin.y, smax.z),
+                    Vec3::new(smin.x, smax.y, smax.z), Vec3::new(smax.x, smax.y, smax.z),
+                ];
+                let mut wmin = Vec3::splat(f32::MAX);
+                let mut wmax = Vec3::splat(f32::MIN);
+                for c in &corners {
+                    let r = wt.rotation * *c + wt.position;
+                    wmin = wmin.min(r);
+                    wmax = wmax.max(r);
+                }
+                (wmin, wmax)
+            })
             .collect();
         let mut coarse_field = CoarseField::from_scene_aabbs(
             &ctx.device, &scene_aabbs, COARSE_VOXEL_SIZE, 1.0,
@@ -566,29 +593,53 @@ impl EngineState {
         self.last_frame_time = now;
         self.character.advance_and_update(
             dt,
-            &mut self.scene.root_objects[self.character_obj_index].root_node,
+            &mut self.scene.objects[self.character_obj_index].root_node,
         );
-        let camera_pos = WorldPosition::new(IVec3::ZERO, self.camera.position);
+        let camera_pos_vec = self.camera.position;
+
+        // Bake world transforms for parent-child hierarchy.
+        let world_transforms = rkf_core::transform_bake::bake_world_transforms(&self.scene.objects);
+        let default_wt = rkf_core::transform_bake::WorldTransform::default();
 
         // Flatten all objects and build GPU object list + BVH pairs.
         // BVH leaf indices must match the GPU objects[] array index (0-based),
         // NOT the scene object IDs (which start at 1).
         let mut gpu_objects = Vec::new();
         let mut bvh_pairs = Vec::new();
-        for obj in &self.scene.root_objects {
-            let flat_nodes = flatten_object(obj, &camera_pos);
+        for obj in &self.scene.objects {
+            let wt = world_transforms.get(&obj.id).unwrap_or(&default_wt);
+            let camera_rel = wt.position - camera_pos_vec;
+            // Transform local AABB to world space via baked transform.
+            let world_aabb = {
+                let smin = obj.aabb.min * wt.scale;
+                let smax = obj.aabb.max * wt.scale;
+                let corners = [
+                    Vec3::new(smin.x, smin.y, smin.z), Vec3::new(smax.x, smin.y, smin.z),
+                    Vec3::new(smin.x, smax.y, smin.z), Vec3::new(smax.x, smax.y, smin.z),
+                    Vec3::new(smin.x, smin.y, smax.z), Vec3::new(smax.x, smin.y, smax.z),
+                    Vec3::new(smin.x, smax.y, smax.z), Vec3::new(smax.x, smax.y, smax.z),
+                ];
+                let mut wmin = Vec3::splat(f32::MAX);
+                let mut wmax = Vec3::splat(f32::MIN);
+                for c in &corners {
+                    let r = wt.rotation * *c + wt.position;
+                    wmin = wmin.min(r);
+                    wmax = wmax.max(r);
+                }
+                Aabb::new(wmin, wmax)
+            };
+            let flat_nodes = flatten_object(obj, camera_rel);
             for flat in &flat_nodes {
                 let gpu_idx = gpu_objects.len() as u32;
-                let aabb = obj.aabb;
-                let cam_rel_min = aabb.min - self.camera.position;
-                let cam_rel_max = aabb.max - self.camera.position;
+                let cam_rel_min = world_aabb.min - self.camera.position;
+                let cam_rel_max = world_aabb.max - self.camera.position;
                 gpu_objects.push(GpuObject::from_flat_node(
                     flat,
                     obj.id,
                     [cam_rel_min.x, cam_rel_min.y, cam_rel_min.z, 0.0],
                     [cam_rel_max.x, cam_rel_max.y, cam_rel_max.z, 0.0],
                 ));
-                bvh_pairs.push((gpu_idx, aabb));
+                bvh_pairs.push((gpu_idx, world_aabb));
             }
         }
 

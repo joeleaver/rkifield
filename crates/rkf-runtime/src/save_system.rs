@@ -6,7 +6,7 @@
 //! diff-friendly) with a `.rksave` extension.
 
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 // ── Data types ─────────────────────────────────────────────────────────────────
 
@@ -34,6 +34,30 @@ pub struct EnvironmentSnapshot {
     pub overrides: std::collections::HashMap<String, f32>,
 }
 
+/// Serde helper: deserialize an optional scale as either `None`, a single
+/// `f32` (uniform → `[s, s, s]`), or a 3-element array.  Serializes as array.
+mod opt_scale_serde {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(v: &Option<[f32; 3]>, s: S) -> Result<S::Ok, S::Error> {
+        v.serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<[f32; 3]>, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum ScaleValue {
+            Vec3([f32; 3]),
+            Uniform(f32),
+        }
+        let opt: Option<ScaleValue> = Option::deserialize(d)?;
+        Ok(opt.map(|v| match v {
+            ScaleValue::Vec3(arr) => arr,
+            ScaleValue::Uniform(f) => [f, f, f],
+        }))
+    }
+}
+
 /// Per-entity override — captures modifications made to a placed entity at
 /// runtime (moved, hidden, custom script state, etc.).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -44,8 +68,10 @@ pub struct EntityOverride {
     pub position: Option<[f64; 3]>,
     /// Overridden orientation as a unit quaternion `[x, y, z, w]`, if changed.
     pub rotation: Option<[f32; 4]>,
-    /// Overridden uniform scale factor, if changed.
-    pub scale: Option<f32>,
+    /// Overridden per-axis scale `[x, y, z]`, if changed.  Old files with a
+    /// single `f32` are deserialized as uniform `[s, s, s]`.
+    #[serde(default, with = "opt_scale_serde")]
+    pub scale: Option<[f32; 3]>,
     /// Overridden visibility, if changed.
     pub visible: Option<bool>,
     /// Arbitrary key-value pairs for game-specific per-entity state.
@@ -268,7 +294,7 @@ mod tests {
             entity_name: "Crate_01".to_string(),
             position: Some([5.0, 0.0, 2.0]),
             rotation: None,
-            scale: Some(1.5),
+            scale: Some([1.5, 1.5, 1.5]),
             visible: Some(false),
             custom_data: {
                 let mut m = std::collections::HashMap::new();
@@ -394,7 +420,7 @@ mod tests {
         assert_eq!(ov.entity_name, "Crate_01");
         assert_eq!(ov.position, Some([5.0, 0.0, 2.0]));
         assert!(ov.rotation.is_none());
-        assert_eq!(ov.scale, Some(1.5));
+        assert_eq!(ov.scale, Some([1.5, 1.5, 1.5]));
         assert_eq!(ov.visible, Some(false));
         assert_eq!(
             ov.custom_data.get("opened").map(String::as_str),

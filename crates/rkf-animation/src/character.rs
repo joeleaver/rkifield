@@ -72,10 +72,9 @@ impl AnimatedCharacter {
         for (i, bone) in self.skeleton.bones.iter().enumerate() {
             let (scale, rotation, translation) =
                 bone.bind_transform.to_scale_rotation_translation();
-            let uniform_scale = (scale.x + scale.y + scale.z) / 3.0;
 
             let mut node = SceneNode::new(&bone.name);
-            node.local_transform = Transform::new(translation, rotation, uniform_scale);
+            node.local_transform = Transform::new(translation, rotation, scale);
 
             // Assign SDF source if bone has a visual.
             if let Some(visual) = self.bone_visuals.iter().find(|v| v.bone_name == bone.name) {

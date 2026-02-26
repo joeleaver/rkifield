@@ -1,8 +1,11 @@
-//! RKIField editor — v2 object-centric render pipeline with rinch UI overlay.
+//! RKIField editor — v2 object-centric render pipeline with rinch shell.
 //!
-//! Provides the full v2 compute-shader rendering pipeline, rinch-based UI
-//! panels (scene tree, properties, toolbar, status bar), orbit/fly camera
-//! controls, and IPC server for MCP agent tooling.
+//! Architecture:
+//! - `rinch::shell::run_with_window_props_and_menu()` owns the window and event loop.
+//! - The engine runs on a background thread, sharing the wgpu Device/Queue from `GpuHandle`.
+//! - Engine output goes to an offscreen texture; `RenderSurfaceHandle::set_texture_source()`
+//!   feeds it to rinch's compositor for zero-copy GPU compositing.
+//! - Input flows through `SurfaceEvent` → `EditorState.editor_input` → engine thread.
 
 #![allow(dead_code)] // Editor modules are WIP — used incrementally
 
@@ -14,12 +17,10 @@ mod editor_state;
 mod engine;
 mod engine_viewport;
 mod environment;
-mod event_bridge;
 mod gizmo;
 mod input;
 mod light_editor;
 mod overlay;
-mod overlay_blit;
 mod paint;
 mod placement;
 mod properties;
@@ -31,56 +32,13 @@ mod undo;
 mod wireframe;
 
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 use rinch::prelude::*;
-use rinch_platform::PlatformEvent;
-use winit::application::ApplicationHandler;
-use winit::event::{DeviceEvent, ElementState, MouseButton, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, EventLoop};
-use winit::keyboard::{KeyCode as WinitKeyCode, PhysicalKey};
-use winit::window::{Window, WindowId};
 
 use automation::SharedState;
-use editor_state::{EditorMode, EditorState, UiRevision};
+use editor_state::{EditorState, UiRevision};
 use engine::EditorEngine;
 use engine_viewport::{DISPLAY_HEIGHT, DISPLAY_WIDTH};
-use overlay_blit::OverlayBlit;
-
-// ---------------------------------------------------------------------------
-// Winit key → editor key translation
-// ---------------------------------------------------------------------------
-
-fn translate_key(key: WinitKeyCode) -> Option<input::KeyCode> {
-    use input::KeyCode as Ek;
-    match key {
-        WinitKeyCode::KeyW => Some(Ek::W),
-        WinitKeyCode::KeyA => Some(Ek::A),
-        WinitKeyCode::KeyS => Some(Ek::S),
-        WinitKeyCode::KeyD => Some(Ek::D),
-        WinitKeyCode::KeyQ => Some(Ek::Q),
-        WinitKeyCode::KeyE => Some(Ek::E),
-        WinitKeyCode::KeyG => Some(Ek::G),
-        WinitKeyCode::KeyR => Some(Ek::R),
-        WinitKeyCode::KeyT => Some(Ek::T),
-        WinitKeyCode::KeyX => Some(Ek::X),
-        WinitKeyCode::KeyY => Some(Ek::Y),
-        WinitKeyCode::KeyZ => Some(Ek::Z),
-        WinitKeyCode::KeyF => Some(Ek::F),
-        WinitKeyCode::Delete => Some(Ek::Delete),
-        WinitKeyCode::Escape => Some(Ek::Escape),
-        WinitKeyCode::Space => Some(Ek::Space),
-        WinitKeyCode::Tab => Some(Ek::Tab),
-        WinitKeyCode::Enter => Some(Ek::Return),
-        WinitKeyCode::ShiftLeft => Some(Ek::ShiftLeft),
-        WinitKeyCode::F5 => Some(Ek::F5),
-        WinitKeyCode::F12 => Some(Ek::F12),
-        WinitKeyCode::Digit1 => Some(Ek::Num1),
-        WinitKeyCode::Digit2 => Some(Ek::Num2),
-        WinitKeyCode::Digit3 => Some(Ek::Num3),
-        _ => None,
-    }
-}
 
 // ---------------------------------------------------------------------------
 // IPC server setup
@@ -125,1113 +83,842 @@ fn cleanup_ipc(socket_path: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// Application
+// Engine background thread
 // ---------------------------------------------------------------------------
 
-struct App {
-    window: Option<Arc<Window>>,
-    engine: Option<EditorEngine>,
+/// Data bundle passed to the engine thread.
+struct EngineThreadData {
     editor_state: Arc<Mutex<EditorState>>,
     shared_state: Arc<Mutex<SharedState>>,
-    last_frame: Instant,
-    _ipc_handle: Option<tokio::task::JoinHandle<()>>,
-    socket_path: Option<String>,
-    rt: tokio::runtime::Runtime,
-
-    // Rinch UI
-    rinch_ctx: Option<RinchContext>,
-    overlay_renderer: Option<RinchOverlayRenderer>,
-    overlay_blit: Option<OverlayBlit>,
-    wireframe_pass: Option<wireframe::WireframePass>,
-
-    // Input state for event routing
-    mouse_phys: (f32, f32),
-    modifiers: winit::keyboard::ModifiersState,
-    pending_events: Vec<PlatformEvent>,
-
-    // Shared reactive revision — bumped on any editor state mutation
-    // to trigger rinch component re-renders.
-    ui_revision: Option<UiRevision>,
+    /// Send-able handle for registering the engine's GPU texture with the compositor.
+    gpu_registrar: GpuTextureRegistrar,
 }
 
-impl App {
-    fn new() -> Self {
-        let editor_state = Arc::new(Mutex::new(EditorState::new()));
-        let shared_state = Arc::new(Mutex::new(SharedState::new(
-            0, 0,
-            DISPLAY_WIDTH,
-            DISPLAY_HEIGHT,
-        )));
-        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-        Self {
-            window: None,
-            engine: None,
-            editor_state,
-            shared_state,
-            last_frame: Instant::now(),
-            _ipc_handle: None,
-            socket_path: None,
-            rt,
+fn engine_thread(data: EngineThreadData) {
+    let EngineThreadData {
+        editor_state,
+        shared_state,
+        gpu_registrar,
+    } = data;
 
-            rinch_ctx: None,
-            overlay_renderer: None,
-            overlay_blit: None,
-            wireframe_pass: None,
+    // 1. Wait for GpuHandle — rinch initialises it during window creation.
+    //    Poll every 10 ms; typically resolves in < 100 ms.
+    let gpu = loop {
+        if let Some(h) = gpu_handle() {
+            break h.clone();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
 
-            mouse_phys: (0.0, 0.0),
-            modifiers: winit::keyboard::ModifiersState::empty(),
-            pending_events: Vec::new(),
-            ui_revision: None,
+    log::info!("Engine thread: got GpuHandle, initialising engine");
+
+    // Cloning Arc<Device> / Arc<Queue> is cheap.
+    let device = (*gpu.device).clone();
+    let queue  = (*gpu.queue).clone();
+
+    // 2. Create engine via new_with_device.
+    let (mut engine, demo_scene) = EditorEngine::new_with_device(
+        device,
+        queue,
+        DISPLAY_WIDTH,
+        DISPLAY_HEIGHT,
+        Arc::clone(&shared_state),
+    );
+
+    // 3. Register offscreen texture with the RenderSurface.
+    //    TextureView implements Clone, so we can clone the initial view directly.
+    {
+        let (w, h) = engine.viewport_size();
+        if let Some(view) = engine.offscreen_texture_view().cloned() {
+            gpu_registrar.set_texture_source(view, w, h);
         }
     }
 
-    fn scale_factor(&self) -> f64 {
-        self.window.as_ref().map(|w| w.scale_factor()).unwrap_or(1.0)
+    // 4. Store demo scene in editor_state.
+    if let Ok(mut es) = editor_state.lock() {
+        es.v2_scene = Some(demo_scene);
+        es.sync_v2_scene();
+
+        // Seed editor light list from render lights (point/spot only).
+        for rl in &engine.world_lights {
+            use crate::light_editor::{EditorLight, EditorLightType};
+            if rl.light_type == 0 {
+                continue; // Skip directional — driven by environment
+            }
+            let light_type = match rl.light_type {
+                2 => EditorLightType::Spot,
+                _ => EditorLightType::Point,
+            };
+            es.light_editor.add_light_full(EditorLight {
+                id: 0, // overwritten by add_light_full
+                light_type,
+                position: glam::Vec3::new(rl.pos_x, rl.pos_y, rl.pos_z),
+                direction: glam::Vec3::new(rl.dir_x, rl.dir_y, rl.dir_z),
+                color: glam::Vec3::new(rl.color_r, rl.color_g, rl.color_b),
+                intensity: rl.intensity,
+                range: rl.range,
+                spot_inner_angle: rl.inner_angle,
+                spot_outer_angle: rl.outer_angle,
+                cast_shadows: rl.shadow_caster != 0,
+                cookie_path: None,
+            });
+        }
+        es.light_editor.clear_dirty();
     }
 
-    fn logical_mouse(&self) -> (f32, f32) {
-        let sf = self.scale_factor() as f32;
-        (self.mouse_phys.0 / sf, self.mouse_phys.1 / sf)
-    }
+    log::info!("Engine thread: engine ready, entering render loop");
 
-    /// Check if rinch wants mouse input at the current position.
-    fn ui_wants_mouse(&self) -> bool {
-        let (lx, ly) = self.logical_mouse();
-        self.rinch_ctx
-            .as_ref()
-            .is_some_and(|ctx| ctx.wants_mouse(lx, ly))
-    }
+    let mut last_frame = std::time::Instant::now();
+    let mut current_vp = engine.viewport_size();
+    let mut prev_left_down = false;
 
-    /// Check if rinch wants keyboard input (text field focused).
-    fn ui_wants_keyboard(&self) -> bool {
-        self.rinch_ctx
-            .as_ref()
-            .is_some_and(|ctx| ctx.wants_keyboard())
-    }
+    loop {
+        let now = std::time::Instant::now();
+        let dt = now.duration_since(last_frame).as_secs_f32();
+        last_frame = now;
 
-    /// Save the current scene to .rkscene.
-    fn save_scene(&mut self) {
-        let engine = match self.engine.as_ref() {
-            Some(e) => e,
-            None => return,
+        // a. Check viewport size from layout — the compositor updates
+        //    gpu_registrar.layout_size() each frame with the physical pixel
+        //    dimensions of the RenderSurface element in the DOM.
+        let desired_vp = {
+            let (w, h) = gpu_registrar.layout_size();
+            (w.max(64), h.max(64))
         };
+        if desired_vp != current_vp {
+            if let Some(view) = engine.resize_viewport(desired_vp.0, desired_vp.1) {
+                gpu_registrar.set_texture_source(view, desired_vp.0, desired_vp.1);
+                current_vp = desired_vp;
+                log::debug!("Engine: resized to {}x{}", desired_vp.0, desired_vp.1);
 
-        let path = {
-            let es = self.editor_state.lock().unwrap();
-            es.current_scene_path.clone()
-        };
-
-        let path = if let Some(p) = path {
-            p
-        } else {
-            let dialog = rfd::FileDialog::new()
-                .set_title("Save Scene")
-                .add_filter("RKIField Scene", &["rkscene"])
-                .set_file_name("scene.rkscene");
-            match dialog.save_file() {
-                Some(p) => p.to_string_lossy().to_string(),
-                None => return,
-            }
-        };
-
-        match scene_io::save_v2_scene(&engine.scene, &path) {
-            Ok(()) => {
-                log::info!("Scene saved to: {path}");
-                if let Ok(mut es) = self.editor_state.lock() {
-                    es.current_scene_path = Some(path.clone());
-                    es.unsaved_changes.mark_saved();
-                    es.recent_files.add(&path, &engine.scene.name, 0);
-                }
-                if let Some(window) = &self.window {
-                    let name = std::path::Path::new(&path)
-                        .file_stem()
-                        .map(|s| s.to_string_lossy().to_string())
-                        .unwrap_or_else(|| "Untitled".to_string());
-                    window.set_title(&format!("RKIField Editor — {name}"));
-                }
-            }
-            Err(e) => log::error!("Failed to save scene: {e}"),
-        }
-    }
-
-    /// Open a .rkscene file.
-    fn open_scene(&mut self) {
-        let dialog = rfd::FileDialog::new()
-            .set_title("Open Scene")
-            .add_filter("RKIField Scene", &["rkscene"]);
-        let path = match dialog.pick_file() {
-            Some(p) => p.to_string_lossy().to_string(),
-            None => return,
-        };
-
-        let sf = match scene_io::load_v2_scene(&path) {
-            Ok(sf) => sf,
-            Err(e) => {
-                log::error!("Failed to load scene: {e}");
-                return;
-            }
-        };
-
-        let new_scene = scene_io::reconstruct_v2_scene(&sf);
-
-        if let Some(engine) = self.engine.as_mut() {
-            engine.replace_scene(new_scene.clone());
-        }
-
-        if let Ok(mut es) = self.editor_state.lock() {
-            es.v2_scene = Some(new_scene);
-            es.sync_v2_scene();
-            es.current_scene_path = Some(path.clone());
-            es.unsaved_changes.mark_saved();
-            es.recent_files.add(&path, &sf.name, 0);
-        }
-
-        if let Some(rev) = &self.ui_revision {
-            rev.bump();
-        }
-
-        if let Some(window) = &self.window {
-            let name = std::path::Path::new(&path)
-                .file_stem()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| "Untitled".to_string());
-            window.set_title(&format!("RKIField Editor — {name}"));
-        }
-
-        log::info!("Scene loaded from: {path}");
-    }
-}
-
-impl ApplicationHandler for App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_some() {
-            return;
-        }
-
-        let attrs = winit::window::WindowAttributes::default()
-            .with_title("RKIField Editor")
-            .with_inner_size(winit::dpi::PhysicalSize::new(DISPLAY_WIDTH, DISPLAY_HEIGHT))
-            .with_decorations(false)
-            .with_transparent(true);
-        let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
-        self.window = Some(window.clone());
-
-        let size = window.inner_size();
-
-        // Initialize engine (wgpu, all render passes, demo scene).
-        let engine_inst = EditorEngine::new(window.clone(), Arc::clone(&self.shared_state));
-
-        // Sync engine's demo scene into editor state.
-        if let Ok(mut es) = self.editor_state.lock() {
-            es.v2_scene = Some(engine_inst.scene.clone());
-            es.sync_v2_scene();
-
-            // Seed editor light list from render lights (point/spot only —
-            // directional sun is driven by environment, not the light editor).
-            for rl in &engine_inst.world_lights {
-                use crate::light_editor::{EditorLight, EditorLightType};
-                // Skip directional lights (type 0) — sun is environment-only.
-                if rl.light_type == 0 {
-                    continue;
-                }
-                let light_type = match rl.light_type {
-                    2 => EditorLightType::Spot,
-                    _ => EditorLightType::Point,
-                };
-                es.light_editor.add_light_full(EditorLight {
-                    id: 0, // overwritten by add_light_full
-                    light_type,
-                    position: glam::Vec3::new(rl.pos_x, rl.pos_y, rl.pos_z),
-                    direction: glam::Vec3::new(rl.dir_x, rl.dir_y, rl.dir_z),
-                    color: glam::Vec3::new(rl.color_r, rl.color_g, rl.color_b),
-                    intensity: rl.intensity,
-                    range: rl.range,
-                    spot_inner_angle: rl.inner_angle,
-                    spot_outer_angle: rl.outer_angle,
-                    cast_shadows: rl.shadow_caster != 0,
-                    cookie_path: None,
-                });
-            }
-            es.light_editor.clear_dirty();
-        }
-
-        // Set up rinch context sharing — components use use_context to access these.
-        create_context(Arc::clone(&self.editor_state));
-        create_context(Arc::clone(&self.shared_state));
-        let ui_revision = UiRevision::new();
-        create_context(ui_revision);
-        self.ui_revision = Some(ui_revision);
-
-        // Initialize rinch UI context.
-        let rinch_ctx = RinchContext::new(
-            RinchContextConfig {
-                width: size.width,
-                height: size.height,
-                scale_factor: window.scale_factor(),
-                theme: Some(ThemeProviderProps {
-                    dark_mode: true,
-                    primary_color: Some("blue".into()),
-                    ..Default::default()
-                }),
-            },
-            ui::editor_ui,
-        );
-
-        // Initialize overlay renderer (Vello → transparent texture).
-        let overlay_renderer = RinchOverlayRenderer::new(
-            engine_inst.device(),
-            size.width,
-            size.height,
-            wgpu::TextureFormat::Rgba8Unorm,
-        );
-
-        // Initialize overlay blit (premultiplied alpha composite onto swapchain).
-        let overlay_blit_pass = OverlayBlit::new(
-            engine_inst.device(),
-            engine_inst.surface_format(),
-        );
-
-        // Initialize wireframe pass for selection highlighting.
-        let wireframe_pass = wireframe::WireframePass::new(
-            engine_inst.device(),
-            engine_inst.surface_format(),
-        );
-
-        self.engine = Some(engine_inst);
-        self.rinch_ctx = Some(rinch_ctx);
-        self.overlay_renderer = Some(overlay_renderer);
-        self.overlay_blit = Some(overlay_blit_pass);
-        self.wireframe_pass = Some(wireframe_pass);
-
-        // Start IPC server for MCP agent tooling.
-        let api = automation::EditorAutomationApi::new(
-            Arc::clone(&self.shared_state),
-            Arc::clone(&self.editor_state),
-        );
-        let api: Arc<dyn rkf_core::automation::AutomationApi> = Arc::new(api);
-        let (handle, path) = start_ipc_server(&self.rt, api);
-        self._ipc_handle = Some(handle);
-        self.socket_path = Some(path);
-
-        log::info!("RKIField Editor initialized — v2 render pipeline + rinch UI active");
-    }
-
-    fn device_event(
-        &mut self,
-        _event_loop: &ActiveEventLoop,
-        _device_id: winit::event::DeviceId,
-        event: DeviceEvent,
-    ) {
-        // Raw mouse motion for camera rotation (fires even when cursor is at edge).
-        if let DeviceEvent::MouseMotion { delta } = event {
-            // Only process camera delta when UI doesn't want the mouse.
-            if !self.ui_wants_mouse() {
-                if let Ok(mut es) = self.editor_state.lock() {
-                    // Only accumulate delta when right mouse is held (camera rotation).
-                    if es.editor_input.is_mouse_button_down(1) {
-                        es.editor_input.mouse_delta.x += delta.0 as f32;
-                        es.editor_input.mouse_delta.y += delta.1 as f32;
-                    }
+                // Resize recreates all GPU passes with default uniforms.
+                // Mark environment dirty so apply_environment re-pushes
+                // all post-process settings (DOF, bloom, tone map, etc.)
+                // on the next frame.
+                if let Ok(mut es) = editor_state.lock() {
+                    es.environment.mark_dirty();
                 }
             }
         }
-    }
 
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _window_id: WindowId,
-        event: WindowEvent,
-    ) {
-        // Always collect platform events for rinch (hover effects, etc).
-        let platform_events = event_bridge::translate_window_event(&event, self.modifiers);
-        self.pending_events.extend(platform_events);
-
-        match event {
-            WindowEvent::CloseRequested => {
-                if let Some(ref path) = self.socket_path {
-                    cleanup_ipc(path);
-                }
-                event_loop.exit();
+        // b. Drain pending MCP commands from shared_state (lock SS briefly,
+        //    then release before touching editor_state — avoids nested locks).
+        let pending_camera;
+        let pending_debug;
+        {
+            if let Ok(mut ss) = shared_state.lock() {
+                pending_camera = ss.pending_camera.take();
+                pending_debug = ss.pending_debug_mode.take();
+            } else {
+                pending_camera = None;
+                pending_debug = None;
             }
+        }
 
-            WindowEvent::CursorMoved { position, .. } => {
-                self.mouse_phys = (position.x as f32, position.y as f32);
+        // Wireframe data — extracted from editor_state while the lock is held,
+        // used to build wireframe vertices after the lock is released.
+        let mut wf_selected: Option<editor_state::SelectedEntity> = None;
+        let mut wf_gizmo_mode = gizmo::GizmoMode::Translate;
+        let mut wf_hovered_axis = gizmo::GizmoAxis::None;
+        let mut wf_cam_pos = glam::Vec3::ZERO;
+        let mut wf_show_grid = false;
+        let mut wf_mode = editor_state::EditorMode::Default;
+        let mut wf_brush_radius = 1.0f32;
+        let mut gizmo_drag_ended = false;
 
-                // Always update editor input mouse pos (for viewport bounds checking).
-                if let Ok(mut es) = self.editor_state.lock() {
-                    es.editor_input.mouse_pos =
-                        glam::Vec2::new(position.x as f32, position.y as f32);
+        // c. Apply pending commands + per-frame updates to editor_state.
+        {
+            if let Ok(mut es) = editor_state.lock() {
+                // Apply pending MCP camera teleport.
+                if let Some(cam) = pending_camera {
+                    es.editor_camera.position = cam.position;
+                    es.editor_camera.fly_yaw = cam.yaw;
+                    es.editor_camera.fly_pitch = cam.pitch;
+                    let dir = glam::Vec3::new(
+                        -cam.yaw.sin() * cam.pitch.cos(),
+                        cam.pitch.sin(),
+                        -cam.yaw.cos() * cam.pitch.cos(),
+                    );
+                    es.editor_camera.target = es.editor_camera.position
+                        + dir * es.editor_camera.orbit_distance;
                 }
-            }
+                if let Some(mode) = pending_debug {
+                    es.pending_debug_mode = Some(mode);
+                }
 
-            WindowEvent::MouseInput { state, button, .. } => {
-                // Update rinch pending events with actual mouse position.
-                // (translate_window_event uses 0,0 — fix up the last event)
-                if let Some(last) = self.pending_events.last_mut() {
-                    let (px, py) = self.mouse_phys;
-                    match last {
-                        PlatformEvent::MouseDown { x, y, .. }
-                        | PlatformEvent::MouseUp { x, y, .. } => {
-                            *x = px;
-                            *y = py;
+                // Camera fly/orbit update (WASD input wired in Step 3).
+                es.update_camera(dt);
+
+                // Sync editor camera → render camera.
+                engine.sync_camera(&es.editor_camera);
+
+                // Apply pending debug mode.
+                if let Some(mode) = es.pending_debug_mode.take() {
+                    es.debug_mode = mode;
+                    engine.set_debug_mode(mode);
+                }
+
+                // d. Apply environment settings.
+                engine.apply_environment(&mut es.environment);
+
+                // e. Sync editor lights → render lights when dirty.
+                if es.light_editor.is_dirty() {
+                    engine.world_lights = es.light_editor.all_lights().iter().map(|el| {
+                        use crate::light_editor::EditorLightType;
+                        rkf_render::Light {
+                            light_type: match el.light_type {
+                                EditorLightType::Point => 1,
+                                EditorLightType::Spot => 2,
+                            },
+                            pos_x: el.position.x,
+                            pos_y: el.position.y,
+                            pos_z: el.position.z,
+                            dir_x: el.direction.x,
+                            dir_y: el.direction.y,
+                            dir_z: el.direction.z,
+                            color_r: el.color.x,
+                            color_g: el.color.y,
+                            color_b: el.color.z,
+                            intensity: el.intensity,
+                            range: el.range,
+                            inner_angle: el.spot_inner_angle,
+                            outer_angle: el.spot_outer_angle,
+                            cookie_index: -1,
+                            shadow_caster: el.cast_shadows as u32,
                         }
-                        _ => {}
+                    }).collect();
+                    es.light_editor.clear_dirty();
+                }
+
+                // f. Recompute AABBs from current transforms each frame.
+                if let Some(ref mut scene) = es.v2_scene {
+                    for obj in &mut scene.objects {
+                        obj.aabb = placement::compute_object_local_aabb(obj);
                     }
                 }
 
-                let wants_ui = self.ui_wants_mouse();
+                // g-gizmo. Gizmo mode switching + drag interaction.
+                {
+                    // Mode switching: G=Translate, R=Rotate, T/L=Scale.
+                    if es.editor_input.keys_just_pressed.contains(&input::KeyCode::G)
+                        && es.mode == editor_state::EditorMode::Default
+                    {
+                        es.gizmo.mode = gizmo::GizmoMode::Translate;
+                    }
+                    if es.editor_input.keys_just_pressed.contains(&input::KeyCode::R)
+                        && es.mode == editor_state::EditorMode::Default
+                    {
+                        es.gizmo.mode = gizmo::GizmoMode::Rotate;
+                    }
+                    if es.editor_input.keys_just_pressed.contains(&input::KeyCode::L)
+                        && es.mode == editor_state::EditorMode::Default
+                    {
+                        es.gizmo.mode = gizmo::GizmoMode::Scale;
+                    }
 
-                // Only route to engine if UI doesn't want the click.
-                if !wants_ui {
-                    let mut should_bump_revision = false;
+                    let left_down = es.editor_input.mouse_buttons[0];
+                    let right_down = es.editor_input.mouse_buttons[1];
+                    let left_just_pressed = left_down && !prev_left_down;
+                    let left_just_released = !left_down && prev_left_down;
 
-                    if let Ok(mut es) = self.editor_state.lock() {
-                        let idx = match button {
-                            MouseButton::Left => 0,
-                            MouseButton::Right => 1,
-                            MouseButton::Middle => 2,
-                            _ => return,
-                        };
-                        es.editor_input.mouse_buttons[idx] = state == ElementState::Pressed;
-
-                        // Left-click release in viewport → ray-pick to select object.
-                        if idx == 0 && state == ElementState::Released {
-                            let viewport = self.rinch_ctx.as_ref().and_then(|ctx| {
-                                ctx.viewport_rect("main").map(|r| {
-                                    let sf = self.scale_factor() as f32;
-                                    (r.x * sf, r.y * sf, r.width * sf, r.height * sf)
-                                })
+                    // Hover detection: update hovered_axis each frame when not dragging.
+                    if !es.gizmo.dragging {
+                        if let Some(editor_state::SelectedEntity::Object(eid)) = es.selected_entity {
+                            let gc = es.v2_scene.as_ref().and_then(|scene| {
+                                let obj = scene.objects.iter().find(|o| o.id as u64 == eid)?;
+                                let (lmin, lmax) = wireframe::compute_node_tree_aabb(
+                                    &obj.root_node, glam::Mat4::IDENTITY,
+                                )?;
+                                Some(obj.position + obj.rotation * ((lmin + lmax) * 0.5 * obj.scale))
                             });
-                            if let Some((vp_x, vp_y, vp_w, vp_h)) = viewport {
-                                let (mx, my) = self.mouse_phys;
-                                let px = mx - vp_x;
-                                let py = my - vp_y;
-                                if px >= 0.0 && py >= 0.0 && px < vp_w && py < vp_h {
-                                    if let Some(entity_id) =
-                                        es.pick_object(px, py, vp_w, vp_h)
-                                    {
-                                        es.selected_entity = Some(
-                                            editor_state::SelectedEntity::Object(entity_id),
-                                        );
-                                    } else {
-                                        es.selected_entity = None;
-                                    }
-                                    should_bump_revision = true;
+                            if let Some(gc) = gc {
+                                let cam_dist = (gc - es.editor_camera.position).length();
+                                let gizmo_size = cam_dist * 0.12;
+                                let (ray_o, ray_d) = camera::screen_to_ray(
+                                    &es.editor_camera,
+                                    es.editor_input.mouse_pos.x,
+                                    es.editor_input.mouse_pos.y,
+                                    current_vp.0 as f32,
+                                    current_vp.1 as f32,
+                                );
+                                es.gizmo.hovered_axis = gizmo::pick_gizmo_axis_for_mode(
+                                    ray_o, ray_d, gc, gizmo_size, es.gizmo.mode,
+                                );
+                            } else {
+                                es.gizmo.hovered_axis = gizmo::GizmoAxis::None;
+                            }
+                        } else {
+                            es.gizmo.hovered_axis = gizmo::GizmoAxis::None;
+                        }
+                    }
+
+                    // Drag start: left-click in Default mode with an object selected.
+                    if left_just_pressed
+                        && !right_down
+                        && es.mode == editor_state::EditorMode::Default
+                        && !es.gizmo.dragging
+                    {
+                        if let Some(editor_state::SelectedEntity::Object(eid)) = es.selected_entity {
+                            // Compute gizmo center from selected object's AABB.
+                            let gc = es.v2_scene.as_ref().and_then(|scene| {
+                                let obj = scene.objects.iter().find(|o| o.id as u64 == eid)?;
+                                let (lmin, lmax) = wireframe::compute_node_tree_aabb(
+                                    &obj.root_node, glam::Mat4::IDENTITY,
+                                )?;
+                                let center = obj.position
+                                    + obj.rotation * ((lmin + lmax) * 0.5 * obj.scale);
+                                Some((center, obj.position, obj.rotation, obj.scale))
+                            });
+
+                            if let Some((gc, obj_pos, obj_rot, obj_scale)) = gc {
+                                let cam_dist = (gc - es.editor_camera.position).length();
+                                let gizmo_size = cam_dist * 0.12;
+                                let (ray_o, ray_d) = camera::screen_to_ray(
+                                    &es.editor_camera,
+                                    es.editor_input.mouse_pos.x,
+                                    es.editor_input.mouse_pos.y,
+                                    current_vp.0 as f32,
+                                    current_vp.1 as f32,
+                                );
+                                let axis = gizmo::pick_gizmo_axis_for_mode(
+                                    ray_o, ray_d, gc, gizmo_size, es.gizmo.mode,
+                                );
+                                if axis != gizmo::GizmoAxis::None {
+                                    let start_point = match es.gizmo.mode {
+                                        gizmo::GizmoMode::Translate | gizmo::GizmoMode::Scale => {
+                                            if axis == gizmo::GizmoAxis::View {
+                                                let vn = (es.editor_camera.position - gc).normalize();
+                                                gizmo::project_to_plane(ray_o, ray_d, gc, vn)
+                                                    .unwrap_or(gc)
+                                            } else {
+                                                let t = gizmo::ray_axis_closest_point(
+                                                    ray_o, ray_d, gc, axis.direction(),
+                                                );
+                                                gc + axis.direction() * t
+                                            }
+                                        }
+                                        gizmo::GizmoMode::Rotate => {
+                                            gizmo::project_to_plane(
+                                                ray_o, ray_d, gc, axis.plane_normal(),
+                                            )
+                                            .unwrap_or(gc)
+                                        }
+                                    };
+                                    let view_normal =
+                                        (es.editor_camera.position - gc).normalize();
+                                    es.gizmo.begin_drag(
+                                        axis,
+                                        start_point,
+                                        obj_pos,
+                                        obj_rot,
+                                        obj_scale,
+                                        view_normal,
+                                    );
+                                    es.gizmo.pivot = gc;
                                 }
                             }
                         }
+                    }
 
-                        // Hide cursor when right-mouse is held (fly/orbit rotation).
-                        if idx == 1 {
-                            if let Some(window) = &self.window {
-                                let _ = window.set_cursor_visible(state != ElementState::Pressed);
+                    // Drag continue: update object transform from ray projection.
+                    if es.gizmo.dragging && !left_just_released {
+                        if let Some(editor_state::SelectedEntity::Object(eid)) = es.selected_entity
+                        {
+                            let (ray_o, ray_d) = camera::screen_to_ray(
+                                &es.editor_camera,
+                                es.editor_input.mouse_pos.x,
+                                es.editor_input.mouse_pos.y,
+                                current_vp.0 as f32,
+                                current_vp.1 as f32,
+                            );
+                            let gizmo_mode = es.gizmo.mode;
+                            let pivot = es.gizmo.pivot;
+                            let initial_pos = es.gizmo.initial_position;
+                            let initial_rot = es.gizmo.initial_rotation;
+                            let initial_scale = es.gizmo.initial_scale;
+
+                            let (new_pos, new_rot, new_scale) = match gizmo_mode {
+                                gizmo::GizmoMode::Translate => {
+                                    let delta =
+                                        gizmo::compute_translate_delta(&es.gizmo, ray_o, ray_d);
+                                    (
+                                        initial_pos + delta,
+                                        initial_rot,
+                                        initial_scale,
+                                    )
+                                }
+                                gizmo::GizmoMode::Rotate => {
+                                    let rot_delta = gizmo::compute_rotate_delta(
+                                        &es.gizmo, ray_o, ray_d, pivot,
+                                    );
+                                    let new_rot = rot_delta * initial_rot;
+                                    let offset = initial_pos - pivot;
+                                    let new_pos = pivot + rot_delta * offset;
+                                    (new_pos, new_rot, initial_scale)
+                                }
+                                gizmo::GizmoMode::Scale => {
+                                    let scale_delta =
+                                        gizmo::compute_scale_delta(&es.gizmo, ray_o, ray_d);
+                                    // Per-axis: multiply initial scale by delta per-component.
+                                    (initial_pos, initial_rot, initial_scale * scale_delta)
+                                }
+                            };
+
+                            if let Some(ref mut scene) = es.v2_scene {
+                                if let Some(obj) =
+                                    scene.objects.iter_mut().find(|o| o.id as u64 == eid)
+                                {
+                                    obj.position = new_pos;
+                                    obj.rotation = new_rot;
+                                    obj.scale = new_scale;
+                                }
                             }
                         }
                     }
-                    // Lock released — now safe to bump revision (triggers reactive
-                    // Effects that re-lock editor_state for reading).
-                    if should_bump_revision {
-                        if let Some(rev) = &self.ui_revision {
-                            rev.bump();
+
+                    // Drag end: push undo action and end the drag.
+                    if left_just_released && es.gizmo.dragging {
+                        if let Some(editor_state::SelectedEntity::Object(eid)) = es.selected_entity
+                        {
+                            // Read current (final) transform from scene.
+                            let final_transform = es.v2_scene.as_ref().and_then(|scene| {
+                                let obj = scene.objects.iter().find(|o| o.id as u64 == eid)?;
+                                Some((obj.position, obj.rotation, obj.scale))
+                            });
+
+                            if let Some((new_pos, new_rot, new_scale)) = final_transform {
+                                let desc = match es.gizmo.mode {
+                                    gizmo::GizmoMode::Translate => "Move object",
+                                    gizmo::GizmoMode::Rotate => "Rotate object",
+                                    gizmo::GizmoMode::Scale => "Scale object",
+                                };
+                                let old_pos = es.gizmo.initial_position;
+                                let old_rot = es.gizmo.initial_rotation;
+                                let old_scale = es.gizmo.initial_scale;
+                                es.undo.push(undo::UndoAction {
+                                    kind: undo::UndoActionKind::Transform {
+                                        entity_id: eid,
+                                        old_pos,
+                                        old_rot,
+                                        old_scale,
+                                        new_pos,
+                                        new_rot,
+                                        new_scale,
+                                    },
+                                    timestamp_ms: 0,
+                                    description: desc.to_string(),
+                                });
+                            }
+                        }
+                        es.gizmo.end_drag();
+                        gizmo_drag_ended = true;
+                    }
+
+                    prev_left_down = left_down;
+                }
+
+                // Extract wireframe data while we hold the lock.
+                wf_selected = es.selected_entity;
+                wf_gizmo_mode = es.gizmo.mode;
+                wf_hovered_axis = if es.gizmo.dragging {
+                    es.gizmo.active_axis
+                } else {
+                    es.gizmo.hovered_axis
+                };
+                wf_cam_pos = es.editor_camera.position;
+                wf_show_grid = es.show_grid;
+                wf_mode = es.mode;
+                wf_brush_radius = match es.mode {
+                    editor_state::EditorMode::Sculpt => es.sculpt.current_settings.radius,
+                    editor_state::EditorMode::Paint => es.paint.current_settings.radius,
+                    _ => 1.0,
+                };
+
+                // Reset per-frame input deltas.
+                es.reset_frame_deltas();
+            }
+        }
+
+        // Notify UI of gizmo transform changes (after editor_state lock released).
+        if gizmo_drag_ended {
+            if let Ok(mut ss) = shared_state.lock() {
+                ss.ui_revision_needed = true;
+            }
+        }
+
+        // g-revox. Process pending re-voxelize request (must happen before scene clone).
+        {
+            let revox_id = editor_state.lock().ok()
+                .and_then(|mut es| es.pending_revoxelize.take());
+            if let Some(obj_id) = revox_id {
+                if let Ok(mut es) = editor_state.lock() {
+                    if let Some(ref mut scene) = es.v2_scene {
+                        engine.process_revoxelize(scene, obj_id);
+                    }
+                    es.sync_v2_scene();
+                }
+            }
+        }
+
+        // g. Clone v2_scene for render — character animation mutates bone
+        //    transforms on the clone, discarded after render.
+        let mut render_scene = editor_state.lock()
+            .ok()
+            .and_then(|es| es.v2_scene.clone())
+            .unwrap_or_else(|| rkf_core::Scene::new("empty"));
+
+        // h. Advance character animation on the render clone.
+        engine.advance_character(&mut render_scene);
+
+        // i. Render frame to offscreen texture.
+        engine.render_frame_offscreen(&render_scene);
+
+        // i-wf. Build and draw wireframe overlays (selection, gizmos, grid).
+        {
+            let mut wf_verts: Vec<wireframe::LineVertex> = Vec::new();
+
+            // Light gizmo for selected light.
+            if let Some(editor_state::SelectedEntity::Light(lid)) = wf_selected {
+                if let Ok(es) = editor_state.lock() {
+                    if let Some(light) = es.light_editor.get_light(lid) {
+                        let lc = [1.0, 0.9, 0.5, 1.0];
+                        match light.light_type {
+                            light_editor::EditorLightType::Point => {
+                                wf_verts.extend(wireframe::point_light_wireframe(
+                                    light.position, light.range, lc,
+                                ));
+                            }
+                            light_editor::EditorLightType::Spot => {
+                                wf_verts.extend(wireframe::spot_light_wireframe(
+                                    light.position, light.direction,
+                                    light.range, light.spot_outer_angle, lc,
+                                ));
+                            }
                         }
                     }
                 }
             }
 
-            WindowEvent::MouseWheel { delta, .. } => {
-                // Fix up mouse position in pending events.
-                if let Some(last) = self.pending_events.last_mut() {
-                    let (px, py) = self.mouse_phys;
-                    if let PlatformEvent::MouseWheel { x, y, .. } = last {
-                        *x = px;
-                        *y = py;
+            // Selection AABB + transform gizmo for selected objects.
+            if let Some(editor_state::SelectedEntity::Object(eid)) = wf_selected {
+                let color = [0.3, 0.7, 1.0, 1.0]; // Light blue
+                let mut gizmo_center: Option<glam::Vec3> = None;
+
+                for obj in &render_scene.objects {
+                    let obj_id = obj.id as u64;
+                    let root_world = glam::Mat4::from_scale_rotation_translation(
+                        obj.scale,
+                        obj.rotation,
+                        obj.position,
+                    );
+
+                    if eid == obj_id {
+                        // Root object selected: OBB follows object rotation.
+                        if let Some((lmin, lmax)) =
+                            wireframe::compute_node_tree_aabb(&obj.root_node, glam::Mat4::IDENTITY)
+                        {
+                            wf_verts.extend(wireframe::obb_wireframe(
+                                lmin, lmax, obj.position, obj.rotation, obj.scale, color,
+                            ));
+                            let center = obj.position + obj.rotation * ((lmin + lmax) * 0.5 * obj.scale);
+                            gizmo_center = Some(center);
+                        }
+                    } else if let Some((child_node, child_world)) =
+                        wireframe::find_child_node_and_transform(
+                            eid, obj_id, &obj.root_node, root_world,
+                        )
+                    {
+                        // Child node selected: compute local AABB, draw as OBB
+                        // using the accumulated parent transform.
+                        if let Some((lmin, lmax)) =
+                            wireframe::compute_node_tree_aabb(child_node, glam::Mat4::IDENTITY)
+                        {
+                            let (child_scale, child_rot, child_pos) =
+                                child_world.to_scale_rotation_translation();
+                            wf_verts.extend(wireframe::obb_wireframe(
+                                lmin, lmax, child_pos, child_rot, child_scale, color,
+                            ));
+                            let center = child_pos + child_rot * ((lmin + lmax) * 0.5 * child_scale);
+                            gizmo_center = Some(center);
+                        }
                     }
                 }
 
-                let wants_ui = self.ui_wants_mouse();
-
-                // Only route scroll to engine if UI doesn't want it.
-                if !wants_ui {
-                    if let Ok(mut es) = self.editor_state.lock() {
-                        let scroll = match delta {
-                            winit::event::MouseScrollDelta::LineDelta(_, y) => y,
-                            winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 / 120.0,
-                        };
-                        es.editor_input.scroll_delta += scroll;
+                // Transform gizmo at the center of the selected object.
+                if let Some(gc) = gizmo_center {
+                    let cam_dist = (gc - wf_cam_pos).length();
+                    let gizmo_size = cam_dist * 0.12;
+                    match wf_gizmo_mode {
+                        gizmo::GizmoMode::Translate => {
+                            wf_verts.extend(wireframe::translate_gizmo_wireframe(
+                                gc, gizmo_size, wf_hovered_axis, wf_cam_pos,
+                            ));
+                        }
+                        gizmo::GizmoMode::Rotate => {
+                            wf_verts.extend(wireframe::rotate_gizmo_wireframe(
+                                gc, gizmo_size, wf_hovered_axis, wf_cam_pos,
+                            ));
+                        }
+                        gizmo::GizmoMode::Scale => {
+                            wf_verts.extend(wireframe::scale_gizmo_wireframe(
+                                gc, gizmo_size, wf_hovered_axis, wf_cam_pos,
+                            ));
+                        }
                     }
                 }
             }
 
-            WindowEvent::KeyboardInput { event, .. } => {
-                if let PhysicalKey::Code(key) = event.physical_key {
-                    // Escape deselects the current selection (if any).
-                    if key == WinitKeyCode::Escape && event.state == ElementState::Pressed {
-                        if let Ok(mut es) = self.editor_state.lock() {
-                            es.selected_entity = None;
-                        }
-                        if let Some(rev) = &self.ui_revision {
-                            rev.bump();
-                        }
-                        return;
-                    }
+            // Ground grid overlay.
+            if wf_show_grid {
+                wf_verts.extend(wireframe::ground_grid_wireframe(
+                    wf_cam_pos,
+                    40.0,
+                    1.0,
+                    [0.3, 0.3, 0.3, 0.4],
+                ));
+            }
 
-                    // Ctrl+S: Save scene, Ctrl+O: Open scene, Ctrl+D: Duplicate.
-                    if event.state == ElementState::Pressed && self.modifiers.control_key() {
-                        match key {
-                            WinitKeyCode::KeyS => {
-                                self.save_scene();
-                                return;
-                            }
-                            WinitKeyCode::KeyO => {
-                                self.open_scene();
-                                return;
-                            }
-                            WinitKeyCode::KeyD => {
-                                if let Ok(mut es) = self.editor_state.lock() {
-                                    es.pending_duplicate = true;
+            // Brush preview sphere in Sculpt/Paint modes.
+            if matches!(wf_mode, editor_state::EditorMode::Sculpt | editor_state::EditorMode::Paint) {
+                let brush_pos = shared_state.lock().ok()
+                    .and_then(|s| s.brush_preview_pos);
+                if let Some(pos) = brush_pos {
+                    let brush_color = match wf_mode {
+                        editor_state::EditorMode::Sculpt => [0.0, 1.0, 1.0, 0.8], // Cyan
+                        editor_state::EditorMode::Paint  => [1.0, 0.8, 0.0, 0.8], // Yellow
+                        _ => [1.0, 1.0, 1.0, 0.8],
+                    };
+                    wf_verts.extend(wireframe::sphere_wireframe(
+                        pos, wf_brush_radius, brush_color,
+                    ));
+                }
+            }
+
+            engine.draw_wireframe(&wf_verts);
+        }
+
+        // i2. Tell the compositor that new content is ready so it repaints.
+        gpu_registrar.notify_frame_ready();
+
+        // j. Update shared_state for MCP observation.
+        //    Read camera snapshot from editor_state first, then write to shared_state.
+        //    Never hold both locks simultaneously.
+        let cam_snapshot = editor_state.lock().ok().map(|es| {
+            (es.editor_camera.position, es.editor_camera.fly_yaw,
+             es.editor_camera.fly_pitch, es.editor_camera.fov_y.to_degrees())
+        });
+        if let Some((pos, yaw, pitch, fov)) = cam_snapshot {
+            if let Ok(mut ss) = shared_state.lock() {
+                ss.camera_position = pos;
+                ss.camera_yaw = yaw;
+                ss.camera_pitch = pitch;
+                ss.camera_fov = fov;
+                ss.frame_time_ms = dt as f64 * 1000.0;
+                ss.frame_width = current_vp.0;
+                ss.frame_height = current_vp.1;
+            }
+        }
+
+        // k. Screenshot readback and GPU pick are handled inside render_frame_offscreen,
+        //    which reads shared_state.screenshot_requested and shared_state.pending_pick
+        //    directly, writing results back to shared_state before returning.
+
+        // l. Process GPU pick result (fulfilled each frame by render_frame_offscreen).
+        //    Sets selected_entity immediately; UI notification (rev.bump()) happens
+        //    on the main thread when it detects pick_completed in the event handler.
+        {
+            let pick = shared_state.lock().ok()
+                .and_then(|mut ss| ss.pick_result.take());
+            if let Some(object_id) = pick {
+                if let Ok(mut es) = editor_state.lock() {
+                    if object_id > 0 {
+                        es.selected_entity = Some(
+                            editor_state::SelectedEntity::Object(object_id as u64),
+                        );
+                    } else {
+                        es.selected_entity = None;
+                    }
+                }
+                // Signal the main thread to bump UiRevision.
+                if let Ok(mut ss) = shared_state.lock() {
+                    ss.pick_completed = true;
+                }
+            }
+        }
+
+        // l2. Process GPU brush hit result — drive sculpt/paint stroke lifecycle.
+        {
+            let brush_hit = shared_state.lock().ok()
+                .and_then(|mut ss| ss.brush_hit_result.take());
+            if let Some(hit) = brush_hit {
+                // Read left-mouse state and mode from editor_state (brief lock).
+                let (left_down, mode) = editor_state.lock().ok()
+                    .map(|es| (es.editor_input.mouse_buttons[0], es.mode))
+                    .unwrap_or((false, editor_state::EditorMode::Default));
+
+                if left_down {
+                    if let Ok(mut es) = editor_state.lock() {
+                        match mode {
+                            editor_state::EditorMode::Sculpt => {
+                                if es.sculpt.active_stroke.is_some() {
+                                    es.sculpt.continue_stroke(hit.position);
+                                } else {
+                                    es.sculpt.begin_stroke(hit.position);
                                 }
-                                if let Some(rev) = &self.ui_revision {
-                                    rev.bump();
+                            }
+                            editor_state::EditorMode::Paint => {
+                                if es.paint.active_stroke.is_some() {
+                                    es.paint.continue_stroke(hit.position);
+                                } else {
+                                    es.paint.begin_stroke(hit.position);
                                 }
-                                return;
                             }
                             _ => {}
                         }
                     }
+                }
 
-                    // Delete key: remove selected object.
-                    if event.state == ElementState::Pressed && key == WinitKeyCode::Delete {
-                        if let Ok(mut es) = self.editor_state.lock() {
-                            es.pending_delete = true;
-                        }
-                        if let Some(rev) = &self.ui_revision {
-                            rev.bump();
-                        }
-                        return;
-                    }
+                // Update brush preview position for wireframe sphere.
+                if let Ok(mut ss) = shared_state.lock() {
+                    ss.brush_preview_pos = Some(hit.position);
+                }
+            } else {
+                // No brush hit this frame — end active strokes if mouse released.
+                let (left_down, mode) = editor_state.lock().ok()
+                    .map(|es| (es.editor_input.mouse_buttons[0], es.mode))
+                    .unwrap_or((false, editor_state::EditorMode::Default));
 
-                    // Tool toggle via S (Sculpt) / P (Paint).
-                    // Pressing the key for the active tool deactivates it.
-                    if event.state == ElementState::Pressed
-                        && !self.modifiers.control_key()
-                    {
-                        let toggle = match key {
-                            WinitKeyCode::KeyB => Some(EditorMode::Sculpt),
-                            WinitKeyCode::KeyN => Some(EditorMode::Paint),
-                            _ => None,
-                        };
-                        if let Some(mode) = toggle {
-                            if let Ok(mut es) = self.editor_state.lock() {
-                                if es.mode == mode {
-                                    es.mode = EditorMode::Default;
-                                } else {
-                                    es.mode = mode;
-                                }
-                            }
-                            if let Some(rev) = &self.ui_revision {
-                                rev.bump();
-                            }
-                            return;
-                        }
-
-                        // W/E/R: switch gizmo mode (Translate/Rotate/Scale).
-                        // Only when not using right mouse (camera fly/orbit).
-                        {
-                            let right_mouse_held = self.editor_state.lock()
-                                .map(|es| es.editor_input.is_mouse_button_down(1))
-                                .unwrap_or(false);
-                            if !right_mouse_held {
-                                let gizmo_mode = match key {
-                                    WinitKeyCode::KeyW => Some(gizmo::GizmoMode::Translate),
-                                    WinitKeyCode::KeyE => Some(gizmo::GizmoMode::Rotate),
-                                    WinitKeyCode::KeyR => Some(gizmo::GizmoMode::Scale),
-                                    _ => None,
-                                };
-                                if let Some(mode) = gizmo_mode {
-                                    if let Ok(mut es) = self.editor_state.lock() {
-                                        es.gizmo.mode = mode;
-                                    }
-                                    if let Some(rev) = &self.ui_revision {
-                                        rev.bump();
-                                    }
-                                    return;
-                                }
-                            }
-                        }
-
-                        // G: toggle grid overlay.
-                        if key == WinitKeyCode::KeyG {
-                            let right_mouse_held = self.editor_state.lock()
-                                .map(|es| es.editor_input.is_mouse_button_down(1))
-                                .unwrap_or(false);
-                            if !right_mouse_held {
-                                if let Ok(mut es) = self.editor_state.lock() {
-                                    es.show_grid = !es.show_grid;
-                                }
-                                if let Some(rev) = &self.ui_revision {
-                                    rev.bump();
-                                }
-                                return;
-                            }
-                        }
-
-                        // F1: toggle shortcut reference.
-                        if key == WinitKeyCode::F1 {
-                            if let Ok(mut es) = self.editor_state.lock() {
-                                es.show_shortcuts = !es.show_shortcuts;
-                            }
-                            if let Some(rev) = &self.ui_revision {
-                                rev.bump();
-                            }
-                            return;
-                        }
-
-                        // F3: cycle debug visualization mode (0-6).
-                        if key == WinitKeyCode::F3 {
-                            if let Ok(mut es) = self.editor_state.lock() {
-                                let next = (es.debug_mode + 1) % 7;
-                                es.debug_mode = next;
-                                es.pending_debug_mode = Some(next);
-                            }
-                            if let Some(rev) = &self.ui_revision {
-                                rev.bump();
-                            }
-                            return;
+                if !left_down && matches!(mode, editor_state::EditorMode::Sculpt | editor_state::EditorMode::Paint) {
+                    if let Ok(mut es) = editor_state.lock() {
+                        match mode {
+                            editor_state::EditorMode::Sculpt => es.sculpt.end_stroke(),
+                            editor_state::EditorMode::Paint => es.paint.end_stroke(),
+                            _ => {}
                         }
                     }
+                }
 
-                    let wants_kb = self.ui_wants_keyboard();
-
-                    // Only route to engine when UI doesn't want keyboard.
-                    if !wants_kb {
-                        if let Some(ek) = translate_key(key) {
-                            if let Ok(mut es) = self.editor_state.lock() {
-                                match event.state {
-                                    ElementState::Pressed => {
-                                        es.editor_input.keys_pressed.insert(ek);
-                                    }
-                                    ElementState::Released => {
-                                        es.editor_input.keys_pressed.remove(&ek);
-                                    }
-                                }
-                            }
-                        }
+                // Clear brush preview when hovering over sky (no hit).
+                if matches!(mode, editor_state::EditorMode::Sculpt | editor_state::EditorMode::Paint) {
+                    // Only clear if we're actively in brush mode but got no hit.
+                    // Keep the last position if there's no pending request.
+                    let had_pending = shared_state.lock().ok()
+                        .map(|s| s.pending_brush_hit.is_some())
+                        .unwrap_or(false);
+                    if !had_pending {
+                        // No pending request means no mouse movement this frame — keep preview.
                     }
                 }
             }
+        }
 
-            WindowEvent::ModifiersChanged(modifiers) => {
-                self.modifiers = modifiers.state();
-                if let Ok(mut es) = self.editor_state.lock() {
-                    let m = modifiers.state();
-                    es.editor_input.modifiers.shift = m.shift_key();
-                    es.editor_input.modifiers.ctrl = m.control_key();
-                    es.editor_input.modifiers.alt = m.alt_key();
-                }
-            }
-
-            WindowEvent::Resized(size) => {
-                if let Some(engine) = self.engine.as_mut() {
-                    engine.resize(size.width, size.height);
-                }
-                if let Some(ctx) = self.rinch_ctx.as_mut() {
-                    ctx.resize(size.width, size.height);
-                }
-                if let Some(overlay) = self.overlay_renderer.as_mut() {
-                    if let Some(engine) = self.engine.as_ref() {
-                        overlay.resize(engine.device(), size.width, size.height);
-                    }
-                }
-            }
-
-            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                if let Some(ctx) = self.rinch_ctx.as_mut() {
-                    ctx.set_scale_factor(scale_factor);
-                }
-            }
-
-            WindowEvent::RedrawRequested => {
-                let now = Instant::now();
-                let dt = now.duration_since(self.last_frame).as_secs_f32();
-                self.last_frame = now;
-
-                // 1. Update rinch UI with collected platform events.
-                //    Collapse consecutive MouseMove events — during slider drags
-                //    the mouse can generate many moves per frame. Rinch only needs
-                //    the latest position; intermediate moves waste 10-15 ms each.
-                let raw_events: Vec<_> = self.pending_events.drain(..).collect();
-                let events: Vec<_> = {
-                    let mut out = Vec::with_capacity(raw_events.len());
-                    for evt in raw_events {
-                        if matches!(&evt, PlatformEvent::MouseMove { .. }) {
-                            if matches!(out.last(), Some(PlatformEvent::MouseMove { .. })) {
-                                *out.last_mut().unwrap() = evt;
-                                continue;
-                            }
-                        }
-                        out.push(evt);
-                    }
-                    out
-                };
-                if let Some(ctx) = self.rinch_ctx.as_mut() {
-                    ctx.update(&events);
-                }
-
-                // 1b. Consume pending menu commands (set by rinch menu callbacks).
-                {
-                    let (do_open, do_save, do_save_as, do_exit, do_drag, do_min, do_max) = {
-                        if let Ok(mut es) = self.editor_state.lock() {
-                            let o = std::mem::replace(&mut es.pending_open, false);
-                            let s = std::mem::replace(&mut es.pending_save, false);
-                            let sa = std::mem::replace(&mut es.pending_save_as, false);
-                            let e = std::mem::replace(&mut es.wants_exit, false);
-                            let dr = std::mem::replace(&mut es.pending_drag, false);
-                            let mn = std::mem::replace(&mut es.pending_minimize, false);
-                            let mx = std::mem::replace(&mut es.pending_maximize, false);
-                            (o, s, sa, e, dr, mn, mx)
-                        } else {
-                            (false, false, false, false, false, false, false)
-                        }
-                    };
-                    if do_exit {
-                        if let Some(ref path) = self.socket_path {
-                            cleanup_ipc(path);
-                        }
-                        event_loop.exit();
-                        return;
-                    }
-                    if do_open {
-                        self.open_scene();
-                    }
-                    if do_save_as {
-                        // Force Save As: temporarily clear current_scene_path so
-                        // save_scene() always shows the file dialog.
-                        let prev = self.editor_state.lock().ok()
-                            .and_then(|mut es| es.current_scene_path.take());
-                        self.save_scene();
-                        // If save was cancelled, restore the old path.
-                        if let (Some(prev_path), Ok(mut es)) = (prev, self.editor_state.lock()) {
-                            if es.current_scene_path.is_none() {
-                                es.current_scene_path = Some(prev_path);
-                            }
-                        }
-                    } else if do_save {
-                        self.save_scene();
-                    }
-                    // Window management commands.
-                    if do_drag {
-                        if let Some(window) = &self.window {
-                            let _ = window.drag_window();
-                        }
-                    }
-                    if do_min {
-                        if let Some(window) = &self.window {
-                            window.set_minimized(true);
-                        }
-                    }
-                    if do_max {
-                        if let Some(window) = &self.window {
-                            window.set_maximized(!window.is_maximized());
-                        }
-                    }
-                }
-
-                // 2. Query viewport rect from rinch layout (logical pixels → physical).
-                // Currently only used for input routing (ray-pick); rendering uses
-                // full-window blit with rinch overlay masking non-viewport areas.
-                let _viewport = self.rinch_ctx.as_ref().and_then(|ctx| {
-                    ctx.viewport_rect("main").map(|rect| {
-                        let sf = self.scale_factor() as f32;
-                        (rect.x * sf, rect.y * sf, rect.width * sf, rect.height * sf)
-                    })
-                });
-
-                // 3. Resize render resolution to match full window.
-                // The engine blits to the entire swapchain (not a sub-region)
-                // and the rinch overlay paints opaque panels over non-viewport
-                // areas. This avoids sub-pixel alignment gaps.
-                if let Some(window) = self.window.as_ref() {
-                    let ws = window.inner_size();
-                    if let Some(engine) = self.engine.as_mut() {
-                        engine.resize_render(ws.width.max(64), ws.height.max(64));
-                    }
-                }
-
-                // 4. Lock editor state, update camera from input.
-                if let Ok(mut es) = self.editor_state.lock() {
-                    // Apply pending MCP commands.
-                    if let Ok(mut ss) = self.shared_state.lock() {
-                        if let Some(cam) = ss.pending_camera.take() {
-                            es.editor_camera.position = cam.position;
-                            es.editor_camera.fly_yaw = cam.yaw;
-                            es.editor_camera.fly_pitch = cam.pitch;
-                            let dir = glam::Vec3::new(
-                                -cam.yaw.sin() * cam.pitch.cos(),
-                                cam.pitch.sin(),
-                                -cam.yaw.cos() * cam.pitch.cos(),
-                            );
-                            es.editor_camera.target = es.editor_camera.position
-                                + dir * es.editor_camera.orbit_distance;
-                        }
-                        if let Some(mode) = ss.pending_debug_mode.take() {
-                            es.pending_debug_mode = Some(mode);
-                        }
-                    }
-
-                    // Update camera from input state.
-                    es.update_camera(dt);
-
-                    // Sync editor camera → render camera + apply pending debug mode.
-                    if let Some(engine) = self.engine.as_mut() {
-                        engine.sync_camera(&es.editor_camera);
-
-                        if let Some(mode) = es.pending_debug_mode.take() {
-                            es.debug_mode = mode;
-                            engine.set_debug_mode(mode);
-                        }
-
-                        // Apply environment settings (sun, fog, bloom, exposure)
-                        // to render pipeline when dirty. The directional sun light
-                        // is synthesized from env in render_frame_inner each frame.
-                        engine.apply_environment(&mut es.environment);
-
-                        // Sync editor lights → render lights when dirty.
-                        if es.light_editor.is_dirty() {
-                            engine.world_lights = es.light_editor.all_lights().iter().map(|el| {
-                                use crate::light_editor::EditorLightType;
-                                rkf_render::Light {
-                                    light_type: match el.light_type {
-                                        EditorLightType::Point => 1,
-                                        EditorLightType::Spot => 2,
-                                    },
-                                    pos_x: el.position.x,
-                                    pos_y: el.position.y,
-                                    pos_z: el.position.z,
-                                    dir_x: el.direction.x,
-                                    dir_y: el.direction.y,
-                                    dir_z: el.direction.z,
-                                    color_r: el.color.x,
-                                    color_g: el.color.y,
-                                    color_b: el.color.z,
-                                    intensity: el.intensity,
-                                    range: el.range,
-                                    inner_angle: el.spot_inner_angle,
-                                    outer_angle: el.spot_outer_angle,
-                                    cookie_index: -1,
-                                    shadow_caster: el.cast_shadows as u32,
-                                }
-                            }).collect();
-                            es.light_editor.clear_dirty();
-                        }
-                    }
-
-                    // Reset per-frame deltas.
-                    es.reset_frame_deltas();
-                }
-
-                // 4b. Process pending spawn / delete / duplicate.
-                // Collect scene change out of the lock, then apply to engine.
-                let mut scene_changed = false;
-                if let Ok(mut es) = self.editor_state.lock() {
-                    // Spawn: create a new analytical SDF object in the scene.
-                    if let Some(prim_name) = es.pending_spawn.take() {
-                        use rkf_core::scene_node::SdfPrimitive;
-                        let prim = match prim_name.as_str() {
-                            "Box" => SdfPrimitive::Box { half_extents: glam::Vec3::splat(0.5) },
-                            "Sphere" => SdfPrimitive::Sphere { radius: 0.5 },
-                            "Capsule" => SdfPrimitive::Capsule { radius: 0.3, half_height: 0.5 },
-                            "Torus" => SdfPrimitive::Torus { major_radius: 0.5, minor_radius: 0.15 },
-                            "Cylinder" => SdfPrimitive::Cylinder { radius: 0.3, half_height: 0.5 },
-                            _ => SdfPrimitive::Sphere { radius: 0.5 },
-                        };
-                        // Place 3 units in front of the camera.
-                        let cam = &es.editor_camera;
-                        let fwd = camera::screen_to_ray(cam, 0.5, 0.5, 1.0, 1.0).1;
-                        let spawn_pos = cam.position + fwd * 3.0;
-
-                        let obj = placement::create_v2_object(&prim_name, spawn_pos, prim, 1);
-                        if let Some(ref mut scene) = es.v2_scene {
-                            let _id = scene.add_object_full(obj);
-                        }
-                        es.sync_v2_scene();
-                        scene_changed = true;
-                    }
-
-                    // Delete: remove the selected object from the scene.
-                    if es.pending_delete {
-                        es.pending_delete = false;
-                        if let Some(editor_state::SelectedEntity::Object(eid)) = es.selected_entity {
-                            if let Some(ref mut scene) = es.v2_scene {
-                                scene.root_objects.retain(|obj| obj.id as u64 != eid);
-                            }
-                            es.selected_entity = None;
-                            es.sync_v2_scene();
-                            scene_changed = true;
-                        }
-                    }
-
-                    // Duplicate: clone the selected object with a small offset.
-                    if es.pending_duplicate {
-                        es.pending_duplicate = false;
-                        if let Some(editor_state::SelectedEntity::Object(eid)) = es.selected_entity {
-                            if let Some(ref mut scene) = es.v2_scene {
-                                if let Some(src) = scene.root_objects.iter().find(|o| o.id as u64 == eid) {
-                                    let mut clone = src.clone();
-                                    clone.world_position.local += glam::Vec3::new(1.0, 0.0, 0.0);
-                                    clone.name = format!("{} (copy)", clone.name);
-                                    let new_id = scene.add_object_full(clone);
-                                    es.selected_entity = Some(
-                                        editor_state::SelectedEntity::Object(new_id as u64),
-                                    );
-                                }
-                            }
-                            es.sync_v2_scene();
-                            scene_changed = true;
-                        }
-                    }
-                }
-                // Apply scene changes to the render engine (outside the lock).
-                if scene_changed {
-                    if let (Some(engine), Ok(es)) = (self.engine.as_mut(), self.editor_state.lock()) {
-                        if let Some(ref scene) = es.v2_scene {
-                            engine.replace_scene(scene.clone());
-                        }
-                    }
-                }
-
-                // 5. Build wireframe vertices for selected object OBBs.
-                //    Read from engine.scene (live animated transforms) rather than
-                //    es.v2_scene (static snapshot) so wireframes track animation
-                //    and future in-editor transforms.
-                let wireframe_verts = {
-                    let mut verts = Vec::new();
-                    if let (Some(engine), Ok(es)) =
-                        (self.engine.as_ref(), self.editor_state.lock())
-                    {
-                        let color = [0.3, 0.7, 1.0, 1.0]; // Light blue
-
-                        // Light gizmos for selected light.
-                        if let Some(editor_state::SelectedEntity::Light(lid)) = es.selected_entity {
-                            if let Some(light) = es.light_editor.get_light(lid) {
-                                let lc = [1.0, 0.9, 0.5, 1.0]; // Warm yellow
-                                match light.light_type {
-                                    light_editor::EditorLightType::Point => {
-                                        verts.extend(wireframe::point_light_wireframe(
-                                            light.position, light.range, lc,
-                                        ));
-                                    }
-                                    light_editor::EditorLightType::Spot => {
-                                        verts.extend(wireframe::spot_light_wireframe(
-                                            light.position, light.direction,
-                                            light.range, light.spot_outer_angle, lc,
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-
-                        // Only draw wireframe for selected SDF objects.
-                        let selected_ids: Vec<u64> = match es.selected_entity {
-                            Some(editor_state::SelectedEntity::Object(eid)) => vec![eid],
-                            _ => vec![],
-                        };
-                        let origin = rkf_core::WorldPosition::default();
-                        let mut gizmo_center: Option<glam::Vec3> = None;
-                        for &eid in &selected_ids {
-                            for obj in &engine.scene.root_objects {
-                                let obj_id = obj.id as u64;
-                                let world_pos = obj.world_position.relative_to(&origin);
-                                let root_world = glam::Mat4::from_scale_rotation_translation(
-                                    glam::Vec3::splat(obj.scale),
-                                    obj.rotation,
-                                    world_pos,
-                                );
-
-                                if eid == obj_id {
-                                    // Root object selected: full hierarchy AABB.
-                                    if let Some((amin, amax)) = wireframe::compute_node_tree_aabb(
-                                        &obj.root_node, root_world,
-                                    ) {
-                                        verts.extend(wireframe::aabb_wireframe(
-                                            amin, amax, color,
-                                        ));
-                                        gizmo_center = Some((amin + amax) * 0.5);
-                                    }
-                                } else if let Some((child_node, child_world)) =
-                                    wireframe::find_child_node_and_transform(
-                                        eid, obj_id, &obj.root_node, root_world,
-                                    )
-                                {
-                                    // Child node selected: AABB of that subtree.
-                                    if let Some((amin, amax)) = wireframe::compute_node_tree_aabb(
-                                        child_node, child_world,
-                                    ) {
-                                        verts.extend(wireframe::aabb_wireframe(
-                                            amin, amax, color,
-                                        ));
-                                        gizmo_center = Some((amin + amax) * 0.5);
-                                    }
-                                }
-                            }
-                        }
-
-                        // Transform gizmo at the center of the selected object.
-                        if let Some(gc) = gizmo_center {
-                            let cam_dist = (gc - es.editor_camera.position).length();
-                            let gizmo_size = cam_dist * 0.12; // Constant screen size
-                            match es.gizmo.mode {
-                                gizmo::GizmoMode::Translate => {
-                                    verts.extend(wireframe::translate_gizmo_wireframe(gc, gizmo_size));
-                                }
-                                gizmo::GizmoMode::Rotate => {
-                                    verts.extend(wireframe::rotate_gizmo_wireframe(gc, gizmo_size));
-                                }
-                                gizmo::GizmoMode::Scale => {
-                                    verts.extend(wireframe::scale_gizmo_wireframe(gc, gizmo_size));
-                                }
-                            }
-                        }
-
-                        // Ground grid overlay.
-                        if es.show_grid {
-                            verts.extend(wireframe::ground_grid_wireframe(
-                                es.editor_camera.position,
-                                40.0,   // 40-unit extent
-                                1.0,    // 1-unit spacing
-                                [0.3, 0.3, 0.3, 0.4], // Subtle dark gray
-                            ));
-                        }
-
-                        // Brush preview sphere when in Sculpt or Paint mode.
-                        if matches!(es.mode, EditorMode::Sculpt | EditorMode::Paint) {
-                            // Get viewport rect to map mouse → viewport-relative coords.
-                            let vp = self.rinch_ctx.as_ref().and_then(|ctx| {
-                                ctx.viewport_rect("main").map(|r| {
-                                    let sf = self.scale_factor() as f32;
-                                    (r.x * sf, r.y * sf, r.width * sf, r.height * sf)
-                                })
-                            });
-                            if let Some((vp_x, vp_y, vp_w, vp_h)) = vp {
-                                let (mx, my) = self.mouse_phys;
-                                let px = mx - vp_x;
-                                let py = my - vp_y;
-                                // Only show cursor when mouse is within the viewport.
-                                if px >= 0.0 && py >= 0.0 && px < vp_w && py < vp_h {
-                                    let (ray_o, ray_d) = camera::screen_to_ray(
-                                        &es.editor_camera, px, py, vp_w, vp_h,
-                                    );
-                                    // Cast against ground plane (y=0) for brush preview position.
-                                    let hit = placement::ray_cast_sdf(
-                                        ray_o, ray_d, 500.0, 0.5, placement::ground_plane_sdf,
-                                    );
-                                    if hit.hit {
-                                        let (radius, color) = match es.mode {
-                                            EditorMode::Sculpt => (
-                                                es.sculpt.current_settings.radius,
-                                                [0.0, 0.8, 1.0, 0.7], // Cyan
-                                            ),
-                                            EditorMode::Paint => (
-                                                es.paint.current_settings.radius,
-                                                [1.0, 0.3, 0.8, 0.7], // Magenta
-                                            ),
-                                            _ => unreachable!(),
-                                        };
-                                        verts.extend(wireframe::sphere_wireframe(
-                                            hit.position, radius, color,
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    verts
-                };
-
-                // 6. Render frame with overlay compositing.
-                //    Take overlay state out temporarily to avoid borrow conflict
-                //    with engine (both live in self).
-                let mut rinch_ctx = self.rinch_ctx.take();
-                let mut overlay_renderer = self.overlay_renderer.take();
-                let overlay_blit = self.overlay_blit.take();
-                let wireframe = self.wireframe_pass.take();
-
-                if let Some(engine) = self.engine.as_mut() {
-                    let vp_matrix = engine.view_projection();
-                    // Full-window viewport for wireframe (matches engine render).
-                    let win_vp = self.window.as_ref().map(|w| {
-                        let s = w.inner_size();
-                        (0.0f32, 0.0f32, s.width as f32, s.height as f32)
-                    }).unwrap_or((0.0, 0.0, DISPLAY_WIDTH as f32, DISPLAY_HEIGHT as f32));
-
-                    engine.render_frame_viewport(win_vp, |device, queue, target_view| {
-                        // Draw wireframe selection highlights at full-window viewport.
-                        if let Some(ref wf) = wireframe {
-                            if !wireframe_verts.is_empty() {
-                                let mut enc = device.create_command_encoder(
-                                    &wgpu::CommandEncoderDescriptor {
-                                        label: Some("wireframe"),
-                                    },
-                                );
-                                wf.draw(
-                                    device, queue, &mut enc, target_view,
-                                    vp_matrix, win_vp, &wireframe_verts,
-                                );
-                                queue.submit(std::iter::once(enc.finish()));
-                            }
-                        }
-
-                        // Render rinch UI to overlay texture, then composite.
-                        if let (Some(ctx), Some(renderer), Some(blit)) =
-                            (&mut rinch_ctx, &mut overlay_renderer, &overlay_blit)
-                        {
-                            let scene = ctx.scene();
-                            let overlay_view = renderer.render(device, queue, scene);
-                            let mut enc = device.create_command_encoder(
-                                &wgpu::CommandEncoderDescriptor {
-                                    label: Some("overlay"),
-                                },
-                            );
-                            blit.draw(device, &mut enc, target_view, &overlay_view);
-                            queue.submit(std::iter::once(enc.finish()));
-                        }
-                    });
-                }
-
-                // Restore overlay state.
-                self.rinch_ctx = rinch_ctx;
-                self.overlay_renderer = overlay_renderer;
-                self.overlay_blit = overlay_blit;
-                self.wireframe_pass = wireframe;
-
-                // 7. Update shared state for MCP observation.
-                if let Ok(es) = self.editor_state.lock() {
-                    if let Ok(mut ss) = self.shared_state.lock() {
-                        ss.camera_position = es.editor_camera.position;
-                        ss.camera_yaw = es.editor_camera.fly_yaw;
-                        ss.camera_pitch = es.editor_camera.fly_pitch;
-                        ss.camera_fov = es.editor_camera.fov_y.to_degrees();
-                        ss.frame_time_ms = dt as f64 * 1000.0;
-                    }
-                }
-
-                // Request next frame.
-                if let Some(window) = &self.window {
-                    window.request_redraw();
-                }
-            }
-
-            _ => {}
+        // m. Cap frame rate at ~60 fps when GPU is faster.
+        let elapsed = last_frame.elapsed();
+        let frame_budget = std::time::Duration::from_millis(16);
+        if elapsed < frame_budget {
+            std::thread::sleep(frame_budget - elapsed);
         }
     }
 }
 
+// ---------------------------------------------------------------------------
+// Main entry point
+// ---------------------------------------------------------------------------
+
 fn main() -> anyhow::Result<()> {
     env_logger::init();
-    log::info!("RKIField Editor — v2 render pipeline + rinch UI");
+    log::info!("RKIField Editor — v2 render pipeline + rinch shell");
 
-    let event_loop = EventLoop::new()?;
-    let mut app = App::new();
-    event_loop.run_app(&mut app)?;
+    // 1. Create shared state.
+    let editor_state = Arc::new(Mutex::new(EditorState::new()));
+    let shared_state = Arc::new(Mutex::new(SharedState::new(
+        0, 0,
+        DISPLAY_WIDTH,
+        DISPLAY_HEIGHT,
+    )));
+
+    // 2. Create tokio runtime and start IPC server.
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let api = automation::EditorAutomationApi::new(
+        Arc::clone(&shared_state),
+        Arc::clone(&editor_state),
+    );
+    let api: Arc<dyn rkf_core::automation::AutomationApi> = Arc::new(api);
+    let (_ipc_handle, socket_path) = start_ipc_server(&rt, api);
+
+    // 3. Create the RenderSurface — identifies where in the rinch layout
+    //    the engine's offscreen texture will be composited.
+    let surface_handle = create_render_surface();
+
+    // 4. Clones for the engine thread.
+    //    GpuTextureRegistrar is Send + Sync (wraps Arc<Mutex<>> fields only).
+    let editor_state_for_thread = Arc::clone(&editor_state);
+    let shared_state_for_thread = Arc::clone(&shared_state);
+    let gpu_registrar = surface_handle.gpu_registrar();
+    let socket_path_for_cleanup = socket_path.clone();
+
+    // 5. Spawn engine thread.
+    //    The thread will poll for gpu_handle() until rinch has created the
+    //    wgpu device (happens inside run_with_window_props_and_menu).
+    std::thread::spawn(move || {
+        engine_thread(EngineThreadData {
+            editor_state: editor_state_for_thread,
+            shared_state: shared_state_for_thread,
+            gpu_registrar,
+        });
+    });
+
+    // 6. Build WindowProps for a borderless transparent window.
+    //    Matches the previous `with_decorations(false).with_transparent(true)`.
+    let sp = socket_path_for_cleanup.clone();
+    let props = WindowProps {
+        title: "RKIField Editor".into(),
+        width: DISPLAY_WIDTH,
+        height: DISPLAY_HEIGHT,
+        borderless: true,
+        resizable: true,
+        transparent: true,
+        menu_in_titlebar: true,
+        on_close_requested: Some(std::sync::Arc::new(move || {
+            cleanup_ipc(&sp);
+            true // proceed with exit
+        })),
+        ..Default::default()
+    };
+
+    let theme = Some(ThemeProviderProps {
+        dark_mode: true,
+        primary_color: Some("blue".into()),
+        ..Default::default()
+    });
+
+    // Context Arc clones for the component closure (main thread).
+    let editor_state_ctx = Arc::clone(&editor_state);
+    let shared_state_ctx = Arc::clone(&shared_state);
+
+    // 7. Call rinch shell — BLOCKING until window close.
+    //    create_context() and UiRevision::new() must be called on the main
+    //    thread inside this closure (both use thread-local rinch state).
+    rinch::shell::run_with_window_props_and_menu(
+        move |_scope| {
+            // Register contexts so components can call use_context().
+            create_context(editor_state_ctx);
+            create_context(shared_state_ctx);
+            // Surface handle context — editor_ui uses it to wire SurfaceEvent → editor input.
+            create_context(surface_handle);
+            // UiRevision wraps a Signal — must be created on the main thread.
+            let ui_revision = UiRevision::new();
+            create_context(ui_revision);
+
+            // Build the editor UI tree.
+            ui::editor_ui(_scope)
+        },
+        props,
+        theme,
+        None, // Menus are rendered inside the borderless titlebar by editor_ui
+    );
+
+    // 8. Cleanup IPC on normal exit (on_close_requested may have already done this).
+    cleanup_ipc(&socket_path);
+
     Ok(())
 }

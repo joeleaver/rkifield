@@ -76,6 +76,20 @@ impl WorldPosition {
         self
     }
 
+    /// Return the absolute world position as a plain `Vec3`.
+    ///
+    /// This is a convenience for editor-scale scenes where all objects are near
+    /// the origin and `f32` precision is sufficient.  For large-world usage,
+    /// prefer [`relative_to`](Self::relative_to) with the camera position.
+    #[inline]
+    pub fn to_vec3(&self) -> Vec3 {
+        Vec3::new(
+            self.chunk.x as f32 * CHUNK_SIZE + self.local.x,
+            self.chunk.y as f32 * CHUNK_SIZE + self.local.y,
+            self.chunk.z as f32 * CHUNK_SIZE + self.local.z,
+        )
+    }
+
     /// Compute the displacement vector `self - origin` using `f64` arithmetic
     /// to avoid precision loss at large distances.
     ///

@@ -12,8 +12,8 @@ pub struct RenderContext {
     pub device: wgpu::Device,
     /// The command queue for submitting GPU work.
     pub queue: wgpu::Queue,
-    /// The adapter that was selected.
-    pub adapter: wgpu::Adapter,
+    /// The adapter that was selected (`None` when using a shared device).
+    pub adapter: Option<wgpu::Adapter>,
     /// Adapter information (name, vendor ID, etc.) for capability queries.
     pub adapter_info: wgpu::AdapterInfo,
 }
@@ -65,8 +65,33 @@ impl RenderContext {
         Self {
             device,
             queue,
-            adapter,
+            adapter: Some(adapter),
             adapter_info,
+        }
+    }
+
+    /// Create a render context from a shared device and queue.
+    ///
+    /// Used when the engine shares a wgpu device with an external renderer
+    /// (e.g., rinch's `GpuHandle` for zero-copy compositing). No adapter is
+    /// available, so surface configuration will panic — use only for offscreen
+    /// rendering.
+    pub fn from_shared(device: wgpu::Device, queue: wgpu::Queue) -> Self {
+        log::info!("RenderContext: using shared device");
+
+        Self {
+            device,
+            queue,
+            adapter: None,
+            adapter_info: wgpu::AdapterInfo {
+                name: "shared device".into(),
+                vendor: 0,
+                device: 0,
+                device_type: wgpu::DeviceType::Other,
+                driver: String::new(),
+                driver_info: String::new(),
+                backend: wgpu::Backend::Vulkan,
+            },
         }
     }
 
@@ -79,7 +104,9 @@ impl RenderContext {
         width: u32,
         height: u32,
     ) -> wgpu::TextureFormat {
-        let caps = surface.get_capabilities(&self.adapter);
+        let adapter = self.adapter.as_ref()
+            .expect("configure_surface requires an adapter (not available on shared devices)");
+        let caps = surface.get_capabilities(adapter);
         let format = caps
             .formats
             .iter()

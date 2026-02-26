@@ -211,7 +211,7 @@ pub fn obb_wireframe(
     local_max: Vec3,
     position: Vec3,
     rotation: Quat,
-    scale: f32,
+    scale: Vec3,
     color: [f32; 4],
 ) -> Vec<LineVertex> {
     // 8 local-space corners.
@@ -412,24 +412,79 @@ const GIZMO_X_COLOR: [f32; 4] = [1.0, 0.2, 0.2, 1.0];
 const GIZMO_Y_COLOR: [f32; 4] = [0.2, 1.0, 0.2, 1.0];
 const GIZMO_Z_COLOR: [f32; 4] = [0.3, 0.3, 1.0, 1.0];
 
+/// Bright saturated colors for hovered axes.
+const GIZMO_X_HOVER: [f32; 4] = [1.0, 0.4, 0.4, 1.0];
+const GIZMO_Y_HOVER: [f32; 4] = [0.4, 1.0, 0.4, 1.0];
+const GIZMO_Z_HOVER: [f32; 4] = [0.4, 0.4, 1.0, 1.0];
+
+/// Dimmed colors for non-hovered axes (when another axis is hovered).
+const GIZMO_X_DIM: [f32; 4] = [0.4, 0.08, 0.08, 0.4];
+const GIZMO_Y_DIM: [f32; 4] = [0.08, 0.4, 0.08, 0.4];
+const GIZMO_Z_DIM: [f32; 4] = [0.12, 0.12, 0.4, 0.4];
+
+use crate::gizmo::GizmoAxis;
+
+/// Pick the color for a gizmo axis based on hover state.
+///
+/// - No hover active (`hovered == None`): normal brightness
+/// - This axis is hovered: bright saturated
+/// - Another axis is hovered: dimmed
+fn gizmo_axis_color(axis_idx: usize, hovered: GizmoAxis) -> [f32; 4] {
+    let normal = [GIZMO_X_COLOR, GIZMO_Y_COLOR, GIZMO_Z_COLOR];
+    let bright = [GIZMO_X_HOVER, GIZMO_Y_HOVER, GIZMO_Z_HOVER];
+    let dim = [GIZMO_X_DIM, GIZMO_Y_DIM, GIZMO_Z_DIM];
+
+    let hovered_idx = match hovered {
+        GizmoAxis::X => Some(0),
+        GizmoAxis::Y => Some(1),
+        GizmoAxis::Z => Some(2),
+        GizmoAxis::None => None,
+        _ => None,
+    };
+
+    match hovered_idx {
+        None => normal[axis_idx],
+        Some(hi) if hi == axis_idx => bright[axis_idx],
+        Some(_) => dim[axis_idx],
+    }
+}
+
 /// Build a translate gizmo: 3 axis arrows from `center` with length `size`.
 ///
 /// Each axis is a line + arrowhead in its respective color (R=X, G=Y, B=Z).
 /// `size` should be proportional to camera distance for constant screen size.
-pub fn translate_gizmo_wireframe(center: Vec3, size: f32) -> Vec<LineVertex> {
+/// `hovered` controls highlight: hovered axis brightens + thickens, others dim.
+/// `cam_pos` is used to compute perpendicular offset for thickness simulation.
+pub fn translate_gizmo_wireframe(
+    center: Vec3, size: f32, hovered: GizmoAxis, cam_pos: Vec3,
+) -> Vec<LineVertex> {
     let mut verts = Vec::new();
     let head_len = size * 0.2;
     let head_radius = size * 0.06;
+    let to_cam = (cam_pos - center).normalize_or_zero();
 
-    for (axis_dir, color) in [
-        (Vec3::X, GIZMO_X_COLOR),
-        (Vec3::Y, GIZMO_Y_COLOR),
-        (Vec3::Z, GIZMO_Z_COLOR),
-    ] {
+    for (axis_idx, axis_dir) in [(0, Vec3::X), (1, Vec3::Y), (2, Vec3::Z)] {
+        let color = gizmo_axis_color(axis_idx, hovered);
+        let is_hovered = matches!(
+            (axis_idx, hovered),
+            (0, GizmoAxis::X) | (1, GizmoAxis::Y) | (2, GizmoAxis::Z)
+        );
+
         let tip = center + axis_dir * size;
         // Shaft.
         verts.push(LineVertex { position: center.to_array(), color });
         verts.push(LineVertex { position: tip.to_array(), color });
+
+        // Thickness: 2 extra parallel lines offset perpendicular to axis and camera.
+        if is_hovered {
+            let perp = axis_dir.cross(to_cam).normalize_or_zero();
+            let offset = size * 0.004;
+            for sign in [-1.0f32, 1.0] {
+                let off = perp * (offset * sign);
+                verts.push(LineVertex { position: (center + off).to_array(), color });
+                verts.push(LineVertex { position: (tip + off).to_array(), color });
+            }
+        }
 
         // Arrowhead: 4 lines from tip to a base ring.
         let tangent = if axis_dir.dot(Vec3::Y).abs() < 0.99 {
@@ -452,28 +507,73 @@ pub fn translate_gizmo_wireframe(center: Vec3, size: f32) -> Vec<LineVertex> {
 }
 
 /// Build a rotate gizmo: 3 axis rings at `center` with radius `size`.
-pub fn rotate_gizmo_wireframe(center: Vec3, size: f32) -> Vec<LineVertex> {
+///
+/// `hovered` controls highlight: hovered axis brightens + thickens, others dim.
+/// `cam_pos` is used to compute perpendicular offset for thickness simulation.
+pub fn rotate_gizmo_wireframe(
+    center: Vec3, size: f32, hovered: GizmoAxis, cam_pos: Vec3,
+) -> Vec<LineVertex> {
     let segs = 48;
-    let mut verts = circle_wireframe(center, Vec3::X, size, GIZMO_X_COLOR, segs);
-    verts.extend(circle_wireframe(center, Vec3::Y, size, GIZMO_Y_COLOR, segs));
-    verts.extend(circle_wireframe(center, Vec3::Z, size, GIZMO_Z_COLOR, segs));
+    let to_cam = (cam_pos - center).normalize_or_zero();
+    let offset_mag = size * 0.004;
+
+    let mut verts = Vec::new();
+    for (axis_idx, normal) in [(0, Vec3::X), (1, Vec3::Y), (2, Vec3::Z)] {
+        let color = gizmo_axis_color(axis_idx, hovered);
+        let is_hovered = matches!(
+            (axis_idx, hovered),
+            (0, GizmoAxis::X) | (1, GizmoAxis::Y) | (2, GizmoAxis::Z)
+        );
+
+        verts.extend(circle_wireframe(center, normal, size, color, segs));
+
+        // Thickness: 2 extra rings at slightly different radii.
+        if is_hovered {
+            // Offset along the radial direction (expand/shrink radius).
+            // Also offset along the ring normal for visible thickening from any angle.
+            let perp = normal.cross(to_cam).normalize_or_zero();
+            for sign in [-1.0f32, 1.0] {
+                let off_center = center + perp * (offset_mag * sign);
+                verts.extend(circle_wireframe(off_center, normal, size, color, segs));
+            }
+        }
+    }
     verts
 }
 
 /// Build a scale gizmo: 3 axis lines with small cubes at the ends.
-pub fn scale_gizmo_wireframe(center: Vec3, size: f32) -> Vec<LineVertex> {
+///
+/// `hovered` controls highlight: hovered axis brightens + thickens, others dim.
+/// `cam_pos` is used to compute perpendicular offset for thickness simulation.
+pub fn scale_gizmo_wireframe(
+    center: Vec3, size: f32, hovered: GizmoAxis, cam_pos: Vec3,
+) -> Vec<LineVertex> {
     let cube_half = size * 0.06;
+    let to_cam = (cam_pos - center).normalize_or_zero();
     let mut verts = Vec::new();
 
-    for (axis_dir, color) in [
-        (Vec3::X, GIZMO_X_COLOR),
-        (Vec3::Y, GIZMO_Y_COLOR),
-        (Vec3::Z, GIZMO_Z_COLOR),
-    ] {
+    for (axis_idx, axis_dir) in [(0, Vec3::X), (1, Vec3::Y), (2, Vec3::Z)] {
+        let color = gizmo_axis_color(axis_idx, hovered);
+        let is_hovered = matches!(
+            (axis_idx, hovered),
+            (0, GizmoAxis::X) | (1, GizmoAxis::Y) | (2, GizmoAxis::Z)
+        );
+
         let tip = center + axis_dir * size;
         // Shaft.
         verts.push(LineVertex { position: center.to_array(), color });
         verts.push(LineVertex { position: tip.to_array(), color });
+
+        // Thickness: 2 extra parallel lines.
+        if is_hovered {
+            let perp = axis_dir.cross(to_cam).normalize_or_zero();
+            let offset = size * 0.004;
+            for sign in [-1.0f32, 1.0] {
+                let off = perp * (offset * sign);
+                verts.push(LineVertex { position: (center + off).to_array(), color });
+                verts.push(LineVertex { position: (tip + off).to_array(), color });
+            }
+        }
 
         // Small cube at the tip.
         let min = tip - Vec3::splat(cube_half);
@@ -481,9 +581,16 @@ pub fn scale_gizmo_wireframe(center: Vec3, size: f32) -> Vec<LineVertex> {
         verts.extend(aabb_wireframe(min, max, color));
     }
 
-    // Center cube for uniform scale.
+    // Center cube for uniform scale (highlight if View is hovered).
+    let center_color = if hovered == GizmoAxis::View {
+        [1.0, 1.0, 1.0, 1.0]
+    } else if hovered != GizmoAxis::None {
+        [0.4, 0.4, 0.4, 0.4]
+    } else {
+        [0.9, 0.9, 0.9, 1.0]
+    };
     let cc = Vec3::splat(cube_half * 1.2);
-    verts.extend(aabb_wireframe(center - cc, center + cc, [0.9, 0.9, 0.9, 1.0]));
+    verts.extend(aabb_wireframe(center - cc, center + cc, center_color));
     verts
 }
 
@@ -529,7 +636,7 @@ pub fn sphere_wireframe(center: Vec3, radius: f32, color: [f32; 4]) -> Vec<LineV
 ///
 /// `parent_world` is the accumulated world transform (translation + rotation + scale)
 /// for the current node. For root calls, pass the object's world transform:
-/// `Mat4::from_scale_rotation_translation(Vec3::splat(scale), rotation, world_pos)`.
+/// `Mat4::from_scale_rotation_translation(scale, rotation, world_pos)`.
 pub fn compute_node_tree_aabb(
     node: &rkf_core::scene_node::SceneNode,
     parent_world: Mat4,
@@ -537,7 +644,7 @@ pub fn compute_node_tree_aabb(
     use rkf_core::scene_node::SdfSource;
 
     let local = Mat4::from_scale_rotation_translation(
-        Vec3::splat(node.local_transform.scale),
+        node.local_transform.scale,
         node.local_transform.rotation,
         node.local_transform.position,
     );
@@ -639,7 +746,7 @@ pub fn find_child_node_and_transform<'a>(
 
     // First, include the root node's own transform (root_world is the object transform).
     let root_local = Mat4::from_scale_rotation_translation(
-        Vec3::splat(node.local_transform.scale),
+        node.local_transform.scale,
         node.local_transform.rotation,
         node.local_transform.position,
     );
@@ -654,7 +761,7 @@ pub fn find_child_node_and_transform<'a>(
         if i + 1 < path.len() {
             // Intermediate node: accumulate its transform.
             let local = Mat4::from_scale_rotation_translation(
-                Vec3::splat(node.local_transform.scale),
+                node.local_transform.scale,
                 node.local_transform.rotation,
                 node.local_transform.position,
             );

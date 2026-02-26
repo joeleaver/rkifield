@@ -12,6 +12,7 @@ use rinch::prelude::*;
 
 use crate::automation::SharedState;
 use crate::editor_state::{EditorMode, EditorState, SelectedEntity, UiRevision};
+use crate::input::{InputState, KeyCode, Modifiers};
 use scene_tree_panel::SceneTreePanel;
 
 // ── Style constants ─────────────────────────────────────────────────────────
@@ -32,6 +33,8 @@ const SECTION_STYLE: &str = "font-size:12px;color:var(--rinch-color-text);paddin
 const VALUE_STYLE: &str = "font-size:12px;color:var(--rinch-color-dimmed);padding:2px 12px;\
     font-family:var(--rinch-font-family-monospace);";
 
+const DIVIDER_STYLE: &str = "height:1px;background:var(--rinch-color-border);margin:8px 0;";
+
 // ── Root component ──────────────────────────────────────────────────────────
 
 /// Root editor UI component.
@@ -41,7 +44,7 @@ const VALUE_STYLE: &str = "font-size:12px;color:var(--rinch-color-dimmed);paddin
 /// ┌──────────────────────────────────────────────────────────────────┐
 /// │ RkiField   File Edit View  ·  Sculpt Paint        [─] [□] [×]  │  (titlebar 36px)
 /// ├────────┬──────────────────────────────────────────┬──────────────┤
-/// │  Left  │           GameViewport                   │    Right     │
+/// │  Left  │           RenderSurface                  │    Right     │
 /// │ 250px  │            (flex: 1)                     │   300px      │
 /// ├────────┴──────────────────────────────────────────┴──────────────┤
 /// │  7 objects  61 fps  ┊                          Navigate mode     │  (status bar 25px)
@@ -69,6 +72,169 @@ pub fn editor_ui() -> NodeHandle {
         }\
     ";
 
+    // Retrieve contexts.
+    let editor_state = use_context::<Arc<Mutex<EditorState>>>();
+    let shared_state = use_context::<Arc<Mutex<SharedState>>>();
+    let surface_handle = use_context::<RenderSurfaceHandle>();
+
+    // Wire SurfaceEvent → EditorState.editor_input + SharedState resize.
+    // The handler runs on the main thread every time the surface receives input.
+    {
+        let es = editor_state.clone();
+        let ss = shared_state.clone();
+        let sh = surface_handle.clone();
+        let rev = use_context::<UiRevision>();
+        surface_handle.set_event_handler(move |event| {
+            use SurfaceEvent::*;
+            use SurfaceMouseButton as Btn;
+            match event {
+                MouseMove { x, y } => {
+                    // Read mode and left-button state before updating input.
+                    let (mode, left_down) = es.lock().ok()
+                        .map(|s| (s.mode, s.editor_input.mouse_buttons[0]))
+                        .unwrap_or((EditorMode::Default, false));
+
+                    if let Ok(mut state) = es.lock() {
+                        let old = state.editor_input.mouse_pos;
+                        state.editor_input.mouse_delta += glam::Vec2::new(x - old.x, y - old.y);
+                        state.editor_input.mouse_pos = glam::Vec2::new(x, y);
+                    }
+
+                    // In Sculpt/Paint mode with left button held, send
+                    // continuous brush hit requests for stroke continuation.
+                    if left_down && matches!(mode, EditorMode::Sculpt | EditorMode::Paint) {
+                        let scale = crate::engine_viewport::RENDER_SCALE;
+                        let bx = (x * scale) as u32;
+                        let by = (y * scale) as u32;
+                        if let Ok(mut state) = ss.lock() {
+                            state.pending_brush_hit = Some((bx, by));
+                        }
+                    }
+
+                    // Check if the engine thread needs a UI revision bump
+                    // (GPU pick completed, gizmo drag ended, etc.).
+                    let needs_refresh = ss.lock().ok()
+                        .map(|mut s| {
+                            let c = s.pick_completed || s.ui_revision_needed;
+                            if s.pick_completed { s.pick_completed = false; }
+                            if s.ui_revision_needed { s.ui_revision_needed = false; }
+                            c
+                        })
+                        .unwrap_or(false);
+                    if needs_refresh {
+                        rev.bump();
+                    }
+                }
+                MouseDown { x, y, button } => {
+                    let mode = es.lock().ok()
+                        .map(|s| s.mode)
+                        .unwrap_or(EditorMode::Default);
+
+                    if let Ok(mut state) = es.lock() {
+                        let idx = match button { Btn::Left => 0, Btn::Right => 1, Btn::Middle => 2 };
+                        state.editor_input.mouse_buttons[idx] = true;
+                    }
+
+                    // In Sculpt/Paint mode, left-click starts a brush hit.
+                    if button == Btn::Left
+                        && matches!(mode, EditorMode::Sculpt | EditorMode::Paint)
+                    {
+                        let scale = crate::engine_viewport::RENDER_SCALE;
+                        let bx = (x * scale) as u32;
+                        let by = (y * scale) as u32;
+                        if let Ok(mut state) = ss.lock() {
+                            state.pending_brush_hit = Some((bx, by));
+                        }
+                    }
+                }
+                MouseUp { x, y, button } => {
+                    let mode = es.lock().ok()
+                        .map(|s| s.mode)
+                        .unwrap_or(EditorMode::Default);
+
+                    if let Ok(mut state) = es.lock() {
+                        let idx = match button { Btn::Left => 0, Btn::Right => 1, Btn::Middle => 2 };
+                        state.editor_input.mouse_buttons[idx] = false;
+                    }
+
+                    // In Sculpt/Paint mode, left-click release ends the
+                    // stroke — don't send an object pick request.
+                    // In Default mode, left-click release → GPU pick for selection,
+                    // UNLESS a gizmo drag is in progress (engine thread ends it).
+                    if button == Btn::Left {
+                        let gizmo_dragging = es.lock().ok()
+                            .map(|s| s.gizmo.dragging)
+                            .unwrap_or(false);
+
+                        if matches!(mode, EditorMode::Sculpt | EditorMode::Paint) {
+                            // Stroke ending is handled by the engine thread
+                            // when it sees left mouse is no longer down.
+                        } else if gizmo_dragging {
+                            // Gizmo drag release — don't fire a pick (engine
+                            // thread handles end_drag + undo push).
+                            // Bump revision so properties panel updates immediately.
+                            rev.bump();
+                        } else {
+                            let (vp_w, vp_h) = sh.layout_size();
+                            if vp_w > 0 && vp_h > 0 {
+                                let scale = crate::engine_viewport::RENDER_SCALE;
+                                let pick_x = (x * scale) as u32;
+                                let pick_y = (y * scale) as u32;
+                                if let Ok(mut state) = ss.lock() {
+                                    state.pending_pick = Some((pick_x, pick_y));
+                                }
+                            }
+                        }
+                    }
+                }
+                MouseWheel { delta_y, .. } => {
+                    if let Ok(mut state) = es.lock() {
+                        state.editor_input.scroll_delta += delta_y;
+                    }
+                }
+                KeyDown(key_data) => {
+                    if let Some(kc) = translate_surface_key(&key_data.code) {
+                        if let Ok(mut state) = es.lock() {
+                            state.editor_input.keys_pressed.insert(kc);
+                            state.editor_input.keys_just_pressed.insert(kc);
+                            state.editor_input.modifiers = Modifiers {
+                                shift: key_data.shift,
+                                ctrl: key_data.ctrl,
+                                alt: key_data.alt,
+                            };
+                        }
+                    }
+                }
+                KeyUp(key_data) => {
+                    if let Some(kc) = translate_surface_key(&key_data.code) {
+                        if let Ok(mut state) = es.lock() {
+                            state.editor_input.keys_pressed.remove(&kc);
+                            state.editor_input.modifiers = Modifiers {
+                                shift: key_data.shift,
+                                ctrl: key_data.ctrl,
+                                alt: key_data.alt,
+                            };
+                        }
+                    }
+                }
+                FocusLost => {
+                    // Clear all input when viewport loses focus.
+                    if let Ok(mut state) = es.lock() {
+                        state.editor_input = InputState::new();
+                    }
+                }
+                // Resize is handled via SharedState polling in the engine thread;
+                // but we can also update it here from SurfaceEvent if available.
+                _ => {}
+            }
+
+            // Update viewport dimensions in shared_state on any event
+            // so the engine thread sees current size on next frame.
+            // (Resize is triggered by the surface's layout changing.)
+            let _ = ss;
+        });
+    }
+
     rsx! {
         div {
             style: "display:flex;flex-direction:column;width:100%;height:100%;\
@@ -95,8 +261,11 @@ pub fn editor_ui() -> NodeHandle {
                     SceneTreePanel {}
                 }
 
-                // Center viewport
-                GameViewport { name: "main", style: "flex:1;" }
+                // Center viewport — zero-copy GPU compositing via RenderSurface
+                div {
+                    style: "flex:1;",
+                    RenderSurface { surface: Some(surface_handle) }
+                }
 
                 // Right panel — mode-dependent
                 div {
@@ -116,15 +285,47 @@ pub fn editor_ui() -> NodeHandle {
     }
 }
 
+/// Translate a `SurfaceKeyData.code` string (Physical key code) to `input::KeyCode`.
+///
+/// The `code` field uses the standard W3C physical key names (e.g. "KeyW", "ArrowLeft").
+fn translate_surface_key(code: &str) -> Option<KeyCode> {
+    match code {
+        "KeyW" => Some(KeyCode::W),
+        "KeyA" => Some(KeyCode::A),
+        "KeyS" => Some(KeyCode::S),
+        "KeyD" => Some(KeyCode::D),
+        "KeyQ" => Some(KeyCode::Q),
+        "KeyE" => Some(KeyCode::E),
+        "KeyG" => Some(KeyCode::G),
+        "KeyR" => Some(KeyCode::R),
+        "KeyL" => Some(KeyCode::L),
+        "KeyX" => Some(KeyCode::X),
+        "KeyY" => Some(KeyCode::Y),
+        "KeyZ" => Some(KeyCode::Z),
+        "KeyF" => Some(KeyCode::F),
+        "Delete" => Some(KeyCode::Delete),
+        "Escape" => Some(KeyCode::Escape),
+        "Space" => Some(KeyCode::Space),
+        "Tab" => Some(KeyCode::Tab),
+        "Enter" | "NumpadEnter" => Some(KeyCode::Return),
+        "ShiftLeft" | "ShiftRight" => Some(KeyCode::ShiftLeft),
+        "F5" => Some(KeyCode::F5),
+        "F12" => Some(KeyCode::F12),
+        "Digit1" => Some(KeyCode::Num1),
+        "Digit2" => Some(KeyCode::Num2),
+        "Digit3" => Some(KeyCode::Num3),
+        _ => None,
+    }
+}
+
 // ── Titlebar ────────────────────────────────────────────────────────────────
 
 /// Combined titlebar with app title, menus, tool buttons, and window controls.
 ///
 /// Replaces the separate MenuBar + Toolbar with a single 36px row in a
 /// frameless window. Uses rinch's `rinch-app-menu-*` CSS classes for themed
-/// dropdown rendering. The titlebar background acts as a drag handle — clicks
-/// on empty areas set `pending_drag` which the winit event loop consumes to
-/// call `window.drag_window()`.
+/// dropdown rendering. The titlebar background has `data-drag-window` set so
+/// rinch triggers `AppAction::DragWindow` on mousedown on empty areas.
 #[component]
 pub fn TitleBar() -> NodeHandle {
     use rinch::menu::{Menu, MenuItem, MenuEntryRef};
@@ -182,18 +383,9 @@ pub fn TitleBar() -> NodeHandle {
         });
     }
 
-    // Titlebar drag handler — clicks on empty background trigger window drag.
-    // Child elements (menus, buttons, controls) have their own data-rid handlers
-    // which fire first due to rinch's deepest-first hit testing.
-    {
-        let es = editor_state.clone();
-        let drag_handler = __scope.register_handler(move || {
-            if let Ok(mut s) = es.lock() {
-                s.pending_drag = true;
-            }
-        });
-        bar.set_attribute("data-rid", &drag_handler.to_string());
-    }
+    // Titlebar drag — rinch reads `data-drag-window` and emits AppAction::DragWindow
+    // when a mousedown lands on this element (deepest-first: child handlers fire first).
+    bar.set_attribute("data-drag-window", "1");
 
     // ── App title "RkiField" ───────────────────────────────────────────
     let title_container = __scope.create_element("div");
@@ -249,13 +441,8 @@ pub fn TitleBar() -> NodeHandle {
             }
         }))
         .separator()
-        .item(MenuItem::new("Quit").shortcut("Esc").on_click({
-            let es = es.clone();
-            let rev = rev;
-            move || {
-                if let Ok(mut s) = es.lock() { s.wants_exit = true; }
-                rev.bump();
-            }
+        .item(MenuItem::new("Quit").shortcut("Esc").on_click(move || {
+            close_current_window();
         }));
 
     let spawn_primitives: &[(&str, &str)] = &[
@@ -284,13 +471,13 @@ pub fn TitleBar() -> NodeHandle {
         .item(MenuItem::new("Undo").shortcut("Ctrl+Z").on_click({
             let es = es.clone();
             move || {
-                if let Ok(mut s) = es.lock() { s.undo.undo(); }
+                if let Ok(mut s) = es.lock() { s.pending_undo = true; }
             }
         }))
         .item(MenuItem::new("Redo").shortcut("Ctrl+Y").on_click({
             let es = es.clone();
             move || {
-                if let Ok(mut s) = es.lock() { s.undo.redo(); }
+                if let Ok(mut s) = es.lock() { s.pending_redo = true; }
             }
         }))
         .separator()
@@ -573,9 +760,8 @@ pub fn TitleBar() -> NodeHandle {
     );
     min_btn.append_child(&__scope.create_text("\u{2500}"));  // ─
     {
-        let es = editor_state.clone();
         let hid = __scope.register_handler(move || {
-            if let Ok(mut s) = es.lock() { s.pending_minimize = true; }
+            minimize_current_window();
         });
         min_btn.set_attribute("data-rid", &hid.to_string());
     }
@@ -592,9 +778,8 @@ pub fn TitleBar() -> NodeHandle {
     );
     max_btn.append_child(&__scope.create_text("\u{25a1}"));  // □
     {
-        let es = editor_state.clone();
         let hid = __scope.register_handler(move || {
-            if let Ok(mut s) = es.lock() { s.pending_maximize = true; }
+            toggle_maximize_current_window();
         });
         max_btn.set_attribute("data-rid", &hid.to_string());
     }
@@ -611,11 +796,8 @@ pub fn TitleBar() -> NodeHandle {
     );
     close_btn.append_child(&__scope.create_text("\u{00d7}"));  // ×
     {
-        let es = editor_state.clone();
-        let rev = revision;
         let hid = __scope.register_handler(move || {
-            if let Ok(mut s) = es.lock() { s.wants_exit = true; }
-            rev.bump();
+            close_current_window();
         });
         close_btn.set_attribute("data-rid", &hid.to_string());
     }
@@ -835,7 +1017,7 @@ pub fn RightPanel() -> NodeHandle {
                 let div = __scope.create_element("div");
                 div.set_attribute(
                     "style",
-                    "height:1px;background:var(--rinch-color-border);margin:8px 0;",
+                    DIVIDER_STYLE,
                 );
                 container.append_child(&div);
             }
@@ -877,7 +1059,7 @@ pub fn RightPanel() -> NodeHandle {
                 let div = __scope.create_element("div");
                 div.set_attribute(
                     "style",
-                    "height:1px;background:var(--rinch-color-border);margin:8px 0;",
+                    DIVIDER_STYLE,
                 );
                 container.append_child(&div);
             }
@@ -951,7 +1133,7 @@ pub fn RightPanel() -> NodeHandle {
             let div = __scope.create_element("div");
             div.set_attribute(
                 "style",
-                "height:1px;background:var(--rinch-color-border);margin:8px 0;",
+                DIVIDER_STYLE,
             );
             container.append_child(&div);
 
@@ -1417,7 +1599,7 @@ pub fn RightPanel() -> NodeHandle {
                 let div = __scope.create_element("div");
                 div.set_attribute(
                     "style",
-                    "height:1px;background:var(--rinch-color-border);margin:8px 0;",
+                    DIVIDER_STYLE,
                 );
                 container.append_child(&div);
 
@@ -1479,114 +1661,383 @@ pub fn RightPanel() -> NodeHandle {
                 );
             }
         } else {
-            // ── Generic info display for non-camera entities ──
-            // Light editing: sync signals and show sliders.
-            if let Some(SelectedEntity::Light(lid)) = selected_entity {
-                let light_data = es.lock().ok().and_then(|es_lock| {
-                    es_lock.light_editor.get_light(lid).map(|light| {
-                        (light.intensity, light.range, light.light_type, light.position)
-                    })
-                });
-                if let Some((intensity, range, light_type, position)) = light_data {
-                    let light_intensity_signal: Signal<f64> = Signal::new(intensity as f64);
-                    let light_range_signal: Signal<f64> = Signal::new(range as f64);
+            // ── Non-camera entity properties ──
+            match selected_entity {
+                Some(SelectedEntity::Object(eid)) => {
+                    // Read object info + transform from v2_scene.
+                    let obj_info = es.lock().ok().and_then(|es_lock| {
+                        let node = es_lock.scene_tree.find_node(eid)?;
+                        let name = node.name.clone();
+                        let children = node.children.len();
+                        let (xf, show_revoxelize) = es_lock.v2_scene.as_ref()
+                            .and_then(|scene| {
+                                scene.objects.iter()
+                                    .find(|o| o.id as u64 == eid)
+                                    .map(|obj| {
+                                        let (x, y, z) = obj.rotation
+                                            .to_euler(glam::EulerRot::XYZ);
+                                        let is_vox = matches!(
+                                            obj.root_node.sdf_source,
+                                            rkf_core::scene_node::SdfSource::Voxelized { .. }
+                                        );
+                                        let non_uniform = (obj.scale - glam::Vec3::ONE).length() > 1e-4;
+                                        (
+                                            Some((
+                                                obj.position,
+                                                glam::Vec3::new(
+                                                    x.to_degrees(),
+                                                    y.to_degrees(),
+                                                    z.to_degrees(),
+                                                ),
+                                                obj.scale,
+                                            )),
+                                            is_vox && non_uniform,
+                                        )
+                                    })
+                            })
+                            .unwrap_or((None, false));
+                        Some((name, children, xf, show_revoxelize))
+                    });
 
-                    let type_name = match light_type {
-                        crate::light_editor::EditorLightType::Point => "Point Light",
-                        crate::light_editor::EditorLightType::Spot => "Spot Light",
-                    };
-                    let hdr = __scope.create_element("div");
-                    hdr.set_attribute("style", SECTION_STYLE);
-                    hdr.append_child(&__scope.create_text(type_name));
-                    container.append_child(&hdr);
+                    if let Some((name, child_count, xf, show_revoxelize)) = obj_info {
+                        // Name.
+                        let name_row = __scope.create_element("div");
+                        name_row.set_attribute("style", SECTION_STYLE);
+                        name_row.append_child(&__scope.create_text(&name));
+                        container.append_child(&name_row);
 
-                    let pos_row = __scope.create_element("div");
-                    pos_row.set_attribute("style", VALUE_STYLE);
-                    pos_row.append_child(&__scope.create_text(
-                        &format!("Pos: ({:.1}, {:.1}, {:.1})", position.x, position.y, position.z),
-                    ));
-                    container.append_child(&pos_row);
+                        // Entity ID.
+                        let id_row = __scope.create_element("div");
+                        id_row.set_attribute("style", VALUE_STYLE);
+                        id_row.append_child(
+                            &__scope.create_text(&format!("Entity ID: {eid}")),
+                        );
+                        container.append_child(&id_row);
 
-                    let lid_cap = lid;
-                    build_slider_row(
-                        __scope, &container, "Intensity", "", light_intensity_signal,
-                        0.0, 50.0, 0.1, 1,
-                        { let es = es.clone(); move |v| {
-                            if let Ok(mut es) = es.lock() {
-                                if let Some(l) = es.light_editor.get_light_mut(lid_cap) {
-                                    l.intensity = v as f32;
-                                }
-                                es.light_editor.mark_dirty();
-                            }
-                        }},
-                    );
-                    build_slider_row(
-                        __scope, &container, "Range", "m", light_range_signal,
-                        0.1, 100.0, 0.5, 1,
-                        { let es = es.clone(); move |v| {
-                            if let Ok(mut es) = es.lock() {
-                                if let Some(l) = es.light_editor.get_light_mut(lid_cap) {
-                                    l.range = v as f32;
-                                }
-                                es.light_editor.mark_dirty();
-                            }
-                        }},
-                    );
-                }
-            }
-
-            let info = if matches!(selected_entity, Some(SelectedEntity::Light(_))) { None } else {
-                selected_entity.and_then(|sel| {
-                    let es = es.lock().ok()?;
-                    match sel {
-                        SelectedEntity::Object(eid) => {
-                            let node = es.scene_tree.find_node(eid)?;
-                            Some((node.name.clone(), format!("Entity ID: {eid}"), node.children.len()))
+                        if child_count > 0 {
+                            let cr = __scope.create_element("div");
+                            cr.set_attribute("style", VALUE_STYLE);
+                            cr.append_child(
+                                &__scope.create_text(&format!("Children: {child_count}")),
+                            );
+                            container.append_child(&cr);
                         }
-                        SelectedEntity::Light(_) => None, // handled above
-                        SelectedEntity::Camera => unreachable!(),
-                        SelectedEntity::Scene => {
-                            let name = es.v2_scene.as_ref()
-                                .map(|s| s.name.clone())
-                                .unwrap_or_else(|| "Scene".to_string());
-                            Some((name, format!("{} objects", es.scene_tree.roots.len()), 0))
-                        }
-                        SelectedEntity::Project => {
-                            Some(("Project".to_string(), String::new(), 0))
+
+                        // Transform sliders (only when v2_scene object found).
+                        if let Some((pos, rot_deg, scale)) = xf {
+                            let div = __scope.create_element("div");
+                            div.set_attribute("style", DIVIDER_STYLE);
+                            container.append_child(&div);
+
+                            let xf_hdr = __scope.create_element("div");
+                            xf_hdr.set_attribute("style", LABEL_STYLE);
+                            xf_hdr.append_child(&__scope.create_text("Transform"));
+                            container.append_child(&xf_hdr);
+
+                            // Position.
+                            let pos_x_sig = Signal::new(pos.x as f64);
+                            let pos_y_sig = Signal::new(pos.y as f64);
+                            let pos_z_sig = Signal::new(pos.z as f64);
+
+                            build_slider_row(
+                                __scope, &container, "Position X", "", pos_x_sig,
+                                -500.0, 500.0, 0.01, 2,
+                                { let es = es.clone(); move |v| {
+                                    if let Ok(mut es) = es.lock() {
+                                        if let Some(ref mut sc) = es.v2_scene {
+                                            if let Some(obj) = sc.objects.iter_mut()
+                                                .find(|o| o.id as u64 == eid)
+                                            {
+                                                obj.position.x = v as f32;
+                                            }
+                                        }
+                                        es.sync_v2_scene();
+                                    }
+                                }},
+                            );
+                            build_slider_row(
+                                __scope, &container, "Position Y", "", pos_y_sig,
+                                -500.0, 500.0, 0.01, 2,
+                                { let es = es.clone(); move |v| {
+                                    if let Ok(mut es) = es.lock() {
+                                        if let Some(ref mut sc) = es.v2_scene {
+                                            if let Some(obj) = sc.objects.iter_mut()
+                                                .find(|o| o.id as u64 == eid)
+                                            {
+                                                obj.position.y = v as f32;
+                                            }
+                                        }
+                                        es.sync_v2_scene();
+                                    }
+                                }},
+                            );
+                            build_slider_row(
+                                __scope, &container, "Position Z", "", pos_z_sig,
+                                -500.0, 500.0, 0.01, 2,
+                                { let es = es.clone(); move |v| {
+                                    if let Ok(mut es) = es.lock() {
+                                        if let Some(ref mut sc) = es.v2_scene {
+                                            if let Some(obj) = sc.objects.iter_mut()
+                                                .find(|o| o.id as u64 == eid)
+                                            {
+                                                obj.position.z = v as f32;
+                                            }
+                                        }
+                                        es.sync_v2_scene();
+                                    }
+                                }},
+                            );
+
+                            // Rotation (Euler XYZ degrees).
+                            let rot_x_sig = Signal::new(rot_deg.x as f64);
+                            let rot_y_sig = Signal::new(rot_deg.y as f64);
+                            let rot_z_sig = Signal::new(rot_deg.z as f64);
+
+                            build_slider_row(
+                                __scope, &container, "Rotation X", "\u{00b0}", rot_x_sig,
+                                -180.0, 180.0, 0.5, 1,
+                                { let es = es.clone(); move |v| {
+                                    if let Ok(mut es) = es.lock() {
+                                        if let Some(ref mut sc) = es.v2_scene {
+                                            if let Some(obj) = sc.objects.iter_mut()
+                                                .find(|o| o.id as u64 == eid)
+                                            {
+                                                let (_, cy, cz) = obj.rotation
+                                                    .to_euler(glam::EulerRot::XYZ);
+                                                obj.rotation = glam::Quat::from_euler(
+                                                    glam::EulerRot::XYZ,
+                                                    (v as f32).to_radians(), cy, cz,
+                                                );
+                                            }
+                                        }
+                                        es.sync_v2_scene();
+                                    }
+                                }},
+                            );
+                            build_slider_row(
+                                __scope, &container, "Rotation Y", "\u{00b0}", rot_y_sig,
+                                -180.0, 180.0, 0.5, 1,
+                                { let es = es.clone(); move |v| {
+                                    if let Ok(mut es) = es.lock() {
+                                        if let Some(ref mut sc) = es.v2_scene {
+                                            if let Some(obj) = sc.objects.iter_mut()
+                                                .find(|o| o.id as u64 == eid)
+                                            {
+                                                let (cx, _, cz) = obj.rotation
+                                                    .to_euler(glam::EulerRot::XYZ);
+                                                obj.rotation = glam::Quat::from_euler(
+                                                    glam::EulerRot::XYZ,
+                                                    cx, (v as f32).to_radians(), cz,
+                                                );
+                                            }
+                                        }
+                                        es.sync_v2_scene();
+                                    }
+                                }},
+                            );
+                            build_slider_row(
+                                __scope, &container, "Rotation Z", "\u{00b0}", rot_z_sig,
+                                -180.0, 180.0, 0.5, 1,
+                                { let es = es.clone(); move |v| {
+                                    if let Ok(mut es) = es.lock() {
+                                        if let Some(ref mut sc) = es.v2_scene {
+                                            if let Some(obj) = sc.objects.iter_mut()
+                                                .find(|o| o.id as u64 == eid)
+                                            {
+                                                let (cx, cy, _) = obj.rotation
+                                                    .to_euler(glam::EulerRot::XYZ);
+                                                obj.rotation = glam::Quat::from_euler(
+                                                    glam::EulerRot::XYZ,
+                                                    cx, cy, (v as f32).to_radians(),
+                                                );
+                                            }
+                                        }
+                                        es.sync_v2_scene();
+                                    }
+                                }},
+                            );
+
+                            // Scale X/Y/Z.
+                            for (label, axis_idx, val) in [
+                                ("Scale X", 0usize, scale.x),
+                                ("Scale Y", 1usize, scale.y),
+                                ("Scale Z", 2usize, scale.z),
+                            ] {
+                                let sig = Signal::new(val as f64);
+                                build_slider_row(
+                                    __scope, &container, label, "", sig,
+                                    0.01, 50.0, 0.01, 2,
+                                    { let es = es.clone(); move |v| {
+                                        if let Ok(mut es) = es.lock() {
+                                            if let Some(ref mut sc) = es.v2_scene {
+                                                if let Some(obj) = sc.objects.iter_mut()
+                                                    .find(|o| o.id as u64 == eid)
+                                                {
+                                                    obj.scale[axis_idx] = v as f32;
+                                                }
+                                            }
+                                            es.sync_v2_scene();
+                                        }
+                                    }},
+                                );
+                            }
+
+                            // Re-voxelize button (only for voxelized objects with non-uniform scale).
+                            if show_revoxelize {
+                                let btn_row = __scope.create_element("div");
+                                btn_row.set_attribute("style", "padding: 6px 8px;");
+                                let btn = __scope.create_element("button");
+                                btn.set_attribute("style",
+                                    "width:100%; padding:4px 8px; background:#553322; \
+                                     color:#ffcc99; border:1px solid #774433; \
+                                     border-radius:3px; cursor:pointer; font-size:12px;");
+                                btn.append_child(
+                                    &__scope.create_text("Re-voxelize (bake scale)"),
+                                );
+                                let hid = __scope.register_handler({
+                                    let es = es.clone();
+                                    let rev = revision;
+                                    move || {
+                                        if let Ok(mut es) = es.lock() {
+                                            es.pending_revoxelize = Some(eid as u32);
+                                        }
+                                        rev.bump();
+                                    }
+                                });
+                                btn.set_attribute("data-rid", &hid.to_string());
+                                btn_row.append_child(&btn);
+                                container.append_child(&btn_row);
+                            }
                         }
                     }
-                })
-            };
-
-            if let Some((name, detail, child_count)) = info {
-                let name_row = __scope.create_element("div");
-                name_row.set_attribute("style", SECTION_STYLE);
-                name_row.append_child(&__scope.create_text(&name));
-                container.append_child(&name_row);
-
-                if !detail.is_empty() {
-                    let detail_row = __scope.create_element("div");
-                    detail_row.set_attribute("style", VALUE_STYLE);
-                    detail_row.append_child(&__scope.create_text(&detail));
-                    container.append_child(&detail_row);
                 }
+                Some(SelectedEntity::Light(lid)) => {
+                    // Read light data.
+                    let light_data = es.lock().ok().and_then(|es_lock| {
+                        es_lock.light_editor.get_light(lid).map(|light| {
+                            (light.intensity, light.range, light.light_type, light.position)
+                        })
+                    });
+                    if let Some((intensity, range, light_type, position)) = light_data {
+                        let type_name = match light_type {
+                            crate::light_editor::EditorLightType::Point => "Point Light",
+                            crate::light_editor::EditorLightType::Spot => "Spot Light",
+                        };
+                        let hdr = __scope.create_element("div");
+                        hdr.set_attribute("style", SECTION_STYLE);
+                        hdr.append_child(&__scope.create_text(type_name));
+                        container.append_child(&hdr);
 
-                if child_count > 0 {
-                    let cr = __scope.create_element("div");
-                    cr.set_attribute("style", VALUE_STYLE);
-                    cr.append_child(
-                        &__scope.create_text(&format!("Children: {child_count}")),
+                        // Position sliders.
+                        let lpos_x = Signal::new(position.x as f64);
+                        let lpos_y = Signal::new(position.y as f64);
+                        let lpos_z = Signal::new(position.z as f64);
+
+                        let lid_cap = lid;
+                        build_slider_row(
+                            __scope, &container, "Position X", "", lpos_x,
+                            -500.0, 500.0, 0.01, 2,
+                            { let es = es.clone(); move |v| {
+                                if let Ok(mut es) = es.lock() {
+                                    if let Some(l) = es.light_editor.get_light_mut(lid_cap) {
+                                        l.position.x = v as f32;
+                                    }
+                                    es.light_editor.mark_dirty();
+                                }
+                            }},
+                        );
+                        build_slider_row(
+                            __scope, &container, "Position Y", "", lpos_y,
+                            -500.0, 500.0, 0.01, 2,
+                            { let es = es.clone(); move |v| {
+                                if let Ok(mut es) = es.lock() {
+                                    if let Some(l) = es.light_editor.get_light_mut(lid_cap) {
+                                        l.position.y = v as f32;
+                                    }
+                                    es.light_editor.mark_dirty();
+                                }
+                            }},
+                        );
+                        build_slider_row(
+                            __scope, &container, "Position Z", "", lpos_z,
+                            -500.0, 500.0, 0.01, 2,
+                            { let es = es.clone(); move |v| {
+                                if let Ok(mut es) = es.lock() {
+                                    if let Some(l) = es.light_editor.get_light_mut(lid_cap) {
+                                        l.position.z = v as f32;
+                                    }
+                                    es.light_editor.mark_dirty();
+                                }
+                            }},
+                        );
+
+                        let div = __scope.create_element("div");
+                        div.set_attribute("style", DIVIDER_STYLE);
+                        container.append_child(&div);
+
+                        // Intensity and range sliders.
+                        let light_intensity_signal = Signal::new(intensity as f64);
+                        let light_range_signal = Signal::new(range as f64);
+
+                        build_slider_row(
+                            __scope, &container, "Intensity", "", light_intensity_signal,
+                            0.0, 50.0, 0.1, 1,
+                            { let es = es.clone(); move |v| {
+                                if let Ok(mut es) = es.lock() {
+                                    if let Some(l) = es.light_editor.get_light_mut(lid_cap) {
+                                        l.intensity = v as f32;
+                                    }
+                                    es.light_editor.mark_dirty();
+                                }
+                            }},
+                        );
+                        build_slider_row(
+                            __scope, &container, "Range", "m", light_range_signal,
+                            0.1, 100.0, 0.5, 1,
+                            { let es = es.clone(); move |v| {
+                                if let Ok(mut es) = es.lock() {
+                                    if let Some(l) = es.light_editor.get_light_mut(lid_cap) {
+                                        l.range = v as f32;
+                                    }
+                                    es.light_editor.mark_dirty();
+                                }
+                            }},
+                        );
+                    }
+                }
+                Some(SelectedEntity::Scene) => {
+                    let name = es.lock().ok().and_then(|e| {
+                        e.v2_scene.as_ref().map(|s| s.name.clone())
+                    }).unwrap_or_else(|| "Scene".to_string());
+                    let count = es.lock().map(|e| e.scene_tree.roots.len()).unwrap_or(0);
+
+                    let name_row = __scope.create_element("div");
+                    name_row.set_attribute("style", SECTION_STYLE);
+                    name_row.append_child(&__scope.create_text(&name));
+                    container.append_child(&name_row);
+
+                    let detail = __scope.create_element("div");
+                    detail.set_attribute("style", VALUE_STYLE);
+                    detail.append_child(
+                        &__scope.create_text(&format!("{count} objects")),
                     );
-                    container.append_child(&cr);
+                    container.append_child(&detail);
                 }
-            } else {
-                let msg = __scope.create_element("div");
-                msg.set_attribute(
-                    "style",
-                    &format!("{SECTION_STYLE}color:var(--rinch-color-placeholder);"),
-                );
-                msg.append_child(&__scope.create_text("No object selected"));
-                container.append_child(&msg);
+                Some(SelectedEntity::Project) => {
+                    let hdr = __scope.create_element("div");
+                    hdr.set_attribute("style", SECTION_STYLE);
+                    hdr.append_child(&__scope.create_text("Project"));
+                    container.append_child(&hdr);
+                }
+                _ => {
+                    let msg = __scope.create_element("div");
+                    msg.set_attribute(
+                        "style",
+                        &format!("{SECTION_STYLE}color:var(--rinch-color-placeholder);"),
+                    );
+                    msg.append_child(&__scope.create_text("No object selected"));
+                    container.append_child(&msg);
+                }
             }
         }
 
@@ -1736,7 +2187,7 @@ pub fn StatusBar() -> NodeHandle {
                 overlay.append_child(&__scope.create_text(
                     "Keyboard Shortcuts  (F1 to close)\n\
                      ─────────────────────────────────\n\
-                     W/E/R      Translate / Rotate / Scale\n\
+                     G/R/L      Grab / Rotate / scaLe\n\
                      B / N      Sculpt / Paint mode\n\
                      G          Toggle grid\n\
                      F3         Cycle debug mode\n\

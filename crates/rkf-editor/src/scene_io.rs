@@ -121,8 +121,8 @@ pub fn save_v2_scene(scene: &rkf_core::scene::Scene, path: &str) -> anyhow::Resu
 
     let mut sf = SceneFile::new(&scene.name);
 
-    for obj in &scene.root_objects {
-        let pos = obj.world_position.local;
+    for obj in &scene.objects {
+        let pos = obj.position;
         let rot = obj.rotation;
         let (analytical, analytical_params) = match &obj.root_node.sdf_source {
             SdfSource::Analytical { primitive, material_id: _ } => {
@@ -155,7 +155,7 @@ pub fn save_v2_scene(scene: &rkf_core::scene::Scene, path: &str) -> anyhow::Resu
             asset_path: None,
             position: [pos.x as f64, pos.y as f64, pos.z as f64],
             rotation: [rot.x, rot.y, rot.z, rot.w],
-            scale: obj.scale,
+            scale: obj.scale.into(),
             material_id: None,
             analytical,
             analytical_params,
@@ -182,35 +182,35 @@ pub fn aabb_for_analytical(
     params: &[f32],
     position: Vec3,
     _rotation: Quat,
-    scale: f32,
+    scale: Vec3,
 ) -> rkf_core::Aabb {
     use rkf_core::Aabb;
 
     let half = match prim_name {
         "sphere" => {
-            let r = params.first().copied().unwrap_or(1.0) * scale;
-            Vec3::splat(r)
+            let r = params.first().copied().unwrap_or(1.0);
+            Vec3::splat(r) * scale
         }
         "box" => {
-            let hx = params.first().copied().unwrap_or(1.0) * scale;
-            let hy = params.get(1).copied().unwrap_or(1.0) * scale;
-            let hz = params.get(2).copied().unwrap_or(1.0) * scale;
-            Vec3::new(hx, hy, hz)
+            let hx = params.first().copied().unwrap_or(1.0);
+            let hy = params.get(1).copied().unwrap_or(1.0);
+            let hz = params.get(2).copied().unwrap_or(1.0);
+            Vec3::new(hx, hy, hz) * scale
         }
         "capsule" => {
-            let r = params.first().copied().unwrap_or(0.2) * scale;
-            let hh = params.get(1).copied().unwrap_or(0.5) * scale;
-            Vec3::new(r, r + hh, r)
+            let r = params.first().copied().unwrap_or(0.2);
+            let hh = params.get(1).copied().unwrap_or(0.5);
+            Vec3::new(r, r + hh, r) * scale
         }
         "torus" => {
-            let major = params.first().copied().unwrap_or(0.5) * scale;
-            let minor = params.get(1).copied().unwrap_or(0.15) * scale;
-            Vec3::new(major + minor, minor, major + minor)
+            let major = params.first().copied().unwrap_or(0.5);
+            let minor = params.get(1).copied().unwrap_or(0.15);
+            Vec3::new(major + minor, minor, major + minor) * scale
         }
         "cylinder" => {
-            let r = params.first().copied().unwrap_or(0.3) * scale;
-            let hh = params.get(1).copied().unwrap_or(0.5) * scale;
-            Vec3::new(r, hh, r)
+            let r = params.first().copied().unwrap_or(0.3);
+            let hh = params.get(1).copied().unwrap_or(0.5);
+            Vec3::new(r, hh, r) * scale
         }
         "plane" => Vec3::splat(50.0),
         _ => Vec3::splat(1.0),
@@ -227,7 +227,6 @@ pub fn reconstruct_v2_scene(
 ) -> rkf_core::scene::Scene {
     use rkf_core::scene::{Scene, SceneObject};
     use rkf_core::scene_node::{SceneNode, SdfPrimitive};
-    use rkf_core::WorldPosition;
 
     let mut scene = Scene::new(&sf.name);
 
@@ -243,7 +242,7 @@ pub fn reconstruct_v2_scene(
             entry.rotation[2],
             entry.rotation[3],
         );
-        let scale = entry.scale;
+        let scale = Vec3::from(entry.scale);
 
         let root_node = if let (Some(analytical), Some(params)) =
             (&entry.analytical, &entry.analytical_params)
@@ -298,7 +297,8 @@ pub fn reconstruct_v2_scene(
         let obj = SceneObject {
             id: 0,
             name: entry.name.clone(),
-            world_position: WorldPosition::new(glam::IVec3::ZERO, pos),
+            parent_id: None,
+            position: pos,
             rotation: rot,
             scale,
             root_node,
@@ -685,12 +685,11 @@ mod tests {
         use rkf_core::{
             scene::Scene,
             scene_node::{SceneNode, SdfPrimitive},
-            WorldPosition,
         };
 
         let mut scene = Scene::new("v2test");
         let node = SceneNode::analytical("sphere", SdfPrimitive::Sphere { radius: 1.0 }, 0);
-        scene.add_object("SphereObj", WorldPosition::default(), node);
+        scene.add_object("SphereObj", Vec3::ZERO, node);
 
         let path = "/tmp/rkf_v2_save_test.rkscene";
         super::save_v2_scene(&scene, path).expect("save_v2_scene should succeed");
@@ -706,12 +705,11 @@ mod tests {
         use rkf_core::{
             scene::Scene,
             scene_node::{SceneNode, SdfPrimitive},
-            WorldPosition,
         };
 
         let mut scene = Scene::new("roundtrip");
         let node = SceneNode::analytical("box", SdfPrimitive::Box { half_extents: glam::Vec3::ONE }, 3);
-        scene.add_object("BoxObj", WorldPosition::default(), node);
+        scene.add_object("BoxObj", Vec3::ZERO, node);
 
         let path = "/tmp/rkf_v2_roundtrip_test.rkscene";
         super::save_v2_scene(&scene, path).expect("save");
@@ -738,18 +736,17 @@ mod tests {
         use rkf_core::{
             scene::Scene,
             scene_node::{SceneNode, SdfPrimitive},
-            WorldPosition,
         };
 
         let mut scene = Scene::new("multi");
         scene.add_object(
             "Sphere",
-            WorldPosition::default(),
+            Vec3::ZERO,
             SceneNode::analytical("s", SdfPrimitive::Sphere { radius: 0.5 }, 1),
         );
         scene.add_object(
             "Capsule",
-            WorldPosition::default(),
+            Vec3::ZERO,
             SceneNode::analytical("c", SdfPrimitive::Capsule { radius: 0.2, half_height: 0.8 }, 2),
         );
 

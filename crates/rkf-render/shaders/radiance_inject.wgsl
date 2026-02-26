@@ -32,7 +32,9 @@ struct GpuObject {
     sdf_param_1: f32,
     sdf_param_2: f32,
     sdf_param_3: f32,
-    accumulated_scale: f32,
+    accumulated_scale_x: f32,
+    accumulated_scale_y: f32,
+    accumulated_scale_z: f32,
     lod_level: u32,
     object_id: u32,
     primitive_type: u32,
@@ -41,7 +43,7 @@ struct GpuObject {
     _pad8: f32, _pad9: f32, _pad10: f32, _pad11: f32,
     _pad12: f32, _pad13: f32, _pad14: f32, _pad15: f32,
     _pad16: f32, _pad17: f32, _pad18: f32, _pad19: f32,
-    _pad20: f32, _pad21: f32, _pad22: f32,
+    _pad20: f32,
 }
 
 struct BvhNode {
@@ -267,7 +269,8 @@ fn evaluate_object(world_pos: vec3<f32>, cam_rel: vec3<f32>, obj_idx: u32) -> ve
     } else {
         dist = sample_voxelized(local_pos, obj);
     }
-    return vec2<f32>(dist * obj.accumulated_scale, f32(obj.material_id));
+    let min_scale = min(obj.accumulated_scale_x, min(obj.accumulated_scale_y, obj.accumulated_scale_z));
+    return vec2<f32>(dist * min_scale, f32(obj.material_id));
 }
 
 // ---------- Coarse Field Sampling ----------

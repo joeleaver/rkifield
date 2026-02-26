@@ -6,7 +6,7 @@
 //! human-readable and diff-friendly so scenes can live under version control.
 
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Root scene descriptor, serialized to `.rkscene` (RON).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +28,31 @@ pub struct SceneFile {
     pub environment: Option<String>,
 }
 
+/// Serde helper: deserialize scale as either a single `f32` (uniform →
+/// `[s, s, s]`) or a 3-element array `[x, y, z]`.  Always serializes as an
+/// array.  This provides backward compatibility with scene files that used a
+/// single scalar scale value.
+mod scale_serde {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(v: &[f32; 3], s: S) -> Result<S::Ok, S::Error> {
+        v.serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[f32; 3], D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum ScaleValue {
+            Vec3([f32; 3]),
+            Uniform(f32),
+        }
+        match ScaleValue::deserialize(d)? {
+            ScaleValue::Vec3(v) => Ok(v),
+            ScaleValue::Uniform(f) => Ok([f, f, f]),
+        }
+    }
+}
+
 /// A single SDF object placed in a scene.
 ///
 /// An object is either asset-backed (has an `asset_path`) or analytical (has
@@ -46,9 +71,10 @@ pub struct ObjectEntry {
     /// Orientation as a unit quaternion `[x, y, z, w]`.
     #[serde(default = "default_rotation")]
     pub rotation: [f32; 4],
-    /// Uniform scale factor.  Non-uniform scale is not supported.
-    #[serde(default = "default_scale")]
-    pub scale: f32,
+    /// Per-axis scale `[x, y, z]`.  Backward-compatible: old files with a
+    /// single `f32` are deserialized as uniform `[s, s, s]`.
+    #[serde(default = "default_scale", with = "scale_serde")]
+    pub scale: [f32; 3],
     /// Optional material ID override applied after asset load.
     #[serde(default)]
     pub material_id: Option<u16>,
@@ -69,8 +95,8 @@ fn default_rotation() -> [f32; 4] {
     [0.0, 0.0, 0.0, 1.0] // identity quaternion
 }
 
-fn default_scale() -> f32 {
-    1.0
+fn default_scale() -> [f32; 3] {
+    [1.0, 1.0, 1.0]
 }
 
 fn default_importance_bias() -> f32 {
@@ -196,7 +222,7 @@ mod tests {
             asset_path: Some("assets/ground.rkf".to_string()),
             position: [0.0, -1.0, 0.0],
             rotation: default_rotation(),
-            scale: 1.0,
+            scale: [1.0, 1.0, 1.0],
             material_id: Some(3),
             analytical: None,
             analytical_params: None,
@@ -208,7 +234,7 @@ mod tests {
             asset_path: None,
             position: [5.0, 2.0, 0.0],
             rotation: default_rotation(),
-            scale: 2.0,
+            scale: [2.0, 2.0, 2.0],
             material_id: None,
             analytical: Some("sphere".to_string()),
             analytical_params: Some(vec![1.5]),
@@ -359,7 +385,7 @@ mod tests {
             asset_path: None,
             position: [1.0, 0.0, -2.0],
             rotation: default_rotation(),
-            scale: 1.0,
+            scale: [1.0, 1.0, 1.0],
             material_id: None,
             analytical: Some("box".to_string()),
             analytical_params: Some(vec![2.0, 1.0, 3.0]),
@@ -373,7 +399,7 @@ mod tests {
         assert_eq!(d.analytical_params, Some(vec![2.0, 1.0, 3.0]));
         assert!(d.asset_path.is_none());
         assert!(d.material_id.is_none());
-        assert!((d.scale - 1.0).abs() < 1e-6);
+        assert!((d.scale[0] - 1.0).abs() < 1e-6);
     }
 
     #[test]
@@ -383,7 +409,7 @@ mod tests {
             asset_path: Some("characters/hero.rkf".to_string()),
             position: [0.0, 0.0, 0.0],
             rotation: [0.0, 0.707, 0.0, 0.707],
-            scale: 1.5,
+            scale: [1.5, 1.5, 1.5],
             material_id: Some(7),
             analytical: None,
             analytical_params: None,
@@ -395,7 +421,9 @@ mod tests {
 
         assert_eq!(d.asset_path, Some("characters/hero.rkf".to_string()));
         assert_eq!(d.material_id, Some(7));
-        assert!((d.scale - 1.5).abs() < 1e-6);
+        assert!((d.scale[0] - 1.5).abs() < 1e-6);
+        assert!((d.scale[1] - 1.5).abs() < 1e-6);
+        assert!((d.scale[2] - 1.5).abs() < 1e-6);
         assert!((d.importance_bias - 2.0).abs() < 1e-6);
         assert!(d.analytical.is_none());
         assert!(d.analytical_params.is_none());

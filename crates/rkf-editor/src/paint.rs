@@ -203,9 +203,9 @@ pub fn world_to_object_local_v2(
     use glam::Mat4;
 
     let world_matrix = Mat4::from_scale_rotation_translation(
-        glam::Vec3::splat(object.scale),
+        object.scale,
         object.rotation,
-        object.world_position.local,
+        object.position,
     );
     let inv = world_matrix.inverse();
     inv.transform_point3(world_pos)
@@ -512,13 +512,14 @@ mod tests {
 
     // --- world_to_object_local_v2 tests (paint module) ---
 
-    fn make_paint_test_object(local_pos: Vec3, scale: f32) -> rkf_core::scene::SceneObject {
-        use rkf_core::{aabb::Aabb, scene::SceneObject, scene_node::SceneNode, WorldPosition};
-        use glam::{IVec3, Quat};
+    fn make_paint_test_object(local_pos: Vec3, scale: Vec3) -> rkf_core::scene::SceneObject {
+        use rkf_core::{aabb::Aabb, scene::SceneObject, scene_node::SceneNode};
+        use glam::Quat;
         SceneObject {
             id: 1,
             name: "paint_obj".into(),
-            world_position: WorldPosition::new(IVec3::ZERO, local_pos),
+            parent_id: None,
+            position: local_pos,
             rotation: Quat::IDENTITY,
             scale,
             root_node: SceneNode::new("root"),
@@ -528,7 +529,7 @@ mod tests {
 
     #[test]
     fn test_paint_world_to_object_local_identity() {
-        let obj = make_paint_test_object(Vec3::ZERO, 1.0);
+        let obj = make_paint_test_object(Vec3::ZERO, Vec3::ONE);
         let world = Vec3::new(2.0, 3.0, 4.0);
         let local = super::world_to_object_local_v2(world, &obj);
         assert!((local - world).length() < EPS, "identity: {local:?}");
@@ -537,7 +538,7 @@ mod tests {
     #[test]
     fn test_paint_world_to_object_local_translated() {
         // Object at (3, 1, 0) — point at object origin maps to local (0,0,0)
-        let obj = make_paint_test_object(Vec3::new(3.0, 1.0, 0.0), 1.0);
+        let obj = make_paint_test_object(Vec3::new(3.0, 1.0, 0.0), Vec3::ONE);
         let local = super::world_to_object_local_v2(Vec3::new(3.0, 1.0, 0.0), &obj);
         assert!(local.length() < EPS, "translated: {local:?}");
     }
@@ -545,7 +546,7 @@ mod tests {
     #[test]
     fn test_paint_world_to_object_local_scaled() {
         // Object at origin, scale 0.5 — world (0.5,0,0) should be local (1,0,0)
-        let obj = make_paint_test_object(Vec3::ZERO, 0.5);
+        let obj = make_paint_test_object(Vec3::ZERO, Vec3::splat(0.5));
         let local = super::world_to_object_local_v2(Vec3::new(0.5, 0.0, 0.0), &obj);
         assert!(approx_eq(local.x, 1.0), "scaled x: {local:?}");
         assert!(local.y.abs() < EPS);

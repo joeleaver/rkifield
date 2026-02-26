@@ -15,24 +15,25 @@ use glam::{Mat4, Quat, Vec3};
 
 use crate::aabb::Aabb;
 
-/// Local transform: position, rotation, uniform scale.
+/// Local transform: position, rotation, per-axis scale.
 ///
-/// Non-uniform scale is forbidden because it distorts SDF distances
-/// differently along each axis, breaking ray marching.
+/// Non-uniform scale uses conservative `dist * min(sx, sy, sz)` for SDF
+/// distance correction. Objects can be re-voxelized to eliminate the
+/// march-step overhead from extreme scale ratios.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Transform {
     /// Offset from parent, in parent's local space.
     pub position: Vec3,
     /// Rotation relative to parent.
     pub rotation: Quat,
-    /// Uniform scale factor. Must be positive.
-    pub scale: f32,
+    /// Per-axis scale factor. All components must be positive.
+    pub scale: Vec3,
 }
 
 impl Transform {
     /// Create a new transform.
     #[inline]
-    pub fn new(position: Vec3, rotation: Quat, scale: f32) -> Self {
+    pub fn new(position: Vec3, rotation: Quat, scale: Vec3) -> Self {
         Self {
             position,
             rotation,
@@ -44,7 +45,7 @@ impl Transform {
     #[inline]
     pub fn to_matrix(&self) -> Mat4 {
         Mat4::from_scale_rotation_translation(
-            Vec3::splat(self.scale),
+            self.scale,
             self.rotation,
             self.position,
         )
@@ -56,7 +57,7 @@ impl Default for Transform {
         Self {
             position: Vec3::ZERO,
             rotation: Quat::IDENTITY,
-            scale: 1.0,
+            scale: Vec3::ONE,
         }
     }
 }
@@ -327,7 +328,7 @@ mod tests {
         let t = Transform::default();
         assert_eq!(t.position, Vec3::ZERO);
         assert_eq!(t.rotation, Quat::IDENTITY);
-        assert_eq!(t.scale, 1.0);
+        assert_eq!(t.scale, Vec3::ONE);
     }
 
     #[test]
@@ -340,7 +341,7 @@ mod tests {
 
     #[test]
     fn transform_to_matrix_translation() {
-        let t = Transform::new(Vec3::new(1.0, 2.0, 3.0), Quat::IDENTITY, 1.0);
+        let t = Transform::new(Vec3::new(1.0, 2.0, 3.0), Quat::IDENTITY, Vec3::ONE);
         let m = t.to_matrix();
         let p = m.transform_point3(Vec3::ZERO);
         assert!((p - Vec3::new(1.0, 2.0, 3.0)).length() < 1e-5);
@@ -348,7 +349,7 @@ mod tests {
 
     #[test]
     fn transform_to_matrix_scale() {
-        let t = Transform::new(Vec3::ZERO, Quat::IDENTITY, 2.0);
+        let t = Transform::new(Vec3::ZERO, Quat::IDENTITY, Vec3::splat(2.0));
         let m = t.to_matrix();
         let p = m.transform_point3(Vec3::ONE);
         assert!((p - Vec3::splat(2.0)).length() < 1e-5);
@@ -356,7 +357,7 @@ mod tests {
 
     #[test]
     fn transform_to_matrix_rotation() {
-        let t = Transform::new(Vec3::ZERO, Quat::from_rotation_z(FRAC_PI_2), 1.0);
+        let t = Transform::new(Vec3::ZERO, Quat::from_rotation_z(FRAC_PI_2), Vec3::ONE);
         let m = t.to_matrix();
         let p = m.transform_point3(Vec3::X);
         // 90° Z rotation: X -> Y
@@ -403,11 +404,11 @@ mod tests {
             },
             2,
         )
-        .with_transform(Transform::new(Vec3::new(1.0, 0.0, 0.0), Quat::IDENTITY, 0.5))
+        .with_transform(Transform::new(Vec3::new(1.0, 0.0, 0.0), Quat::IDENTITY, Vec3::splat(0.5)))
         .with_blend_mode(BlendMode::Subtract);
 
         assert_eq!(node.local_transform.position, Vec3::new(1.0, 0.0, 0.0));
-        assert_eq!(node.local_transform.scale, 0.5);
+        assert_eq!(node.local_transform.scale, Vec3::splat(0.5));
         assert!(matches!(node.blend_mode, BlendMode::Subtract));
     }
 
@@ -562,7 +563,7 @@ mod tests {
         let t = Transform::new(
             Vec3::new(5.0, 0.0, 0.0),
             Quat::from_rotation_z(FRAC_PI_2),
-            2.0,
+            Vec3::splat(2.0),
         );
         let m = t.to_matrix();
         // Point at (1, 0, 0) should be: scale(2) → (2,0,0), rotate 90°Z → (0,2,0), translate → (5,2,0)

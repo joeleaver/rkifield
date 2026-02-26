@@ -94,7 +94,7 @@ impl RuntimeScene {
 
     /// Clear everything — both SDF scene and ECS world.
     pub fn clear(&mut self) {
-        self.sdf_scene.root_objects.clear();
+        self.sdf_scene.objects.clear();
         self.world.clear();
     }
 }
@@ -113,7 +113,7 @@ impl Default for RuntimeScene {
 mod tests {
     use super::*;
     use rkf_core::scene_node::{SceneNode, SdfPrimitive};
-    use rkf_core::WorldPosition;
+    use glam::Vec3;
 
     #[test]
     fn new_scene_empty() {
@@ -144,7 +144,7 @@ mod tests {
             SdfPrimitive::Sphere { radius: 0.5 },
             1,
         );
-        scene.sdf_scene.add_object("sphere_obj", WorldPosition::default(), node);
+        scene.sdf_scene.add_object("sphere_obj", Vec3::ZERO, node);
         assert_eq!(scene.sdf_object_count(), 1);
     }
 
@@ -154,7 +154,7 @@ mod tests {
 
         // SDF objects
         let node = SceneNode::new("root");
-        scene.sdf_scene.add_object("obj1", WorldPosition::default(), node);
+        scene.sdf_scene.add_object("obj1", Vec3::ZERO, node);
 
         // ECS entities
         scene.spawn_light(Transform::default());
@@ -188,7 +188,7 @@ mod tests {
         let mut scene = RuntimeScene::new("test");
         scene.spawn_light(Transform::default());
         let node = SceneNode::new("root");
-        scene.sdf_scene.add_object("obj", WorldPosition::default(), node);
+        scene.sdf_scene.add_object("obj", Vec3::ZERO, node);
 
         scene.clear();
         assert_eq!(scene.ecs_entity_count(), 0);

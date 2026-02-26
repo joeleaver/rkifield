@@ -395,14 +395,14 @@ pub trait AutomationApi: Send + Sync {
     /// Set a node's local transform in the v2 scene.
     ///
     /// `position` is the local translation in metres, `rotation` is a unit
-    /// quaternion `[x, y, z, w]`, and `scale` is a uniform scale factor.
+    /// quaternion `[x, y, z, w]`, and `scale` is per-axis `[sx, sy, sz]`.
     #[allow(unused_variables)]
     fn node_set_transform(
         &self,
         object_id: u32,
         position: [f32; 3],
         rotation: [f32; 4],
-        scale: f32,
+        scale: [f32; 3],
     ) -> Result<(), String> {
         Err("node_set_transform not supported".into())
     }
@@ -862,7 +862,7 @@ mod tests {
     #[test]
     fn default_node_set_transform_returns_error() {
         assert_err_contains(
-            make_stub().node_set_transform(1, [0.0; 3], [0.0, 0.0, 0.0, 1.0], 1.0),
+            make_stub().node_set_transform(1, [0.0; 3], [0.0, 0.0, 0.0, 1.0], [1.0; 3]),
             "not supported",
         );
     }

@@ -20,6 +20,15 @@ pub struct PendingCamera {
     pub pitch: f32,
 }
 
+/// Result of a GPU brush hit readback from the G-buffer.
+#[derive(Debug, Clone, Copy)]
+pub struct BrushHitResult {
+    /// World-space hit position (from position G-buffer).
+    pub position: Vec3,
+    /// Object ID at the hit pixel (bits 24-31 of material G-buffer).
+    pub object_id: u32,
+}
+
 /// Shared mutable state between the render loop and the automation API.
 pub struct SharedState {
     /// Camera position in world space.
@@ -48,6 +57,27 @@ pub struct SharedState {
     pub pending_camera: Option<PendingCamera>,
     /// Set true by MCP screenshot(); render loop performs readback and clears.
     pub screenshot_requested: bool,
+    /// GPU pick request: internal-resolution pixel to sample for object_id.
+    /// Set by click handler, consumed by render loop.
+    pub pending_pick: Option<(u32, u32)>,
+    /// GPU pick result: object_id at the requested pixel (0 = miss/sky).
+    /// Set by render loop after readback, consumed by engine thread section l.
+    pub pick_result: Option<u32>,
+    /// Set by the engine thread after processing a pick result.
+    /// Cleared by the UI thread after bumping UiRevision.
+    pub pick_completed: bool,
+    /// Set by the engine thread when a gizmo drag finishes (transform changed).
+    /// Cleared by the UI thread after bumping UiRevision.
+    pub ui_revision_needed: bool,
+    /// GPU brush hit request: internal-resolution pixel to sample for position.
+    /// Set by mouse handler in Sculpt/Paint modes, consumed by render loop.
+    pub pending_brush_hit: Option<(u32, u32)>,
+    /// GPU brush hit result: world-space position + object_id at the requested pixel.
+    /// Set by render loop after readback, consumed by engine thread.
+    pub brush_hit_result: Option<BrushHitResult>,
+    /// Brush preview position for wireframe sphere rendering.
+    /// Set by engine thread after processing brush hit, read by wireframe builder.
+    pub brush_preview_pos: Option<Vec3>,
     /// Ring buffer of recent log entries for MCP `read_log` tool.
     pub log_entries: VecDeque<LogEntry>,
     /// Engine start time for log timestamps.
@@ -74,6 +104,13 @@ impl SharedState {
             pending_debug_mode: None,
             pending_camera: None,
             screenshot_requested: false,
+            pending_pick: None,
+            pick_result: None,
+            pick_completed: false,
+            ui_revision_needed: false,
+            pending_brush_hit: None,
+            brush_hit_result: None,
+            brush_preview_pos: None,
             log_entries: VecDeque::with_capacity(MAX_LOG_ENTRIES),
             start_time: Instant::now(),
         }
@@ -774,7 +811,7 @@ impl AutomationApi for EditorAutomationApi {
         object_id: u32,
         position: [f32; 3],
         rotation: [f32; 4],
-        scale: f32,
+        scale: [f32; 3],
     ) -> Result<(), String> {
         let mut es = self
             .editor_state
@@ -789,7 +826,7 @@ impl AutomationApi for EditorAutomationApi {
         node.position = glam::Vec3::new(position[0], position[1], position[2]);
         node.rotation =
             glam::Quat::from_xyzw(rotation[0], rotation[1], rotation[2], rotation[3]);
-        node.scale = glam::Vec3::splat(scale);
+        node.scale = glam::Vec3::new(scale[0], scale[1], scale[2]);
 
         Ok(())
     }

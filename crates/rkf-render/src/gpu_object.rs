@@ -29,11 +29,11 @@ use bytemuck::{Pod, Zeroable};
 /// | 124    | 4    | blend_mode (u32) |
 /// | 128    | 4    | blend_radius (f32) |
 /// | 132    | 16   | sdf_params (vec4) |
-/// | 148    | 4    | accumulated_scale (f32) |
-/// | 152    | 4    | lod_level (u32) |
-/// | 156    | 4    | object_id (u32) |
-/// | 160    | 4    | primitive_type (u32) |
-/// | 164    | 92   | _padding |
+/// | 148    | 12   | accumulated_scale ([f32; 3]) |
+/// | 160    | 4    | lod_level (u32) |
+/// | 164    | 4    | object_id (u32) |
+/// | 168    | 4    | primitive_type (u32) |
+/// | 172    | 84   | _padding |
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Pod, Zeroable)]
 pub struct GpuObject {
@@ -72,8 +72,8 @@ pub struct GpuObject {
     /// Plane: [normal_x, normal_y, normal_z, distance]
     pub sdf_params: [f32; 4],
 
-    /// Product of all scales from root to this node.
-    pub accumulated_scale: f32,
+    /// Product of all per-axis scales from root to this node.
+    pub accumulated_scale: [f32; 3],
     /// Current LOD level (0 = finest).
     pub lod_level: u32,
     /// Unique object ID (matches SceneObject::id).
@@ -82,7 +82,7 @@ pub struct GpuObject {
     pub primitive_type: u32,
 
     /// Padding to 256 bytes.
-    pub _padding: [f32; 23],
+    pub _padding: [f32; 21],
 }
 
 /// SDF type constants for [`GpuObject::sdf_type`].
@@ -192,11 +192,11 @@ impl GpuObject {
             blend_mode: bm,
             blend_radius: br,
             sdf_params,
-            accumulated_scale: flat.accumulated_scale,
+            accumulated_scale: flat.accumulated_scale.to_array(),
             lod_level: 0,
             object_id,
             primitive_type: prim_type,
-            _padding: [0.0; 23],
+            _padding: [0.0; 21],
         }
     }
 }
@@ -283,11 +283,11 @@ mod tests {
             blend_mode: blend_mode::SMOOTH_UNION,
             blend_radius: 0.1,
             sdf_params: [0.5, 0.0, 0.0, 0.0],
-            accumulated_scale: 2.0,
+            accumulated_scale: [2.0, 2.0, 2.0],
             lod_level: 0,
             object_id: 99,
             primitive_type: primitive_type::SPHERE,
-            _padding: [0.0; 23],
+            _padding: [0.0; 21],
         };
 
         let bytes = bytemuck::bytes_of(&obj);
@@ -297,14 +297,14 @@ mod tests {
         assert_eq!(restored.object_id, 99);
         assert_eq!(restored.material_id, 7);
         assert_eq!(restored.brick_map_offset, 42);
-        assert!((restored.accumulated_scale - 2.0).abs() < 1e-6);
+        assert!((restored.accumulated_scale[0] - 2.0).abs() < 1e-6);
     }
 
     #[test]
     fn from_flat_node_analytical() {
         let flat = FlatNode {
             inverse_world: Mat4::IDENTITY,
-            accumulated_scale: 1.5,
+            accumulated_scale: Vec3::splat(1.5),
             sdf_source: SdfSource::Analytical {
                 primitive: SdfPrimitive::Sphere { radius: 0.5 },
                 material_id: 3,
@@ -328,14 +328,14 @@ mod tests {
         assert!((gpu.sdf_params[0] - 0.5).abs() < 1e-6);
         assert!((gpu.blend_radius - 0.1).abs() < 1e-6);
         assert_eq!(gpu.blend_mode, blend_mode::SMOOTH_UNION);
-        assert!((gpu.accumulated_scale - 1.5).abs() < 1e-6);
+        assert!((gpu.accumulated_scale[0] - 1.5).abs() < 1e-6);
     }
 
     #[test]
     fn from_flat_node_voxelized() {
         let flat = FlatNode {
             inverse_world: Mat4::IDENTITY,
-            accumulated_scale: 1.0,
+            accumulated_scale: Vec3::ONE,
             sdf_source: SdfSource::Voxelized {
                 brick_map_handle: rkf_core::BrickMapHandle {
                     offset: 100,
@@ -368,7 +368,7 @@ mod tests {
     fn from_flat_node_none() {
         let flat = FlatNode {
             inverse_world: Mat4::IDENTITY,
-            accumulated_scale: 1.0,
+            accumulated_scale: Vec3::ONE,
             sdf_source: SdfSource::None,
             blend_mode: BlendMode::Subtract,
             depth: 0,

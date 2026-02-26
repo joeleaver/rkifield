@@ -81,6 +81,9 @@ pub struct GizmoState {
     pub drag_view_normal: Vec3,
     /// Which axis the mouse is currently hovering over (for visual feedback).
     pub hovered_axis: GizmoAxis,
+    /// World-space pivot (gizmo center) captured at drag start.
+    /// Used for rotation (rotate around this point) and scale (scale relative to this point).
+    pub pivot: Vec3,
 }
 
 impl Default for GizmoState {
@@ -103,6 +106,7 @@ impl GizmoState {
             initial_scale: Vec3::ONE,
             drag_view_normal: Vec3::Z,
             hovered_axis: GizmoAxis::None,
+            pivot: Vec3::ZERO,
         }
     }
 
@@ -455,25 +459,20 @@ pub struct GizmoResult {
     pub position: Vec3,
     /// New world-space rotation of the object.
     pub rotation: Quat,
-    /// New uniform scale factor of the object.
-    pub scale: f32,
+    /// New per-axis scale of the object.
+    pub scale: Vec3,
 }
 
 /// Apply a gizmo drag result to a v2 `rkf_core::scene::SceneObject`.
 ///
-/// Writes `result.position` into the object's `world_position.local` component,
+/// Writes `result.position` into the object's `position` field,
 /// copies `result.rotation` to `object.rotation`, and sets `object.scale` to
-/// `result.scale`. The chunk component of `world_position` is left unchanged.
-///
-/// # Note
-/// For large-world precision, callers should update `world_position.chunk`
-/// when `local` exceeds half-chunk range and re-normalise. This helper only
-/// writes the local offset.
+/// `result.scale`.
 pub fn apply_to_v2_object(
     result: &GizmoResult,
     object: &mut rkf_core::scene::SceneObject,
 ) {
-    object.world_position.local = result.position;
+    object.position = result.position;
     object.rotation = result.rotation;
     object.scale = result.scale;
 }
@@ -945,14 +944,15 @@ mod tests {
 
     #[test]
     fn test_apply_to_v2_object_sets_fields() {
-        use rkf_core::{aabb::Aabb, scene::SceneObject, scene_node::SceneNode, WorldPosition};
+        use rkf_core::{aabb::Aabb, scene::SceneObject, scene_node::SceneNode};
 
         let mut obj = SceneObject {
             id: 1,
             name: "test".into(),
-            world_position: WorldPosition::default(),
+            parent_id: None,
+            position: Vec3::ZERO,
             rotation: Quat::IDENTITY,
-            scale: 1.0,
+            scale: Vec3::ONE,
             root_node: SceneNode::new("root"),
             aabb: Aabb::new(Vec3::ZERO, Vec3::ZERO),
         };
@@ -960,44 +960,41 @@ mod tests {
         let result = GizmoResult {
             position: Vec3::new(1.0, 2.0, 3.0),
             rotation: Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
-            scale: 2.5,
+            scale: Vec3::splat(2.5),
         };
 
         apply_to_v2_object(&result, &mut obj);
 
-        assert!(vec3_approx_eq(obj.world_position.local, Vec3::new(1.0, 2.0, 3.0)));
-        assert!((obj.scale - 2.5).abs() < EPS);
+        assert!(vec3_approx_eq(obj.position, Vec3::new(1.0, 2.0, 3.0)));
+        assert!((obj.scale - Vec3::splat(2.5)).length() < EPS);
         // Rotation should match
         let expected = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
         assert!((obj.rotation - expected).length() < EPS);
     }
 
     #[test]
-    fn test_apply_to_v2_object_preserves_chunk() {
-        use rkf_core::{aabb::Aabb, scene::SceneObject, scene_node::SceneNode, WorldPosition};
-        use glam::IVec3;
+    fn test_apply_to_v2_object_sets_position_directly() {
+        use rkf_core::{aabb::Aabb, scene::SceneObject, scene_node::SceneNode};
 
         let mut obj = SceneObject {
             id: 2,
             name: "far".into(),
-            world_position: WorldPosition::new(IVec3::new(10, 0, -5), Vec3::ZERO),
+            parent_id: None,
+            position: Vec3::ZERO,
             rotation: Quat::IDENTITY,
-            scale: 1.0,
+            scale: Vec3::ONE,
             root_node: SceneNode::new("root"),
             aabb: Aabb::new(Vec3::ZERO, Vec3::ZERO),
         };
 
         let result = GizmoResult {
-            position: Vec3::new(0.5, 0.5, 0.5),
+            position: Vec3::new(80.5, 0.5, -39.5),
             rotation: Quat::IDENTITY,
-            scale: 1.0,
+            scale: Vec3::ONE,
         };
 
         apply_to_v2_object(&result, &mut obj);
 
-        // Chunk must be unchanged
-        assert_eq!(obj.world_position.chunk, IVec3::new(10, 0, -5));
-        // Local updated
-        assert!(vec3_approx_eq(obj.world_position.local, Vec3::new(0.5, 0.5, 0.5)));
+        assert!(vec3_approx_eq(obj.position, Vec3::new(80.5, 0.5, -39.5)));
     }
 }
