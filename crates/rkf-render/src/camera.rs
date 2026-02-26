@@ -158,7 +158,7 @@ impl Camera {
     /// ndc = uv * 2.0 - 1.0;
     /// ray_dir = normalize(forward + ndc.x * right + ndc.y * up);
     /// ```
-    pub fn uniforms(&self, width: u32, height: u32, frame_index: u32, prev_vp: [[f32; 4]; 4]) -> CameraUniforms {
+    pub fn uniforms(&self, width: u32, height: u32, _frame_index: u32, prev_vp: [[f32; 4]; 4]) -> CameraUniforms {
         let fov_rad = self.fov_degrees.to_radians();
         let half_fov_tan = (fov_rad * 0.5).tan();
         let aspect = width as f32 / height as f32;
@@ -173,7 +173,12 @@ impl Camera {
             right: [r.x, r.y, r.z, 0.0],
             up: [u.x, u.y, u.z, 0.0],
             resolution: [width as f32, height as f32],
-            jitter: jitter_for_frame(frame_index),
+            // TODO(temporal): Re-enable when a proper per-signal temporal resolve
+            // pass (FSR2-style) is implemented.  Currently disabled because SDF ray
+            // marching shifts the entire hit point per frame, causing whole-image
+            // shimmer with no temporal filter to stabilise it.
+            // jitter: jitter_for_frame(frame_index),
+            jitter: [0.0, 0.0],
             prev_vp,
         }
     }
@@ -482,11 +487,12 @@ mod tests {
     }
 
     #[test]
-    fn uniforms_jitter_at_frame_zero() {
+    fn uniforms_jitter_disabled() {
+        // Jitter is currently disabled (zeroed) because SDF ray marching shifts
+        // the entire hit point per frame with no temporal resolve pass to stabilise.
         let cam = Camera::new(Vec3::ZERO);
         let u = cam.uniforms(960, 540, 0, [[0.0; 4]; 4]);
-        let expected = jitter_for_frame(0);
-        assert_eq!(u.jitter, expected);
+        assert_eq!(u.jitter, [0.0, 0.0]);
     }
 
     // ------ Full yaw sweep ------

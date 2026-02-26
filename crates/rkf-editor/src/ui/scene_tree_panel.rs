@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use rinch::prelude::*;
 use rinch_tabler_icons::TablerIcon;
 
-use crate::editor_state::{EditorState, SelectedEntity, UiRevision};
+use crate::editor_state::{EditorState, SelectedEntity, UiRevision, UiSignals};
 use crate::light_editor::EditorLightType;
 
 // ── Style constants ──────────────────────────────────────────────────────────
@@ -110,6 +110,7 @@ fn parse_value(value: &str) -> Option<SelectedEntity> {
 pub fn SceneTreePanel() -> NodeHandle {
     let editor_state = use_context::<Arc<Mutex<EditorState>>>();
     let revision = use_context::<UiRevision>();
+    let ui = use_context::<UiSignals>();
 
     // Persistent tree expand/select state — created once, lives in rinch context.
     let tree_state = UseTreeReturn::new(UseTreeOptions {
@@ -127,6 +128,10 @@ pub fn SceneTreePanel() -> NodeHandle {
 
     let es = editor_state.clone();
     rinch::core::reactive_component_dom(__scope, &root, move |__scope| {
+        // Track selection + scene structure — only rebuild when these change.
+        let _ = ui.selection.get();
+        let _ = ui.scene_revision.get();
+        // Legacy fallback: also track revision for non-migrated code paths.
         revision.track();
 
         // Read tree data and selection from editor state, then RELEASE the
@@ -175,6 +180,8 @@ pub fn SceneTreePanel() -> NodeHandle {
                 if let Ok(mut state) = es_cb.lock() {
                     state.selected_entity = Some(entity);
                 }
+                // Signal update after lock released.
+                ui.selection.set(Some(entity));
             }
             revision.bump();
         });

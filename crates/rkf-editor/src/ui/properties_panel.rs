@@ -1,13 +1,13 @@
 //! Properties panel — shows details of the currently selected entity.
 //!
-//! Tracks the shared `UiRevision` signal so it re-renders whenever the
-//! selection changes (from scene tree clicks or viewport picks).
+//! Tracks `UiSignals::selection` for fine-grained reactivity — only rebuilds
+//! when the selection changes (from scene tree clicks or viewport picks).
 
 use std::sync::{Arc, Mutex};
 
 use rinch::prelude::*;
 
-use crate::editor_state::{EditorState, SelectedEntity, UiRevision};
+use crate::editor_state::{EditorState, SelectedEntity, UiRevision, UiSignals};
 
 // ── Style constants ──────────────────────────────────────────────────────────
 
@@ -29,6 +29,7 @@ const VALUE_STYLE: &str = "font-size:12px;color:var(--rinch-color-dimmed);paddin
 pub fn PropertiesPanel() -> NodeHandle {
     let editor_state = use_context::<Arc<Mutex<EditorState>>>();
     let revision = use_context::<UiRevision>();
+    let ui = use_context::<UiSignals>();
 
     let root = __scope.create_element("div");
     root.set_attribute(
@@ -36,9 +37,11 @@ pub fn PropertiesPanel() -> NodeHandle {
         "flex:1;overflow-y:auto;display:flex;flex-direction:column;",
     );
 
-    // Reactive content — rebuilds when revision changes.
+    // Reactive content — rebuilds when selection changes.
     let es = editor_state.clone();
     rinch::core::reactive_component_dom(__scope, &root, move |__scope| {
+        let _ = ui.selection.get();
+        // Legacy fallback: also track revision for non-migrated code paths.
         revision.track();
 
         let container = __scope.create_element("div");

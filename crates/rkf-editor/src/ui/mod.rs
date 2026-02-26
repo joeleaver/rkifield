@@ -11,8 +11,10 @@ use std::sync::{Arc, Mutex};
 use rinch::prelude::*;
 
 use crate::automation::SharedState;
-use crate::editor_state::{EditorMode, EditorState, SelectedEntity, UiRevision};
+use crate::editor_state::{EditorMode, EditorState, SelectedEntity, UiRevision, UiSignals};
+use crate::gizmo;
 use crate::input::{InputState, KeyCode, Modifiers};
+use crate::wireframe;
 use scene_tree_panel::SceneTreePanel;
 
 // ── Style constants ─────────────────────────────────────────────────────────
@@ -77,16 +79,25 @@ pub fn editor_ui() -> NodeHandle {
     let shared_state = use_context::<Arc<Mutex<SharedState>>>();
     let surface_handle = use_context::<RenderSurfaceHandle>();
 
-    // Wire SurfaceEvent → EditorState.editor_input + SharedState resize.
+    // Wire SurfaceEvent → EditorState.editor_input + gizmo interaction.
     // The handler runs on the main thread every time the surface receives input.
+    // All editor logic (gizmo hover/drag/end, mode switching) lives here.
     {
         let es = editor_state.clone();
         let ss = shared_state.clone();
         let sh = surface_handle.clone();
         let rev = use_context::<UiRevision>();
+        let ui = use_context::<UiSignals>();
         surface_handle.set_event_handler(move |event| {
             use SurfaceEvent::*;
             use SurfaceMouseButton as Btn;
+
+            // Helper: get viewport size for ray casting.
+            let vp_size = || -> (f32, f32) {
+                let (w, h) = sh.layout_size();
+                (w.max(1) as f32, h.max(1) as f32)
+            };
+
             match event {
                 MouseMove { x, y } => {
                     // Read mode and left-button state before updating input.
@@ -100,6 +111,85 @@ pub fn editor_ui() -> NodeHandle {
                         state.editor_input.mouse_pos = glam::Vec2::new(x, y);
                     }
 
+                    // Gizmo hover detection + drag continue (main thread).
+                    if mode == EditorMode::Default {
+                        let (vp_w, vp_h) = vp_size();
+                        if let Ok(mut state) = es.lock() {
+                            if state.gizmo.dragging {
+                                // Drag continue: update object transform.
+                                if let Some(SelectedEntity::Object(eid)) = state.selected_entity {
+                                    let (ray_o, ray_d) = crate::camera::screen_to_ray(
+                                        &state.editor_camera, x, y, vp_w, vp_h,
+                                    );
+                                    let gizmo_mode = state.gizmo.mode;
+                                    let pivot = state.gizmo.pivot;
+                                    let initial_pos = state.gizmo.initial_position;
+                                    let initial_rot = state.gizmo.initial_rotation;
+                                    let initial_scale = state.gizmo.initial_scale;
+
+                                    let (new_pos, new_rot, new_scale) = match gizmo_mode {
+                                        gizmo::GizmoMode::Translate => {
+                                            let delta = gizmo::compute_translate_delta(
+                                                &state.gizmo, ray_o, ray_d,
+                                            );
+                                            (initial_pos + delta, initial_rot, initial_scale)
+                                        }
+                                        gizmo::GizmoMode::Rotate => {
+                                            let rot_delta = gizmo::compute_rotate_delta(
+                                                &state.gizmo, ray_o, ray_d, pivot,
+                                            );
+                                            let new_rot = rot_delta * initial_rot;
+                                            let offset = initial_pos - pivot;
+                                            let new_pos = pivot + rot_delta * offset;
+                                            (new_pos, new_rot, initial_scale)
+                                        }
+                                        gizmo::GizmoMode::Scale => {
+                                            let scale_delta = gizmo::compute_scale_delta(
+                                                &state.gizmo, ray_o, ray_d,
+                                            );
+                                            (initial_pos, initial_rot, initial_scale * scale_delta)
+                                        }
+                                    };
+
+                                    if let Some(ref mut scene) = state.v2_scene {
+                                        if let Some(obj) = scene.objects.iter_mut()
+                                            .find(|o| o.id as u64 == eid)
+                                        {
+                                            obj.position = new_pos;
+                                            obj.rotation = new_rot;
+                                            obj.scale = new_scale;
+                                        }
+                                    }
+                                }
+                            } else {
+                                // Hover detection: update hovered_axis.
+                                if let Some(SelectedEntity::Object(eid)) = state.selected_entity {
+                                    let gc = state.v2_scene.as_ref().and_then(|scene| {
+                                        let obj = scene.objects.iter().find(|o| o.id as u64 == eid)?;
+                                        let (lmin, lmax) = wireframe::compute_node_tree_aabb(
+                                            &obj.root_node, glam::Mat4::IDENTITY,
+                                        )?;
+                                        Some(obj.position + obj.rotation * ((lmin + lmax) * 0.5 * obj.scale))
+                                    });
+                                    if let Some(gc) = gc {
+                                        let cam_dist = (gc - state.editor_camera.position).length();
+                                        let gizmo_size = cam_dist * 0.12;
+                                        let (ray_o, ray_d) = crate::camera::screen_to_ray(
+                                            &state.editor_camera, x, y, vp_w, vp_h,
+                                        );
+                                        state.gizmo.hovered_axis = gizmo::pick_gizmo_axis_for_mode(
+                                            ray_o, ray_d, gc, gizmo_size, state.gizmo.mode,
+                                        );
+                                    } else {
+                                        state.gizmo.hovered_axis = gizmo::GizmoAxis::None;
+                                    }
+                                } else {
+                                    state.gizmo.hovered_axis = gizmo::GizmoAxis::None;
+                                }
+                            }
+                        }
+                    }
+
                     // In Sculpt/Paint mode with left button held, send
                     // continuous brush hit requests for stroke continuation.
                     if left_down && matches!(mode, EditorMode::Sculpt | EditorMode::Paint) {
@@ -111,17 +201,18 @@ pub fn editor_ui() -> NodeHandle {
                         }
                     }
 
-                    // Check if the engine thread needs a UI revision bump
-                    // (GPU pick completed, gizmo drag ended, etc.).
-                    let needs_refresh = ss.lock().ok()
+                    // Check if the engine thread completed a GPU pick.
+                    let pick_done = ss.lock().ok()
                         .map(|mut s| {
-                            let c = s.pick_completed || s.ui_revision_needed;
-                            if s.pick_completed { s.pick_completed = false; }
-                            if s.ui_revision_needed { s.ui_revision_needed = false; }
+                            let c = s.pick_completed;
+                            if c { s.pick_completed = false; }
                             c
                         })
                         .unwrap_or(false);
-                    if needs_refresh {
+                    if pick_done {
+                        // Read the entity that was set by the render thread's pick handler.
+                        let picked = es.lock().ok().and_then(|s| s.selected_entity);
+                        ui.selection.set(picked);
                         rev.bump();
                     }
                 }
@@ -133,6 +224,67 @@ pub fn editor_ui() -> NodeHandle {
                     if let Ok(mut state) = es.lock() {
                         let idx = match button { Btn::Left => 0, Btn::Right => 1, Btn::Middle => 2 };
                         state.editor_input.mouse_buttons[idx] = true;
+                    }
+
+                    // Gizmo drag start: left-click in Default mode with object selected.
+                    if button == Btn::Left && mode == EditorMode::Default {
+                        let (vp_w, vp_h) = vp_size();
+                        if let Ok(mut state) = es.lock() {
+                            let right_down = state.editor_input.mouse_buttons[1];
+                            if !right_down && !state.gizmo.dragging {
+                                if let Some(SelectedEntity::Object(eid)) = state.selected_entity {
+                                    let gc = state.v2_scene.as_ref().and_then(|scene| {
+                                        let obj = scene.objects.iter().find(|o| o.id as u64 == eid)?;
+                                        let (lmin, lmax) = wireframe::compute_node_tree_aabb(
+                                            &obj.root_node, glam::Mat4::IDENTITY,
+                                        )?;
+                                        let center = obj.position
+                                            + obj.rotation * ((lmin + lmax) * 0.5 * obj.scale);
+                                        Some((center, obj.position, obj.rotation, obj.scale))
+                                    });
+
+                                    if let Some((gc, obj_pos, obj_rot, obj_scale)) = gc {
+                                        let cam_dist = (gc - state.editor_camera.position).length();
+                                        let gizmo_size = cam_dist * 0.12;
+                                        let (ray_o, ray_d) = crate::camera::screen_to_ray(
+                                            &state.editor_camera, x, y, vp_w, vp_h,
+                                        );
+                                        let axis = gizmo::pick_gizmo_axis_for_mode(
+                                            ray_o, ray_d, gc, gizmo_size, state.gizmo.mode,
+                                        );
+                                        if axis != gizmo::GizmoAxis::None {
+                                            let start_point = match state.gizmo.mode {
+                                                gizmo::GizmoMode::Translate | gizmo::GizmoMode::Scale => {
+                                                    if axis == gizmo::GizmoAxis::View {
+                                                        let vn = (state.editor_camera.position - gc).normalize();
+                                                        gizmo::project_to_plane(ray_o, ray_d, gc, vn)
+                                                            .unwrap_or(gc)
+                                                    } else {
+                                                        let t = gizmo::ray_axis_closest_point(
+                                                            ray_o, ray_d, gc, axis.direction(),
+                                                        );
+                                                        gc + axis.direction() * t
+                                                    }
+                                                }
+                                                gizmo::GizmoMode::Rotate => {
+                                                    gizmo::project_to_plane(
+                                                        ray_o, ray_d, gc, axis.plane_normal(),
+                                                    )
+                                                    .unwrap_or(gc)
+                                                }
+                                            };
+                                            let view_normal =
+                                                (state.editor_camera.position - gc).normalize();
+                                            state.gizmo.begin_drag(
+                                                axis, start_point, obj_pos, obj_rot, obj_scale,
+                                                view_normal,
+                                            );
+                                            state.gizmo.pivot = gc;
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     // In Sculpt/Paint mode, left-click starts a brush hit.
@@ -157,24 +309,51 @@ pub fn editor_ui() -> NodeHandle {
                         state.editor_input.mouse_buttons[idx] = false;
                     }
 
-                    // In Sculpt/Paint mode, left-click release ends the
-                    // stroke — don't send an object pick request.
-                    // In Default mode, left-click release → GPU pick for selection,
-                    // UNLESS a gizmo drag is in progress (engine thread ends it).
                     if button == Btn::Left {
-                        let gizmo_dragging = es.lock().ok()
+                        // Gizmo drag end: push undo action.
+                        let gizmo_was_dragging = es.lock().ok()
                             .map(|s| s.gizmo.dragging)
                             .unwrap_or(false);
 
-                        if matches!(mode, EditorMode::Sculpt | EditorMode::Paint) {
-                            // Stroke ending is handled by the engine thread
-                            // when it sees left mouse is no longer down.
-                        } else if gizmo_dragging {
-                            // Gizmo drag release — don't fire a pick (engine
-                            // thread handles end_drag + undo push).
-                            // Bump revision so properties panel updates immediately.
+                        if gizmo_was_dragging {
+                            if let Ok(mut state) = es.lock() {
+                                if let Some(SelectedEntity::Object(eid)) = state.selected_entity {
+                                    let final_transform = state.v2_scene.as_ref().and_then(|scene| {
+                                        let obj = scene.objects.iter().find(|o| o.id as u64 == eid)?;
+                                        Some((obj.position, obj.rotation, obj.scale))
+                                    });
+
+                                    if let Some((new_pos, new_rot, new_scale)) = final_transform {
+                                        let desc = match state.gizmo.mode {
+                                            gizmo::GizmoMode::Translate => "Move object",
+                                            gizmo::GizmoMode::Rotate => "Rotate object",
+                                            gizmo::GizmoMode::Scale => "Scale object",
+                                        };
+                                        let old_pos = state.gizmo.initial_position;
+                                        let old_rot = state.gizmo.initial_rotation;
+                                        let old_scale = state.gizmo.initial_scale;
+                                        state.undo.push(crate::undo::UndoAction {
+                                            kind: crate::undo::UndoActionKind::Transform {
+                                                entity_id: eid,
+                                                old_pos, old_rot, old_scale,
+                                                new_pos, new_rot, new_scale,
+                                            },
+                                            timestamp_ms: 0,
+                                            description: desc.to_string(),
+                                        });
+                                    }
+                                }
+                                state.gizmo.end_drag();
+                            }
+                            // Signal update after lock released.
+                            ui.selection.set(
+                                es.lock().ok().and_then(|s| s.selected_entity),
+                            );
                             rev.bump();
+                        } else if matches!(mode, EditorMode::Sculpt | EditorMode::Paint) {
+                            // Stroke ending is handled by the engine thread.
                         } else {
+                            // No gizmo drag — send GPU pick request.
                             let (vp_w, vp_h) = sh.layout_size();
                             if vp_w > 0 && vp_h > 0 {
                                 let scale = crate::engine_viewport::RENDER_SCALE;
@@ -194,6 +373,8 @@ pub fn editor_ui() -> NodeHandle {
                 }
                 KeyDown(key_data) => {
                     if let Some(kc) = translate_surface_key(&key_data.code) {
+                        // Gizmo mode switching: G/R/L keys.
+                        let mut gizmo_mode_changed = false;
                         if let Ok(mut state) = es.lock() {
                             state.editor_input.keys_pressed.insert(kc);
                             state.editor_input.keys_just_pressed.insert(kc);
@@ -202,6 +383,30 @@ pub fn editor_ui() -> NodeHandle {
                                 ctrl: key_data.ctrl,
                                 alt: key_data.alt,
                             };
+                            if state.mode == EditorMode::Default {
+                                match kc {
+                                    KeyCode::G => {
+                                        state.gizmo.mode = gizmo::GizmoMode::Translate;
+                                        gizmo_mode_changed = true;
+                                    }
+                                    KeyCode::R => {
+                                        state.gizmo.mode = gizmo::GizmoMode::Rotate;
+                                        gizmo_mode_changed = true;
+                                    }
+                                    KeyCode::L => {
+                                        state.gizmo.mode = gizmo::GizmoMode::Scale;
+                                        gizmo_mode_changed = true;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        if gizmo_mode_changed {
+                            let mode = es.lock().ok()
+                                .map(|s| s.gizmo.mode)
+                                .unwrap_or(gizmo::GizmoMode::Translate);
+                            ui.gizmo_mode.set(mode);
+                            rev.bump();
                         }
                     }
                 }
@@ -218,19 +423,13 @@ pub fn editor_ui() -> NodeHandle {
                     }
                 }
                 FocusLost => {
-                    // Clear all input when viewport loses focus.
                     if let Ok(mut state) = es.lock() {
                         state.editor_input = InputState::new();
                     }
                 }
-                // Resize is handled via SharedState polling in the engine thread;
-                // but we can also update it here from SurfaceEvent if available.
                 _ => {}
             }
 
-            // Update viewport dimensions in shared_state on any event
-            // so the engine thread sees current size on next frame.
-            // (Resize is triggered by the surface's layout changing.)
             let _ = ss;
         });
     }
@@ -332,6 +531,7 @@ pub fn TitleBar() -> NodeHandle {
 
     let editor_state = use_context::<Arc<Mutex<EditorState>>>();
     let revision = use_context::<UiRevision>();
+    let ui = use_context::<UiSignals>();
 
     // -1 = all closed, 0 = File, 1 = Edit, 2 = View.
     let active_menu: Signal<i32> = Signal::new(-1);
@@ -421,6 +621,8 @@ pub fn TitleBar() -> NodeHandle {
             let rev = rev;
             move || {
                 if let Ok(mut s) = es.lock() { s.pending_open = true; }
+                ui.bump_scene();
+                ui.selection.set(None);
                 rev.bump();
             }
         }))
@@ -462,6 +664,7 @@ pub fn TitleBar() -> NodeHandle {
                 if let Ok(mut s) = es.lock() {
                     s.pending_spawn = Some(name.clone());
                 }
+                ui.bump_scene();
                 rev.bump();
             }
         }));
@@ -486,6 +689,7 @@ pub fn TitleBar() -> NodeHandle {
             let rev = rev;
             move || {
                 if let Ok(mut s) = es.lock() { s.pending_delete = true; }
+                ui.bump_scene();
                 rev.bump();
             }
         }))
@@ -494,6 +698,7 @@ pub fn TitleBar() -> NodeHandle {
             let rev = rev;
             move || {
                 if let Ok(mut s) = es.lock() { s.pending_duplicate = true; }
+                ui.bump_scene();
                 rev.bump();
             }
         }))
@@ -519,6 +724,7 @@ pub fn TitleBar() -> NodeHandle {
                     s.debug_mode = mode;
                     s.pending_debug_mode = Some(mode);
                 }
+                ui.debug_mode.set(mode);
                 rev.bump();
             }
         }));
@@ -553,7 +759,11 @@ pub fn TitleBar() -> NodeHandle {
         let es = es.clone();
         let rev = rev;
         move || {
-            if let Ok(mut s) = es.lock() { s.show_grid = !s.show_grid; }
+            let new_val = es.lock().ok().map(|mut s| {
+                s.show_grid = !s.show_grid;
+                s.show_grid
+            }).unwrap_or(false);
+            ui.show_grid.set(new_val);
             rev.bump();
         }
     }));
@@ -684,6 +894,8 @@ pub fn TitleBar() -> NodeHandle {
         );
 
         rinch::core::reactive_component_dom(__scope, &tool_container, move |__scope| {
+            let _ = ui.editor_mode.get();
+            // Legacy fallback.
             revision.track();
 
             let current_mode = {
@@ -717,13 +929,18 @@ pub fn TitleBar() -> NodeHandle {
 
                 let es = es.clone();
                 let handler_id = __scope.register_handler(move || {
-                    if let Ok(mut state) = es.lock() {
+                    let new_mode = if let Ok(mut state) = es.lock() {
                         if state.mode == mode {
                             state.mode = EditorMode::Default;
+                            EditorMode::Default
                         } else {
                             state.mode = mode;
+                            mode
                         }
-                    }
+                    } else {
+                        EditorMode::Default
+                    };
+                    ui.editor_mode.set(new_mode);
                     revision.bump();
                 });
                 btn.set_attribute("data-rid", &handler_id.to_string());
@@ -896,6 +1113,7 @@ fn build_slider_row(
 pub fn RightPanel() -> NodeHandle {
     let editor_state = use_context::<Arc<Mutex<EditorState>>>();
     let revision = use_context::<UiRevision>();
+    let ui = use_context::<UiSignals>();
 
     let root = __scope.create_element("div");
     root.set_attribute(
@@ -951,6 +1169,17 @@ pub fn RightPanel() -> NodeHandle {
 
     let es = editor_state.clone();
     rinch::core::reactive_component_dom(__scope, &root, move |__scope| {
+        // Fine-grained signal tracking.
+        let _ = ui.selection.get();
+        let _ = ui.editor_mode.get();
+        // Env toggle signals — needed because toggle labels are built in this closure.
+        let _ = ui.atmo_enabled.get();
+        let _ = ui.fog_enabled.get();
+        let _ = ui.clouds_enabled.get();
+        let _ = ui.bloom_enabled.get();
+        let _ = ui.dof_enabled.get();
+        let _ = ui.tone_map_mode.get();
+        // Legacy fallback.
         revision.track();
 
         let (mode, selected_entity) = {
@@ -1209,10 +1438,12 @@ pub fn RightPanel() -> NodeHandle {
                 let es_toggle = es.clone();
                 let rev = revision;
                 let hid = __scope.register_handler(move || {
-                    if let Ok(mut es) = es_toggle.lock() {
+                    let new_val = es_toggle.lock().ok().map(|mut es| {
                         es.environment.atmosphere.enabled = !es.environment.atmosphere.enabled;
                         es.environment.mark_dirty();
-                    }
+                        es.environment.atmosphere.enabled
+                    }).unwrap_or(true);
+                    ui.atmo_enabled.set(new_val);
                     rev.bump();
                 });
                 toggle_row.set_attribute("data-rid", &hid.to_string());
@@ -1260,10 +1491,12 @@ pub fn RightPanel() -> NodeHandle {
                 let es_toggle = es.clone();
                 let rev = revision;
                 let hid = __scope.register_handler(move || {
-                    if let Ok(mut es) = es_toggle.lock() {
+                    let new_val = es_toggle.lock().ok().map(|mut es| {
                         es.environment.fog.enabled = !es.environment.fog.enabled;
                         es.environment.mark_dirty();
-                    }
+                        es.environment.fog.enabled
+                    }).unwrap_or(false);
+                    ui.fog_enabled.set(new_val);
                     rev.bump();
                 });
                 toggle_row.set_attribute("data-rid", &hid.to_string());
@@ -1331,10 +1564,12 @@ pub fn RightPanel() -> NodeHandle {
                 let es_toggle = es.clone();
                 let rev = revision;
                 let hid = __scope.register_handler(move || {
-                    if let Ok(mut es) = es_toggle.lock() {
+                    let new_val = es_toggle.lock().ok().map(|mut es| {
                         es.environment.clouds.enabled = !es.environment.clouds.enabled;
                         es.environment.mark_dirty();
-                    }
+                        es.environment.clouds.enabled
+                    }).unwrap_or(false);
+                    ui.clouds_enabled.set(new_val);
                     rev.bump();
                 });
                 toggle_row.set_attribute("data-rid", &hid.to_string());
@@ -1412,10 +1647,12 @@ pub fn RightPanel() -> NodeHandle {
                 let es_toggle = es.clone();
                 let rev = revision;
                 let hid = __scope.register_handler(move || {
-                    if let Ok(mut es) = es_toggle.lock() {
+                    let new_val = es_toggle.lock().ok().map(|mut es| {
                         es.environment.post_process.bloom_enabled = !es.environment.post_process.bloom_enabled;
                         es.environment.mark_dirty();
-                    }
+                        es.environment.post_process.bloom_enabled
+                    }).unwrap_or(true);
+                    ui.bloom_enabled.set(new_val);
                     rev.bump();
                 });
                 toggle_row.set_attribute("data-rid", &hid.to_string());
@@ -1467,11 +1704,13 @@ pub fn RightPanel() -> NodeHandle {
                 let es_toggle = es.clone();
                 let rev = revision;
                 let hid = __scope.register_handler(move || {
-                    if let Ok(mut es) = es_toggle.lock() {
+                    let new_mode = es_toggle.lock().ok().map(|mut es| {
                         es.environment.post_process.tone_map_mode =
                             if es.environment.post_process.tone_map_mode == 0 { 1 } else { 0 };
                         es.environment.mark_dirty();
-                    }
+                        es.environment.post_process.tone_map_mode
+                    }).unwrap_or(0);
+                    ui.tone_map_mode.set(new_mode);
                     rev.bump();
                 });
                 toggle_row.set_attribute("data-rid", &hid.to_string());
@@ -1503,10 +1742,12 @@ pub fn RightPanel() -> NodeHandle {
                 let es_toggle = es.clone();
                 let rev = revision;
                 let hid = __scope.register_handler(move || {
-                    if let Ok(mut es) = es_toggle.lock() {
+                    let new_val = es_toggle.lock().ok().map(|mut es| {
                         es.environment.post_process.dof_enabled = !es.environment.post_process.dof_enabled;
                         es.environment.mark_dirty();
-                    }
+                        es.environment.post_process.dof_enabled
+                    }).unwrap_or(false);
+                    ui.dof_enabled.set(new_val);
                     rev.bump();
                 });
                 toggle_row.set_attribute("data-rid", &hid.to_string());
@@ -2053,8 +2294,9 @@ pub fn RightPanel() -> NodeHandle {
 #[component]
 pub fn StatusBar() -> NodeHandle {
     let editor_state = use_context::<Arc<Mutex<EditorState>>>();
-    let shared_state = use_context::<Arc<Mutex<SharedState>>>();
+    let _shared_state = use_context::<Arc<Mutex<SharedState>>>();
     let revision = use_context::<UiRevision>();
+    let ui = use_context::<UiSignals>();
 
     let root = __scope.create_element("div");
     root.set_attribute(
@@ -2068,8 +2310,15 @@ pub fn StatusBar() -> NodeHandle {
     );
 
     let es = editor_state.clone();
-    let ss = shared_state.clone();
     rinch::core::reactive_component_dom(__scope, &root, move |__scope| {
+        // Fine-grained signal tracking — only rebuild when these specific values change.
+        let _ = ui.selection.get();
+        let _ = ui.editor_mode.get();
+        let _ = ui.gizmo_mode.get();
+        let _ = ui.debug_mode.get();
+        let _ = ui.show_grid.get();
+        let _ = ui.object_count.get();
+        // Legacy fallback.
         revision.track();
 
         let container = __scope.create_element("div");
@@ -2111,20 +2360,27 @@ pub fn StatusBar() -> NodeHandle {
                 gizmo_name.to_string(),
             )
         };
-        let frame_time_ms = ss.lock().map(|s| s.frame_time_ms).unwrap_or(0.0);
-        let fps = if frame_time_ms > 0.1 {
-            format!("{:.0} fps", 1000.0 / frame_time_ms)
-        } else {
-            "-- fps".to_string()
-        };
-
         let obj_div = __scope.create_element("div");
         obj_div.append_child(&__scope.create_text(&format!("{obj_count} objects")));
         container.append_child(&obj_div);
 
+        // FPS: own reactive text node tracking UiSignals.fps (not revision).
         let fps_div = __scope.create_element("div");
-        fps_div.append_child(&__scope.create_text(&fps));
+        let fps_text = __scope.create_text("-- fps");
+        fps_div.append_child(&fps_text);
         container.append_child(&fps_div);
+        {
+            let fps_text = fps_text.clone();
+            Effect::new(move || {
+                let ms = ui.fps.get();
+                let label = if ms > 0.1 {
+                    format!("{:.0} fps", 1000.0 / ms)
+                } else {
+                    "-- fps".to_string()
+                };
+                fps_text.set_text(&label);
+            });
+        }
 
         // Selected object name.
         if let Some(name) = &selected_name {

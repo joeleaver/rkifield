@@ -7,7 +7,7 @@ use crate::animation_preview::AnimationPreview;
 use crate::camera::{CameraMode, EditorCamera};
 use crate::debug_viz::{DebugOverlay, FrameTimeHistory};
 use crate::environment::EnvironmentState;
-use crate::gizmo::GizmoState;
+use crate::gizmo::{GizmoMode, GizmoState};
 use crate::input::InputState;
 use crate::light_editor::LightEditor;
 use crate::overlay::OverlayConfig;
@@ -35,6 +35,79 @@ pub enum SelectedEntity {
     Scene,
     /// The project root node.
     Project,
+}
+
+/// Dedicated reactive signal for the FPS counter.
+///
+/// Updated from the render thread via `run_on_main_thread`. Only the status
+/// bar's FPS text node tracks this — bumping it does NOT rebuild other panels.
+#[derive(Clone, Copy)]
+pub struct FpsSignal(pub Signal<f64>);
+
+impl FpsSignal {
+    pub fn new() -> Self {
+        Self(Signal::new(0.0))
+    }
+}
+
+/// Per-property reactive signals for fine-grained UI updates.
+///
+/// Each signal holds the actual value (not a counter). UI components subscribe
+/// to specific signals via `.get()` inside `reactive_component_dom`, so changes
+/// to one property only rebuild the panels that care about it.
+///
+/// **Important**: Never call `.set()` while holding `editor_state.lock()` — signal
+/// updates trigger synchronous reactive effects that may also lock `EditorState`.
+/// Always release the lock first, then update signals.
+#[derive(Clone, Copy)]
+pub struct UiSignals {
+    // Selection & modes
+    pub selection: Signal<Option<SelectedEntity>>,
+    pub editor_mode: Signal<EditorMode>,
+    pub gizmo_mode: Signal<GizmoMode>,
+    pub debug_mode: Signal<u32>,
+    pub show_grid: Signal<bool>,
+    pub object_count: Signal<usize>,
+    pub fps: Signal<f64>,
+
+    // Environment toggles
+    pub atmo_enabled: Signal<bool>,
+    pub fog_enabled: Signal<bool>,
+    pub clouds_enabled: Signal<bool>,
+    pub bloom_enabled: Signal<bool>,
+    pub dof_enabled: Signal<bool>,
+    pub tone_map_mode: Signal<u32>,
+
+    // Scene structure — counter because tree data is too complex for a Signal
+    pub scene_revision: Signal<u64>,
+}
+
+impl UiSignals {
+    /// Create a new set of UI signals with default values.
+    /// Must be called on the main thread (signals use thread-local reactive state).
+    pub fn new() -> Self {
+        Self {
+            selection: Signal::new(None),
+            editor_mode: Signal::new(EditorMode::Default),
+            gizmo_mode: Signal::new(GizmoMode::Translate),
+            debug_mode: Signal::new(0),
+            show_grid: Signal::new(false),
+            object_count: Signal::new(0),
+            fps: Signal::new(0.0),
+            atmo_enabled: Signal::new(true),
+            fog_enabled: Signal::new(false),
+            clouds_enabled: Signal::new(false),
+            bloom_enabled: Signal::new(true),
+            dof_enabled: Signal::new(false),
+            tone_map_mode: Signal::new(0),
+            scene_revision: Signal::new(0),
+        }
+    }
+
+    /// Increment scene_revision to trigger tree/count rebuilds.
+    pub fn bump_scene(&self) {
+        self.scene_revision.update(|r| *r += 1);
+    }
 }
 
 /// Shared reactive revision counter for triggering UI re-renders.
