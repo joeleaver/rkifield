@@ -12,6 +12,9 @@
 
 #![warn(missing_docs)]
 
+/// Public engine API — World, Entity, Renderer, SpawnBuilder.
+pub mod api;
+
 /// Asset registry with generational handles and state tracking.
 pub mod asset_registry;
 /// ECS component types for the scene graph.
