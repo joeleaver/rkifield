@@ -17,6 +17,12 @@ pub enum WorldError {
     Parse(String),
     /// Voxelization error.
     Voxelize(String),
+    /// A scene node with the given name was not found.
+    NodeNotFound(String),
+    /// Scene index out of range.
+    SceneOutOfRange(usize),
+    /// Cannot remove the last scene.
+    CannotRemoveLastScene,
 }
 
 impl std::fmt::Display for WorldError {
@@ -30,6 +36,9 @@ impl std::fmt::Display for WorldError {
             Self::Io(err) => write!(f, "I/O: {}", err),
             Self::Parse(msg) => write!(f, "parse: {}", msg),
             Self::Voxelize(msg) => write!(f, "voxelization: {}", msg),
+            Self::NodeNotFound(name) => write!(f, "node not found: {}", name),
+            Self::SceneOutOfRange(idx) => write!(f, "scene index {} out of range", idx),
+            Self::CannotRemoveLastScene => write!(f, "cannot remove the last scene"),
         }
     }
 }

@@ -667,6 +667,70 @@ impl World {
             .ok_or(WorldError::NoSuchEntity(entity))?;
         Ok(&mut obj.root_node)
     }
+
+    // ── Node tree access ────────────────────────────────────────────────
+
+    /// Get a reference to the root scene node of an entity.
+    pub fn root_node(&self, entity: Entity) -> Result<&SceneNode, WorldError> {
+        let record = self
+            .entities
+            .get(&entity)
+            .ok_or(WorldError::NoSuchEntity(entity))?;
+        let sdf_id = record
+            .sdf_object_id
+            .ok_or(WorldError::MissingComponent(entity, "SdfObject"))?;
+        let obj = self
+            .scene
+            .find_by_id(sdf_id)
+            .ok_or(WorldError::NoSuchEntity(entity))?;
+        Ok(&obj.root_node)
+    }
+
+    /// Find a node by name within an entity's scene node tree.
+    pub fn find_node(&self, entity: Entity, name: &str) -> Result<&SceneNode, WorldError> {
+        let root = self.root_node(entity)?;
+        root.find_by_name(name)
+            .ok_or_else(|| WorldError::NodeNotFound(name.to_string()))
+    }
+
+    /// Find a node by name (mutable) within an entity's scene node tree.
+    pub fn find_node_mut(
+        &mut self,
+        entity: Entity,
+        name: &str,
+    ) -> Result<&mut SceneNode, WorldError> {
+        let root = self.root_node_mut(entity)?;
+        root.find_by_name_mut(name)
+            .ok_or_else(|| WorldError::NodeNotFound(name.to_string()))
+    }
+
+    /// Find a node by slash-separated path within an entity's scene node tree.
+    pub fn find_node_by_path(
+        &self,
+        entity: Entity,
+        path: &str,
+    ) -> Result<&SceneNode, WorldError> {
+        let root = self.root_node(entity)?;
+        root.find_by_path(path)
+            .ok_or_else(|| WorldError::NodeNotFound(path.to_string()))
+    }
+
+    /// Find a node by slash-separated path (mutable) within an entity's scene node tree.
+    pub fn find_node_by_path_mut(
+        &mut self,
+        entity: Entity,
+        path: &str,
+    ) -> Result<&mut SceneNode, WorldError> {
+        let root = self.root_node_mut(entity)?;
+        root.find_by_path_mut(path)
+            .ok_or_else(|| WorldError::NodeNotFound(path.to_string()))
+    }
+
+    /// Count the total number of nodes in an entity's scene node tree.
+    pub fn node_count(&self, entity: Entity) -> Result<usize, WorldError> {
+        let root = self.root_node(entity)?;
+        Ok(root.node_count())
+    }
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -1424,6 +1488,90 @@ mod tests {
         let mut world = World::new("test");
         let result = world.load_scene("/nonexistent/path.rkscene");
         assert!(result.is_err());
+    }
+
+    // ── Node tree access (B.1) ──────────────────────────────────────────
+
+    #[test]
+    fn find_node_returns_matching_child() {
+        let mut world = World::new("test");
+        let mut root = SceneNode::new("root");
+        root.add_child(SceneNode::analytical(
+            "arm",
+            SdfPrimitive::Sphere { radius: 0.2 },
+            1,
+        ));
+        let e = world.spawn("obj").sdf_tree(root).build();
+        let node = world.find_node(e, "arm").unwrap();
+        assert_eq!(node.name, "arm");
+    }
+
+    #[test]
+    fn find_node_not_found_returns_error() {
+        let mut world = World::new("test");
+        let e = world
+            .spawn("obj")
+            .sdf(SdfPrimitive::Sphere { radius: 0.5 })
+            .material(1)
+            .build();
+        assert!(matches!(
+            world.find_node(e, "nope"),
+            Err(WorldError::NodeNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn find_node_on_ecs_entity_errors() {
+        let mut world = World::new("test");
+        let e = world.spawn("ecs_only").build();
+        assert!(matches!(
+            world.find_node(e, "anything"),
+            Err(WorldError::MissingComponent(_, _))
+        ));
+    }
+
+    #[test]
+    fn find_node_mut_allows_modification() {
+        let mut world = World::new("test");
+        let mut root = SceneNode::new("root");
+        root.add_child(SceneNode::new("child"));
+        let e = world.spawn("obj").sdf_tree(root).build();
+        world.find_node_mut(e, "child").unwrap().metadata.locked = true;
+        assert!(world.find_node(e, "child").unwrap().metadata.locked);
+    }
+
+    #[test]
+    fn find_node_by_path_multi_level() {
+        let mut world = World::new("test");
+        let mut root = SceneNode::new("root");
+        let mut spine = SceneNode::new("spine");
+        spine.add_child(SceneNode::new("chest"));
+        root.add_child(spine);
+        let e = world.spawn("obj").sdf_tree(root).build();
+        let node = world.find_node_by_path(e, "spine/chest").unwrap();
+        assert_eq!(node.name, "chest");
+    }
+
+    #[test]
+    fn root_node_immutable() {
+        let mut world = World::new("test");
+        let e = world
+            .spawn("obj")
+            .sdf(SdfPrimitive::Sphere { radius: 0.5 })
+            .material(1)
+            .build();
+        let root = world.root_node(e).unwrap();
+        assert_eq!(root.name, "obj");
+    }
+
+    #[test]
+    fn node_count_matches_tree() {
+        let mut world = World::new("test");
+        let mut root = SceneNode::new("root");
+        root.add_child(SceneNode::new("a"));
+        root.add_child(SceneNode::new("b"));
+        let e = world.spawn("obj").sdf_tree(root).build();
+        assert_eq!(world.node_count(e).unwrap(), 3);
     }
 
     #[test]
