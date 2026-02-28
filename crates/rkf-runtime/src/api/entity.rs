@@ -41,6 +41,19 @@ impl Entity {
     }
 }
 
+impl Entity {
+    /// Convert this entity handle to a u64 identifier for the automation API.
+    ///
+    /// SDF objects encode as their object_id (lower 32 bits, bit 63 = 0).
+    /// ECS-only entities encode with bit 63 set and the hecs entity id in the lower bits.
+    pub fn to_u64(&self) -> u64 {
+        match self.inner {
+            EntityInner::SdfObject(id) => id as u64,
+            EntityInner::EcsOnly(e) => (1u64 << 63) | (e.id() as u64),
+        }
+    }
+}
+
 impl std::fmt::Display for Entity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.inner {

@@ -1231,6 +1231,26 @@ impl World {
         }
         Ok(())
     }
+
+    // ── Automation ID conversion ───────────────────────────────────────
+
+    /// Look up an entity by its automation-API u64 identifier.
+    ///
+    /// SDF objects (bit 63 = 0) are looked up by object_id.
+    /// ECS-only entities (bit 63 = 1) are looked up by hecs entity id.
+    pub fn find_entity_by_id(&self, id: u64) -> Option<Entity> {
+        if id & (1u64 << 63) != 0 {
+            // ECS-only entity
+            let hecs_id = (id & !(1u64 << 63)) as u32;
+            self.entities
+                .iter()
+                .find(|(_, r)| r.ecs_entity.id() == hecs_id)
+                .map(|(e, _)| *e)
+        } else {
+            // SDF object
+            self.sdf_to_entity.get(&(id as u32)).copied()
+        }
+    }
 }
 
 // ── Node tree helpers ──────────────────────────────────────────────────────

@@ -897,6 +897,331 @@ impl AutomationApi for EditorAutomationApi {
         Ok(())
     }
 
+    // --- Node tree operations -----------------------------------------------
+
+    fn node_find(&self, object_id: u32, node_name: &str) -> Result<String, String> {
+        let es = self
+            .editor_state
+            .lock()
+            .map_err(|e| format!("lock poisoned: {e}"))?;
+
+        let scene = es.world.scene();
+        let obj = scene
+            .objects
+            .iter()
+            .find(|o| o.id == object_id)
+            .ok_or_else(|| format!("object {object_id} not found"))?;
+
+        let node = obj
+            .root_node
+            .find_by_name(node_name)
+            .ok_or_else(|| format!("node '{node_name}' not found in object {object_id}"))?;
+
+        Ok(serde_json::json!({
+            "name": node.name,
+            "child_count": node.children.len(),
+            "sdf_source": format!("{:?}", node.sdf_source),
+            "blend_mode": format!("{:?}", node.blend_mode),
+            "transform": {
+                "position": [node.local_transform.position.x, node.local_transform.position.y, node.local_transform.position.z],
+                "rotation": [node.local_transform.rotation.x, node.local_transform.rotation.y, node.local_transform.rotation.z, node.local_transform.rotation.w],
+                "scale": [node.local_transform.scale.x, node.local_transform.scale.y, node.local_transform.scale.z],
+            },
+            "children": node.children.iter().map(|c| c.name.clone()).collect::<Vec<_>>(),
+        })
+        .to_string())
+    }
+
+    fn node_add_child(
+        &self,
+        object_id: u32,
+        parent_node: &str,
+        child_primitive: &str,
+        params: &[f32],
+        name: &str,
+        material_id: u16,
+    ) -> Result<(), String> {
+        use rkf_core::scene_node::{SceneNode as CoreNode, SdfSource};
+        use rkf_core::SdfPrimitive;
+
+        let primitive = match child_primitive {
+            "sphere" => {
+                let radius = params.first().copied().unwrap_or(0.5);
+                SdfPrimitive::Sphere { radius }
+            }
+            "box" => {
+                let hx = params.first().copied().unwrap_or(0.5);
+                let hy = params.get(1).copied().unwrap_or(hx);
+                let hz = params.get(2).copied().unwrap_or(hx);
+                SdfPrimitive::Box {
+                    half_extents: Vec3::new(hx, hy, hz),
+                }
+            }
+            "capsule" => {
+                let radius = params.first().copied().unwrap_or(0.2);
+                let half_height = params.get(1).copied().unwrap_or(0.4);
+                SdfPrimitive::Capsule {
+                    radius,
+                    half_height,
+                }
+            }
+            "torus" => {
+                let major = params.first().copied().unwrap_or(0.4);
+                let minor = params.get(1).copied().unwrap_or(0.12);
+                SdfPrimitive::Torus {
+                    major_radius: major,
+                    minor_radius: minor,
+                }
+            }
+            "cylinder" => {
+                let radius = params.first().copied().unwrap_or(0.3);
+                let half_height = params.get(1).copied().unwrap_or(0.5);
+                SdfPrimitive::Cylinder {
+                    radius,
+                    half_height,
+                }
+            }
+            "plane" => SdfPrimitive::Plane {
+                normal: Vec3::Y,
+                distance: 0.0,
+            },
+            other => return Err(format!("unknown primitive type: {other}")),
+        };
+
+        let mut child = CoreNode::new(name);
+        child.sdf_source = SdfSource::Analytical {
+            primitive,
+            material_id,
+        };
+
+        let mut es = self
+            .editor_state
+            .lock()
+            .map_err(|e| format!("lock poisoned: {e}"))?;
+
+        let scene = es.world.scene_mut();
+        let obj = scene
+            .objects
+            .iter_mut()
+            .find(|o| o.id == object_id)
+            .ok_or_else(|| format!("object {object_id} not found"))?;
+
+        let parent = obj
+            .root_node
+            .find_by_name_mut(parent_node)
+            .ok_or_else(|| {
+                format!("parent node '{parent_node}' not found in object {object_id}")
+            })?;
+
+        parent.add_child(child);
+        Ok(())
+    }
+
+    fn node_remove(&self, object_id: u32, node_name: &str) -> Result<(), String> {
+        let mut es = self
+            .editor_state
+            .lock()
+            .map_err(|e| format!("lock poisoned: {e}"))?;
+
+        let scene = es.world.scene_mut();
+        let obj = scene
+            .objects
+            .iter_mut()
+            .find(|o| o.id == object_id)
+            .ok_or_else(|| format!("object {object_id} not found"))?;
+
+        // Don't allow removing the root node
+        if obj.root_node.name == node_name {
+            return Err(format!("cannot remove root node '{node_name}'"));
+        }
+
+        obj.root_node
+            .remove_child_by_name(node_name)
+            .ok_or_else(|| {
+                format!("node '{node_name}' not found in object {object_id}")
+            })?;
+
+        Ok(())
+    }
+
+    // --- Multi-scene operations -----------------------------------------------
+
+    fn scene_create(&self, name: &str) -> Result<usize, String> {
+        let mut es = self
+            .editor_state
+            .lock()
+            .map_err(|e| format!("lock poisoned: {e}"))?;
+
+        Ok(es.world.create_scene(name))
+    }
+
+    fn scene_list(&self) -> Result<String, String> {
+        let es = self
+            .editor_state
+            .lock()
+            .map_err(|e| format!("lock poisoned: {e}"))?;
+
+        let mut scenes = Vec::new();
+        for i in 0..es.world.scene_count() {
+            scenes.push(serde_json::json!({
+                "index": i,
+                "name": es.world.scene_name(i).unwrap_or("unknown"),
+                "active": i == es.world.active_scene_index(),
+                "persistent": es.world.is_scene_persistent(i),
+            }));
+        }
+
+        Ok(serde_json::Value::Array(scenes).to_string())
+    }
+
+    fn scene_set_active(&self, index: usize) -> Result<(), String> {
+        let mut es = self
+            .editor_state
+            .lock()
+            .map_err(|e| format!("lock poisoned: {e}"))?;
+
+        if index >= es.world.scene_count() {
+            return Err(format!(
+                "scene index {index} out of range (count: {})",
+                es.world.scene_count()
+            ));
+        }
+
+        es.world.set_active_scene(index);
+        Ok(())
+    }
+
+    fn scene_set_persistent(&self, index: usize, persistent: bool) -> Result<(), String> {
+        let mut es = self
+            .editor_state
+            .lock()
+            .map_err(|e| format!("lock poisoned: {e}"))?;
+
+        if index >= es.world.scene_count() {
+            return Err(format!(
+                "scene index {index} out of range (count: {})",
+                es.world.scene_count()
+            ));
+        }
+
+        es.world.set_scene_persistent(index, persistent);
+        Ok(())
+    }
+
+    fn scene_swap(&self) -> Result<String, String> {
+        let mut es = self
+            .editor_state
+            .lock()
+            .map_err(|e| format!("lock poisoned: {e}"))?;
+
+        let removed = es.world.swap_scenes();
+        Ok(serde_json::json!({
+            "removed_scenes": removed,
+            "remaining_count": es.world.scene_count(),
+        })
+        .to_string())
+    }
+
+    // --- Camera entity operations -----------------------------------------------
+
+    fn camera_spawn(
+        &self,
+        label: &str,
+        position: [f32; 3],
+        yaw: f32,
+        pitch: f32,
+        fov: f32,
+    ) -> Result<u64, String> {
+        let mut es = self
+            .editor_state
+            .lock()
+            .map_err(|e| format!("lock poisoned: {e}"))?;
+
+        let wp = rkf_core::WorldPosition::new(
+            glam::IVec3::ZERO,
+            Vec3::new(position[0], position[1], position[2]),
+        );
+        let entity = es.world.spawn_camera(label, wp, yaw, pitch, fov);
+        Ok(entity.to_u64())
+    }
+
+    fn camera_list(&self) -> Result<String, String> {
+        let es = self
+            .editor_state
+            .lock()
+            .map_err(|e| format!("lock poisoned: {e}"))?;
+
+        let cameras = es.world.cameras();
+        let mut result = Vec::new();
+        for entity in &cameras {
+            let pos = es
+                .world
+                .position(*entity)
+                .map(|p| {
+                    let v = p.to_vec3();
+                    [v.x, v.y, v.z]
+                })
+                .unwrap_or([0.0; 3]);
+            // Extract CameraComponent fields while the hecs::Ref is alive.
+            let (label, fov, yaw, pitch, active) = es
+                .world
+                .get::<rkf_runtime::components::CameraComponent>(*entity)
+                .map(|c| (c.label.clone(), c.fov_degrees, c.yaw, c.pitch, c.active))
+                .unwrap_or_else(|_| (String::new(), 60.0, 0.0, 0.0, false));
+            result.push(serde_json::json!({
+                "entity_id": entity.to_u64(),
+                "position": pos,
+                "label": label,
+                "fov_degrees": fov,
+                "yaw": yaw,
+                "pitch": pitch,
+                "active": active,
+            }));
+        }
+
+        Ok(serde_json::Value::Array(result).to_string())
+    }
+
+    fn camera_snap_to(&self, entity_id: u64) -> Result<(), String> {
+        // Read camera data while holding editor_state lock, then release it.
+        let (pos_vec3, yaw_rad, pitch_rad) = {
+            let es = self
+                .editor_state
+                .lock()
+                .map_err(|e| format!("lock poisoned: {e}"))?;
+
+            let entity = es
+                .world
+                .find_entity_by_id(entity_id)
+                .ok_or_else(|| format!("entity {entity_id} not found"))?;
+
+            let pos = es
+                .world
+                .position(entity)
+                .map_err(|e| format!("cannot read position: {e}"))?;
+
+            let cam = es
+                .world
+                .get::<rkf_runtime::components::CameraComponent>(entity)
+                .map_err(|_| format!("entity {entity_id} has no CameraComponent"))?;
+
+            (pos.to_vec3(), cam.yaw.to_radians(), cam.pitch.to_radians())
+        };
+
+        // Set pending camera on SharedState to update the viewport camera.
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|e| format!("lock poisoned: {e}"))?;
+        state.pending_camera = Some(PendingCamera {
+            position: pos_vec3,
+            yaw: yaw_rad,
+            pitch: pitch_rad,
+        });
+
+        Ok(())
+    }
+
     fn env_override(&self, property: &str, value: f32) -> Result<(), String> {
         let mut es = self
             .editor_state
@@ -960,5 +1285,111 @@ impl AutomationApi for EditorAutomationApi {
 
         es.environment.mark_dirty();
         Ok(())
+    }
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rkf_core::automation::AutomationApi;
+
+    /// Create a test EditorAutomationApi with empty state.
+    fn make_api() -> EditorAutomationApi {
+        let state = Arc::new(Mutex::new(SharedState::new(4096, 0, 128, 128)));
+        let editor_state = Arc::new(Mutex::new(EditorState::new()));
+        EditorAutomationApi::new(state, editor_state)
+    }
+
+    /// Spawn a test object and return its object_id.
+    fn spawn_test_object(api: &EditorAutomationApi) -> u32 {
+        api.object_spawn("test_obj", "sphere", &[0.5], [0.0, 0.0, 0.0], 0)
+            .unwrap()
+    }
+
+    #[test]
+    fn automation_node_find_returns_json() {
+        let api = make_api();
+        let oid = spawn_test_object(&api);
+        let result = api.node_find(oid, "test_obj").unwrap();
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(json["name"], "test_obj");
+        assert!(json["sdf_source"].as_str().unwrap().contains("Analytical"));
+    }
+
+    #[test]
+    fn automation_node_add_child_adds_to_tree() {
+        let api = make_api();
+        let oid = spawn_test_object(&api);
+        api.node_add_child(oid, "test_obj", "box", &[0.3, 0.3, 0.3], "child_box", 1)
+            .unwrap();
+
+        let result = api.node_find(oid, "test_obj").unwrap();
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let children = json["children"].as_array().unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0], "child_box");
+    }
+
+    #[test]
+    fn automation_scene_create_adds_scene() {
+        let api = make_api();
+        let result = api.scene_list().unwrap();
+        let scenes: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        assert_eq!(scenes.len(), 1);
+
+        let idx = api.scene_create("level2").unwrap();
+        assert_eq!(idx, 1);
+
+        let result = api.scene_list().unwrap();
+        let scenes: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        assert_eq!(scenes.len(), 2);
+        assert_eq!(scenes[1]["name"], "level2");
+    }
+
+    #[test]
+    fn automation_scene_set_active_changes_target() {
+        let api = make_api();
+        api.scene_create("second").unwrap();
+        api.scene_set_active(1).unwrap();
+
+        let result = api.scene_list().unwrap();
+        let scenes: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        assert_eq!(scenes[1]["active"], true);
+        assert_eq!(scenes[0]["active"], false);
+    }
+
+    #[test]
+    fn automation_camera_spawn_creates_entity() {
+        let api = make_api();
+        let cam_id = api
+            .camera_spawn("Main", [1.0, 2.0, 3.0], 45.0, -10.0, 75.0)
+            .unwrap();
+        assert!(cam_id != 0); // Should get a valid non-zero ID
+
+        let list = api.camera_list().unwrap();
+        let cameras: Vec<serde_json::Value> = serde_json::from_str(&list).unwrap();
+        assert_eq!(cameras.len(), 1);
+        assert_eq!(cameras[0]["label"], "Main");
+        assert!((cameras[0]["fov_degrees"].as_f64().unwrap() - 75.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn automation_camera_list_includes_spawned() {
+        let api = make_api();
+        api.camera_spawn("CamA", [0.0; 3], 0.0, 0.0, 60.0).unwrap();
+        api.camera_spawn("CamB", [5.0, 0.0, 0.0], 90.0, 0.0, 90.0)
+            .unwrap();
+
+        let list = api.camera_list().unwrap();
+        let cameras: Vec<serde_json::Value> = serde_json::from_str(&list).unwrap();
+        assert_eq!(cameras.len(), 2);
+        let labels: Vec<&str> = cameras
+            .iter()
+            .map(|c| c["label"].as_str().unwrap())
+            .collect();
+        assert!(labels.contains(&"CamA"));
+        assert!(labels.contains(&"CamB"));
     }
 }
