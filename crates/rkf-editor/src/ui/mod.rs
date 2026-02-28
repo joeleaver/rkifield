@@ -151,15 +151,13 @@ pub fn editor_ui() -> NodeHandle {
                                         }
                                     };
 
-                                    {
-                                        let scene = state.world.scene_mut();
-                                        if let Some(obj) = scene.objects.iter_mut()
-                                            .find(|o| o.id as u64 == eid)
-                                        {
-                                            obj.position = new_pos;
-                                            obj.rotation = new_rot;
-                                            obj.scale = new_scale;
-                                        }
+                                    if let Some(entity) = state.world.find_entity_by_id(eid) {
+                                        let wp = rkf_core::WorldPosition::new(
+                                            glam::IVec3::ZERO, new_pos,
+                                        );
+                                        let _ = state.world.set_position(entity, wp);
+                                        let _ = state.world.set_rotation(entity, new_rot);
+                                        let _ = state.world.set_scale(entity, new_scale);
                                     }
                                 }
                             } else {

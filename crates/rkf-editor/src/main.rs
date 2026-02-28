@@ -298,16 +298,17 @@ fn engine_thread(data: EngineThreadData) {
                 None
             };
 
-            // Recompute AABBs before cloning the scene.
-            {
-                let scene = es.world.scene_mut();
-                for obj in &mut scene.objects {
+            // Build a merged scene from all scenes (multi-scene rendering).
+            // Recompute AABBs on the clone — character animation mutates
+            // the clone anyway, so we discard it after render.
+            let scene = {
+                let mut merged = rkf_core::scene::Scene::new("merged");
+                merged.objects = es.world.all_objects().cloned().collect();
+                for obj in &mut merged.objects {
                     obj.aabb = crate::placement::compute_object_local_aabb(obj);
                 }
-            }
-
-            // Scene clone (character animation mutates the clone, discarded after render).
-            let scene = es.world.scene().clone();
+                merged
+            };
 
             // Wireframe overlay data (all Copy).
             let gizmo_axis = if es.gizmo.dragging {
