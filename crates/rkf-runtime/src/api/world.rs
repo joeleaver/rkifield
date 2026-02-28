@@ -705,7 +705,115 @@ impl World {
 
     // ── Scene I/O ──────────────────────────────────────────────────────────
 
-    /// Load entities from a `.rkscene` file, adding them to this world.
+    /// Load entities from a `.rkscene` file into a specific or new scene.
+    ///
+    /// - `target_scene: None` — creates a new scene and loads into it.
+    /// - `target_scene: Some(idx)` — loads into the existing scene at `idx`.
+    ///
+    /// Returns `(scene_index, loaded_entities)`.
+    pub fn load_scene_into(
+        &mut self,
+        path: impl AsRef<Path>,
+        target_scene: Option<usize>,
+    ) -> Result<(usize, Vec<Entity>), WorldError> {
+        let path_ref = path.as_ref();
+        let scene_name = path_ref
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("loaded")
+            .to_string();
+
+        let scene_idx = match target_scene {
+            Some(idx) => {
+                if idx >= self.scenes.len() {
+                    return Err(WorldError::SceneOutOfRange(idx));
+                }
+                idx
+            }
+            None => self.create_scene(&scene_name),
+        };
+
+        let prev_active = self.active_scene;
+        self.active_scene = scene_idx;
+        let result = self.load_scene(path_ref);
+        self.active_scene = prev_active;
+
+        result.map(|entities| (scene_idx, entities))
+    }
+
+    /// Save the entities in a specific scene to a `.rkscene` file.
+    pub fn save_scene_at(
+        &self,
+        index: usize,
+        path: impl AsRef<Path>,
+    ) -> Result<(), WorldError> {
+        if index >= self.scenes.len() {
+            return Err(WorldError::SceneOutOfRange(index));
+        }
+
+        use crate::scene_file::{ObjectEntry, SceneFile};
+        use rkf_core::scene_node::SdfSource;
+
+        let scene = &self.scenes[index].scene;
+        let mut objects = Vec::new();
+
+        for obj in &scene.objects {
+            let entity = self.sdf_to_entity.get(&obj.id);
+            let record = entity.and_then(|e| self.entities.get(e));
+
+            let (analytical, analytical_params, material_id) =
+                match &obj.root_node.sdf_source {
+                    SdfSource::Analytical {
+                        primitive,
+                        material_id,
+                    } => {
+                        let (name, params) = primitive_to_analytical(primitive);
+                        (Some(name), Some(params), Some(*material_id))
+                    }
+                    _ => (None, None, None),
+                };
+
+            let pos = record
+                .map(|r| r.position)
+                .unwrap_or_default();
+            let pos_f64 = [
+                pos.chunk.x as f64 * 8.0 + pos.local.x as f64,
+                pos.chunk.y as f64 * 8.0 + pos.local.y as f64,
+                pos.chunk.z as f64 * 8.0 + pos.local.z as f64,
+            ];
+
+            objects.push(ObjectEntry {
+                name: obj.name.clone(),
+                asset_path: None,
+                position: pos_f64,
+                rotation: [
+                    obj.rotation.x,
+                    obj.rotation.y,
+                    obj.rotation.z,
+                    obj.rotation.w,
+                ],
+                scale: [obj.scale.x, obj.scale.y, obj.scale.z],
+                material_id,
+                analytical,
+                analytical_params,
+                importance_bias: 1.0,
+            });
+        }
+
+        let scene_file = SceneFile {
+            name: scene.name.clone(),
+            objects,
+            cameras: Vec::new(),
+            lights: Vec::new(),
+            environment: None,
+        };
+
+        let path_str = path.as_ref().to_str().unwrap_or("");
+        crate::scene_file::save_scene_file(path_str, &scene_file)
+            .map_err(|e| WorldError::Io(std::io::Error::other(e.to_string())))
+    }
+
+    /// Load entities from a `.rkscene` file, adding them to the active scene.
     ///
     /// Returns the entities that were loaded.
     pub fn load_scene(&mut self, path: impl AsRef<Path>) -> Result<Vec<Entity>, WorldError> {
@@ -1863,6 +1971,110 @@ mod tests {
             .material(1)
             .build();
         assert!(!world.has::<Marker>(e));
+    }
+
+    // ── Per-scene load/save (C.4) ────────────────────────────────────────
+
+    #[test]
+    fn load_scene_into_new_creates_scene() {
+        let dir = std::env::temp_dir().join("rkf_api_test_load_into.rkscene");
+        let path = dir.to_str().unwrap();
+
+        let mut source = World::new("src");
+        source
+            .spawn("sphere")
+            .sdf(SdfPrimitive::Sphere { radius: 0.5 })
+            .material(1)
+            .build();
+        source.save_scene(path).unwrap();
+
+        let mut world = World::new("main");
+        let (idx, entities) = world.load_scene_into(path, None).unwrap();
+        assert_eq!(idx, 1);
+        assert_eq!(entities.len(), 1);
+        assert_eq!(world.scene_count(), 2);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn load_scene_into_existing_appends() {
+        let dir = std::env::temp_dir().join("rkf_api_test_load_existing.rkscene");
+        let path = dir.to_str().unwrap();
+
+        let mut source = World::new("src");
+        source
+            .spawn("obj")
+            .sdf(SdfPrimitive::Sphere { radius: 0.5 })
+            .material(1)
+            .build();
+        source.save_scene(path).unwrap();
+
+        let mut world = World::new("main");
+        world
+            .spawn("existing")
+            .sdf(SdfPrimitive::Sphere { radius: 0.5 })
+            .material(1)
+            .build();
+        let (idx, entities) = world.load_scene_into(path, Some(0)).unwrap();
+        assert_eq!(idx, 0);
+        assert_eq!(entities.len(), 1);
+        assert_eq!(world.total_object_count(), 2);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn save_scene_at_writes_file() {
+        let dir = std::env::temp_dir().join("rkf_api_test_save_at.rkscene");
+        let path = dir.to_str().unwrap();
+
+        let mut world = World::new("main");
+        world
+            .spawn("obj")
+            .sdf(SdfPrimitive::Sphere { radius: 0.5 })
+            .material(1)
+            .build();
+        world.save_scene_at(0, path).unwrap();
+        assert!(std::path::Path::new(path).exists());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn load_then_save_roundtrip() {
+        let dir1 = std::env::temp_dir().join("rkf_api_test_rt1.rkscene");
+        let dir2 = std::env::temp_dir().join("rkf_api_test_rt2.rkscene");
+        let p1 = dir1.to_str().unwrap();
+        let p2 = dir2.to_str().unwrap();
+
+        let mut world = World::new("test");
+        world
+            .spawn("ball")
+            .position_vec3(Vec3::new(1.0, 2.0, 3.0))
+            .sdf(SdfPrimitive::Sphere { radius: 0.5 })
+            .material(2)
+            .build();
+        world.save_scene(p1).unwrap();
+
+        let mut world2 = World::new("empty");
+        let (idx, _) = world2.load_scene_into(p1, None).unwrap();
+        world2.save_scene_at(idx, p2).unwrap();
+
+        let mut world3 = World::new("verify");
+        let loaded = world3.load_scene(p2).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(world3.name(loaded[0]).unwrap(), "ball");
+
+        let _ = std::fs::remove_file(p1);
+        let _ = std::fs::remove_file(p2);
+    }
+
+    #[test]
+    fn save_scene_at_out_of_range_errors() {
+        let world = World::new("test");
+        let result = world.save_scene_at(99, "/tmp/nope.rkscene");
+        assert!(matches!(result, Err(WorldError::SceneOutOfRange(99))));
     }
 
     // ── Scene I/O ──────────────────────────────────────────────────────────
