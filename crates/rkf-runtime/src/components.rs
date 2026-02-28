@@ -61,26 +61,40 @@ pub struct Parent {
     pub bone_index: Option<u32>,
 }
 
-/// Camera component.
-#[derive(Debug, Clone, Copy)]
+/// Camera component for entity-based camera bookmarks.
+///
+/// Stores camera parameters on an ECS entity. The renderer's singleton
+/// [`Camera`] is the "viewport camera" that actually renders — use
+/// [`Renderer::snap_camera_to`] to copy an entity's camera state to
+/// the viewport camera.
+#[derive(Debug, Clone)]
 pub struct CameraComponent {
-    /// Vertical field of view in radians.
-    pub fov: f32,
+    /// Vertical field of view in degrees.
+    pub fov_degrees: f32,
     /// Near clip distance.
     pub near: f32,
     /// Far clip distance.
     pub far: f32,
     /// Whether this is the active (primary) camera.
     pub active: bool,
+    /// Display name for this camera.
+    pub label: String,
+    /// Yaw in degrees.
+    pub yaw: f32,
+    /// Pitch in degrees.
+    pub pitch: f32,
 }
 
 impl Default for CameraComponent {
     fn default() -> Self {
         Self {
-            fov: std::f32::consts::FRAC_PI_4, // 45 degrees
+            fov_degrees: 60.0,
             near: 0.1,
             far: 1000.0,
-            active: true,
+            active: false,
+            label: String::new(),
+            yaw: 0.0,
+            pitch: 0.0,
         }
     }
 }
@@ -153,10 +167,37 @@ mod tests {
     #[test]
     fn camera_component_default() {
         let c = CameraComponent::default();
-        assert!(c.fov > 0.0);
-        assert!(c.near > 0.0);
-        assert!(c.far > c.near);
-        assert!(c.active);
+        assert!((c.fov_degrees - 60.0).abs() < 1e-6);
+        assert!((c.near - 0.1).abs() < 1e-6);
+        assert!((c.far - 1000.0).abs() < 1e-6);
+        assert!(!c.active);
+        assert!(c.label.is_empty());
+    }
+
+    #[test]
+    fn camera_component_fields_roundtrip() {
+        let c = CameraComponent {
+            fov_degrees: 90.0,
+            near: 0.5,
+            far: 500.0,
+            active: true,
+            label: "Main".to_string(),
+            yaw: 45.0,
+            pitch: -15.0,
+        };
+        assert!((c.fov_degrees - 90.0).abs() < 1e-6);
+        assert!((c.yaw - 45.0).abs() < 1e-6);
+        assert!((c.pitch - -15.0).abs() < 1e-6);
+        assert_eq!(c.label, "Main");
+    }
+
+    #[test]
+    fn camera_component_with_label() {
+        let c = CameraComponent {
+            label: "Cinematic".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(c.label, "Cinematic");
     }
 
     #[test]
