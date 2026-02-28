@@ -297,6 +297,60 @@ impl SceneNode {
         }
         None
     }
+
+    // ── Child access ────────────────────────────────────────────────────
+
+    /// Number of direct children.
+    pub fn child_count(&self) -> usize {
+        self.children.len()
+    }
+
+    /// Get a child by index.
+    pub fn child(&self, index: usize) -> Option<&SceneNode> {
+        self.children.get(index)
+    }
+
+    /// Get a mutable child by index.
+    pub fn child_mut(&mut self, index: usize) -> Option<&mut SceneNode> {
+        self.children.get_mut(index)
+    }
+
+    /// Remove and return the child at `index`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index >= child_count()`.
+    pub fn remove_child(&mut self, index: usize) -> SceneNode {
+        self.children.remove(index)
+    }
+
+    /// Remove the first child with the given name, returning it.
+    ///
+    /// Returns `None` if no direct child has that name.
+    pub fn remove_child_by_name(&mut self, name: &str) -> Option<SceneNode> {
+        let pos = self.children.iter().position(|c| c.name == name)?;
+        Some(self.children.remove(pos))
+    }
+
+    /// Insert a child at `index`, shifting existing children right.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index > child_count()`.
+    pub fn insert_child_at(&mut self, index: usize, child: SceneNode) -> &mut Self {
+        self.children.insert(index, child);
+        self
+    }
+
+    /// Iterate over children (immutable).
+    pub fn iter_children(&self) -> std::slice::Iter<'_, SceneNode> {
+        self.children.iter()
+    }
+
+    /// Iterate over children (mutable).
+    pub fn iter_children_mut(&mut self) -> std::slice::IterMut<'_, SceneNode> {
+        self.children.iter_mut()
+    }
 }
 
 impl std::fmt::Display for SceneNode {
@@ -530,6 +584,128 @@ mod tests {
             normal: Vec3::Y,
             distance: 0.0,
         };
+    }
+
+    // ── Child access (A.1) ───────────────────────────────────────────────
+
+    #[test]
+    fn child_count_empty() {
+        let node = SceneNode::new("leaf");
+        assert_eq!(node.child_count(), 0);
+    }
+
+    #[test]
+    fn child_count_with_children() {
+        let mut node = SceneNode::new("root");
+        node.add_child(SceneNode::new("a"));
+        node.add_child(SceneNode::new("b"));
+        node.add_child(SceneNode::new("c"));
+        assert_eq!(node.child_count(), 3);
+    }
+
+    #[test]
+    fn child_by_index() {
+        let mut node = SceneNode::new("root");
+        node.add_child(SceneNode::new("first"));
+        node.add_child(SceneNode::new("second"));
+        assert_eq!(node.child(0).unwrap().name, "first");
+        assert_eq!(node.child(1).unwrap().name, "second");
+    }
+
+    #[test]
+    fn child_out_of_bounds_returns_none() {
+        let node = SceneNode::new("root");
+        assert!(node.child(0).is_none());
+        assert!(node.child(99).is_none());
+    }
+
+    #[test]
+    fn child_mut_by_index() {
+        let mut node = SceneNode::new("root");
+        node.add_child(SceneNode::new("child"));
+        node.child_mut(0).unwrap().name = "renamed".to_string();
+        assert_eq!(node.child(0).unwrap().name, "renamed");
+    }
+
+    #[test]
+    fn remove_child_by_index() {
+        let mut node = SceneNode::new("root");
+        node.add_child(SceneNode::new("a"));
+        node.add_child(SceneNode::new("b"));
+        node.add_child(SceneNode::new("c"));
+        let removed = node.remove_child(1);
+        assert_eq!(removed.name, "b");
+        assert_eq!(node.child_count(), 2);
+        assert_eq!(node.child(0).unwrap().name, "a");
+        assert_eq!(node.child(1).unwrap().name, "c");
+    }
+
+    #[test]
+    fn remove_child_by_name_found() {
+        let mut node = SceneNode::new("root");
+        node.add_child(SceneNode::new("keep"));
+        node.add_child(SceneNode::new("remove_me"));
+        let removed = node.remove_child_by_name("remove_me");
+        assert!(removed.is_some());
+        assert_eq!(removed.unwrap().name, "remove_me");
+        assert_eq!(node.child_count(), 1);
+    }
+
+    #[test]
+    fn remove_child_by_name_not_found() {
+        let mut node = SceneNode::new("root");
+        node.add_child(SceneNode::new("child"));
+        assert!(node.remove_child_by_name("nope").is_none());
+        assert_eq!(node.child_count(), 1);
+    }
+
+    #[test]
+    fn insert_child_at_beginning() {
+        let mut node = SceneNode::new("root");
+        node.add_child(SceneNode::new("b"));
+        node.insert_child_at(0, SceneNode::new("a"));
+        assert_eq!(node.child(0).unwrap().name, "a");
+        assert_eq!(node.child(1).unwrap().name, "b");
+    }
+
+    #[test]
+    fn insert_child_at_middle() {
+        let mut node = SceneNode::new("root");
+        node.add_child(SceneNode::new("a"));
+        node.add_child(SceneNode::new("c"));
+        node.insert_child_at(1, SceneNode::new("b"));
+        assert_eq!(node.child(0).unwrap().name, "a");
+        assert_eq!(node.child(1).unwrap().name, "b");
+        assert_eq!(node.child(2).unwrap().name, "c");
+    }
+
+    #[test]
+    fn insert_child_at_end() {
+        let mut node = SceneNode::new("root");
+        node.add_child(SceneNode::new("a"));
+        node.insert_child_at(1, SceneNode::new("b"));
+        assert_eq!(node.child(1).unwrap().name, "b");
+        assert_eq!(node.child_count(), 2);
+    }
+
+    #[test]
+    fn iter_children_count() {
+        let mut node = SceneNode::new("root");
+        node.add_child(SceneNode::new("a"));
+        node.add_child(SceneNode::new("b"));
+        assert_eq!(node.iter_children().count(), node.child_count());
+    }
+
+    #[test]
+    fn iter_children_mut_modify() {
+        let mut node = SceneNode::new("root");
+        node.add_child(SceneNode::new("a"));
+        node.add_child(SceneNode::new("b"));
+        for child in node.iter_children_mut() {
+            child.metadata.locked = true;
+        }
+        assert!(node.child(0).unwrap().metadata.locked);
+        assert!(node.child(1).unwrap().metadata.locked);
     }
 
     #[test]
