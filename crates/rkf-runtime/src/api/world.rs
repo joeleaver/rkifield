@@ -182,6 +182,116 @@ impl World {
         self.scenes.iter().map(|sm| sm.scene.object_count()).sum()
     }
 
+    // ── Scene persistence ───────────────────────────────────────────────
+
+    /// Mark a scene as persistent (survives scene swaps).
+    pub fn set_scene_persistent(&mut self, index: usize, persistent: bool) {
+        if let Some(sm) = self.scenes.get_mut(index) {
+            sm.persistent = persistent;
+        }
+    }
+
+    /// Check if a scene is persistent.
+    pub fn is_scene_persistent(&self, index: usize) -> bool {
+        self.scenes.get(index).map(|sm| sm.persistent).unwrap_or(false)
+    }
+
+    /// Unload all non-persistent scenes, despawning their entities.
+    ///
+    /// Returns the names of the removed scenes. Adjusts the active scene
+    /// index to remain valid (falls back to 0).
+    pub fn swap_scenes(&mut self) -> Vec<String> {
+        let mut removed_names = Vec::new();
+
+        // Collect indices of non-persistent scenes (reverse order for removal)
+        let to_remove: Vec<usize> = self
+            .scenes
+            .iter()
+            .enumerate()
+            .filter(|(_, sm)| !sm.persistent)
+            .map(|(i, _)| i)
+            .collect();
+
+        // Despawn entities belonging to non-persistent scenes
+        let entities_to_despawn: Vec<Entity> = self
+            .entity_scene
+            .iter()
+            .filter(|(_, si)| to_remove.contains(si))
+            .map(|(e, _)| *e)
+            .collect();
+
+        for entity in entities_to_despawn {
+            let _ = self.despawn(entity);
+        }
+
+        // Remove scenes in reverse order to preserve indices
+        for &idx in to_remove.iter().rev() {
+            removed_names.push(self.scenes[idx].scene.name.clone());
+            self.scenes.remove(idx);
+        }
+
+        // If all scenes were removed, create a default empty one
+        if self.scenes.is_empty() {
+            self.scenes.push(SceneMeta {
+                scene: Scene::new("default"),
+                persistent: false,
+            });
+        }
+
+        // Adjust active scene index
+        if self.active_scene >= self.scenes.len() {
+            self.active_scene = 0;
+        }
+
+        removed_names
+    }
+
+    /// Remove a scene by index.
+    ///
+    /// If the scene is persistent, `force` must be true. Cannot remove the
+    /// last scene. Despawns all entities belonging to the removed scene.
+    pub fn remove_scene(&mut self, index: usize, force: bool) -> Result<String, WorldError> {
+        if index >= self.scenes.len() {
+            return Err(WorldError::SceneOutOfRange(index));
+        }
+        if self.scenes.len() == 1 {
+            return Err(WorldError::CannotRemoveLastScene);
+        }
+        if self.scenes[index].persistent && !force {
+            return Err(WorldError::Parse(
+                "scene is persistent; use force=true".to_string(),
+            ));
+        }
+
+        // Despawn entities belonging to this scene
+        let entities_to_despawn: Vec<Entity> = self
+            .entity_scene
+            .iter()
+            .filter(|(_, si)| **si == index)
+            .map(|(e, _)| *e)
+            .collect();
+        for entity in entities_to_despawn {
+            let _ = self.despawn(entity);
+        }
+
+        let name = self.scenes[index].scene.name.clone();
+        self.scenes.remove(index);
+
+        // Update entity_scene indices for scenes after the removed one
+        for si in self.entity_scene.values_mut() {
+            if *si > index {
+                *si -= 1;
+            }
+        }
+
+        // Adjust active scene
+        if self.active_scene >= self.scenes.len() {
+            self.active_scene = self.scenes.len() - 1;
+        }
+
+        Ok(name)
+    }
+
     // ── Spawning ───────────────────────────────────────────────────────────
 
     /// Begin building a new entity with the given name.
@@ -2188,6 +2298,99 @@ mod tests {
         // Renderer would call all_objects() — verify it contains both
         assert_eq!(world.all_objects().count(), 2);
         assert_eq!(world.total_object_count(), 2);
+    }
+
+    // ── Persistent scenes and swap (C.3) ─────────────────────────────────
+
+    #[test]
+    fn set_persistent_flag() {
+        let mut world = World::new("test");
+        assert!(!world.is_scene_persistent(0));
+        world.set_scene_persistent(0, true);
+        assert!(world.is_scene_persistent(0));
+    }
+
+    #[test]
+    fn swap_removes_non_persistent() {
+        let mut world = World::new("gameplay");
+        world.create_scene("ui");
+        world.set_scene_persistent(1, true); // ui is persistent
+        let removed = world.swap_scenes();
+        assert_eq!(removed, vec!["gameplay"]);
+        assert_eq!(world.scene_count(), 1);
+        assert_eq!(world.scene_name(0), Some("ui"));
+    }
+
+    #[test]
+    fn swap_despawns_entities() {
+        let mut world = World::new("temp");
+        let e = world
+            .spawn("obj")
+            .sdf(SdfPrimitive::Sphere { radius: 0.5 })
+            .material(1)
+            .build();
+        world.create_scene("persistent");
+        world.set_scene_persistent(1, true);
+        world.swap_scenes();
+        assert!(!world.is_alive(e));
+    }
+
+    #[test]
+    fn swap_preserves_persistent_entities() {
+        let mut world = World::new("temp");
+        world
+            .spawn("temp_obj")
+            .sdf(SdfPrimitive::Sphere { radius: 0.5 })
+            .material(1)
+            .build();
+        world.create_scene("persistent");
+        world.set_scene_persistent(1, true);
+        world.set_active_scene(1);
+        let keeper = world
+            .spawn("keeper")
+            .sdf(SdfPrimitive::Sphere { radius: 0.5 })
+            .material(1)
+            .build();
+        world.swap_scenes();
+        assert!(world.is_alive(keeper));
+    }
+
+    #[test]
+    fn remove_scene_by_index() {
+        let mut world = World::new("s0");
+        world.create_scene("s1");
+        let name = world.remove_scene(0, false).unwrap();
+        assert_eq!(name, "s0");
+        assert_eq!(world.scene_count(), 1);
+    }
+
+    #[test]
+    fn remove_persistent_needs_force() {
+        let mut world = World::new("s0");
+        world.create_scene("s1");
+        world.set_scene_persistent(0, true);
+        assert!(world.remove_scene(0, false).is_err());
+        assert!(world.remove_scene(0, true).is_ok());
+    }
+
+    #[test]
+    fn cannot_remove_last_scene() {
+        let mut world = World::new("only");
+        assert!(matches!(
+            world.remove_scene(0, false),
+            Err(WorldError::CannotRemoveLastScene)
+        ));
+    }
+
+    #[test]
+    fn active_index_adjusts_after_removal() {
+        let mut world = World::new("s0");
+        world.create_scene("s1");
+        world.create_scene("s2");
+        world.set_active_scene(2);
+        world.remove_scene(0, false).unwrap();
+        // Active was 2, scene 0 removed → active should be adjusted
+        assert!(world.active_scene_index() < world.scene_count());
     }
 
     #[test]
