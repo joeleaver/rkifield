@@ -257,6 +257,20 @@ fn engine_thread(data: EngineThreadData) {
             }
             let revoxelize = es.pending_revoxelize.take();
 
+            // Consume undo/redo.
+            if es.pending_undo {
+                es.pending_undo = false;
+                if let Some(action) = es.undo.undo() {
+                    es.apply_undo_action(&action, true);
+                }
+            }
+            if es.pending_redo {
+                es.pending_redo = false;
+                if let Some(action) = es.undo.redo() {
+                    es.apply_undo_action(&action, false);
+                }
+            }
+
             // Environment: clone only when dirty.
             let environment = if es.environment.is_dirty() {
                 let env = es.environment.clone();

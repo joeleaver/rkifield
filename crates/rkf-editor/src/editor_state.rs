@@ -614,6 +614,49 @@ impl EditorState {
         self.editor_input.keys_just_pressed.clear();
     }
 
+    /// Apply a single undo/redo action to the world.
+    ///
+    /// When `reverse` is `true` (undo), applies old values.
+    /// When `reverse` is `false` (redo), applies new values.
+    pub fn apply_undo_action(&mut self, action: &crate::undo::UndoAction, reverse: bool) {
+        use crate::undo::UndoActionKind;
+
+        match &action.kind {
+            UndoActionKind::Transform {
+                entity_id,
+                old_pos, old_rot, old_scale,
+                new_pos, new_rot, new_scale,
+            } => {
+                let (pos, rot, scale) = if reverse {
+                    (*old_pos, *old_rot, *old_scale)
+                } else {
+                    (*new_pos, *new_rot, *new_scale)
+                };
+                if let Some(entity) = self.world.find_entity_by_id(*entity_id) {
+                    let wp = rkf_core::WorldPosition::new(glam::IVec3::ZERO, pos);
+                    let _ = self.world.set_position(entity, wp);
+                    let _ = self.world.set_rotation(entity, rot);
+                    let _ = self.world.set_scale(entity, scale);
+                }
+            }
+            UndoActionKind::SpawnEntity { entity_id } => {
+                if reverse {
+                    // Undo spawn = despawn
+                    if let Some(entity) = self.world.find_entity_by_id(*entity_id) {
+                        let _ = self.world.despawn(entity);
+                    }
+                }
+                // Redo spawn would need stored object data — not supported yet.
+            }
+            UndoActionKind::DespawnEntity { entity_id: _ } => {
+                // Undo despawn would need stored object data — not supported yet.
+            }
+            _ => {
+                // VoxelEdit, PropertyChange, EnvironmentChange — future work.
+            }
+        }
+    }
+
     /// Pick a scene object via ray-AABB intersection (CPU fallback).
     ///
     /// Returns the nearest hit object's id, or `None`. This is a rough
@@ -1067,5 +1110,104 @@ mod tests {
         state.load_scene(path).unwrap();
         let saved = state.save_current_scene();
         assert_eq!(saved.name, "rkf_test_save_name");
+    }
+
+    // ── Undo/redo application tests ───────────────────────────────────────
+
+    #[test]
+    fn undo_transform_restores_position() {
+        use rkf_core::scene_node::SdfPrimitive;
+        let mut state = EditorState::new();
+        let entity = state.world.spawn("obj")
+            .position_vec3(Vec3::new(1.0, 2.0, 3.0))
+            .sdf(SdfPrimitive::Sphere { radius: 0.5 })
+            .material(0)
+            .build();
+
+        let action = crate::undo::UndoAction {
+            kind: crate::undo::UndoActionKind::Transform {
+                entity_id: entity.to_u64(),
+                old_pos: Vec3::new(1.0, 2.0, 3.0),
+                old_rot: Quat::IDENTITY,
+                old_scale: Vec3::ONE,
+                new_pos: Vec3::new(10.0, 20.0, 30.0),
+                new_rot: Quat::from_rotation_y(1.0),
+                new_scale: Vec3::splat(2.0),
+            },
+            timestamp_ms: 0,
+            description: "Move".into(),
+        };
+
+        // Apply redo (new values).
+        state.apply_undo_action(&action, false);
+        let pos = state.world.position(entity).unwrap().to_vec3();
+        assert!(pos.abs_diff_eq(Vec3::new(10.0, 20.0, 30.0), 1e-6));
+
+        // Apply undo (old values).
+        state.apply_undo_action(&action, true);
+        let pos = state.world.position(entity).unwrap().to_vec3();
+        assert!(pos.abs_diff_eq(Vec3::new(1.0, 2.0, 3.0), 1e-6));
+    }
+
+    #[test]
+    fn redo_transform_reapplies() {
+        use rkf_core::scene_node::SdfPrimitive;
+        let mut state = EditorState::new();
+        let entity = state.world.spawn("obj")
+            .position_vec3(Vec3::ZERO)
+            .sdf(SdfPrimitive::Sphere { radius: 0.5 })
+            .material(0)
+            .build();
+
+        let action = crate::undo::UndoAction {
+            kind: crate::undo::UndoActionKind::Transform {
+                entity_id: entity.to_u64(),
+                old_pos: Vec3::ZERO,
+                old_rot: Quat::IDENTITY,
+                old_scale: Vec3::ONE,
+                new_pos: Vec3::new(5.0, 0.0, 0.0),
+                new_rot: Quat::IDENTITY,
+                new_scale: Vec3::splat(3.0),
+            },
+            timestamp_ms: 0,
+            description: "Move".into(),
+        };
+
+        // Undo then redo should restore new values.
+        state.apply_undo_action(&action, true);
+        state.apply_undo_action(&action, false);
+        let scale = state.world.scale(entity).unwrap();
+        assert!(scale.abs_diff_eq(Vec3::splat(3.0), 1e-6));
+    }
+
+    #[test]
+    fn undo_spawn_despawns_entity() {
+        use rkf_core::scene_node::SdfPrimitive;
+        let mut state = EditorState::new();
+        let entity = state.world.spawn("spawned")
+            .sdf(SdfPrimitive::Sphere { radius: 0.5 })
+            .material(0)
+            .build();
+        assert!(state.world.is_alive(entity));
+
+        let action = crate::undo::UndoAction {
+            kind: crate::undo::UndoActionKind::SpawnEntity {
+                entity_id: entity.to_u64(),
+            },
+            timestamp_ms: 0,
+            description: "Spawn".into(),
+        };
+
+        // Undo spawn = despawn.
+        state.apply_undo_action(&action, true);
+        assert!(!state.world.is_alive(entity));
+    }
+
+    #[test]
+    fn undo_with_empty_stack_noop() {
+        let mut state = EditorState::new();
+        // No actions pushed — undo/redo should return None silently.
+        assert!(state.undo.undo().is_none());
+        assert!(state.undo.redo().is_none());
     }
 }
