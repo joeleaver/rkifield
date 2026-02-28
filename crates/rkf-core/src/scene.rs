@@ -51,7 +51,7 @@ pub struct Scene {
     /// All objects (both roots and children, stored flat).
     pub objects: Vec<SceneObject>,
     /// Next object ID to assign (monotonically increasing).
-    next_id: u32,
+    pub next_id: u32,
 }
 
 impl Scene {

@@ -60,10 +60,11 @@ pub fn PropertiesPanel() -> NodeHandle {
         if let Some(ref sel) = es.selected_entity {
             match sel {
                 SelectedEntity::Object(entity_id) => {
-                    if let Some(node) = es.scene_tree.find_node(*entity_id) {
+                    let scene = es.world.scene();
+                    if let Some(obj) = scene.objects.iter().find(|o| o.id as u64 == *entity_id) {
                         let name_row = __scope.create_element("div");
                         name_row.set_attribute("style", SECTION_STYLE);
-                        name_row.append_child(&__scope.create_text(&node.name));
+                        name_row.append_child(&__scope.create_text(&obj.name));
                         container.append_child(&name_row);
 
                         let id_row = __scope.create_element("div");
@@ -73,11 +74,14 @@ pub fn PropertiesPanel() -> NodeHandle {
                         );
                         container.append_child(&id_row);
 
-                        if !node.children.is_empty() {
+                        let child_count = scene.objects.iter()
+                            .filter(|o| o.parent_id == Some(obj.id))
+                            .count();
+                        if child_count > 0 {
                             let cr = __scope.create_element("div");
                             cr.set_attribute("style", VALUE_STYLE);
                             cr.append_child(
-                                &__scope.create_text(&format!("Children: {}", node.children.len())),
+                                &__scope.create_text(&format!("Children: {child_count}")),
                             );
                             container.append_child(&cr);
                         }

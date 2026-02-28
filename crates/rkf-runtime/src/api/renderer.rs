@@ -1,8 +1,17 @@
 //! Renderer — the GPU rendering pipeline.
 //!
 //! Owns all GPU resources (brick pool buffer, G-buffer, 21 compute passes,
-//! readback buffers). Takes a [`&Scene`](rkf_core::scene::Scene) per frame via
-//! the [`World`](super::world::World) reference — does NOT own the scene.
+//! readback buffers). Takes a [`&World`](super::world::World) per frame — does
+//! NOT own the scene.
+//!
+//! # Features
+//!
+//! - Full 21-pass compute pipeline (ray march, shading, GI, volumetrics, post-FX)
+//! - Wireframe overlay rendering (selection highlights, gizmos, debug)
+//! - GPU pick readback (object ID at pixel)
+//! - GPU brush hit readback (world position + object ID at pixel)
+//! - Environment-driven rendering (sun, fog, clouds, post-processing)
+//! - Offscreen rendering with compositor integration
 //!
 //! # Usage
 //!
@@ -10,31 +19,38 @@
 //! let mut renderer = Renderer::new(&window, RendererConfig::default());
 //! renderer.add_light(Light::directional([0.5, 1.0, 0.3], [1.0, 0.95, 0.85], 3.0, true));
 //! // Per frame:
-//! renderer.render(&world, &RenderTarget::Surface(&surface));
+//! renderer.render_to_surface(&world, &surface);
 //! ```
 
 use std::sync::Arc;
 
-use glam::Vec3;
+use glam::{Mat4, Vec3};
 use winit::window::Window;
 
 use rkf_core::aabb::Aabb;
+use rkf_core::material::Material;
 use rkf_core::transform_bake;
 use rkf_core::transform_flatten::flatten_object;
-use rkf_render::material_table::{MaterialTable, create_test_materials};
+use rkf_render::material_table::{create_test_materials, MaterialTable};
 use rkf_render::radiance_inject::{InjectUniforms, RadianceInjectPass};
 use rkf_render::radiance_mip::RadianceMipPass;
 use rkf_render::{
     AutoExposurePass, BlitPass, BloomCompositePass, BloomPass, Camera, CloudShadowPass,
     CoarseField, ColorGradePass, CosmeticsPass, DebugMode, DebugViewPass, DofPass, GBuffer,
-    GodRaysBlurPass, GpuObject, GpuSceneV2, Light, LightBuffer, MotionBlurPass,
-    RadianceVolume, RayMarchPass, RenderContext, SceneUniforms, ShadeUniforms,
-    ShadingPass, SharpenPass, TileObjectCullPass, ToneMapPass, VolCompositePass,
-    VolMarchPass, VolShadowPass, VolUpscalePass, COARSE_VOXEL_SIZE,
+    GodRaysBlurPass, GpuObject, GpuSceneV2, Light, LightBuffer, LineVertex, MotionBlurPass,
+    RadianceVolume, RayMarchPass, RenderContext, SceneUniforms, ShadeUniforms, ShadingPass,
+    SharpenPass, TileObjectCullPass, ToneMapPass, VolCompositePass, VolMarchPass, VolShadowPass,
+    VolUpscalePass, WireframePass, COARSE_VOXEL_SIZE,
 };
-use rkf_core::material::Material;
 
 use super::world::World;
+
+/// Offscreen render target format for the compositor path.
+///
+/// sRGB variant so the blit pass's linear-to-sRGB conversion happens in hardware.
+const OFFSCREEN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+// ── Configuration ────────────────────────────────────────────────────────────
 
 /// Renderer configuration.
 pub struct RendererConfig {
@@ -42,9 +58,9 @@ pub struct RendererConfig {
     pub internal_width: u32,
     /// Internal render resolution height (default 540).
     pub internal_height: u32,
-    /// Display/window resolution width (default 1280).
+    /// Display/viewport resolution width (default 1280).
     pub display_width: u32,
-    /// Display/window resolution height (default 720).
+    /// Display/viewport resolution height (default 720).
     pub display_height: u32,
 }
 
@@ -66,6 +82,117 @@ pub enum RenderTarget<'a> {
     /// Render to an offscreen texture view.
     Texture(&'a wgpu::TextureView),
 }
+
+/// Rendering environment configuration.
+///
+/// Contains all parameters that drive the rendering pipeline: sun, atmosphere,
+/// fog, clouds, and post-processing. Set via [`Renderer::set_render_environment`].
+#[derive(Debug, Clone)]
+pub struct RenderEnvironment {
+    // Atmosphere
+    /// Sun direction (normalized).
+    pub sun_direction: Vec3,
+    /// Sun base color (before tinting by elevation).
+    pub sun_color: Vec3,
+    /// Sun intensity multiplier.
+    pub sun_intensity: f32,
+    /// Rayleigh scattering scale (atmosphere).
+    pub rayleigh_scale: f32,
+    /// Mie scattering scale (atmosphere).
+    pub mie_scale: f32,
+    /// Whether analytic atmosphere sky is enabled.
+    pub atmosphere_enabled: bool,
+
+    // Fog
+    /// Fog base color.
+    pub fog_color: Vec3,
+    /// Fog density (0 = disabled).
+    pub fog_density: f32,
+    /// Fog height falloff rate.
+    pub fog_height_falloff: f32,
+    /// Ambient dust particle density for god rays.
+    pub ambient_dust: f32,
+    /// Dust asymmetry parameter for Henyey-Greenstein phase function.
+    pub dust_asymmetry: f32,
+
+    // Clouds
+    /// Cloud rendering settings.
+    pub cloud_settings: rkf_render::CloudSettings,
+
+    // Post-processing
+    /// Bloom threshold (HDR luminance).
+    pub bloom_threshold: f32,
+    /// Bloom intensity multiplier.
+    pub bloom_intensity: f32,
+    /// Tone map mode (0 = ACES, 1 = AgX).
+    pub tone_map_mode: u32,
+    /// Exposure compensation (EV).
+    pub exposure: f32,
+    /// Whether depth of field is enabled.
+    pub dof_enabled: bool,
+    /// DoF focus distance.
+    pub dof_focus_distance: f32,
+    /// DoF focus range (transition zone).
+    pub dof_focus_range: f32,
+    /// DoF maximum circle of confusion.
+    pub dof_max_coc: f32,
+    /// Sharpen filter strength.
+    pub sharpen_strength: f32,
+    /// Motion blur intensity.
+    pub motion_blur_intensity: f32,
+    /// God rays radial blur intensity.
+    pub god_rays_intensity: f32,
+    /// Vignette darkening intensity.
+    pub vignette_intensity: f32,
+    /// Film grain intensity.
+    pub grain_intensity: f32,
+    /// Chromatic aberration strength.
+    pub chromatic_aberration: f32,
+}
+
+impl Default for RenderEnvironment {
+    fn default() -> Self {
+        Self {
+            sun_direction: Vec3::new(0.5, 1.0, 0.3).normalize(),
+            sun_color: Vec3::new(1.0, 0.95, 0.85),
+            sun_intensity: 3.0,
+            rayleigh_scale: 1.0,
+            mie_scale: 1.0,
+            atmosphere_enabled: true,
+            fog_color: Vec3::new(0.7, 0.75, 0.8),
+            fog_density: 0.0,
+            fog_height_falloff: 0.1,
+            ambient_dust: 0.005,
+            dust_asymmetry: 0.3,
+            cloud_settings: rkf_render::CloudSettings::default(),
+            bloom_threshold: 1.0,
+            bloom_intensity: 0.3,
+            tone_map_mode: 0,
+            exposure: 0.0,
+            dof_enabled: false,
+            dof_focus_distance: 5.0,
+            dof_focus_range: 3.0,
+            dof_max_coc: 0.02,
+            sharpen_strength: 0.0,
+            motion_blur_intensity: 0.0,
+            god_rays_intensity: 0.0,
+            vignette_intensity: 0.0,
+            grain_intensity: 0.0,
+            chromatic_aberration: 0.0,
+        }
+    }
+}
+
+/// Result from a GPU brush hit readback.
+#[derive(Debug, Clone)]
+pub struct BrushHitResult {
+    /// World-space position of the hit.
+    pub position: Vec3,
+    /// Object ID at the hit point.
+    pub object_id: u32,
+}
+
+// ── Renderer ─────────────────────────────────────────────────────────────────
 
 /// The GPU rendering pipeline.
 ///
@@ -114,18 +241,29 @@ pub struct Renderer {
     sharpen: SharpenPass,
     blit: BlitPass,
 
-    // Readback
+    // Wireframe overlay
+    wireframe_pass: WireframePass,
+
+    // Offscreen rendering (compositor path)
+    offscreen_texture: Option<wgpu::Texture>,
+    offscreen_view: Option<wgpu::TextureView>,
+    offscreen_blit: Option<BlitPass>,
+
+    // GPU readback
     readback_buffer: wgpu::Buffer,
+    pick_readback_buffer: wgpu::Buffer,
+    brush_readback_buffer: wgpu::Buffer,
 
     // CPU state
     camera: Camera,
     world_lights: Vec<Light>,
     materials: Vec<Material>,
     light_buffer: LightBuffer,
-    environment: crate::environment::EnvironmentProfile,
+    render_env: RenderEnvironment,
     frame_index: u32,
     prev_vp: [[f32; 4]; 4],
     shade_debug_mode: u32,
+    accumulated_time: f32,
 
     // Config
     internal_width: u32,
@@ -137,7 +275,10 @@ pub struct Renderer {
 
 impl Renderer {
     /// Create a new Renderer with its own GPU device, attached to a window.
-    pub fn new(window: Arc<Window>, config: RendererConfig) -> Self {
+    ///
+    /// Returns the Renderer and the configured `wgpu::Surface` for frame
+    /// presentation. Pass the surface to [`render_to_surface`] each frame.
+    pub fn new(window: Arc<Window>, config: RendererConfig) -> (Self, wgpu::Surface<'static>) {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..Default::default()
@@ -150,10 +291,13 @@ impl Renderer {
         let surface_format =
             ctx.configure_surface(&surface, config.display_width, config.display_height);
 
-        Self::build(ctx, surface_format, config)
+        (Self::build(ctx, surface_format, config, false), surface)
     }
 
     /// Create a new Renderer using a shared GPU device (e.g. from an editor compositor).
+    ///
+    /// Sets up an offscreen render target at `display_width x display_height` for
+    /// compositor integration. Use [`offscreen_view`] to get the texture view.
     pub fn from_shared(
         device: wgpu::Device,
         queue: wgpu::Queue,
@@ -161,24 +305,30 @@ impl Renderer {
         config: RendererConfig,
     ) -> Self {
         let ctx = RenderContext::from_shared(device, queue);
-        Self::build(ctx, surface_format, config)
+        Self::build(ctx, surface_format, config, true)
     }
 
-    fn build(ctx: RenderContext, surface_format: wgpu::TextureFormat, config: RendererConfig) -> Self {
+    fn build(
+        ctx: RenderContext,
+        surface_format: wgpu::TextureFormat,
+        config: RendererConfig,
+        offscreen: bool,
+    ) -> Self {
         let iw = config.internal_width;
         let ih = config.internal_height;
+        let dw = config.display_width.max(64);
+        let dh = config.display_height.max(64);
 
         // Create empty brick pool buffer.
         let brick_pool_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("brick_pool"),
-            size: 8, // minimum — resized on first upload
+            size: 8,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
         let gpu_scene = GpuSceneV2::new(&ctx.device, brick_pool_buffer);
 
-        // Re-create brick pool buffer as owned (gpu_scene took ownership of the first one)
         let brick_pool_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("brick_pool_shadow"),
             size: 8,
@@ -189,22 +339,17 @@ impl Renderer {
         let gbuffer = GBuffer::new(&ctx.device, iw, ih);
         let tile_cull = TileObjectCullPass::new(&ctx.device, &gpu_scene, iw, ih);
 
-        // Initial coarse field (will be recomputed from scene each frame)
-        let coarse_field = CoarseField::from_scene_aabbs(
-            &ctx.device,
-            &[], // empty scene
-            COARSE_VOXEL_SIZE,
-            1.0,
-        );
+        let coarse_field =
+            CoarseField::from_scene_aabbs(&ctx.device, &[], COARSE_VOXEL_SIZE, 1.0);
 
-        let ray_march = RayMarchPass::new(&ctx.device, &gpu_scene, &gbuffer, &tile_cull, &coarse_field);
+        let ray_march =
+            RayMarchPass::new(&ctx.device, &gpu_scene, &gbuffer, &tile_cull, &coarse_field);
         let debug_view = DebugViewPass::new(&ctx.device, &gbuffer);
 
-        // Material table
         let materials = create_test_materials();
         let material_table = MaterialTable::upload(&ctx.device, &materials);
 
-        // Lights — start with a default sun
+        // Lights — start with a default sun.
         let world_lights = vec![Light::directional(
             [0.5, 1.0, 0.3],
             [1.0, 0.95, 0.85],
@@ -326,20 +471,46 @@ impl Renderer {
             iw,
             ih,
         );
-        let blit = BlitPass::new(&ctx.device, &cosmetics.output_view, surface_format);
+
+        // Blit target format depends on mode.
+        let blit_format = if offscreen { OFFSCREEN_FORMAT } else { surface_format };
+        let blit = BlitPass::new(&ctx.device, &cosmetics.output_view, blit_format);
+
+        // Wireframe pass (targets offscreen or swapchain format).
+        let wireframe_format = if offscreen { OFFSCREEN_FORMAT } else { surface_format };
+        let wireframe_pass = WireframePass::new(&ctx.device, wireframe_format);
+
+        // Offscreen render target (compositor path only).
+        let (offscreen_texture, offscreen_view, offscreen_blit) = if offscreen {
+            let (tex, view) = create_offscreen_target(&ctx.device, dw, dh);
+            let os_blit = BlitPass::new(&ctx.device, &cosmetics.output_view, OFFSCREEN_FORMAT);
+            (Some(tex), Some(view), Some(os_blit))
+        } else {
+            (None, None, None)
+        };
 
         // Camera
         let mut camera = Camera::new(Vec3::new(0.0, 2.5, 5.0));
         camera.pitch = -0.15;
-        camera.move_speed = 3.0;
+        camera.move_speed = 5.0;
 
-        // Readback buffer
-        let bytes_per_pixel = 4u32;
-        let unpadded_row = iw * bytes_per_pixel;
-        let padded_row = (unpadded_row + 255) & !255;
-        let readback_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("readback"),
-            size: (padded_row * ih) as u64,
+        // Readback buffers
+        let readback_width = if offscreen { dw } else { iw };
+        let readback_height = if offscreen { dh } else { ih };
+        let readback_buffer = create_readback_buffer(&ctx.device, readback_width, readback_height);
+
+        // Pick readback — 1 pixel from R32Uint material texture (256-byte aligned).
+        let pick_readback_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("pick_readback"),
+            size: 256,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        // Brush hit readback — 1 pixel from Rgba32Float position (16 bytes, 256-aligned).
+        let brush_readback_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("brush_readback"),
+            size: 256,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -374,19 +545,26 @@ impl Renderer {
             cosmetics,
             sharpen,
             blit,
+            wireframe_pass,
+            offscreen_texture,
+            offscreen_view,
+            offscreen_blit,
             readback_buffer,
+            pick_readback_buffer,
+            brush_readback_buffer,
             camera,
             world_lights,
             materials,
             light_buffer,
-            environment: crate::environment::EnvironmentProfile::default(),
+            render_env: RenderEnvironment::default(),
             frame_index: 0,
             prev_vp: [[0.0; 4]; 4],
             shade_debug_mode: 0,
+            accumulated_time: 0.0,
             internal_width: iw,
             internal_height: ih,
-            display_width: config.display_width,
-            display_height: config.display_height,
+            display_width: dw,
+            display_height: dh,
             surface_format,
         }
     }
@@ -412,10 +590,32 @@ impl Renderer {
 
     /// Render a frame to the internal offscreen texture (for editor compositing).
     ///
-    /// Returns a reference to the final LDR output texture view.
+    /// Runs the full 21-pass compute pipeline, then blits to the offscreen render
+    /// target at viewport resolution. Returns the offscreen texture view for the
+    /// compositor. If no offscreen target exists (surface-based mode), returns the
+    /// cosmetics compute output directly.
     pub fn render_offscreen(&mut self, world: &World) -> &wgpu::TextureView {
-        self.render_frame(world, None);
-        &self.cosmetics.output_view
+        if self.offscreen_view.is_some() {
+            // Offscreen path: render compute passes, then blit to offscreen target.
+            self.render_frame(world, None);
+            // Blit from cosmetics output to offscreen sRGB target.
+            if let Some(ref offscreen_blit) = self.offscreen_blit {
+                if let Some(ref offscreen_view) = self.offscreen_view {
+                    let mut encoder = self.ctx.device.create_command_encoder(
+                        &wgpu::CommandEncoderDescriptor {
+                            label: Some("offscreen_blit"),
+                        },
+                    );
+                    offscreen_blit.draw(&mut encoder, offscreen_view);
+                    self.ctx.queue.submit(std::iter::once(encoder.finish()));
+                }
+            }
+            self.offscreen_view.as_ref().unwrap()
+        } else {
+            // No offscreen target — return compute output directly.
+            self.render_frame(world, None);
+            &self.cosmetics.output_view
+        }
     }
 
     /// Core render dispatch — executes all 21 passes.
@@ -438,7 +638,6 @@ impl Renderer {
             let wt = world_transforms.get(&obj.id).unwrap_or(&default_wt);
             let camera_rel = wt.position - camera_pos;
 
-            // Transform local AABB to world space
             let world_aabb = transform_aabb(&obj.aabb, wt);
             scene_aabbs.push((world_aabb.min, world_aabb.max));
 
@@ -460,7 +659,6 @@ impl Renderer {
         // Upload brick pool if needed
         let pool_data: &[u8] = bytemuck::cast_slice(world.brick_pool().as_slice());
         if !pool_data.is_empty() {
-            // Check if we need to reallocate
             if pool_data.len() as u64 > self.brick_pool_buffer.size() {
                 self.brick_pool_buffer =
                     self.ctx.device.create_buffer(&wgpu::BufferDescriptor {
@@ -469,7 +667,6 @@ impl Renderer {
                         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                         mapped_at_creation: false,
                     });
-                // Create a second buffer for the GPU scene bind group
                 let new_pool_buf =
                     self.ctx.device.create_buffer(&wgpu::BufferDescriptor {
                         label: Some("brick_pool_gpu"),
@@ -492,20 +689,17 @@ impl Renderer {
                 .upload_brick_maps(&self.ctx.device, &self.ctx.queue, brick_map_data);
         }
 
-        // Upload GPU objects
+        // Upload GPU objects + BVH
         self.gpu_scene
             .upload_objects(&self.ctx.device, &self.ctx.queue, &gpu_objects);
-
-        // Build and upload BVH
         let bvh = rkf_core::Bvh::build(&bvh_pairs);
         self.gpu_scene
             .upload_bvh(&self.ctx.device, &self.ctx.queue, &bvh);
 
-        // Update camera uniforms
+        // Camera uniforms
         let cam_uniforms = self.camera.uniforms(iw, ih, self.frame_index, self.prev_vp);
         self.gpu_scene.update_camera(&self.ctx.queue, &cam_uniforms);
 
-        // Update scene uniforms
         let scene_uniforms = SceneUniforms {
             num_objects: gpu_objects.len() as u32,
             max_steps: 128,
@@ -515,50 +709,96 @@ impl Renderer {
         self.gpu_scene
             .update_scene_uniforms(&self.ctx.queue, &scene_uniforms);
 
-        // Update shade uniforms
+        // ── Compute environment-derived values ───────────────────────────────
+
+        let env = &self.render_env;
+        let sun_dir = env.sun_direction.normalize();
+
+        // Tint sun color based on elevation (Rayleigh extinction approximation).
+        let sun_elevation = sun_dir.y.asin();
+        let tinted_color = {
+            let path = (1.0 / sun_elevation.max(0.02).sin()).min(12.0);
+            let tau = Vec3::new(0.02, 0.06, 0.15);
+            let extinction = Vec3::new(
+                (-tau.x * path).exp(),
+                (-tau.y * path).exp(),
+                (-tau.z * path).exp(),
+            );
+            env.sun_color * extinction
+        };
+        let sun_color_tinted = tinted_color * env.sun_intensity;
+        let sun_dir_arr = [sun_dir.x, sun_dir.y, sun_dir.z];
+
+        let fog_density = if env.fog_density > 0.0 { env.fog_density } else { 0.0 };
+        let fog_alpha = if fog_density > 0.0 { 1.0 } else { 0.0 };
+
+        // Camera basis for shade + vol march
         let fwd = self.camera.forward();
         let fov_rad = self.camera.fov_degrees.to_radians();
         let half_fov_tan = (fov_rad * 0.5).tan();
         let aspect = iw as f32 / ih as f32;
         let right = self.camera.right() * half_fov_tan * aspect;
         let up = self.camera.up() * half_fov_tan;
-        let sun_dir = Vec3::new(0.5, 1.0, 0.3).normalize();
         let cam = self.camera.position;
 
+        // Synthesize directional sun light.
+        let sun_light = Light {
+            light_type: 0,
+            pos_x: 0.0, pos_y: 0.0, pos_z: 0.0,
+            dir_x: sun_dir_arr[0],
+            dir_y: sun_dir_arr[1],
+            dir_z: sun_dir_arr[2],
+            color_r: sun_color_tinted.x,
+            color_g: sun_color_tinted.y,
+            color_b: sun_color_tinted.z,
+            intensity: 1.0,
+            range: 0.0,
+            inner_angle: 0.0,
+            outer_angle: 0.0,
+            cookie_index: -1,
+            shadow_caster: 1,
+        };
+
+        // Camera-relative point/spot lights.
+        let cam_rel_lights: Vec<Light> = self.world_lights.iter().map(|l| {
+            let mut cl = *l;
+            if cl.light_type != 0 {
+                cl.pos_x -= cam.x;
+                cl.pos_y -= cam.y;
+                cl.pos_z -= cam.z;
+            }
+            cl
+        }).collect();
+
+        let total_lights = 1 + cam_rel_lights.len() as u32;
+        let mut all_lights = vec![sun_light];
+        all_lights.extend(cam_rel_lights);
+        self.light_buffer.update(&self.ctx.queue, &all_lights);
+
+        // Shade uniforms
         self.shading_pass.update_uniforms(
             &self.ctx.queue,
             &ShadeUniforms {
                 debug_mode: self.shade_debug_mode,
-                num_lights: self.world_lights.len() as u32,
+                num_lights: total_lights,
                 _pad0: 0,
                 shadow_budget_k: 0,
                 camera_pos: [cam.x, cam.y, cam.z, 0.0],
-                sun_dir: [sun_dir.x, sun_dir.y, sun_dir.z, 3.0],
-                sun_color: [1.0, 0.95, 0.85, 0.0],
-                sky_params: [1.0, 1.0, 1.0, 0.0],
+                sun_dir: [sun_dir_arr[0], sun_dir_arr[1], sun_dir_arr[2], env.sun_intensity],
+                sun_color: [tinted_color.x, tinted_color.y, tinted_color.z, 0.0],
+                sky_params: [
+                    env.rayleigh_scale,
+                    env.mie_scale,
+                    if env.atmosphere_enabled { 1.0 } else { 0.0 },
+                    0.0,
+                ],
                 cam_forward: [fwd.x, fwd.y, fwd.z, 0.0],
                 cam_right: [right.x, right.y, right.z, 0.0],
                 cam_up: [up.x, up.y, up.z, 0.0],
             },
         );
 
-        // Upload camera-relative light positions
-        let cam_rel_lights: Vec<Light> = self
-            .world_lights
-            .iter()
-            .map(|l| {
-                let mut cl = *l;
-                if cl.light_type != 0 {
-                    cl.pos_x -= cam.x;
-                    cl.pos_y -= cam.y;
-                    cl.pos_z -= cam.z;
-                }
-                cl
-            })
-            .collect();
-        self.light_buffer.update(&self.ctx.queue, &cam_rel_lights);
-
-        // Update debug view
+        // Debug view
         let dm = match self.shade_debug_mode {
             1 => DebugMode::Normals,
             2 => DebugMode::Positions,
@@ -593,15 +833,13 @@ impl Renderer {
         }
         self.coarse_field.upload(&self.ctx.queue, camera_pos);
 
-        // Update radiance volume center
         self.radiance_volume
             .update_center(&self.ctx.queue, [cam.x, cam.y, cam.z]);
 
-        // Update inject uniforms
         self.radiance_inject.update_uniforms(
             &self.ctx.queue,
             &InjectUniforms {
-                num_lights: self.world_lights.len() as u32,
+                num_lights: total_lights,
                 max_shadow_lights: 1,
                 _pad: [0; 2],
             },
@@ -628,7 +866,16 @@ impl Renderer {
         );
 
         // === Volumetrics ===
-        let sun_dir_arr = [0.5f32, 1.0, 0.3];
+        self.accumulated_time += 1.0 / 60.0;
+        let cloud_params = rkf_render::CloudParams::from_settings(
+            &env.cloud_settings,
+            self.accumulated_time,
+        );
+        self.vol_march
+            .set_cloud_params(&self.ctx.queue, &cloud_params);
+        self.cloud_shadow
+            .set_cloud_params(&self.ctx.queue, &cloud_params);
+
         self.vol_shadow.dispatch(
             &mut encoder,
             &self.ctx.queue,
@@ -636,12 +883,19 @@ impl Renderer {
             sun_dir_arr,
             &self.coarse_field.bind_group,
         );
-        self.cloud_shadow.dispatch(
-            &mut encoder,
+        self.cloud_shadow.update_params_ex(
             &self.ctx.queue,
             [cam.x, cam.y, cam.z],
             sun_dir_arr,
+            cloud_params.altitude[0],
+            cloud_params.altitude[1],
+            rkf_render::cloud_shadow::DEFAULT_CLOUD_SHADOW_COVERAGE,
+            rkf_render::cloud_shadow::DEFAULT_CLOUD_SHADOW_EXTINCTION,
         );
+        self.cloud_shadow.dispatch_only(&mut encoder);
+
+        let sc = [sun_color_tinted.x, sun_color_tinted.y, sun_color_tinted.z];
+        let fc = [env.fog_color.x, env.fog_color.y, env.fog_color.z];
         let half_w = iw / 2;
         let half_h = ih / 2;
         let vol_params = rkf_render::VolMarchParams {
@@ -650,7 +904,7 @@ impl Renderer {
             cam_right: [right.x, right.y, right.z, 0.0],
             cam_up: [up.x, up.y, up.z, 0.0],
             sun_dir: [sun_dir_arr[0], sun_dir_arr[1], sun_dir_arr[2], 0.0],
-            sun_color: [1.0, 0.95, 0.85, 0.0],
+            sun_color: [sc[0], sc[1], sc[2], 0.0],
             width: half_w,
             height: half_h,
             full_width: iw,
@@ -659,9 +913,9 @@ impl Renderer {
             step_size: 2.0,
             near: 0.5,
             far: 200.0,
-            fog_color: [0.7, 0.8, 0.9, 1.0],
-            fog_height: [0.01, -0.5, 0.15, 0.0],
-            fog_distance: [0.0, 0.01, 0.001, 0.3],
+            fog_color: [fc[0], fc[1], fc[2], fog_alpha],
+            fog_height: [fog_density, -0.5, env.fog_height_falloff, 0.0],
+            fog_distance: [0.0, 0.01, env.ambient_dust, env.dust_asymmetry],
             frame_index: self.frame_index,
             _pad0: 0,
             _pad1: 0,
@@ -675,13 +929,13 @@ impl Renderer {
         self.vol_composite.dispatch(&mut encoder);
 
         // === Post-processing ===
+        // Project sun to screen UV for radial blur god rays.
         {
-            let sun_dir_vec = Vec3::new(0.5, 1.0, 0.3).normalize();
             let cam_fwd = self.camera.forward();
-            let sun_dot = sun_dir_vec.dot(cam_fwd);
+            let sun_dot = sun_dir.dot(cam_fwd);
             let (sun_uv_x, sun_uv_y) = if sun_dot > 0.0 {
-                let ndc_x = sun_dir_vec.dot(right) / sun_dot;
-                let ndc_y = -sun_dir_vec.dot(up) / sun_dot;
+                let ndc_x = sun_dir.dot(right) / sun_dot;
+                let ndc_y = -sun_dir.dot(up) / sun_dot;
                 (ndc_x * 0.5 + 0.5, ndc_y * 0.5 + 0.5)
             } else {
                 (0.5, 0.5)
@@ -738,6 +992,17 @@ impl Renderer {
         self.camera.fov_degrees = fov_degrees;
     }
 
+    /// Camera-relative view-projection matrix for overlay rendering.
+    pub fn view_projection(&self) -> Mat4 {
+        self.camera
+            .view_projection(self.internal_width, self.internal_height)
+    }
+
+    /// Current camera position in world space.
+    pub fn camera_position(&self) -> Vec3 {
+        self.camera.position
+    }
+
     // ── Materials ──────────────────────────────────────────────────────────
 
     /// Set a material at the given index.
@@ -747,7 +1012,6 @@ impl Renderer {
             self.materials.resize(idx + 1, Material::default());
         }
         self.materials[idx] = material;
-        // Re-upload on next render
         self.material_table = MaterialTable::upload(&self.ctx.device, &self.materials);
     }
 
@@ -803,19 +1067,66 @@ impl Renderer {
 
     // ── Environment ────────────────────────────────────────────────────────
 
-    /// Set the environment profile.
-    pub fn set_environment(&mut self, env: crate::environment::EnvironmentProfile) {
-        self.environment = env;
+    /// Set the render environment (sun, fog, clouds, post-processing).
+    ///
+    /// This also applies post-processing settings to the GPU passes immediately.
+    pub fn set_render_environment(&mut self, env: RenderEnvironment) {
+        self.apply_post_process_settings(&env);
+        self.render_env = env;
     }
 
-    /// Get the environment profile.
-    pub fn environment(&self) -> &crate::environment::EnvironmentProfile {
-        &self.environment
+    /// Get the current render environment.
+    pub fn render_environment(&self) -> &RenderEnvironment {
+        &self.render_env
     }
 
-    /// Get a mutable reference to the environment profile.
-    pub fn environment_mut(&mut self) -> &mut crate::environment::EnvironmentProfile {
-        &mut self.environment
+    /// Get a mutable reference to the render environment.
+    pub fn render_environment_mut(&mut self) -> &mut RenderEnvironment {
+        &mut self.render_env
+    }
+
+    /// Apply post-processing settings from the render environment to GPU passes.
+    fn apply_post_process_settings(&mut self, env: &RenderEnvironment) {
+        let queue = &self.ctx.queue;
+
+        // Bloom
+        let t = env.bloom_threshold;
+        self.bloom.set_threshold(queue, t, t * 0.5);
+        self.bloom_composite.set_intensity(queue, env.bloom_intensity);
+
+        // Tone mapping
+        let mode = if env.tone_map_mode == 1 {
+            rkf_render::ToneMapMode::AgX
+        } else {
+            rkf_render::ToneMapMode::Aces
+        };
+        self.tone_map.set_mode(queue, mode);
+        self.tone_map.set_exposure(queue, env.exposure);
+
+        // Depth of field
+        if env.dof_enabled {
+            self.dof.update_focus(
+                queue,
+                env.dof_focus_distance,
+                env.dof_focus_range,
+                env.dof_max_coc,
+            );
+        } else {
+            self.dof.update_focus(
+                queue,
+                env.dof_focus_distance,
+                env.dof_focus_range,
+                0.0,
+            );
+        }
+
+        // Other post-FX
+        self.sharpen.set_strength(queue, env.sharpen_strength);
+        self.motion_blur.set_intensity(queue, env.motion_blur_intensity);
+        self.god_rays_blur.set_intensity(queue, env.god_rays_intensity);
+        self.cosmetics.set_vignette(queue, env.vignette_intensity);
+        self.cosmetics.set_grain(queue, env.grain_intensity);
+        self.cosmetics.set_chromatic_aberration(queue, env.chromatic_aberration);
     }
 
     // ── Debug / quality ────────────────────────────────────────────────────
@@ -830,28 +1141,70 @@ impl Renderer {
         self.shade_debug_mode
     }
 
+    // ── Wireframe ─────────────────────────────────────────────────────────
+
+    /// Draw wireframe lines onto the offscreen render target.
+    ///
+    /// Call after [`render_offscreen`]. Positions should be in camera-relative
+    /// world space. Uses the camera's view-projection matrix for transformation.
+    pub fn draw_wireframe(&mut self, vertices: &[LineVertex]) {
+        if vertices.is_empty() {
+            return;
+        }
+        let target = match self.offscreen_view.as_ref() {
+            Some(v) => v,
+            None => return,
+        };
+        let vp_matrix = self.view_projection();
+        let viewport = (
+            0.0,
+            0.0,
+            self.display_width as f32,
+            self.display_height as f32,
+        );
+        let mut encoder = self.ctx.device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor {
+                label: Some("wireframe"),
+            },
+        );
+        self.wireframe_pass.draw(
+            &self.ctx.device,
+            &self.ctx.queue,
+            &mut encoder,
+            target,
+            vp_matrix,
+            viewport,
+            vertices,
+        );
+        self.ctx.queue.submit(std::iter::once(encoder.finish()));
+    }
+
     // ── GPU readback ───────────────────────────────────────────────────────
 
     /// Capture a screenshot of the current frame as RGBA8 pixels.
+    ///
+    /// Returns pixels at the offscreen viewport resolution (if offscreen) or
+    /// at internal resolution (if surface-based).
     pub fn screenshot(&self) -> Vec<u8> {
-        // This requires a frame to have been rendered. The pixels are in the
-        // cosmetics output texture. We need to copy it to a readback buffer.
-        let iw = self.internal_width;
-        let ih = self.internal_height;
+        let (source_texture, w, h) = if let Some(ref tex) = self.offscreen_texture {
+            (tex, self.display_width, self.display_height)
+        } else {
+            (&self.cosmetics.output_texture, self.internal_width, self.internal_height)
+        };
+
         let bytes_per_pixel = 4u32;
-        let unpadded_row = iw * bytes_per_pixel;
+        let unpadded_row = w * bytes_per_pixel;
         let padded_row = (unpadded_row + 255) & !255;
 
-        let mut encoder = self
-            .ctx
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        let mut encoder = self.ctx.device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor {
                 label: Some("screenshot"),
-            });
+            },
+        );
 
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: &self.cosmetics.output_texture,
+                texture: source_texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -861,12 +1214,12 @@ impl Renderer {
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(padded_row),
-                    rows_per_image: Some(ih),
+                    rows_per_image: Some(h),
                 },
             },
             wgpu::Extent3d {
-                width: iw,
-                height: ih,
+                width: w,
+                height: h,
                 depth_or_array_layers: 1,
             },
         );
@@ -880,15 +1233,15 @@ impl Renderer {
         });
         let _ = self.ctx.device.poll(wgpu::PollType::wait_indefinitely());
 
-        let pixel_count = (iw * ih) as usize;
+        let pixel_count = (w * h) as usize;
         let mut rgba8 = vec![0u8; pixel_count * 4];
 
         if let Ok(Ok(())) = rx.recv() {
             let data = buffer_slice.get_mapped_range();
-            for y in 0..ih as usize {
+            for y in 0..h as usize {
                 let src_offset = y * padded_row as usize;
-                let dst_offset = y * iw as usize * 4;
-                let row_bytes = iw as usize * 4;
+                let dst_offset = y * w as usize * 4;
+                let row_bytes = w as usize * 4;
                 rgba8[dst_offset..dst_offset + row_bytes]
                     .copy_from_slice(&data[src_offset..src_offset + row_bytes]);
             }
@@ -899,6 +1252,362 @@ impl Renderer {
         }
 
         rgba8
+    }
+
+    /// GPU pick readback — returns the object ID at the given pixel coordinate.
+    ///
+    /// Coordinates are in internal render resolution space. Returns `None` if
+    /// the pixel is background (no object hit).
+    pub fn pick(&self, x: u32, y: u32) -> Option<u32> {
+        let px = x.min(self.internal_width.saturating_sub(1));
+        let py = y.min(self.internal_height.saturating_sub(1));
+
+        let mut encoder = self.ctx.device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor {
+                label: Some("pick_readback"),
+            },
+        );
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.gbuffer.material_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: px, y: py, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &self.pick_readback_buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(1),
+                },
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.ctx.queue.submit(std::iter::once(encoder.finish()));
+
+        let slice = self.pick_readback_buffer.slice(..4);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        let _ = self.ctx.device.poll(wgpu::PollType::wait_indefinitely());
+
+        if let Ok(Ok(())) = rx.recv() {
+            let data = slice.get_mapped_range();
+            let packed = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+            let object_id = packed >> 24; // bits 24-31
+            drop(data);
+            self.pick_readback_buffer.unmap();
+            if object_id > 0 {
+                Some(object_id)
+            } else {
+                None
+            }
+        } else {
+            self.pick_readback_buffer.unmap();
+            None
+        }
+    }
+
+    /// GPU brush hit readback — returns world position + object ID at pixel.
+    ///
+    /// Coordinates are in internal render resolution space. Returns `None` if
+    /// the pixel is background (no geometry hit).
+    pub fn brush_hit(&self, x: u32, y: u32) -> Option<BrushHitResult> {
+        let bx = x.min(self.internal_width.saturating_sub(1));
+        let by = y.min(self.internal_height.saturating_sub(1));
+
+        let mut encoder = self.ctx.device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor {
+                label: Some("brush_readback"),
+            },
+        );
+
+        // Copy 1 pixel from position G-buffer (Rgba32Float = 16 bytes).
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.gbuffer.position_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: bx, y: by, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &self.brush_readback_buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(1),
+                },
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        // Also copy 1 pixel from material G-buffer for object_id.
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.gbuffer.material_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: bx, y: by, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &self.pick_readback_buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(1),
+                },
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        self.ctx.queue.submit(std::iter::once(encoder.finish()));
+
+        // Read position (4xf32 = 16 bytes).
+        let pos_slice = self.brush_readback_buffer.slice(..16);
+        let (tx_pos, rx_pos) = std::sync::mpsc::channel();
+        pos_slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx_pos.send(r);
+        });
+        let _ = self.ctx.device.poll(wgpu::PollType::wait_indefinitely());
+
+        let mut hit_pos = [0.0f32; 4];
+        let pos_ok = if let Ok(Ok(())) = rx_pos.recv() {
+            let data = pos_slice.get_mapped_range();
+            hit_pos = [
+                f32::from_le_bytes([data[0], data[1], data[2], data[3]]),
+                f32::from_le_bytes([data[4], data[5], data[6], data[7]]),
+                f32::from_le_bytes([data[8], data[9], data[10], data[11]]),
+                f32::from_le_bytes([data[12], data[13], data[14], data[15]]),
+            ];
+            drop(data);
+            self.brush_readback_buffer.unmap();
+            true
+        } else {
+            self.brush_readback_buffer.unmap();
+            false
+        };
+
+        // Read object_id from material G-buffer (bits 24-31).
+        let mat_slice = self.pick_readback_buffer.slice(..4);
+        let (tx_mat, rx_mat) = std::sync::mpsc::channel();
+        mat_slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx_mat.send(r);
+        });
+        let _ = self.ctx.device.poll(wgpu::PollType::wait_indefinitely());
+
+        let mut object_id = 0u32;
+        if let Ok(Ok(())) = rx_mat.recv() {
+            let data = mat_slice.get_mapped_range();
+            let packed = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+            object_id = packed >> 24;
+            drop(data);
+            self.pick_readback_buffer.unmap();
+        } else {
+            self.pick_readback_buffer.unmap();
+        }
+
+        if pos_ok && hit_pos[3] < 1e30 {
+            Some(BrushHitResult {
+                position: Vec3::new(hit_pos[0], hit_pos[1], hit_pos[2]),
+                object_id,
+            })
+        } else {
+            None
+        }
+    }
+
+    // ── Resize ────────────────────────────────────────────────────────────
+
+    /// Resize the internal render resolution.
+    ///
+    /// Recreates all size-dependent GPU resources.
+    pub fn resize_render(&mut self, width: u32, height: u32) {
+        let width = width.max(64);
+        let height = height.max(64);
+        if width == self.internal_width && height == self.internal_height {
+            return;
+        }
+        log::info!(
+            "Render resolution: {}x{} -> {}x{}",
+            self.internal_width,
+            self.internal_height,
+            width,
+            height
+        );
+        self.internal_width = width;
+        self.internal_height = height;
+
+        let device = &self.ctx.device;
+
+        // Core passes
+        self.gbuffer = GBuffer::new(device, width, height);
+        self.tile_cull = TileObjectCullPass::new(device, &self.gpu_scene, width, height);
+        self.debug_view = DebugViewPass::new(device, &self.gbuffer);
+        self.shading_pass = ShadingPass::new(
+            device,
+            &self.gbuffer,
+            &self.gpu_scene,
+            &self.light_buffer,
+            &self.coarse_field,
+            &self.radiance_volume,
+            &self.material_table.buffer,
+            width,
+            height,
+        );
+
+        // Volumetric pipeline
+        let half_w = width / 2;
+        let half_h = height / 2;
+        self.vol_march = VolMarchPass::new(
+            device,
+            &self.ctx.queue,
+            &self.gbuffer.position_view,
+            &self.vol_shadow.shadow_view,
+            &self.cloud_shadow.shadow_view,
+            half_w,
+            half_h,
+            width,
+            height,
+        );
+        self.vol_upscale = VolUpscalePass::new(
+            device,
+            &self.vol_march.output_view,
+            &self.gbuffer.position_view,
+            width,
+            height,
+            half_w,
+            half_h,
+        );
+        self.vol_composite = VolCompositePass::new(
+            device,
+            &self.shading_pass.hdr_view,
+            &self.vol_upscale.output_view,
+            width,
+            height,
+        );
+
+        // Post-processing pipeline
+        self.god_rays_blur = GodRaysBlurPass::new(
+            device,
+            &self.vol_composite.output_view,
+            &self.gbuffer.position_view,
+            width,
+            height,
+        );
+        self.bloom = BloomPass::new(device, &self.god_rays_blur.output_view, width, height);
+        self.auto_exposure =
+            AutoExposurePass::new(device, &self.god_rays_blur.output_view, width, height);
+        self.dof = DofPass::new(
+            device,
+            &self.god_rays_blur.output_view,
+            &self.gbuffer.position_view,
+            width,
+            height,
+        );
+        self.motion_blur = MotionBlurPass::new(
+            device,
+            &self.dof.output_view,
+            &self.gbuffer.motion_view,
+            width,
+            height,
+        );
+        self.bloom_composite = BloomCompositePass::new(
+            device,
+            &self.motion_blur.output_view,
+            self.bloom.mip_views(),
+            width,
+            height,
+        );
+        self.tone_map = ToneMapPass::new_with_exposure(
+            device,
+            &self.bloom_composite.output_view,
+            width,
+            height,
+            Some(self.auto_exposure.get_exposure_buffer()),
+        );
+        self.color_grade = ColorGradePass::new(
+            device,
+            &self.ctx.queue,
+            &self.tone_map.ldr_view,
+            width,
+            height,
+        );
+        self.cosmetics = CosmeticsPass::new(device, &self.color_grade.output_view, width, height);
+        self.sharpen = SharpenPass::new(
+            device,
+            &self.vol_composite.output_view,
+            &self.gbuffer,
+            width,
+            height,
+        );
+
+        // Update blit source
+        self.blit.update_source(device, &self.cosmetics.output_view);
+        if let Some(ref mut os_blit) = self.offscreen_blit {
+            os_blit.update_source(device, &self.cosmetics.output_view);
+        }
+
+        // Re-apply post-processing settings
+        let env = self.render_env.clone();
+        self.apply_post_process_settings(&env);
+    }
+
+    /// Resize the viewport (offscreen render target) and internal resolution.
+    ///
+    /// Called when the viewport dimensions change (e.g., panel resize).
+    /// Returns the new offscreen `TextureView` for the compositor to use,
+    /// or `None` if the viewport didn't actually change.
+    pub fn resize_viewport(
+        &mut self,
+        viewport_w: u32,
+        viewport_h: u32,
+        render_scale: f32,
+    ) -> Option<wgpu::TextureView> {
+        let vp_w = viewport_w.max(64);
+        let vp_h = viewport_h.max(64);
+        if vp_w == self.display_width && vp_h == self.display_height {
+            return None;
+        }
+
+        log::info!(
+            "Viewport resize: {}x{} -> {}x{}",
+            self.display_width,
+            self.display_height,
+            vp_w,
+            vp_h
+        );
+        self.display_width = vp_w;
+        self.display_height = vp_h;
+
+        // Recreate offscreen target.
+        let (tex, view) = create_offscreen_target(&self.ctx.device, vp_w, vp_h);
+        self.offscreen_texture = Some(tex);
+        self.offscreen_view = Some(view);
+
+        // Recreate readback buffer at new viewport resolution.
+        self.readback_buffer = create_readback_buffer(&self.ctx.device, vp_w, vp_h);
+
+        // Resize internal render resolution.
+        let internal_w = ((vp_w as f32 * render_scale) as u32).max(64);
+        let internal_h = ((vp_h as f32 * render_scale) as u32).max(64);
+        self.resize_render(internal_w, internal_h);
+
+        // Return new view for compositor.
+        self.offscreen_view.clone()
     }
 
     // ── Stats ──────────────────────────────────────────────────────────────
@@ -913,7 +1622,7 @@ impl Renderer {
         (self.internal_width, self.internal_height)
     }
 
-    /// Get the display resolution.
+    /// Get the display/viewport resolution.
     pub fn display_resolution(&self) -> (u32, u32) {
         (self.display_width, self.display_height)
     }
@@ -935,15 +1644,73 @@ impl Renderer {
         self.surface_format
     }
 
-    /// Get a reference to the final LDR output texture view (for compositor integration).
+    /// Get the final LDR compute output texture view (before offscreen blit).
     pub fn output_view(&self) -> &wgpu::TextureView {
         &self.cosmetics.output_view
     }
 
-    /// Get a reference to the blit pass (for drawing to a target view).
+    /// Get the offscreen texture view for compositor integration.
+    ///
+    /// Returns `None` if the renderer is using the surface-based path.
+    pub fn offscreen_view(&self) -> Option<&wgpu::TextureView> {
+        self.offscreen_view.as_ref()
+    }
+
+    /// Get a reference to the blit pass (for custom target rendering).
     pub fn blit_pass(&self) -> &BlitPass {
         &self.blit
     }
+
+    /// Access the GPU scene (for direct brick pool / brick map operations).
+    pub fn gpu_scene(&self) -> &GpuSceneV2 {
+        &self.gpu_scene
+    }
+
+    /// Access the GPU scene mutably.
+    pub fn gpu_scene_mut(&mut self) -> &mut GpuSceneV2 {
+        &mut self.gpu_scene
+    }
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+/// Create the offscreen render target texture at the given resolution.
+fn create_offscreen_target(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("offscreen_target"),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: OFFSCREEN_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&Default::default());
+    (texture, view)
+}
+
+/// Create a readback buffer sized for the given dimensions.
+fn create_readback_buffer(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Buffer {
+    let bytes_per_pixel = 4u32;
+    let unpadded_row = width * bytes_per_pixel;
+    let padded_row = (unpadded_row + 255) & !255;
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("readback"),
+        size: (padded_row * height) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    })
 }
 
 /// Transform a local-space AABB to world-space using a baked world transform.
@@ -976,8 +1743,6 @@ fn transform_aabb(aabb: &Aabb, wt: &transform_bake::WorldTransform) -> Aabb {
 mod tests {
     use super::*;
 
-    // CPU-only tests — no GPU required
-
     #[test]
     fn renderer_config_default() {
         let config = RendererConfig::default();
@@ -985,5 +1750,25 @@ mod tests {
         assert_eq!(config.internal_height, 540);
         assert_eq!(config.display_width, 1280);
         assert_eq!(config.display_height, 720);
+    }
+
+    #[test]
+    fn render_environment_default() {
+        let env = RenderEnvironment::default();
+        assert_eq!(env.sun_intensity, 3.0);
+        assert!(env.atmosphere_enabled);
+        assert_eq!(env.fog_density, 0.0);
+        assert_eq!(env.tone_map_mode, 0);
+        assert!(!env.dof_enabled);
+    }
+
+    #[test]
+    fn brush_hit_result_debug() {
+        let hit = BrushHitResult {
+            position: Vec3::new(1.0, 2.0, 3.0),
+            object_id: 42,
+        };
+        let s = format!("{:?}", hit);
+        assert!(s.contains("42"));
     }
 }

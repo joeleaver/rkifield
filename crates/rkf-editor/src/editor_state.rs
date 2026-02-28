@@ -15,45 +15,12 @@ use crate::paint::PaintState;
 use crate::placement::{AssetBrowser, GridSnap, PlacementQueue};
 use crate::properties::PropertySheet;
 use crate::scene_io::{RecentFiles, UnsavedChangesState};
-use crate::scene_tree::SceneTree;
 use crate::sculpt::SculptState;
 use crate::undo::UndoStack;
 
 use glam::Vec3;
 use rinch::prelude::Signal;
-
-use crate::gizmo::GizmoAxis;
-
-/// Per-frame snapshot of everything the engine thread needs from EditorState.
-///
-/// Produced by [`EditorState::take_engine_snapshot`] under a brief lock, then
-/// consumed after the lock is released. Adding new engine-visible state means
-/// adding a field here and a line in `take_engine_snapshot` — nothing else.
-pub struct EngineSnapshot {
-    // Camera (Copy — zero cost).
-    pub camera: EditorCamera,
-
-    // Pending commands consumed from EditorState.
-    pub debug_mode: Option<u32>,
-    pub revoxelize: Option<u32>,
-
-    // Environment (cloned only when dirty, otherwise None).
-    pub environment: Option<EnvironmentState>,
-
-    // Lights (converted only when dirty, otherwise None).
-    pub lights: Option<Vec<rkf_render::Light>>,
-
-    // Scene clone for rendering (character animation mutates the clone).
-    pub scene: rkf_core::scene::Scene,
-
-    // Wireframe overlay data (all Copy).
-    pub selected_entity: Option<SelectedEntity>,
-    pub gizmo_mode: GizmoMode,
-    pub gizmo_axis: GizmoAxis,
-    pub show_grid: bool,
-    pub editor_mode: EditorMode,
-    pub brush_radius: f32,
-}
+use rkf_runtime::api::World;
 
 /// What is currently selected in the scene tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -433,7 +400,6 @@ pub struct EditorState {
     pub editor_input: InputState,
 
     // ── Scene ────────────────────────────────────────────────
-    pub scene_tree: SceneTree,
     pub selected_entity: Option<SelectedEntity>,
     pub selected_properties: Option<PropertySheet>,
 
@@ -517,10 +483,10 @@ pub struct EditorState {
     /// current non-uniform scale, resetting scale to (1,1,1) afterwards.
     pub pending_revoxelize: Option<u32>,
 
-    // ── v2 Scene model ───────────────────────────────────────
-    /// Optional v2 scene reference. When set, `sync_v2_scene` mirrors it
-    /// into the editor scene tree.
-    pub v2_scene: Option<rkf_core::scene::Scene>,
+    // ── World (unified game state) ──────────────────────────
+    /// The unified world container. Wraps `Scene` (SDF objects) + ECS +
+    /// brick pool. Replaces the former `v2_scene: Option<Scene>`.
+    pub world: World,
 }
 
 impl EditorState {
@@ -539,7 +505,6 @@ impl EditorState {
             mode: EditorMode::Default,
             editor_camera: cam,
             editor_input: InputState::new(),
-            scene_tree: SceneTree::new(),
             selected_entity: None,
             selected_properties: None,
             gizmo: GizmoState::new(),
@@ -584,7 +549,7 @@ impl EditorState {
             pending_minimize: false,
             pending_maximize: false,
             pending_revoxelize: None,
-            v2_scene: None,
+            world: World::new("editor"),
         }
     }
 
@@ -649,115 +614,6 @@ impl EditorState {
         self.editor_input.keys_just_pressed.clear();
     }
 
-    /// Snapshot everything the engine thread needs, consuming pending commands.
-    ///
-    /// Call this under the `editor_state` lock, then release the lock before
-    /// applying the snapshot to the engine. This keeps lock hold time minimal
-    /// (no GPU work while locked) and avoids per-property boilerplate — adding
-    /// new engine-visible state means adding a field to [`EngineSnapshot`] and
-    /// a line here.
-    pub fn take_engine_snapshot(&mut self) -> EngineSnapshot {
-        // Consume pending commands.
-        let debug_mode = self.pending_debug_mode.take();
-        if let Some(mode) = debug_mode {
-            self.debug_mode = mode;
-        }
-        let revoxelize = self.pending_revoxelize.take();
-
-        // Environment: clone only when dirty, then clear the flag.
-        let environment = if self.environment.is_dirty() {
-            let env = self.environment.clone();
-            self.environment.clear_dirty();
-            Some(env)
-        } else {
-            None
-        };
-
-        // Lights: convert only when dirty, then clear the flag.
-        let lights = if self.light_editor.is_dirty() {
-            let converted = self.light_editor.all_lights().iter().map(|el| {
-                use crate::light_editor::EditorLightType;
-                rkf_render::Light {
-                    light_type: match el.light_type {
-                        EditorLightType::Point => 1,
-                        EditorLightType::Spot => 2,
-                    },
-                    pos_x: el.position.x,
-                    pos_y: el.position.y,
-                    pos_z: el.position.z,
-                    dir_x: el.direction.x,
-                    dir_y: el.direction.y,
-                    dir_z: el.direction.z,
-                    color_r: el.color.x,
-                    color_g: el.color.y,
-                    color_b: el.color.z,
-                    intensity: el.intensity,
-                    range: el.range,
-                    inner_angle: el.spot_inner_angle,
-                    outer_angle: el.spot_outer_angle,
-                    cookie_index: -1,
-                    shadow_caster: el.cast_shadows as u32,
-                }
-            }).collect();
-            self.light_editor.clear_dirty();
-            Some(converted)
-        } else {
-            None
-        };
-
-        // Recompute AABBs before cloning the scene.
-        if let Some(ref mut scene) = self.v2_scene {
-            for obj in &mut scene.objects {
-                obj.aabb = crate::placement::compute_object_local_aabb(obj);
-            }
-        }
-
-        // Scene clone (character animation mutates the clone, discarded after render).
-        let scene = self.v2_scene.clone()
-            .unwrap_or_else(|| rkf_core::scene::Scene::new("empty"));
-
-        // Wireframe overlay data (all Copy — free).
-        let gizmo_axis = if self.gizmo.dragging {
-            self.gizmo.active_axis
-        } else {
-            self.gizmo.hovered_axis
-        };
-        let brush_radius = match self.mode {
-            EditorMode::Sculpt => self.sculpt.current_settings.radius,
-            EditorMode::Paint => self.paint.current_settings.radius,
-            _ => 1.0,
-        };
-
-        // Reset per-frame deltas last.
-        self.reset_frame_deltas();
-
-        EngineSnapshot {
-            camera: self.editor_camera,
-            debug_mode,
-            revoxelize,
-            environment,
-            lights,
-            scene,
-            selected_entity: self.selected_entity,
-            gizmo_mode: self.gizmo.mode,
-            gizmo_axis,
-            show_grid: self.show_grid,
-            editor_mode: self.mode,
-            brush_radius,
-        }
-    }
-
-    /// Mirror the v2 scene into the editor scene tree.
-    ///
-    /// If `v2_scene` is `Some`, calls [`crate::scene_tree::sync_from_v2_scene`]
-    /// to rebuild `scene_tree.roots` from the v2 object list. Does nothing when
-    /// `v2_scene` is `None`.
-    pub fn sync_v2_scene(&mut self) {
-        if let Some(ref scene) = self.v2_scene {
-            crate::scene_tree::sync_from_v2_scene(&mut self.scene_tree, scene);
-        }
-    }
-
     /// Pick a scene object via ray-AABB intersection (CPU fallback).
     ///
     /// Returns the nearest hit object's id, or `None`. This is a rough
@@ -778,7 +634,7 @@ impl EditorState {
             vp_height,
         );
 
-        let scene = self.v2_scene.as_ref()?;
+        let scene = self.world.scene();
         let world_transforms = rkf_core::transform_bake::bake_world_transforms(&scene.objects);
         let default_wt = rkf_core::transform_bake::WorldTransform::default();
 
@@ -815,22 +671,20 @@ impl EditorState {
 
     /// Load a scene file and populate the editor state from it.
     ///
-    /// Populates the scene tree with entities from the file and applies
-    /// environment settings if present. Returns the loaded `SceneFile`
-    /// for further processing (e.g. setting up engine geometry).
+    /// Populates `world.scene()` with SDF objects from the file, lights into
+    /// the light editor, and applies environment settings. Returns the loaded
+    /// `SceneFile` for further processing (e.g. setting up engine geometry).
     pub fn load_scene(&mut self, path: &str) -> Result<crate::scene_io::SceneFile, String> {
         use crate::scene_io::{load_scene_from_path, ComponentData};
-        use crate::scene_tree::SceneNode;
 
-        let scene = load_scene_from_path(path)?;
+        let scene_file = load_scene_from_path(path)?;
 
-        // Clear existing scene tree
-        self.scene_tree = crate::scene_tree::SceneTree::new();
+        // Clear existing world scene.
+        let world_scene = self.world.scene_mut();
+        world_scene.objects.clear();
 
-        // Populate scene tree from entities.
-        // Light-only entities are handled exclusively by the light editor below;
-        // skip them here to avoid double-counting on save.
-        for entity in &scene.entities {
+        // Populate world scene from non-light entities.
+        for entity in &scene_file.entities {
             let is_light_only = !entity.components.is_empty()
                 && entity
                     .components
@@ -840,45 +694,34 @@ impl EditorState {
                 continue;
             }
 
-            let mut node = SceneNode::new(entity.entity_id, &entity.name);
-            node.visible = true;
-            node.position = entity.position;
-            node.rotation = entity.rotation;
-            node.scale = entity.scale;
+            let root_node = rkf_core::scene_node::SceneNode::new(&entity.name);
+            let mut obj = rkf_core::scene::SceneObject {
+                id: entity.entity_id as u32,
+                name: entity.name.clone(),
+                parent_id: entity.parent_id.map(|p| p as u32),
+                position: entity.position,
+                rotation: entity.rotation,
+                scale: entity.scale,
+                root_node,
+                aabb: rkf_core::aabb::Aabb::new(Vec3::ZERO, Vec3::ZERO),
+            };
+            // Store asset path in the root node's name for roundtrip.
             for comp in &entity.components {
                 if let ComponentData::SdfObject { asset_path } = comp {
-                    node.asset_path = Some(asset_path.clone());
+                    obj.root_node.name = asset_path.clone();
                 }
             }
-            self.scene_tree.add_node(node);
+            world_scene.objects.push(obj);
         }
 
-        // Rebuild parent-child relationships (only for non-light entities)
-        for entity in &scene.entities {
-            let is_light_only = !entity.components.is_empty()
-                && entity
-                    .components
-                    .iter()
-                    .all(|c| matches!(c, ComponentData::Light { .. }));
-            if is_light_only {
-                continue;
-            }
-            if let Some(parent_id) = entity.parent_id {
-                // Remove from roots and re-add as child
-                if let Some(child) = self.scene_tree.remove_node(entity.entity_id) {
-                    if let Some(parent) = self.scene_tree.find_node_mut(parent_id) {
-                        parent.children.push(child);
-                    } else {
-                        // Parent not found — keep as root
-                        self.scene_tree.add_node(child);
-                    }
-                }
-            }
+        // Update next_id to avoid collisions with loaded objects.
+        if let Some(max_id) = world_scene.objects.iter().map(|o| o.id).max() {
+            world_scene.next_id = max_id + 1;
         }
 
-        // Populate light editor from Light components
+        // Populate light editor from Light components.
         self.light_editor = crate::light_editor::LightEditor::new();
-        for entity in &scene.entities {
+        for entity in &scene_file.entities {
             for comp in &entity.components {
                 if let ComponentData::Light {
                     light_type,
@@ -906,65 +749,55 @@ impl EditorState {
             }
         }
 
-        // Apply environment settings if present
-        if !scene.environment_ron.is_empty() {
+        // Apply environment settings if present.
+        if !scene_file.environment_ron.is_empty() {
             if let Ok(env) =
-                crate::environment::EnvironmentState::deserialize_from_ron(&scene.environment_ron)
+                crate::environment::EnvironmentState::deserialize_from_ron(&scene_file.environment_ron)
             {
                 self.environment = env;
                 self.environment.mark_dirty();
             }
         }
 
-        // Track the current scene path
+        // Track the current scene path.
         self.current_scene_path = Some(path.to_string());
         self.unsaved_changes.mark_saved();
 
-        Ok(scene)
+        Ok(scene_file)
     }
 
     /// Construct a [`SceneFile`] from the current editor state.
     ///
-    /// Walks the scene tree to collect SDF/animated/physics entities (with their
-    /// stored transforms and asset paths), then appends light entities from the
-    /// light editor. The environment is serialized via RON. The resulting
-    /// `SceneFile` can be passed to [`crate::scene_io::save_scene_to_path`].
+    /// Reads SDF objects directly from `world.scene()`, then appends light
+    /// entities from the light editor. The environment is serialized via RON.
+    /// The resulting `SceneFile` can be passed to
+    /// [`crate::scene_io::save_scene_to_path`].
     pub fn save_current_scene(&self) -> crate::scene_io::SceneFile {
         use crate::light_editor::EditorLightType;
         use crate::scene_io::{ComponentData, SceneEntity, SceneFile};
-        use crate::scene_tree::SceneNode;
         use glam::Quat;
 
         let mut entities: Vec<SceneEntity> = Vec::new();
 
-        // Recursively collect scene-tree nodes into flat entity list.
-        fn collect_nodes(
-            node: &SceneNode,
-            parent_id: Option<u64>,
-            out: &mut Vec<SceneEntity>,
-        ) {
+        // Collect SDF objects from world scene.
+        let scene = self.world.scene();
+        for obj in &scene.objects {
             let mut components = Vec::new();
-            if let Some(ref path) = node.asset_path {
+            // If the root node name looks like an asset path, store it.
+            if !obj.root_node.name.is_empty() && obj.root_node.name.contains("://") {
                 components.push(ComponentData::SdfObject {
-                    asset_path: path.clone(),
+                    asset_path: obj.root_node.name.clone(),
                 });
             }
-            out.push(SceneEntity {
-                entity_id: node.entity_id,
-                name: node.name.clone(),
-                parent_id,
-                position: node.position,
-                rotation: node.rotation,
-                scale: node.scale,
+            entities.push(SceneEntity {
+                entity_id: obj.id as u64,
+                name: obj.name.clone(),
+                parent_id: obj.parent_id.map(|p| p as u64),
+                position: obj.position,
+                rotation: obj.rotation,
+                scale: obj.scale,
                 components,
             });
-            for child in &node.children {
-                collect_nodes(child, Some(node.entity_id), out);
-            }
-        }
-
-        for root in &self.scene_tree.roots {
-            collect_nodes(root, None, &mut entities);
         }
 
         // Append light entities from the light editor.
@@ -1097,18 +930,19 @@ mod tests {
     }
 
     #[test]
-    fn test_load_scene_populates_scene_tree() {
+    fn test_load_scene_populates_world() {
         let path = "/tmp/rkf_test_load_tree.rkscene";
         write_test_scene(path);
         let mut state = EditorState::new();
         let scene = state.load_scene(path).unwrap();
         assert_eq!(scene.entities.len(), 3);
-        // Only SDF entities go in scene tree (lights go to light_editor)
-        assert_eq!(state.scene_tree.roots.len(), 1); // "Ground" root
-        assert_eq!(state.scene_tree.roots[0].name, "Ground");
-        // "Child" is reparented under "Ground"
-        assert_eq!(state.scene_tree.roots[0].children.len(), 1);
-        assert_eq!(state.scene_tree.roots[0].children[0].name, "Child");
+        // Only SDF entities go in world scene (lights go to light_editor)
+        let objects = &state.world.scene().objects;
+        assert_eq!(objects.len(), 2); // "Ground" + "Child"
+        assert_eq!(objects[0].name, "Ground");
+        assert_eq!(objects[1].name, "Child");
+        // "Child" has parent_id pointing to Ground
+        assert_eq!(objects[1].parent_id, Some(objects[0].id));
     }
 
     #[test]
@@ -1117,19 +951,15 @@ mod tests {
         write_test_scene(path);
         let mut state = EditorState::new();
         state.load_scene(path).unwrap();
-        let ground = &state.scene_tree.roots[0];
+        let objects = &state.world.scene().objects;
+        let ground = &objects[0];
         assert_eq!(ground.position, Vec3::new(0.0, -0.5, 0.0));
-        assert_eq!(
-            ground.asset_path.as_deref(),
-            Some("procedural://ground")
-        );
-        let child = &ground.children[0];
+        // Asset path stored in root_node.name
+        assert_eq!(ground.root_node.name, "procedural://ground");
+        let child = &objects[1];
         assert_eq!(child.position, Vec3::new(1.0, 2.0, 3.0));
         assert!(child.scale.abs_diff_eq(Vec3::splat(0.5), 1e-6));
-        assert_eq!(
-            child.asset_path.as_deref(),
-            Some("procedural://pillar")
-        );
+        assert_eq!(child.root_node.name, "procedural://pillar");
     }
 
     #[test]
@@ -1207,39 +1037,23 @@ mod tests {
     }
 
     #[test]
-    fn test_v2_scene_field_defaults_to_none() {
+    fn test_world_defaults_to_empty() {
         let state = EditorState::new();
-        assert!(state.v2_scene.is_none());
+        assert_eq!(state.world.scene().objects.len(), 0);
     }
 
     #[test]
-    fn test_sync_v2_scene_populates_tree() {
-        use rkf_core::scene::Scene;
+    fn test_world_scene_is_single_source_of_truth() {
         use rkf_core::scene_node::SceneNode as CoreNode;
         let mut state = EditorState::new();
-        let mut v2 = Scene::new("test");
-        v2.add_object("SphereObj", Vec3::ZERO, CoreNode::new("root"));
-        v2.add_object("BoxObj", Vec3::ZERO, CoreNode::new("root2"));
+        let scene = state.world.scene_mut();
+        scene.add_object("SphereObj", Vec3::ZERO, CoreNode::new("root"));
+        scene.add_object("BoxObj", Vec3::ZERO, CoreNode::new("root2"));
 
-        state.v2_scene = Some(v2);
-        state.sync_v2_scene();
-
-        assert_eq!(state.scene_tree.roots.len(), 2);
-        assert_eq!(state.scene_tree.roots[0].name, "SphereObj");
-        assert_eq!(state.scene_tree.roots[1].name, "BoxObj");
-    }
-
-    #[test]
-    fn test_sync_v2_scene_no_op_when_none() {
-        let mut state = EditorState::new();
-        // Add a node manually
-        use crate::scene_tree::SceneNode;
-        state.scene_tree.add_node(SceneNode::new(1, "ManualNode"));
-
-        // sync with no v2_scene — tree should be unchanged
-        state.sync_v2_scene();
-        assert_eq!(state.scene_tree.roots.len(), 1);
-        assert_eq!(state.scene_tree.roots[0].name, "ManualNode");
+        // World scene is the single source of truth — no sync needed.
+        assert_eq!(state.world.scene().objects.len(), 2);
+        assert_eq!(state.world.scene().objects[0].name, "SphereObj");
+        assert_eq!(state.world.scene().objects[1].name, "BoxObj");
     }
 
     #[test]

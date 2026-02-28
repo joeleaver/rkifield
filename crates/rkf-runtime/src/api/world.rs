@@ -586,17 +586,13 @@ impl World {
             .map_err(|e| WorldError::Io(std::io::Error::other(e.to_string())))
     }
 
-    // ── Internal accessors (pub(crate)) ────────────────────────────────────
+    // ── Internal accessors ─────────────────────────────────────────────────
 
-    /// Get a reference to the underlying Scene (for Renderer).
-    pub(crate) fn scene(&self) -> &Scene {
+    /// Get a reference to the underlying Scene.
+    ///
+    /// Used by the Renderer internally and by the editor for snapshot cloning.
+    pub fn scene(&self) -> &Scene {
         &self.scene
-    }
-
-    /// Get a mutable reference to the underlying Scene.
-    #[allow(dead_code)]
-    pub(crate) fn scene_mut(&mut self) -> &mut Scene {
-        &mut self.scene
     }
 
     /// Get a reference to the brick pool.
@@ -617,6 +613,59 @@ impl World {
     /// Get a mutable reference to the hecs world.
     pub(crate) fn ecs_mut(&mut self) -> &mut hecs::World {
         &mut self.ecs
+    }
+
+    // ── Advanced access ─────────────────────────────────────────────────────
+
+    /// Get a mutable reference to the underlying Scene.
+    ///
+    /// Advanced: use this for animation updates, custom voxelization, or
+    /// other operations not covered by the standard World API.
+    pub fn scene_mut(&mut self) -> &mut Scene {
+        &mut self.scene
+    }
+
+    /// Voxelize an SDF function into this world's brick pool.
+    ///
+    /// Returns the brick map handle and brick count on success.
+    pub fn voxelize<F>(
+        &mut self,
+        sdf_fn: F,
+        aabb: &Aabb,
+        voxel_size: f32,
+    ) -> Result<(rkf_core::BrickMapHandle, u32), WorldError>
+    where
+        F: Fn(Vec3) -> (f32, u16),
+    {
+        rkf_core::voxelize_sdf(
+            sdf_fn,
+            aabb,
+            voxel_size,
+            &mut self.brick_pool,
+            &mut self.brick_map_alloc,
+        )
+        .ok_or(WorldError::Voxelize("voxelization produced no bricks".into()))
+    }
+
+    /// Get a mutable reference to the root SDF scene node of an entity.
+    ///
+    /// Advanced: use this for per-frame animation updates that modify the
+    /// scene node tree (e.g. skeletal animation bone transforms).
+    pub fn root_node_mut(&mut self, entity: Entity) -> Result<&mut SceneNode, WorldError> {
+        let record = self
+            .entities
+            .get(&entity)
+            .ok_or(WorldError::NoSuchEntity(entity))?;
+        let sdf_id = record
+            .sdf_object_id
+            .ok_or(WorldError::MissingComponent(entity, "SdfObject"))?;
+        let obj = self
+            .scene
+            .objects
+            .iter_mut()
+            .find(|o| o.id == sdf_id)
+            .ok_or(WorldError::NoSuchEntity(entity))?;
+        Ok(&mut obj.root_node)
     }
 }
 

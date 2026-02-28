@@ -2,6 +2,7 @@
 //!
 //! Uses rinch's `Tree` component with `TreeNodeData` to render the project
 //! hierarchy: Project → Camera + Scene → objects + lights.
+//! Reads directly from `world.scene().objects` — no intermediate SceneTree mirror.
 
 use std::sync::{Arc, Mutex};
 
@@ -18,28 +19,27 @@ const LABEL_STYLE: &str = "font-size:11px;color:var(--rinch-color-dimmed);\
 
 // ── Tree data builder ────────────────────────────────────────────────────────
 
-/// Build `TreeNodeData` for a SceneNode and its children (recursive).
-fn build_object_nodes(node: &crate::scene_tree::SceneNode) -> TreeNodeData {
-    let value = format!("obj:{}", node.entity_id);
-    let mut tree_node = TreeNodeData::new(value, &node.name)
-        .with_icon(TablerIcon::Cube);
-    for child in &node.children {
-        tree_node = tree_node.with_child(build_object_nodes(child));
-    }
-    tree_node
-}
-
 /// Build the full tree data from editor state.
+///
+/// Reads objects from `world.scene().objects` and lights from `light_editor`.
+/// Objects with `parent_id` are nested under their parent; root objects
+/// (parent_id == None) appear directly under the Scene node.
 fn build_tree_data(es: &EditorState) -> Vec<TreeNodeData> {
     // Camera node.
     let camera_node = TreeNodeData::new("camera", "Camera")
         .with_icon(TablerIcon::Camera);
 
-    // Scene children: SDF objects + lights.
+    // Scene children: SDF objects (roots only) + lights.
     let mut scene_children: Vec<TreeNodeData> = Vec::new();
 
-    for root in &es.scene_tree.roots {
-        scene_children.push(build_object_nodes(root));
+    let scene = es.world.scene();
+
+    // Build a map of parent_id → children for hierarchy.
+    // First pass: collect root objects (no parent).
+    for obj in &scene.objects {
+        if obj.parent_id.is_none() {
+            scene_children.push(build_object_node(obj, &scene.objects));
+        }
     }
 
     for light in es.light_editor.all_lights() {
@@ -53,9 +53,7 @@ fn build_tree_data(es: &EditorState) -> Vec<TreeNodeData> {
         scene_children.push(node);
     }
 
-    let scene_name = es.v2_scene.as_ref()
-        .map(|s| s.name.clone())
-        .unwrap_or_else(|| "Scene".to_string());
+    let scene_name = scene.name.clone();
 
     let scene_node = TreeNodeData::new("scene", scene_name)
         .with_icon(TablerIcon::World)
@@ -71,6 +69,25 @@ fn build_tree_data(es: &EditorState) -> Vec<TreeNodeData> {
         .with_children(vec![camera_node, scene_node]);
 
     vec![project_node]
+}
+
+/// Build a `TreeNodeData` for a `SceneObject` and recursively attach children.
+fn build_object_node(
+    obj: &rkf_core::scene::SceneObject,
+    all_objects: &[rkf_core::scene::SceneObject],
+) -> TreeNodeData {
+    let value = format!("obj:{}", obj.id);
+    let mut tree_node = TreeNodeData::new(value, &obj.name)
+        .with_icon(TablerIcon::Cube);
+
+    // Find children (objects whose parent_id == this object's id).
+    for child_obj in all_objects {
+        if child_obj.parent_id == Some(obj.id) {
+            tree_node = tree_node.with_child(build_object_node(child_obj, all_objects));
+        }
+    }
+
+    tree_node
 }
 
 /// Convert a `SelectedEntity` to the tree node value string.
@@ -141,7 +158,7 @@ pub fn SceneTreePanel() -> NodeHandle {
         let (tree_data, obj_count, sel_entity) = {
             let es = es.lock().unwrap();
             let data = build_tree_data(&es);
-            let count = es.scene_tree.roots.len() + es.light_editor.all_lights().len();
+            let count = es.world.scene().objects.len() + es.light_editor.all_lights().len();
             let sel = es.selected_entity;
             (data, count, sel)
         };

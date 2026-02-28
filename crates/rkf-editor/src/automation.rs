@@ -526,36 +526,26 @@ impl AutomationApi for EditorAutomationApi {
             .lock()
             .map_err(|e| AutomationError::EngineError(format!("lock poisoned: {e}")))?;
 
-        fn collect_nodes(
-            node: &crate::scene_tree::SceneNode,
-            parent_id: Option<u64>,
-            out: &mut Vec<EntityNode>,
-        ) {
-            let entity_type = if node.asset_path.is_some() {
-                "sdf_object"
-            } else {
-                "entity"
-            };
-            let p = node.position;
-            let r = node.rotation;
-            out.push(EntityNode {
-                id: node.entity_id,
-                name: node.name.clone(),
-                parent: parent_id,
-                entity_type: entity_type.to_string(),
-                transform: [p.x, p.y, p.z, r.x, r.y, r.z, r.w, node.scale.x, node.scale.y, node.scale.z],
-            });
-            for child in &node.children {
-                collect_nodes(child, Some(node.entity_id), out);
-            }
-        }
-
+        // Read directly from world.scene() — the authoritative source.
+        let scene = es.world.scene();
         let mut entities = Vec::new();
-        for root in &es.scene_tree.roots {
-            collect_nodes(root, None, &mut entities);
+        for obj in &scene.objects {
+            let p = obj.position;
+            let r = obj.rotation;
+            let entity_type = match &obj.root_node.sdf_source {
+                rkf_core::scene_node::SdfSource::None => "entity",
+                _ => "sdf_object",
+            };
+            entities.push(EntityNode {
+                id: obj.id as u64,
+                name: obj.name.clone(),
+                parent: obj.parent_id.map(|pid| pid as u64),
+                entity_type: entity_type.to_string(),
+                transform: [p.x, p.y, p.z, r.x, r.y, r.z, r.w, obj.scale.x, obj.scale.y, obj.scale.z],
+            });
         }
 
-        // Include light entities from light editor
+        // Include light entities from light editor.
         use crate::light_editor::EditorLightType;
         for (idx, light) in es.light_editor.all_lights().iter().enumerate() {
             let (light_type, type_name) = match light.light_type {
@@ -581,9 +571,10 @@ impl AutomationApi for EditorAutomationApi {
             .lock()
             .map_err(|e| AutomationError::EngineError(format!("lock poisoned: {e}")))?;
 
-        let node = es
-            .scene_tree
-            .find_node(entity_id)
+        // Look up from world.scene() — the authoritative source.
+        let scene = es.world.scene();
+        let obj = scene.objects.iter()
+            .find(|o| o.id as u64 == entity_id)
             .ok_or(AutomationError::EntityNotFound(entity_id))?;
 
         let is_selected = matches!(
@@ -591,19 +582,26 @@ impl AutomationApi for EditorAutomationApi {
             Some(crate::editor_state::SelectedEntity::Object(eid)) if eid == entity_id
         );
 
+        let child_count = scene.objects.iter()
+            .filter(|o| o.parent_id == Some(obj.id))
+            .count();
+
         let mut components = HashMap::new();
         components.insert(
-            "scene_node".to_string(),
+            "scene_object".to_string(),
             serde_json::json!({
-                "visible": node.visible,
                 "selected": is_selected,
-                "children": node.children.len(),
+                "children": child_count,
+                "position": [obj.position.x, obj.position.y, obj.position.z],
+                "rotation": [obj.rotation.x, obj.rotation.y, obj.rotation.z, obj.rotation.w],
+                "scale": [obj.scale.x, obj.scale.y, obj.scale.z],
+                "sdf_type": format!("{:?}", obj.root_node.sdf_source),
             }),
         );
 
         Ok(EntitySnapshot {
-            id: node.entity_id,
-            name: node.name.clone(),
+            id: entity_id,
+            name: obj.name.clone(),
             components,
         })
     }
@@ -769,28 +767,67 @@ impl AutomationApi for EditorAutomationApi {
         position: [f32; 3],
         material_id: u16,
     ) -> Result<u32, String> {
+        use rkf_core::scene_node::{SceneNode as CoreNode, SdfSource};
+        use rkf_core::{SdfPrimitive, SceneObject, Aabb};
+
+        let primitive = match primitive_type {
+            "sphere" => {
+                let radius = params.first().copied().unwrap_or(0.5);
+                SdfPrimitive::Sphere { radius }
+            }
+            "box" => {
+                let hx = params.first().copied().unwrap_or(0.5);
+                let hy = params.get(1).copied().unwrap_or(hx);
+                let hz = params.get(2).copied().unwrap_or(hx);
+                SdfPrimitive::Box { half_extents: Vec3::new(hx, hy, hz) }
+            }
+            "capsule" => {
+                let radius = params.first().copied().unwrap_or(0.2);
+                let half_height = params.get(1).copied().unwrap_or(0.4);
+                SdfPrimitive::Capsule { radius, half_height }
+            }
+            "torus" => {
+                let major = params.first().copied().unwrap_or(0.4);
+                let minor = params.get(1).copied().unwrap_or(0.12);
+                SdfPrimitive::Torus { major_radius: major, minor_radius: minor }
+            }
+            "cylinder" => {
+                let radius = params.first().copied().unwrap_or(0.3);
+                let half_height = params.get(1).copied().unwrap_or(0.5);
+                SdfPrimitive::Cylinder { radius, half_height }
+            }
+            "plane" => SdfPrimitive::Plane {
+                normal: Vec3::Y,
+                distance: 0.0,
+            },
+            other => return Err(format!("unknown primitive type: {other}")),
+        };
+
+        let mut root = CoreNode::new(name);
+        root.sdf_source = SdfSource::Analytical { primitive, material_id };
+
+        let pos = Vec3::new(position[0], position[1], position[2]);
+        let obj = SceneObject {
+            id: 0, // scene.add_object_full assigns a unique id
+            name: name.into(),
+            parent_id: None,
+            position: pos,
+            rotation: glam::Quat::IDENTITY,
+            scale: Vec3::ONE,
+            root_node: root,
+            // AABB recomputed per-frame in take_engine_snapshot.
+            aabb: Aabb::new(Vec3::ZERO, Vec3::ZERO),
+        };
+
         let mut es = self
             .editor_state
             .lock()
             .map_err(|e| format!("lock poisoned: {e}"))?;
 
-        // Generate a stable ID from the current tree size (simple sequential ID).
-        let entity_id = (es.scene_tree.roots.len() as u64 + 1) * 0x1000 + 1;
+        let scene = es.world.scene_mut();
+        let object_id = scene.add_object_full(obj);
 
-        let mut node = crate::scene_tree::SceneNode::new(entity_id, name);
-        node.asset_path = Some(format!(
-            "procedural://{primitive_type}?params={}&mat={material_id}",
-            params
-                .iter()
-                .map(|f| f.to_string())
-                .collect::<Vec<_>>()
-                .join(",")
-        ));
-        node.position = glam::Vec3::new(position[0], position[1], position[2]);
-
-        es.scene_tree.add_node(node);
-
-        Ok(entity_id as u32)
+        Ok(object_id)
     }
 
     fn object_despawn(&self, object_id: u32) -> Result<(), String> {
@@ -799,8 +836,8 @@ impl AutomationApi for EditorAutomationApi {
             .lock()
             .map_err(|e| format!("lock poisoned: {e}"))?;
 
-        es.scene_tree
-            .remove_node(object_id as u64)
+        let scene = es.world.scene_mut();
+        scene.remove_object(object_id)
             .ok_or_else(|| format!("object {object_id} not found"))?;
 
         Ok(())
@@ -818,15 +855,16 @@ impl AutomationApi for EditorAutomationApi {
             .lock()
             .map_err(|e| format!("lock poisoned: {e}"))?;
 
-        let node = es
-            .scene_tree
-            .find_node_mut(object_id as u64)
+        let scene = es.world.scene_mut();
+        let obj = scene.objects.iter_mut()
+            .find(|o| o.id == object_id)
             .ok_or_else(|| format!("object {object_id} not found"))?;
 
-        node.position = glam::Vec3::new(position[0], position[1], position[2]);
-        node.rotation =
+        obj.position = Vec3::new(position[0], position[1], position[2]);
+        obj.rotation =
             glam::Quat::from_xyzw(rotation[0], rotation[1], rotation[2], rotation[3]);
-        node.scale = glam::Vec3::new(scale[0], scale[1], scale[2]);
+        obj.scale = Vec3::new(scale[0], scale[1], scale[2]);
+
 
         Ok(())
     }

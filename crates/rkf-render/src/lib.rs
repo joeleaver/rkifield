@@ -100,6 +100,8 @@ pub mod clouds;
 pub mod cloud_shadow;
 /// Brick-backed low-altitude cloud configuration.
 pub mod brick_clouds;
+/// Wireframe line rendering pass (the only rasterization pass in the engine).
+pub mod wireframe;
 
 pub use camera::{Camera, CameraUniforms};
 pub use context::RenderContext;
@@ -149,3 +151,4 @@ pub use god_rays::{GodRaySettings, DEFAULT_GOD_RAY_DUST, DEFAULT_GOD_RAY_G, MIN_
 pub use clouds::{CloudSettings, CloudParams, DEFAULT_CLOUD_MIN, DEFAULT_CLOUD_MAX, DEFAULT_CLOUD_THRESHOLD, DEFAULT_CLOUD_DENSITY_SCALE, DEFAULT_CLOUD_SHADOW_RESOLUTION, DEFAULT_CLOUD_SHADOW_COVERAGE};
 pub use cloud_shadow::{CloudShadowPass, CloudShadowParams, DEFAULT_CLOUD_SHADOW_RES, CLOUD_SHADOW_FORMAT};
 pub use brick_clouds::{BrickCloudRegion, BrickCloudType, DEFAULT_BRICK_CLOUD_MIN, DEFAULT_BRICK_CLOUD_MAX, DEFAULT_BRICK_CLOUD_DENSITY, DEFAULT_BRICK_CLOUD_COLOR};
+pub use wireframe::{WireframePass, LineVertex};

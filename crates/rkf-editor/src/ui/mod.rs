@@ -151,7 +151,8 @@ pub fn editor_ui() -> NodeHandle {
                                         }
                                     };
 
-                                    if let Some(ref mut scene) = state.v2_scene {
+                                    {
+                                        let scene = state.world.scene_mut();
                                         if let Some(obj) = scene.objects.iter_mut()
                                             .find(|o| o.id as u64 == eid)
                                         {
@@ -164,13 +165,16 @@ pub fn editor_ui() -> NodeHandle {
                             } else {
                                 // Hover detection: update hovered_axis.
                                 if let Some(SelectedEntity::Object(eid)) = state.selected_entity {
-                                    let gc = state.v2_scene.as_ref().and_then(|scene| {
-                                        let obj = scene.objects.iter().find(|o| o.id as u64 == eid)?;
-                                        let (lmin, lmax) = wireframe::compute_node_tree_aabb(
-                                            &obj.root_node, glam::Mat4::IDENTITY,
-                                        )?;
-                                        Some(obj.position + obj.rotation * ((lmin + lmax) * 0.5 * obj.scale))
-                                    });
+                                    let gc = {
+                                        let scene = state.world.scene();
+                                        scene.objects.iter().find(|o| o.id as u64 == eid)
+                                            .and_then(|obj| {
+                                                let (lmin, lmax) = wireframe::compute_node_tree_aabb(
+                                                    &obj.root_node, glam::Mat4::IDENTITY,
+                                                )?;
+                                                Some(obj.position + obj.rotation * ((lmin + lmax) * 0.5 * obj.scale))
+                                            })
+                                    };
                                     if let Some(gc) = gc {
                                         let cam_dist = (gc - state.editor_camera.position).length();
                                         let gizmo_size = cam_dist * 0.12;
@@ -233,15 +237,18 @@ pub fn editor_ui() -> NodeHandle {
                             let right_down = state.editor_input.mouse_buttons[1];
                             if !right_down && !state.gizmo.dragging {
                                 if let Some(SelectedEntity::Object(eid)) = state.selected_entity {
-                                    let gc = state.v2_scene.as_ref().and_then(|scene| {
-                                        let obj = scene.objects.iter().find(|o| o.id as u64 == eid)?;
-                                        let (lmin, lmax) = wireframe::compute_node_tree_aabb(
-                                            &obj.root_node, glam::Mat4::IDENTITY,
-                                        )?;
-                                        let center = obj.position
-                                            + obj.rotation * ((lmin + lmax) * 0.5 * obj.scale);
-                                        Some((center, obj.position, obj.rotation, obj.scale))
-                                    });
+                                    let gc = {
+                                        let scene = state.world.scene();
+                                        scene.objects.iter().find(|o| o.id as u64 == eid)
+                                            .and_then(|obj| {
+                                                let (lmin, lmax) = wireframe::compute_node_tree_aabb(
+                                                    &obj.root_node, glam::Mat4::IDENTITY,
+                                                )?;
+                                                let center = obj.position
+                                                    + obj.rotation * ((lmin + lmax) * 0.5 * obj.scale);
+                                                Some((center, obj.position, obj.rotation, obj.scale))
+                                            })
+                                    };
 
                                     if let Some((gc, obj_pos, obj_rot, obj_scale)) = gc {
                                         let cam_dist = (gc - state.editor_camera.position).length();
@@ -318,10 +325,11 @@ pub fn editor_ui() -> NodeHandle {
                         if gizmo_was_dragging {
                             if let Ok(mut state) = es.lock() {
                                 if let Some(SelectedEntity::Object(eid)) = state.selected_entity {
-                                    let final_transform = state.v2_scene.as_ref().and_then(|scene| {
-                                        let obj = scene.objects.iter().find(|o| o.id as u64 == eid)?;
-                                        Some((obj.position, obj.rotation, obj.scale))
-                                    });
+                                    let final_transform = {
+                                        let scene = state.world.scene();
+                                        scene.objects.iter().find(|o| o.id as u64 == eid)
+                                            .map(|obj| (obj.position, obj.rotation, obj.scale))
+                                    };
 
                                     if let Some((new_pos, new_rot, new_scale)) = final_transform {
                                         let desc = match state.gizmo.mode {
@@ -1591,39 +1599,27 @@ pub fn RightPanel() -> NodeHandle {
             // ── Non-camera entity properties ──
             match selected_entity {
                 Some(SelectedEntity::Object(eid)) => {
-                    // Read object info + transform from v2_scene.
+                    // Read object info + transform from world scene.
                     let obj_info = es.lock().ok().and_then(|es_lock| {
-                        let node = es_lock.scene_tree.find_node(eid)?;
-                        let name = node.name.clone();
-                        let children = node.children.len();
-                        let (xf, show_revoxelize) = es_lock.v2_scene.as_ref()
-                            .and_then(|scene| {
-                                scene.objects.iter()
-                                    .find(|o| o.id as u64 == eid)
-                                    .map(|obj| {
-                                        let (x, y, z) = obj.rotation
-                                            .to_euler(glam::EulerRot::XYZ);
-                                        let is_vox = matches!(
-                                            obj.root_node.sdf_source,
-                                            rkf_core::scene_node::SdfSource::Voxelized { .. }
-                                        );
-                                        let non_uniform = (obj.scale - glam::Vec3::ONE).length() > 1e-4;
-                                        (
-                                            Some((
-                                                obj.position,
-                                                glam::Vec3::new(
-                                                    x.to_degrees(),
-                                                    y.to_degrees(),
-                                                    z.to_degrees(),
-                                                ),
-                                                obj.scale,
-                                            )),
-                                            is_vox && non_uniform,
-                                        )
-                                    })
-                            })
-                            .unwrap_or((None, false));
-                        Some((name, children, xf, show_revoxelize))
+                        let scene = es_lock.world.scene();
+                        let obj = scene.objects.iter().find(|o| o.id as u64 == eid)?;
+                        let name = obj.name.clone();
+                        let child_count = scene.objects.iter()
+                            .filter(|o| o.parent_id == Some(obj.id))
+                            .count();
+                        let (x, y, z) = obj.rotation.to_euler(glam::EulerRot::XYZ);
+                        let is_vox = matches!(
+                            obj.root_node.sdf_source,
+                            rkf_core::scene_node::SdfSource::Voxelized { .. }
+                        );
+                        let non_uniform = (obj.scale - glam::Vec3::ONE).length() > 1e-4;
+                        let xf = Some((
+                            obj.position,
+                            glam::Vec3::new(x.to_degrees(), y.to_degrees(), z.to_degrees()),
+                            obj.scale,
+                        ));
+                        let show_revoxelize = is_vox && non_uniform;
+                        Some((name, child_count, xf, show_revoxelize))
                     });
 
                     if let Some((name, child_count, xf, show_revoxelize)) = obj_info {
@@ -1650,7 +1646,7 @@ pub fn RightPanel() -> NodeHandle {
                             container.append_child(&cr);
                         }
 
-                        // Transform sliders (only when v2_scene object found).
+                        // Transform sliders (only when scene object found).
                         if let Some((pos, rot_deg, scale)) = xf {
                             let div = __scope.create_element("div");
                             div.set_attribute("style", DIVIDER_STYLE);
@@ -1671,14 +1667,14 @@ pub fn RightPanel() -> NodeHandle {
                                 -500.0, 500.0, 0.01, 2,
                                 { let es = es.clone(); move |v| {
                                     if let Ok(mut es) = es.lock() {
-                                        if let Some(ref mut sc) = es.v2_scene {
+                                        {
+                                            let sc = es.world.scene_mut();
                                             if let Some(obj) = sc.objects.iter_mut()
                                                 .find(|o| o.id as u64 == eid)
                                             {
                                                 obj.position.x = v as f32;
                                             }
                                         }
-                                        es.sync_v2_scene();
                                     }
                                 }},
                             );
@@ -1687,14 +1683,12 @@ pub fn RightPanel() -> NodeHandle {
                                 -500.0, 500.0, 0.01, 2,
                                 { let es = es.clone(); move |v| {
                                     if let Ok(mut es) = es.lock() {
-                                        if let Some(ref mut sc) = es.v2_scene {
-                                            if let Some(obj) = sc.objects.iter_mut()
-                                                .find(|o| o.id as u64 == eid)
-                                            {
-                                                obj.position.y = v as f32;
-                                            }
+                                        let sc = es.world.scene_mut();
+                                        if let Some(obj) = sc.objects.iter_mut()
+                                            .find(|o| o.id as u64 == eid)
+                                        {
+                                            obj.position.y = v as f32;
                                         }
-                                        es.sync_v2_scene();
                                     }
                                 }},
                             );
@@ -1703,14 +1697,12 @@ pub fn RightPanel() -> NodeHandle {
                                 -500.0, 500.0, 0.01, 2,
                                 { let es = es.clone(); move |v| {
                                     if let Ok(mut es) = es.lock() {
-                                        if let Some(ref mut sc) = es.v2_scene {
-                                            if let Some(obj) = sc.objects.iter_mut()
-                                                .find(|o| o.id as u64 == eid)
-                                            {
-                                                obj.position.z = v as f32;
-                                            }
+                                        let sc = es.world.scene_mut();
+                                        if let Some(obj) = sc.objects.iter_mut()
+                                            .find(|o| o.id as u64 == eid)
+                                        {
+                                            obj.position.z = v as f32;
                                         }
-                                        es.sync_v2_scene();
                                     }
                                 }},
                             );
@@ -1725,19 +1717,17 @@ pub fn RightPanel() -> NodeHandle {
                                 -180.0, 180.0, 0.5, 1,
                                 { let es = es.clone(); move |v| {
                                     if let Ok(mut es) = es.lock() {
-                                        if let Some(ref mut sc) = es.v2_scene {
-                                            if let Some(obj) = sc.objects.iter_mut()
-                                                .find(|o| o.id as u64 == eid)
-                                            {
-                                                let (_, cy, cz) = obj.rotation
-                                                    .to_euler(glam::EulerRot::XYZ);
-                                                obj.rotation = glam::Quat::from_euler(
-                                                    glam::EulerRot::XYZ,
-                                                    (v as f32).to_radians(), cy, cz,
-                                                );
-                                            }
+                                        let sc = es.world.scene_mut();
+                                        if let Some(obj) = sc.objects.iter_mut()
+                                            .find(|o| o.id as u64 == eid)
+                                        {
+                                            let (_, cy, cz) = obj.rotation
+                                                .to_euler(glam::EulerRot::XYZ);
+                                            obj.rotation = glam::Quat::from_euler(
+                                                glam::EulerRot::XYZ,
+                                                (v as f32).to_radians(), cy, cz,
+                                            );
                                         }
-                                        es.sync_v2_scene();
                                     }
                                 }},
                             );
@@ -1746,19 +1736,17 @@ pub fn RightPanel() -> NodeHandle {
                                 -180.0, 180.0, 0.5, 1,
                                 { let es = es.clone(); move |v| {
                                     if let Ok(mut es) = es.lock() {
-                                        if let Some(ref mut sc) = es.v2_scene {
-                                            if let Some(obj) = sc.objects.iter_mut()
-                                                .find(|o| o.id as u64 == eid)
-                                            {
-                                                let (cx, _, cz) = obj.rotation
-                                                    .to_euler(glam::EulerRot::XYZ);
-                                                obj.rotation = glam::Quat::from_euler(
-                                                    glam::EulerRot::XYZ,
-                                                    cx, (v as f32).to_radians(), cz,
-                                                );
-                                            }
+                                        let sc = es.world.scene_mut();
+                                        if let Some(obj) = sc.objects.iter_mut()
+                                            .find(|o| o.id as u64 == eid)
+                                        {
+                                            let (cx, _, cz) = obj.rotation
+                                                .to_euler(glam::EulerRot::XYZ);
+                                            obj.rotation = glam::Quat::from_euler(
+                                                glam::EulerRot::XYZ,
+                                                cx, (v as f32).to_radians(), cz,
+                                            );
                                         }
-                                        es.sync_v2_scene();
                                     }
                                 }},
                             );
@@ -1767,19 +1755,17 @@ pub fn RightPanel() -> NodeHandle {
                                 -180.0, 180.0, 0.5, 1,
                                 { let es = es.clone(); move |v| {
                                     if let Ok(mut es) = es.lock() {
-                                        if let Some(ref mut sc) = es.v2_scene {
-                                            if let Some(obj) = sc.objects.iter_mut()
-                                                .find(|o| o.id as u64 == eid)
-                                            {
-                                                let (cx, cy, _) = obj.rotation
-                                                    .to_euler(glam::EulerRot::XYZ);
-                                                obj.rotation = glam::Quat::from_euler(
-                                                    glam::EulerRot::XYZ,
-                                                    cx, cy, (v as f32).to_radians(),
-                                                );
-                                            }
+                                        let sc = es.world.scene_mut();
+                                        if let Some(obj) = sc.objects.iter_mut()
+                                            .find(|o| o.id as u64 == eid)
+                                        {
+                                            let (cx, cy, _) = obj.rotation
+                                                .to_euler(glam::EulerRot::XYZ);
+                                            obj.rotation = glam::Quat::from_euler(
+                                                glam::EulerRot::XYZ,
+                                                cx, cy, (v as f32).to_radians(),
+                                            );
                                         }
-                                        es.sync_v2_scene();
                                     }
                                 }},
                             );
@@ -1796,14 +1782,12 @@ pub fn RightPanel() -> NodeHandle {
                                     0.01, 50.0, 0.01, 2,
                                     { let es = es.clone(); move |v| {
                                         if let Ok(mut es) = es.lock() {
-                                            if let Some(ref mut sc) = es.v2_scene {
-                                                if let Some(obj) = sc.objects.iter_mut()
-                                                    .find(|o| o.id as u64 == eid)
-                                                {
-                                                    obj.scale[axis_idx] = v as f32;
-                                                }
+                                            let sc = es.world.scene_mut();
+                                            if let Some(obj) = sc.objects.iter_mut()
+                                                .find(|o| o.id as u64 == eid)
+                                            {
+                                                obj.scale[axis_idx] = v as f32;
                                             }
-                                            es.sync_v2_scene();
                                         }
                                     }},
                                 );
@@ -1933,10 +1917,10 @@ pub fn RightPanel() -> NodeHandle {
                     }
                 }
                 Some(SelectedEntity::Scene) => {
-                    let name = es.lock().ok().and_then(|e| {
-                        e.v2_scene.as_ref().map(|s| s.name.clone())
-                    }).unwrap_or_else(|| "Scene".to_string());
-                    let count = es.lock().map(|e| e.scene_tree.roots.len()).unwrap_or(0);
+                    let name = es.lock().ok()
+                        .map(|e| e.world.scene().name.clone())
+                        .unwrap_or_else(|| "Scene".to_string());
+                    let count = es.lock().map(|e| e.world.scene().objects.len()).unwrap_or(0);
 
                     let name_row = __scope.create_element("div");
                     name_row.set_attribute("style", SECTION_STYLE);
@@ -2017,8 +2001,9 @@ pub fn StatusBar() -> NodeHandle {
             let es = es.lock().unwrap();
             let sel_name = es.selected_entity.as_ref().map(|sel| match sel {
                 SelectedEntity::Object(eid) => {
-                    es.scene_tree.find_node(*eid)
-                        .map(|n| n.name.clone())
+                    es.world.scene().objects.iter()
+                        .find(|o| o.id as u64 == *eid)
+                        .map(|o| o.name.clone())
                         .unwrap_or_else(|| format!("Object {eid}"))
                 }
                 SelectedEntity::Light(lid) => {
@@ -2039,7 +2024,7 @@ pub fn StatusBar() -> NodeHandle {
                 crate::gizmo::GizmoMode::Scale => "Scale (R)",
             };
             (
-                es.scene_tree.roots.len(),
+                es.world.scene().objects.len(),
                 es.mode.name().to_string(),
                 sel_name,
                 es.debug_mode_name().to_string(),

@@ -26,6 +26,13 @@ pub mod world;
 
 pub use entity::Entity;
 pub use error::WorldError;
-pub use renderer::{Renderer, RendererConfig, RenderTarget};
+pub use renderer::{BrushHitResult, RenderEnvironment, Renderer, RendererConfig, RenderTarget};
 pub use spawn::SpawnBuilder;
 pub use world::World;
+
+// Re-export wireframe types from rkf-render for convenience.
+pub use rkf_render::wireframe::{
+    aabb_wireframe, circle_wireframe, crosshair, directional_light_wireframe,
+    ground_grid_wireframe, obb_wireframe, point_light_wireframe, sphere_wireframe,
+    spot_light_wireframe, LineVertex, WireframePass,
+};

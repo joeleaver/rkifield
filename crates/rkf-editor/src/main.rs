@@ -25,7 +25,6 @@ mod paint;
 mod placement;
 mod properties;
 mod scene_io;
-mod scene_tree;
 mod sculpt;
 mod ui;
 mod undo;
@@ -134,10 +133,9 @@ fn engine_thread(data: EngineThreadData) {
         }
     }
 
-    // 4. Store demo scene in editor_state.
+    // 4. Store demo scene in editor_state (set world's scene directly).
     if let Ok(mut es) = editor_state.lock() {
-        es.v2_scene = Some(demo_scene);
-        es.sync_v2_scene();
+        *es.world.scene_mut() = demo_scene;
 
         // Seed editor light list from render lights (point/spot only).
         for rl in &engine.world_lights {
@@ -218,15 +216,20 @@ fn engine_thread(data: EngineThreadData) {
             }
         }
 
-        // c. Single brief lock: snapshot everything → release → apply.
-        //    All extraction logic lives in EditorState::take_engine_snapshot().
-        let mut snap = {
+        // c. Single brief lock: read all data needed for this frame, then release.
+        //    We inline what was formerly `take_engine_snapshot()` to avoid the
+        //    intermediate `EngineSnapshot` struct.
+        let (
+            camera, f_debug_mode, f_revoxelize, f_environment, f_lights,
+            mut scene_clone, f_selected, f_gizmo_mode, f_gizmo_axis,
+            f_show_grid, f_editor_mode, f_brush_radius,
+        ) = {
             let mut es = match editor_state.lock() {
                 Ok(es) => es,
                 Err(_) => continue, // poisoned — skip frame
             };
 
-            // Apply pending MCP commands (mutate before snapshot).
+            // Apply pending MCP commands (mutate before read).
             if let Some(cam) = pending_camera {
                 es.editor_camera.position = cam.position;
                 es.editor_camera.fly_yaw = cam.yaw;
@@ -246,45 +249,122 @@ fn engine_thread(data: EngineThreadData) {
             // Camera update (mutates EditorState input state).
             es.update_camera(dt);
 
-            // Snapshot + release lock.
-            es.take_engine_snapshot()
+            // Consume pending commands.
+            let debug_mode = es.pending_debug_mode.take();
+            if let Some(mode) = debug_mode {
+                es.debug_mode = mode;
+            }
+            let revoxelize = es.pending_revoxelize.take();
+
+            // Environment: clone only when dirty.
+            let environment = if es.environment.is_dirty() {
+                let env = es.environment.clone();
+                es.environment.clear_dirty();
+                Some(env)
+            } else {
+                None
+            };
+
+            // Lights: convert only when dirty.
+            let lights = if es.light_editor.is_dirty() {
+                let converted = es.light_editor.all_lights().iter().map(|el| {
+                    use crate::light_editor::EditorLightType;
+                    rkf_render::Light {
+                        light_type: match el.light_type {
+                            EditorLightType::Point => 1,
+                            EditorLightType::Spot => 2,
+                        },
+                        pos_x: el.position.x,
+                        pos_y: el.position.y,
+                        pos_z: el.position.z,
+                        dir_x: el.direction.x,
+                        dir_y: el.direction.y,
+                        dir_z: el.direction.z,
+                        color_r: el.color.x,
+                        color_g: el.color.y,
+                        color_b: el.color.z,
+                        intensity: el.intensity,
+                        range: el.range,
+                        inner_angle: el.spot_inner_angle,
+                        outer_angle: el.spot_outer_angle,
+                        cookie_index: -1,
+                        shadow_caster: el.cast_shadows as u32,
+                    }
+                }).collect();
+                es.light_editor.clear_dirty();
+                Some(converted)
+            } else {
+                None
+            };
+
+            // Recompute AABBs before cloning the scene.
+            {
+                let scene = es.world.scene_mut();
+                for obj in &mut scene.objects {
+                    obj.aabb = crate::placement::compute_object_local_aabb(obj);
+                }
+            }
+
+            // Scene clone (character animation mutates the clone, discarded after render).
+            let scene = es.world.scene().clone();
+
+            // Wireframe overlay data (all Copy).
+            let gizmo_axis = if es.gizmo.dragging {
+                es.gizmo.active_axis
+            } else {
+                es.gizmo.hovered_axis
+            };
+            let brush_radius = match es.mode {
+                editor_state::EditorMode::Sculpt => es.sculpt.current_settings.radius,
+                editor_state::EditorMode::Paint => es.paint.current_settings.radius,
+                _ => 1.0,
+            };
+
+            let cam = es.editor_camera;
+            let sel = es.selected_entity;
+            let gm = es.gizmo.mode;
+            let grid = es.show_grid;
+            let emode = es.mode;
+
+            // Reset per-frame deltas last.
+            es.reset_frame_deltas();
+
+            (cam, debug_mode, revoxelize, environment, lights,
+             scene, sel, gm, gizmo_axis, grid, emode, brush_radius)
         };
 
-        // d. Apply snapshot to engine (no lock held — UI thread runs freely).
-        engine.sync_camera(&snap.camera);
-        if let Some(mode) = snap.debug_mode {
+        // d. Apply extracted data to engine (no lock held — UI thread runs freely).
+        engine.sync_camera(&camera);
+        if let Some(mode) = f_debug_mode {
             engine.set_debug_mode(mode);
         }
-        if let Some(ref env) = snap.environment {
+        if let Some(ref env) = f_environment {
             engine.apply_environment_snapshot(env);
         }
-        if let Some(lights) = snap.lights {
+        if let Some(lights) = f_lights {
             engine.world_lights = lights;
         }
 
         // e. Process pending re-voxelize (needs brief lock for scene mutation).
-        if let Some(obj_id) = snap.revoxelize {
+        if let Some(obj_id) = f_revoxelize {
             if let Ok(mut es) = editor_state.lock() {
-                if let Some(ref mut scene) = es.v2_scene {
-                    engine.process_revoxelize(scene, obj_id);
-                }
-                es.sync_v2_scene();
+                engine.process_revoxelize(es.world.scene_mut(), obj_id);
             }
         }
 
         // f. Advance character animation on the render clone.
-        engine.advance_character(&mut snap.scene);
+        engine.advance_character(&mut scene_clone);
 
         // g. Render frame to offscreen texture.
-        engine.render_frame_offscreen(&snap.scene);
+        engine.render_frame_offscreen(&scene_clone);
 
         // h. Build and draw wireframe overlays (selection, gizmos, grid).
         {
             let mut wf_verts: Vec<wireframe::LineVertex> = Vec::new();
-            let cam_pos = snap.camera.position;
+            let cam_pos = camera.position;
 
             // Light gizmo for selected light.
-            if let Some(editor_state::SelectedEntity::Light(lid)) = snap.selected_entity {
+            if let Some(editor_state::SelectedEntity::Light(lid)) = f_selected {
                 if let Ok(es) = editor_state.lock() {
                     if let Some(light) = es.light_editor.get_light(lid) {
                         let lc = [1.0, 0.9, 0.5, 1.0];
@@ -306,11 +386,11 @@ fn engine_thread(data: EngineThreadData) {
             }
 
             // Selection AABB + transform gizmo for selected objects.
-            if let Some(editor_state::SelectedEntity::Object(eid)) = snap.selected_entity {
+            if let Some(editor_state::SelectedEntity::Object(eid)) = f_selected {
                 let color = [0.3, 0.7, 1.0, 1.0]; // Light blue
                 let mut gizmo_center: Option<glam::Vec3> = None;
 
-                for obj in &snap.scene.objects {
+                for obj in &scene_clone.objects {
                     let obj_id = obj.id as u64;
                     let root_world = glam::Mat4::from_scale_rotation_translation(
                         obj.scale,
@@ -351,20 +431,20 @@ fn engine_thread(data: EngineThreadData) {
                 if let Some(gc) = gizmo_center {
                     let cam_dist = (gc - cam_pos).length();
                     let gizmo_size = cam_dist * 0.12;
-                    match snap.gizmo_mode {
+                    match f_gizmo_mode {
                         gizmo::GizmoMode::Translate => {
                             wf_verts.extend(wireframe::translate_gizmo_wireframe(
-                                gc, gizmo_size, snap.gizmo_axis, cam_pos,
+                                gc, gizmo_size, f_gizmo_axis, cam_pos,
                             ));
                         }
                         gizmo::GizmoMode::Rotate => {
                             wf_verts.extend(wireframe::rotate_gizmo_wireframe(
-                                gc, gizmo_size, snap.gizmo_axis, cam_pos,
+                                gc, gizmo_size, f_gizmo_axis, cam_pos,
                             ));
                         }
                         gizmo::GizmoMode::Scale => {
                             wf_verts.extend(wireframe::scale_gizmo_wireframe(
-                                gc, gizmo_size, snap.gizmo_axis, cam_pos,
+                                gc, gizmo_size, f_gizmo_axis, cam_pos,
                             ));
                         }
                     }
@@ -372,7 +452,7 @@ fn engine_thread(data: EngineThreadData) {
             }
 
             // Ground grid overlay.
-            if snap.show_grid {
+            if f_show_grid {
                 wf_verts.extend(wireframe::ground_grid_wireframe(
                     cam_pos,
                     40.0,
@@ -382,17 +462,17 @@ fn engine_thread(data: EngineThreadData) {
             }
 
             // Brush preview sphere in Sculpt/Paint modes.
-            if matches!(snap.editor_mode, editor_state::EditorMode::Sculpt | editor_state::EditorMode::Paint) {
+            if matches!(f_editor_mode, editor_state::EditorMode::Sculpt | editor_state::EditorMode::Paint) {
                 let brush_pos = shared_state.lock().ok()
                     .and_then(|s| s.brush_preview_pos);
                 if let Some(pos) = brush_pos {
-                    let brush_color = match snap.editor_mode {
+                    let brush_color = match f_editor_mode {
                         editor_state::EditorMode::Sculpt => [0.0, 1.0, 1.0, 0.8],
                         editor_state::EditorMode::Paint  => [1.0, 0.8, 0.0, 0.8],
                         _ => [1.0, 1.0, 1.0, 0.8],
                     };
                     wf_verts.extend(wireframe::sphere_wireframe(
-                        pos, snap.brush_radius, brush_color,
+                        pos, f_brush_radius, brush_color,
                     ));
                 }
             }
@@ -403,12 +483,12 @@ fn engine_thread(data: EngineThreadData) {
         // i. Tell the compositor that new content is ready so it repaints.
         gpu_registrar.notify_frame_ready();
 
-        // j. Update shared_state for MCP observation (uses snapshot, no editor_state lock).
+        // j. Update shared_state for MCP observation (no editor_state lock).
         if let Ok(mut ss) = shared_state.lock() {
-            ss.camera_position = snap.camera.position;
-            ss.camera_yaw = snap.camera.fly_yaw;
-            ss.camera_pitch = snap.camera.fly_pitch;
-            ss.camera_fov = snap.camera.fov_y.to_degrees();
+            ss.camera_position = camera.position;
+            ss.camera_yaw = camera.fly_yaw;
+            ss.camera_pitch = camera.fly_pitch;
+            ss.camera_fov = camera.fov_y.to_degrees();
             ss.frame_time_ms = dt as f64 * 1000.0;
             ss.frame_width = current_vp.0;
             ss.frame_height = current_vp.1;
