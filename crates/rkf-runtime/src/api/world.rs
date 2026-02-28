@@ -169,6 +169,19 @@ impl World {
         self.scenes.get(index).map(|s| s.scene.name.as_str())
     }
 
+    /// Iterate over all objects from all loaded scenes.
+    ///
+    /// The renderer uses this to build the BVH and populate GPU scene data
+    /// from every scene, not just the active one.
+    pub fn all_objects(&self) -> impl Iterator<Item = &SceneObject> {
+        self.scenes.iter().flat_map(|sm| sm.scene.objects.iter())
+    }
+
+    /// Total number of SDF objects across all scenes.
+    pub fn total_object_count(&self) -> usize {
+        self.scenes.iter().map(|sm| sm.scene.object_count()).sum()
+    }
+
     // ── Spawning ───────────────────────────────────────────────────────────
 
     /// Begin building a new entity with the given name.
@@ -2110,6 +2123,71 @@ mod tests {
         let rot = Quat::from_rotation_y(1.0);
         world.set_rotation(e, rot).unwrap();
         assert!((world.rotation(e).unwrap() - rot).length() < 1e-5);
+    }
+
+    // ── Combined scene view (C.2) ──────────────────────────────────────
+
+    #[test]
+    fn all_objects_spans_scenes() {
+        let mut world = World::new("s0");
+        world
+            .spawn("a")
+            .sdf(SdfPrimitive::Sphere { radius: 0.5 })
+            .material(1)
+            .build();
+        world.create_scene("s1");
+        world.set_active_scene(1);
+        world
+            .spawn("b")
+            .sdf(SdfPrimitive::Sphere { radius: 0.5 })
+            .material(1)
+            .build();
+        let names: Vec<&str> = world.all_objects().map(|o| o.name.as_str()).collect();
+        assert!(names.contains(&"a"));
+        assert!(names.contains(&"b"));
+    }
+
+    #[test]
+    fn total_object_count_sums_scenes() {
+        let mut world = World::new("s0");
+        world
+            .spawn("a")
+            .sdf(SdfPrimitive::Sphere { radius: 0.5 })
+            .material(1)
+            .build();
+        world.create_scene("s1");
+        world.set_active_scene(1);
+        world
+            .spawn("b")
+            .sdf(SdfPrimitive::Sphere { radius: 0.5 })
+            .material(1)
+            .build();
+        world
+            .spawn("c")
+            .sdf(SdfPrimitive::Sphere { radius: 0.5 })
+            .material(1)
+            .build();
+        assert_eq!(world.total_object_count(), 3);
+    }
+
+    #[test]
+    fn renderer_sees_all_scenes() {
+        let mut world = World::new("s0");
+        world
+            .spawn("obj0")
+            .sdf(SdfPrimitive::Sphere { radius: 0.5 })
+            .material(1)
+            .build();
+        world.create_scene("s1");
+        world.set_active_scene(1);
+        world
+            .spawn("obj1")
+            .sdf(SdfPrimitive::Sphere { radius: 0.5 })
+            .material(1)
+            .build();
+        // Renderer would call all_objects() — verify it contains both
+        assert_eq!(world.all_objects().count(), 2);
+        assert_eq!(world.total_object_count(), 2);
     }
 
     #[test]
