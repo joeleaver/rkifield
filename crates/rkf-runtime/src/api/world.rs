@@ -45,13 +45,22 @@ struct EntityRecord {
     name: String,
 }
 
+/// Metadata wrapping a Scene for multi-scene support.
+struct SceneMeta {
+    scene: Scene,
+    persistent: bool,
+}
+
 /// The unified game state container.
 ///
-/// Wraps [`Scene`] (SDF rendering data) and [`hecs::World`] (game logic
-/// components) behind a single API. Users spawn objects, add components,
-/// query, and mutate transforms through one handle type ([`Entity`]).
+/// Wraps one or more [`Scene`]s (SDF rendering data) and a [`hecs::World`]
+/// (game logic components) behind a single API. Users spawn objects, add
+/// components, query, and mutate transforms through one handle type
+/// ([`Entity`]).
 pub struct World {
-    scene: Scene,
+    scenes: Vec<SceneMeta>,
+    active_scene: usize,
+    next_sdf_id: u32,
     ecs: hecs::World,
     brick_pool: BrickPool,
     brick_map_alloc: BrickMapAllocator,
@@ -60,20 +69,104 @@ pub struct World {
     next_generation: u32,
     entities: HashMap<Entity, EntityRecord>,
     sdf_to_entity: HashMap<u32, Entity>,
+    /// Which scene index each entity was spawned into.
+    entity_scene: HashMap<Entity, usize>,
 }
 
 impl World {
-    /// Create a new empty world.
+    /// Create a new empty world with one default scene.
     pub fn new(name: impl Into<String>) -> Self {
         Self {
-            scene: Scene::new(name),
+            scenes: vec![SceneMeta {
+                scene: Scene::new(name),
+                persistent: false,
+            }],
+            active_scene: 0,
+            next_sdf_id: 0,
             ecs: hecs::World::new(),
             brick_pool: BrickPool::new(4096),
             brick_map_alloc: BrickMapAllocator::new(),
             next_generation: 0,
             entities: HashMap::new(),
             sdf_to_entity: HashMap::new(),
+            entity_scene: HashMap::new(),
         }
+    }
+
+    /// Internal reference to the active scene.
+    fn active_scene_ref(&self) -> &Scene {
+        &self.scenes[self.active_scene].scene
+    }
+
+    /// Internal mutable reference to the active scene.
+    fn active_scene_mut(&mut self) -> &mut Scene {
+        &mut self.scenes[self.active_scene].scene
+    }
+
+    /// Find a SceneObject by ID across all scenes.
+    fn find_object_by_id(&self, obj_id: u32) -> Option<&SceneObject> {
+        for sm in &self.scenes {
+            if let Some(obj) = sm.scene.find_by_id(obj_id) {
+                return Some(obj);
+            }
+        }
+        None
+    }
+
+    /// Find a mutable SceneObject by ID across all scenes.
+    fn find_object_by_id_mut(&mut self, obj_id: u32) -> Option<&mut SceneObject> {
+        for sm in &mut self.scenes {
+            if let Some(obj) = sm.scene.find_by_id_mut(obj_id) {
+                return Some(obj);
+            }
+        }
+        None
+    }
+
+    /// Find the scene containing a given object ID.
+    fn scene_containing_object(&self, obj_id: u32) -> Option<usize> {
+        for (i, sm) in self.scenes.iter().enumerate() {
+            if sm.scene.find_by_id(obj_id).is_some() {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    // ── Multi-scene management ──────────────────────────────────────────
+
+    /// Create a new empty scene and return its index.
+    pub fn create_scene(&mut self, name: impl Into<String>) -> usize {
+        let idx = self.scenes.len();
+        self.scenes.push(SceneMeta {
+            scene: Scene::new(name),
+            persistent: false,
+        });
+        idx
+    }
+
+    /// Number of loaded scenes.
+    pub fn scene_count(&self) -> usize {
+        self.scenes.len()
+    }
+
+    /// Index of the currently active scene.
+    pub fn active_scene_index(&self) -> usize {
+        self.active_scene
+    }
+
+    /// Switch the active scene.
+    ///
+    /// All spawn operations target the active scene. Existing entities
+    /// remain accessible regardless of which scene is active.
+    pub fn set_active_scene(&mut self, index: usize) {
+        assert!(index < self.scenes.len(), "scene index out of range");
+        self.active_scene = index;
+    }
+
+    /// Get the name of a scene by index.
+    pub fn scene_name(&self, index: usize) -> Option<&str> {
+        self.scenes.get(index).map(|s| s.scene.name.as_str())
     }
 
     // ── Spawning ───────────────────────────────────────────────────────────
@@ -107,9 +200,13 @@ impl World {
 
         // Remove from Scene if SDF
         if let Some(obj_id) = record.sdf_object_id {
-            self.scene.remove_object(obj_id);
+            // Find the scene containing this object and remove from it
+            if let Some(scene_idx) = self.scene_containing_object(obj_id) {
+                self.scenes[scene_idx].scene.remove_object(obj_id);
+            }
             self.sdf_to_entity.remove(&obj_id);
         }
+        self.entity_scene.remove(&entity);
 
         Ok(())
     }
@@ -154,7 +251,10 @@ impl World {
             obj.root_node.blend_mode = bm;
         }
 
-        let obj_id = self.scene.add_object_full(obj);
+        // Use global ID counter to prevent collisions across scenes
+        self.active_scene_mut().next_id = self.next_sdf_id;
+        let obj_id = self.active_scene_mut().add_object_full(obj);
+        self.next_sdf_id = obj_id + 1;
 
         let generation = self.next_generation;
         self.next_generation += 1;
@@ -174,6 +274,7 @@ impl World {
 
         self.entities.insert(entity, record);
         self.sdf_to_entity.insert(obj_id, entity);
+        self.entity_scene.insert(entity, self.active_scene);
 
         entity
     }
@@ -195,6 +296,7 @@ impl World {
         };
 
         self.entities.insert(entity, record);
+        self.entity_scene.insert(entity, self.active_scene);
         entity
     }
 
@@ -222,7 +324,7 @@ impl World {
 
         // Sync to Scene
         if let Some(obj_id) = record.sdf_object_id {
-            if let Some(obj) = self.scene.find_by_id_mut(obj_id) {
+            if let Some(obj) = self.find_object_by_id_mut(obj_id) {
                 obj.position = pos.to_vec3();
             }
         }
@@ -246,7 +348,7 @@ impl World {
         record.rotation = rot;
 
         if let Some(obj_id) = record.sdf_object_id {
-            if let Some(obj) = self.scene.find_by_id_mut(obj_id) {
+            if let Some(obj) = self.find_object_by_id_mut(obj_id) {
                 obj.rotation = rot;
             }
         }
@@ -270,7 +372,7 @@ impl World {
         record.scale = scale;
 
         if let Some(obj_id) = record.sdf_object_id {
-            if let Some(obj) = self.scene.find_by_id_mut(obj_id) {
+            if let Some(obj) = self.find_object_by_id_mut(obj_id) {
                 obj.scale = scale;
             }
         }
@@ -297,8 +399,11 @@ impl World {
         // Both must be SDF entities for Scene hierarchy
         match (child_record.sdf_object_id, parent_record.sdf_object_id) {
             (Some(child_id), Some(parent_id)) => {
-                if !self.scene.reparent(child_id, Some(parent_id)) {
-                    return Err(WorldError::CycleDetected);
+                // Find the scene containing the child and reparent within it
+                if let Some(scene_idx) = self.scene_containing_object(child_id) {
+                    if !self.scenes[scene_idx].scene.reparent(child_id, Some(parent_id)) {
+                        return Err(WorldError::CycleDetected);
+                    }
                 }
                 Ok(())
             }
@@ -318,7 +423,9 @@ impl World {
             .ok_or(WorldError::NoSuchEntity(entity))?;
 
         if let Some(obj_id) = record.sdf_object_id {
-            self.scene.reparent(obj_id, None);
+            if let Some(scene_idx) = self.scene_containing_object(obj_id) {
+                self.scenes[scene_idx].scene.reparent(obj_id, None);
+            }
         }
         Ok(())
     }
@@ -330,11 +437,11 @@ impl World {
             .get(&entity)
             .and_then(|r| r.sdf_object_id);
 
-        // Collect child SDF object IDs, then map to Entities
+        // Collect child SDF object IDs across all scenes
         let child_ids: Vec<u32> = if let Some(parent_id) = sdf_obj_id {
-            self.scene
-                .children_of(parent_id)
-                .map(|o| o.id)
+            self.scenes
+                .iter()
+                .flat_map(|sm| sm.scene.children_of(parent_id).map(|o| o.id))
                 .collect()
         } else {
             Vec::new()
@@ -349,7 +456,7 @@ impl World {
     pub fn parent(&self, entity: Entity) -> Option<Entity> {
         let record = self.entities.get(&entity)?;
         let obj_id = record.sdf_object_id?;
-        let obj = self.scene.find_by_id(obj_id)?;
+        let obj = self.find_object_by_id(obj_id)?;
         let parent_id = obj.parent_id?;
         self.sdf_to_entity.get(&parent_id).copied()
     }
@@ -400,8 +507,15 @@ impl World {
     pub fn clear(&mut self) {
         self.entities.clear();
         self.sdf_to_entity.clear();
+        self.entity_scene.clear();
         self.ecs = hecs::World::new();
-        self.scene = Scene::new(self.scene.name.clone());
+        let name = self.active_scene_ref().name.clone();
+        self.scenes = vec![SceneMeta {
+            scene: Scene::new(name),
+            persistent: false,
+        }];
+        self.active_scene = 0;
+        self.next_sdf_id = 0;
     }
 
     // ── ECS Components ─────────────────────────────────────────────────────
@@ -534,7 +648,7 @@ impl World {
 
         for (entity, record) in &self.entities {
             if let Some(obj_id) = record.sdf_object_id {
-                if let Some(obj) = self.scene.find_by_id(obj_id) {
+                if let Some(obj) = self.find_object_by_id(obj_id) {
                     let (analytical, analytical_params, material_id) =
                         match &obj.root_node.sdf_source {
                             SdfSource::Analytical {
@@ -576,7 +690,7 @@ impl World {
         }
 
         let scene_file = SceneFile {
-            name: self.scene.name.clone(),
+            name: self.active_scene_ref().name.clone(),
             objects,
             cameras: Vec::new(),
             lights: Vec::new(),
@@ -590,11 +704,11 @@ impl World {
 
     // ── Internal accessors ─────────────────────────────────────────────────
 
-    /// Get a reference to the underlying Scene.
+    /// Get a reference to the active Scene.
     ///
     /// Used by the Renderer internally and by the editor for snapshot cloning.
     pub fn scene(&self) -> &Scene {
-        &self.scene
+        self.active_scene_ref()
     }
 
     /// Get a reference to the brick pool.
@@ -624,7 +738,7 @@ impl World {
     /// Advanced: use this for animation updates, custom voxelization, or
     /// other operations not covered by the standard World API.
     pub fn scene_mut(&mut self) -> &mut Scene {
-        &mut self.scene
+        self.active_scene_mut()
     }
 
     /// Voxelize an SDF function into this world's brick pool.
@@ -662,10 +776,7 @@ impl World {
             .sdf_object_id
             .ok_or(WorldError::MissingComponent(entity, "SdfObject"))?;
         let obj = self
-            .scene
-            .objects
-            .iter_mut()
-            .find(|o| o.id == sdf_id)
+            .find_object_by_id_mut(sdf_id)
             .ok_or(WorldError::NoSuchEntity(entity))?;
         Ok(&mut obj.root_node)
     }
@@ -682,8 +793,7 @@ impl World {
             .sdf_object_id
             .ok_or(WorldError::MissingComponent(entity, "SdfObject"))?;
         let obj = self
-            .scene
-            .find_by_id(sdf_id)
+            .find_object_by_id(sdf_id)
             .ok_or(WorldError::NoSuchEntity(entity))?;
         Ok(&obj.root_node)
     }
@@ -1468,7 +1578,7 @@ mod tests {
             .build();
         // Material is set on the scene node — verify via Scene
         let record = world.entities.get(&e).unwrap();
-        let obj = world.scene.find_by_id(record.sdf_object_id.unwrap()).unwrap();
+        let obj = world.scene().find_by_id(record.sdf_object_id.unwrap()).unwrap();
         match &obj.root_node.sdf_source {
             rkf_core::scene_node::SdfSource::Analytical { material_id, .. } => {
                 assert_eq!(*material_id, 42);
@@ -1488,7 +1598,7 @@ mod tests {
             .blend(BlendMode::Subtract)
             .build();
         let record = world.entities.get(&e).unwrap();
-        let obj = world.scene.find_by_id(record.sdf_object_id.unwrap()).unwrap();
+        let obj = world.scene().find_by_id(record.sdf_object_id.unwrap()).unwrap();
         assert!(matches!(obj.root_node.blend_mode, BlendMode::Subtract));
     }
 
@@ -1531,7 +1641,7 @@ mod tests {
         let e = world.spawn("ecs_only").build();
         assert!(world.is_alive(e));
         // No SDF object in scene
-        assert_eq!(world.scene.object_count(), 0);
+        assert_eq!(world.scene().object_count(), 0);
     }
 
     // ── ECS Components ─────────────────────────────────────────────────────
@@ -1920,6 +2030,115 @@ mod tests {
         assert!((c.fov_degrees - 75.0).abs() < 1e-6);
         assert!((c.yaw - 45.0).abs() < 1e-6);
         assert!((c.pitch - -15.0).abs() < 1e-6);
+    }
+
+    // ── Multi-scene (C.1) ──────────────────────────────────────────────
+
+    #[test]
+    fn world_starts_with_one_scene() {
+        let world = World::new("test");
+        assert_eq!(world.scene_count(), 1);
+        assert_eq!(world.scene_name(0), Some("test"));
+    }
+
+    #[test]
+    fn create_scene_increments_count() {
+        let mut world = World::new("test");
+        world.create_scene("scene2");
+        world.create_scene("scene3");
+        assert_eq!(world.scene_count(), 3);
+    }
+
+    #[test]
+    fn active_scene_defaults_to_zero() {
+        let world = World::new("test");
+        assert_eq!(world.active_scene_index(), 0);
+    }
+
+    #[test]
+    fn set_active_scene_changes_target() {
+        let mut world = World::new("test");
+        world.create_scene("scene2");
+        world.set_active_scene(1);
+        assert_eq!(world.active_scene_index(), 1);
+    }
+
+    #[test]
+    fn scene_name_returns_correct() {
+        let mut world = World::new("main");
+        world.create_scene("overlay");
+        assert_eq!(world.scene_name(0), Some("main"));
+        assert_eq!(world.scene_name(1), Some("overlay"));
+        assert_eq!(world.scene_name(99), None);
+    }
+
+    #[test]
+    fn spawn_targets_active_scene() {
+        let mut world = World::new("scene0");
+        let _e0 = world
+            .spawn("obj_s0")
+            .sdf(SdfPrimitive::Sphere { radius: 0.5 })
+            .material(1)
+            .build();
+        assert_eq!(world.scene().object_count(), 1);
+
+        world.create_scene("scene1");
+        world.set_active_scene(1);
+        let _e1 = world
+            .spawn("obj_s1")
+            .sdf(SdfPrimitive::Sphere { radius: 0.5 })
+            .material(1)
+            .build();
+        assert_eq!(world.scene().object_count(), 1); // scene1 has 1
+
+        world.set_active_scene(0);
+        assert_eq!(world.scene().object_count(), 1); // scene0 still has 1
+    }
+
+    #[test]
+    fn existing_apis_still_work_after_refactor() {
+        let mut world = World::new("test");
+        let e = world
+            .spawn("obj")
+            .sdf(SdfPrimitive::Sphere { radius: 0.5 })
+            .material(1)
+            .build();
+        let pos = WorldPosition::new(glam::IVec3::ZERO, Vec3::new(1.0, 2.0, 3.0));
+        world.set_position(e, pos).unwrap();
+        assert_eq!(world.position(e).unwrap(), pos);
+
+        let rot = Quat::from_rotation_y(1.0);
+        world.set_rotation(e, rot).unwrap();
+        assert!((world.rotation(e).unwrap() - rot).length() < 1e-5);
+    }
+
+    #[test]
+    fn entities_span_scenes() {
+        let mut world = World::new("scene0");
+        let e0 = world
+            .spawn("obj_s0")
+            .sdf(SdfPrimitive::Sphere { radius: 0.5 })
+            .material(1)
+            .build();
+
+        world.create_scene("scene1");
+        world.set_active_scene(1);
+        let e1 = world
+            .spawn("obj_s1")
+            .sdf(SdfPrimitive::Sphere { radius: 0.3 })
+            .material(2)
+            .build();
+
+        // Both entities accessible regardless of active scene
+        assert!(world.is_alive(e0));
+        assert!(world.is_alive(e1));
+        assert_eq!(world.name(e0).unwrap(), "obj_s0");
+        assert_eq!(world.name(e1).unwrap(), "obj_s1");
+
+        // Transforms work across scenes
+        let pos = WorldPosition::new(glam::IVec3::ZERO, Vec3::new(5.0, 0.0, 0.0));
+        world.set_position(e0, pos).unwrap();
+        assert_eq!(world.position(e0).unwrap(), pos);
     }
 
     #[test]
