@@ -767,8 +767,7 @@ impl AutomationApi for EditorAutomationApi {
         position: [f32; 3],
         material_id: u16,
     ) -> Result<u32, String> {
-        use rkf_core::scene_node::{SceneNode as CoreNode, SdfSource};
-        use rkf_core::{SdfPrimitive, SceneObject, Aabb};
+        use rkf_core::SdfPrimitive;
 
         let primitive = match primitive_type {
             "sphere" => {
@@ -803,31 +802,18 @@ impl AutomationApi for EditorAutomationApi {
             other => return Err(format!("unknown primitive type: {other}")),
         };
 
-        let mut root = CoreNode::new(name);
-        root.sdf_source = SdfSource::Analytical { primitive, material_id };
-
-        let pos = Vec3::new(position[0], position[1], position[2]);
-        let obj = SceneObject {
-            id: 0, // scene.add_object_full assigns a unique id
-            name: name.into(),
-            parent_id: None,
-            position: pos,
-            rotation: glam::Quat::IDENTITY,
-            scale: Vec3::ONE,
-            root_node: root,
-            // AABB recomputed per-frame in take_engine_snapshot.
-            aabb: Aabb::new(Vec3::ZERO, Vec3::ZERO),
-        };
-
         let mut es = self
             .editor_state
             .lock()
             .map_err(|e| format!("lock poisoned: {e}"))?;
 
-        let scene = es.world.scene_mut();
-        let object_id = scene.add_object_full(obj);
+        let entity = es.world.spawn(name)
+            .position_vec3(Vec3::new(position[0], position[1], position[2]))
+            .sdf(primitive)
+            .material(material_id)
+            .build();
 
-        Ok(object_id)
+        Ok(entity.to_u64() as u32)
     }
 
     fn object_despawn(&self, object_id: u32) -> Result<(), String> {
@@ -836,9 +822,10 @@ impl AutomationApi for EditorAutomationApi {
             .lock()
             .map_err(|e| format!("lock poisoned: {e}"))?;
 
-        let scene = es.world.scene_mut();
-        scene.remove_object(object_id)
+        let entity = es.world.find_entity_by_id(object_id as u64)
             .ok_or_else(|| format!("object {object_id} not found"))?;
+        es.world.despawn(entity)
+            .map_err(|e| format!("{e}"))?;
 
         Ok(())
     }
@@ -855,16 +842,19 @@ impl AutomationApi for EditorAutomationApi {
             .lock()
             .map_err(|e| format!("lock poisoned: {e}"))?;
 
-        let scene = es.world.scene_mut();
-        let obj = scene.objects.iter_mut()
-            .find(|o| o.id == object_id)
+        let entity = es.world.find_entity_by_id(object_id as u64)
             .ok_or_else(|| format!("object {object_id} not found"))?;
 
-        obj.position = Vec3::new(position[0], position[1], position[2]);
-        obj.rotation =
-            glam::Quat::from_xyzw(rotation[0], rotation[1], rotation[2], rotation[3]);
-        obj.scale = Vec3::new(scale[0], scale[1], scale[2]);
+        let pos = rkf_core::WorldPosition::new(
+            glam::IVec3::ZERO,
+            Vec3::new(position[0], position[1], position[2]),
+        );
+        let rot = glam::Quat::from_xyzw(rotation[0], rotation[1], rotation[2], rotation[3]);
+        let scl = Vec3::new(scale[0], scale[1], scale[2]);
 
+        es.world.set_position(entity, pos).map_err(|e| format!("{e}"))?;
+        es.world.set_rotation(entity, rot).map_err(|e| format!("{e}"))?;
+        es.world.set_scale(entity, scl).map_err(|e| format!("{e}"))?;
 
         Ok(())
     }
@@ -905,17 +895,11 @@ impl AutomationApi for EditorAutomationApi {
             .lock()
             .map_err(|e| format!("lock poisoned: {e}"))?;
 
-        let scene = es.world.scene();
-        let obj = scene
-            .objects
-            .iter()
-            .find(|o| o.id == object_id)
+        let entity = es.world.find_entity_by_id(object_id as u64)
             .ok_or_else(|| format!("object {object_id} not found"))?;
 
-        let node = obj
-            .root_node
-            .find_by_name(node_name)
-            .ok_or_else(|| format!("node '{node_name}' not found in object {object_id}"))?;
+        let node = es.world.find_node(entity, node_name)
+            .map_err(|e| format!("{e}"))?;
 
         Ok(serde_json::json!({
             "name": node.name,
@@ -999,22 +983,11 @@ impl AutomationApi for EditorAutomationApi {
             .lock()
             .map_err(|e| format!("lock poisoned: {e}"))?;
 
-        let scene = es.world.scene_mut();
-        let obj = scene
-            .objects
-            .iter_mut()
-            .find(|o| o.id == object_id)
+        let entity = es.world.find_entity_by_id(object_id as u64)
             .ok_or_else(|| format!("object {object_id} not found"))?;
 
-        let parent = obj
-            .root_node
-            .find_by_name_mut(parent_node)
-            .ok_or_else(|| {
-                format!("parent node '{parent_node}' not found in object {object_id}")
-            })?;
-
-        parent.add_child(child);
-        Ok(())
+        es.world.add_child_node(entity, parent_node, child)
+            .map_err(|e| format!("{e}"))
     }
 
     fn node_remove(&self, object_id: u32, node_name: &str) -> Result<(), String> {
@@ -1023,23 +996,11 @@ impl AutomationApi for EditorAutomationApi {
             .lock()
             .map_err(|e| format!("lock poisoned: {e}"))?;
 
-        let scene = es.world.scene_mut();
-        let obj = scene
-            .objects
-            .iter_mut()
-            .find(|o| o.id == object_id)
+        let entity = es.world.find_entity_by_id(object_id as u64)
             .ok_or_else(|| format!("object {object_id} not found"))?;
 
-        // Don't allow removing the root node
-        if obj.root_node.name == node_name {
-            return Err(format!("cannot remove root node '{node_name}'"));
-        }
-
-        obj.root_node
-            .remove_child_by_name(node_name)
-            .ok_or_else(|| {
-                format!("node '{node_name}' not found in object {object_id}")
-            })?;
+        es.world.remove_child_node(entity, node_name)
+            .map_err(|e| format!("{e}"))?;
 
         Ok(())
     }
