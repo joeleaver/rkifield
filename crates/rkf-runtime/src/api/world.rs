@@ -17,6 +17,8 @@ use rkf_core::scene::{Scene, SceneObject};
 use rkf_core::scene_node::{BlendMode, SceneNode, SdfSource, Transform as NodeTransform};
 use rkf_core::WorldPosition;
 
+use crate::components::CameraComponent;
+
 use super::entity::Entity;
 use super::error::WorldError;
 use super::spawn::SpawnBuilder;
@@ -800,6 +802,92 @@ impl World {
     ) -> Result<(), WorldError> {
         let node = self.find_node_mut(entity, node_name)?;
         node.sdf_source = source;
+        Ok(())
+    }
+
+    // ── Camera entities ─────────────────────────────────────────────────
+
+    /// Spawn a camera entity (ECS-only, no SDF geometry).
+    pub fn spawn_camera(
+        &mut self,
+        label: impl Into<String>,
+        position: WorldPosition,
+        yaw: f32,
+        pitch: f32,
+        fov_degrees: f32,
+    ) -> Entity {
+        let label = label.into();
+        let entity = self.finalize_ecs_spawn(label.clone());
+        let cam = CameraComponent {
+            fov_degrees,
+            active: false,
+            label,
+            yaw,
+            pitch,
+            ..Default::default()
+        };
+        let record = self.entities.get(&entity).unwrap();
+        let _ = self.ecs.insert_one(record.ecs_entity, cam);
+        // Store position
+        if let Some(r) = self.entities.get_mut(&entity) {
+            r.position = position;
+        }
+        entity
+    }
+
+    /// List all camera entities.
+    pub fn cameras(&self) -> Vec<Entity> {
+        self.entities
+            .iter()
+            .filter(|(_, r)| {
+                self.ecs.get::<&CameraComponent>(r.ecs_entity).is_ok()
+            })
+            .map(|(e, _)| *e)
+            .collect()
+    }
+
+    /// Find the active camera entity, if any.
+    pub fn active_camera(&self) -> Option<Entity> {
+        self.entities
+            .iter()
+            .find(|(_, r)| {
+                self.ecs
+                    .get::<&CameraComponent>(r.ecs_entity)
+                    .map(|c| c.active)
+                    .unwrap_or(false)
+            })
+            .map(|(e, _)| *e)
+    }
+
+    /// Set a camera entity as the active camera (deactivates all others).
+    pub fn set_active_camera(&mut self, entity: Entity) -> Result<(), WorldError> {
+        let record = self
+            .entities
+            .get(&entity)
+            .ok_or(WorldError::NoSuchEntity(entity))?;
+        // Verify it has a CameraComponent
+        if self.ecs.get::<&CameraComponent>(record.ecs_entity).is_err() {
+            return Err(WorldError::MissingComponent(entity, "CameraComponent"));
+        }
+
+        // Deactivate all cameras
+        let ecs_entities: Vec<hecs::Entity> = self
+            .entities
+            .values()
+            .filter(|r| self.ecs.get::<&CameraComponent>(r.ecs_entity).is_ok())
+            .map(|r| r.ecs_entity)
+            .collect();
+        for ee in ecs_entities {
+            if let Ok(mut cam) = self.ecs.get::<&mut CameraComponent>(ee) {
+                cam.active = false;
+            }
+        }
+
+        // Activate target
+        let record = self.entities.get(&entity).unwrap();
+        if let Ok(mut cam) = self.ecs.get::<&mut CameraComponent>(record.ecs_entity) {
+            cam.active = true;
+        }
         Ok(())
     }
 }
@@ -1774,6 +1862,64 @@ mod tests {
         world.set_node_sdf_source(e, "child", source).unwrap();
         let node = world.find_node(e, "child").unwrap();
         assert!(matches!(node.sdf_source, SdfSource::Analytical { material_id: 5, .. }));
+    }
+
+    // ── Camera entities (D.2) ───────────────────────────────────────────
+
+    #[test]
+    fn spawn_camera_creates_entity() {
+        let mut world = World::new("test");
+        let cam = world.spawn_camera("Main", WorldPosition::default(), 0.0, 0.0, 60.0);
+        assert!(world.is_alive(cam));
+        assert_eq!(world.name(cam).unwrap(), "Main");
+    }
+
+    #[test]
+    fn cameras_lists_camera_entities() {
+        let mut world = World::new("test");
+        world.spawn_camera("Cam1", WorldPosition::default(), 0.0, 0.0, 60.0);
+        world.spawn_camera("Cam2", WorldPosition::default(), 0.0, 0.0, 90.0);
+        // Also spawn a non-camera entity
+        world
+            .spawn("cube")
+            .sdf(SdfPrimitive::Sphere { radius: 0.5 })
+            .material(1)
+            .build();
+        assert_eq!(world.cameras().len(), 2);
+    }
+
+    #[test]
+    fn active_camera_finds_one() {
+        let mut world = World::new("test");
+        let cam = world.spawn_camera("Main", WorldPosition::default(), 0.0, 0.0, 60.0);
+        assert!(world.active_camera().is_none()); // starts inactive
+        world.set_active_camera(cam).unwrap();
+        assert_eq!(world.active_camera(), Some(cam));
+    }
+
+    #[test]
+    fn set_active_camera_deactivates_others() {
+        let mut world = World::new("test");
+        let cam1 = world.spawn_camera("Cam1", WorldPosition::default(), 0.0, 0.0, 60.0);
+        let cam2 = world.spawn_camera("Cam2", WorldPosition::default(), 0.0, 0.0, 90.0);
+        world.set_active_camera(cam1).unwrap();
+        world.set_active_camera(cam2).unwrap();
+        assert_eq!(world.active_camera(), Some(cam2));
+        // cam1 should be inactive
+        let c1 = world.get::<CameraComponent>(cam1).unwrap();
+        assert!(!c1.active);
+    }
+
+    #[test]
+    fn camera_round_trips_through_position() {
+        let mut world = World::new("test");
+        let pos = WorldPosition::new(glam::IVec3::new(1, 0, 0), Vec3::new(3.0, 2.0, 1.0));
+        let cam = world.spawn_camera("Main", pos, 45.0, -15.0, 75.0);
+        assert_eq!(world.position(cam).unwrap(), pos);
+        let c = world.get::<CameraComponent>(cam).unwrap();
+        assert!((c.fov_degrees - 75.0).abs() < 1e-6);
+        assert!((c.yaw - 45.0).abs() < 1e-6);
+        assert!((c.pitch - -15.0).abs() < 1e-6);
     }
 
     #[test]
