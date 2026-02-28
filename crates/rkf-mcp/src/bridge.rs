@@ -440,6 +440,136 @@ impl AutomationApi for BridgeAutomationApi {
         .map(|_| ())
         .map_err(|e| e.to_string())
     }
+
+    // --- Node tree operations (forwarded over IPC) -------------------------
+
+    fn node_find(&self, object_id: u32, node_name: &str) -> Result<String, String> {
+        let result = self
+            .call_tool(
+                "node_find",
+                serde_json::json!({"object_id": object_id, "node_name": node_name}),
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(result.to_string())
+    }
+
+    fn node_add_child(
+        &self,
+        object_id: u32,
+        parent_node: &str,
+        child_primitive: &str,
+        params: &[f32],
+        name: &str,
+        material_id: u16,
+    ) -> Result<(), String> {
+        self.call_tool(
+            "node_add_child",
+            serde_json::json!({
+                "object_id": object_id,
+                "parent_node": parent_node,
+                "child_primitive": child_primitive,
+                "params": params,
+                "name": name,
+                "material_id": material_id,
+            }),
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    }
+
+    fn node_remove(&self, object_id: u32, node_name: &str) -> Result<(), String> {
+        self.call_tool(
+            "node_remove",
+            serde_json::json!({"object_id": object_id, "node_name": node_name}),
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    }
+
+    // --- Multi-scene operations (forwarded over IPC) -----------------------
+
+    fn scene_create(&self, name: &str) -> Result<usize, String> {
+        let result = self
+            .call_tool("scene_create", serde_json::json!({"name": name}))
+            .map_err(|e| e.to_string())?;
+        result["index"]
+            .as_u64()
+            .map(|i| i as usize)
+            .ok_or_else(|| "missing index in response".to_string())
+    }
+
+    fn scene_list(&self) -> Result<String, String> {
+        let result = self
+            .call_tool("scene_list", serde_json::json!({}))
+            .map_err(|e| e.to_string())?;
+        Ok(result.to_string())
+    }
+
+    fn scene_set_active(&self, index: usize) -> Result<(), String> {
+        self.call_tool(
+            "scene_set_active",
+            serde_json::json!({"index": index}),
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    }
+
+    fn scene_set_persistent(&self, index: usize, persistent: bool) -> Result<(), String> {
+        self.call_tool(
+            "scene_set_persistent",
+            serde_json::json!({"index": index, "persistent": persistent}),
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    }
+
+    fn scene_swap(&self) -> Result<String, String> {
+        let result = self
+            .call_tool("scene_swap", serde_json::json!({}))
+            .map_err(|e| e.to_string())?;
+        Ok(result.to_string())
+    }
+
+    // --- Camera entity operations (forwarded over IPC) ---------------------
+
+    fn camera_spawn(
+        &self,
+        label: &str,
+        position: [f32; 3],
+        yaw: f32,
+        pitch: f32,
+        fov: f32,
+    ) -> Result<u64, String> {
+        let result = self
+            .call_tool(
+                "camera_spawn",
+                serde_json::json!({
+                    "label": label,
+                    "x": position[0], "y": position[1], "z": position[2],
+                    "yaw": yaw, "pitch": pitch, "fov": fov,
+                }),
+            )
+            .map_err(|e| e.to_string())?;
+        result["entity_id"]
+            .as_u64()
+            .ok_or_else(|| "missing entity_id in response".to_string())
+    }
+
+    fn camera_list(&self) -> Result<String, String> {
+        let result = self
+            .call_tool("camera_list", serde_json::json!({}))
+            .map_err(|e| e.to_string())?;
+        Ok(result.to_string())
+    }
+
+    fn camera_snap_to(&self, entity_id: u64) -> Result<(), String> {
+        self.call_tool(
+            "camera_snap_to",
+            serde_json::json!({"entity_id": entity_id}),
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    }
 }
 
 #[cfg(test)]

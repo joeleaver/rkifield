@@ -251,6 +251,209 @@ impl ToolHandler for EnvGetHandler {
     }
 }
 
+// --- Node Find tool ---
+
+struct NodeFindHandler;
+
+impl ToolHandler for NodeFindHandler {
+    fn call(&self, api: &dyn AutomationApi, params: serde_json::Value) -> Result<ToolResponse, ToolError> {
+        let object_id = params.get("object_id").and_then(|v| v.as_u64())
+            .ok_or_else(|| ToolError::InvalidParams("object_id is required".to_string()))? as u32;
+        let node_name = params.get("node_name").and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidParams("node_name is required".to_string()))?;
+
+        match api.node_find(object_id, node_name) {
+            Ok(json_str) => {
+                let val: Value = serde_json::from_str(&json_str).unwrap_or(Value::String(json_str));
+                Ok(val.into())
+            }
+            Err(e) => Err(ToolError::EngineError(e)),
+        }
+    }
+}
+
+// --- Node Add Child tool ---
+
+struct NodeAddChildHandler;
+
+impl ToolHandler for NodeAddChildHandler {
+    fn call(&self, api: &dyn AutomationApi, params: serde_json::Value) -> Result<ToolResponse, ToolError> {
+        let object_id = params.get("object_id").and_then(|v| v.as_u64())
+            .ok_or_else(|| ToolError::InvalidParams("object_id is required".to_string()))? as u32;
+        let parent_node = params.get("parent_node").and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidParams("parent_node is required".to_string()))?;
+        let child_primitive = params.get("child_primitive").and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidParams("child_primitive is required".to_string()))?;
+        let p: Vec<f32> = params.get("params").and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect())
+            .unwrap_or_default();
+        let name = params.get("name").and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidParams("name is required".to_string()))?;
+        let material_id = params.get("material_id").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+
+        match api.node_add_child(object_id, parent_node, child_primitive, &p, name, material_id) {
+            Ok(()) => Ok(serde_json::json!({"status": "ok"}).into()),
+            Err(e) => Err(ToolError::EngineError(e)),
+        }
+    }
+}
+
+// --- Node Remove tool ---
+
+struct NodeRemoveHandler;
+
+impl ToolHandler for NodeRemoveHandler {
+    fn call(&self, api: &dyn AutomationApi, params: serde_json::Value) -> Result<ToolResponse, ToolError> {
+        let object_id = params.get("object_id").and_then(|v| v.as_u64())
+            .ok_or_else(|| ToolError::InvalidParams("object_id is required".to_string()))? as u32;
+        let node_name = params.get("node_name").and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidParams("node_name is required".to_string()))?;
+
+        match api.node_remove(object_id, node_name) {
+            Ok(()) => Ok(serde_json::json!({"status": "ok"}).into()),
+            Err(e) => Err(ToolError::EngineError(e)),
+        }
+    }
+}
+
+// --- Scene Create tool ---
+
+struct SceneCreateHandler;
+
+impl ToolHandler for SceneCreateHandler {
+    fn call(&self, api: &dyn AutomationApi, params: serde_json::Value) -> Result<ToolResponse, ToolError> {
+        let name = params.get("name").and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidParams("name is required".to_string()))?;
+
+        match api.scene_create(name) {
+            Ok(index) => Ok(serde_json::json!({"status": "ok", "index": index}).into()),
+            Err(e) => Err(ToolError::EngineError(e)),
+        }
+    }
+}
+
+// --- Scene List tool ---
+
+struct SceneListHandler;
+
+impl ToolHandler for SceneListHandler {
+    fn call(&self, api: &dyn AutomationApi, _params: serde_json::Value) -> Result<ToolResponse, ToolError> {
+        match api.scene_list() {
+            Ok(json_str) => {
+                let val: Value = serde_json::from_str(&json_str).unwrap_or(Value::String(json_str));
+                Ok(val.into())
+            }
+            Err(e) => Err(ToolError::EngineError(e)),
+        }
+    }
+}
+
+// --- Scene Set Active tool ---
+
+struct SceneSetActiveHandler;
+
+impl ToolHandler for SceneSetActiveHandler {
+    fn call(&self, api: &dyn AutomationApi, params: serde_json::Value) -> Result<ToolResponse, ToolError> {
+        let index = params.get("index").and_then(|v| v.as_u64())
+            .ok_or_else(|| ToolError::InvalidParams("index is required".to_string()))? as usize;
+
+        match api.scene_set_active(index) {
+            Ok(()) => Ok(serde_json::json!({"status": "ok"}).into()),
+            Err(e) => Err(ToolError::EngineError(e)),
+        }
+    }
+}
+
+// --- Scene Set Persistent tool ---
+
+struct SceneSetPersistentHandler;
+
+impl ToolHandler for SceneSetPersistentHandler {
+    fn call(&self, api: &dyn AutomationApi, params: serde_json::Value) -> Result<ToolResponse, ToolError> {
+        let index = params.get("index").and_then(|v| v.as_u64())
+            .ok_or_else(|| ToolError::InvalidParams("index is required".to_string()))? as usize;
+        let persistent = params.get("persistent").and_then(|v| v.as_bool())
+            .ok_or_else(|| ToolError::InvalidParams("persistent is required".to_string()))?;
+
+        match api.scene_set_persistent(index, persistent) {
+            Ok(()) => Ok(serde_json::json!({"status": "ok"}).into()),
+            Err(e) => Err(ToolError::EngineError(e)),
+        }
+    }
+}
+
+// --- Scene Swap tool ---
+
+struct SceneSwapHandler;
+
+impl ToolHandler for SceneSwapHandler {
+    fn call(&self, api: &dyn AutomationApi, _params: serde_json::Value) -> Result<ToolResponse, ToolError> {
+        match api.scene_swap() {
+            Ok(json_str) => {
+                let val: Value = serde_json::from_str(&json_str).unwrap_or(Value::String(json_str));
+                Ok(val.into())
+            }
+            Err(e) => Err(ToolError::EngineError(e)),
+        }
+    }
+}
+
+// --- Camera Spawn tool ---
+
+struct CameraSpawnHandler;
+
+impl ToolHandler for CameraSpawnHandler {
+    fn call(&self, api: &dyn AutomationApi, params: serde_json::Value) -> Result<ToolResponse, ToolError> {
+        let label = params.get("label").and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidParams("label is required".to_string()))?;
+        let position = [
+            params.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+            params.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+            params.get("z").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+        ];
+        let yaw = params.get("yaw").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+        let pitch = params.get("pitch").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+        let fov = params.get("fov").and_then(|v| v.as_f64()).unwrap_or(60.0) as f32;
+
+        match api.camera_spawn(label, position, yaw, pitch, fov) {
+            Ok(entity_id) => Ok(serde_json::json!({"status": "ok", "entity_id": entity_id}).into()),
+            Err(e) => Err(ToolError::EngineError(e)),
+        }
+    }
+}
+
+// --- Camera List tool ---
+
+struct CameraListHandler;
+
+impl ToolHandler for CameraListHandler {
+    fn call(&self, api: &dyn AutomationApi, _params: serde_json::Value) -> Result<ToolResponse, ToolError> {
+        match api.camera_list() {
+            Ok(json_str) => {
+                let val: Value = serde_json::from_str(&json_str).unwrap_or(Value::String(json_str));
+                Ok(val.into())
+            }
+            Err(e) => Err(ToolError::EngineError(e)),
+        }
+    }
+}
+
+// --- Camera Snap To tool ---
+
+struct CameraSnapToHandler;
+
+impl ToolHandler for CameraSnapToHandler {
+    fn call(&self, api: &dyn AutomationApi, params: serde_json::Value) -> Result<ToolResponse, ToolError> {
+        let entity_id = params.get("entity_id").and_then(|v| v.as_u64())
+            .ok_or_else(|| ToolError::InvalidParams("entity_id is required".to_string()))?;
+
+        match api.camera_snap_to(entity_id) {
+            Ok(()) => Ok(serde_json::json!({"status": "ok"}).into()),
+            Err(e) => Err(ToolError::EngineError(e)),
+        }
+    }
+}
+
 /// Register all built-in observation tools with the registry.
 pub fn register_observation_tools(registry: &mut ToolRegistry) {
     registry.register(
@@ -580,6 +783,174 @@ pub fn register_observation_tools(registry: &mut ToolRegistry) {
         },
         Arc::new(EnvGetHandler),
     );
+
+    // --- Node tree tools ---
+
+    registry.register(
+        ToolDefinition {
+            name: "node_find".to_string(),
+            description: "Find a node by name within an object's SDF tree and return its properties".to_string(),
+            category: ToolCategory::Observation,
+            parameters: vec![
+                ParameterDef { name: "object_id".to_string(), description: "SDF object ID".to_string(), param_type: ParamType::Integer, required: true, default: None },
+                ParameterDef { name: "node_name".to_string(), description: "Node name to find".to_string(), param_type: ParamType::String, required: true, default: None },
+            ],
+            return_type: ReturnTypeDef { description: "Node properties as JSON".to_string(), return_type: ParamType::Object },
+            mode: ToolMode::Both,
+        },
+        Arc::new(NodeFindHandler),
+    );
+
+    registry.register(
+        ToolDefinition {
+            name: "node_add_child".to_string(),
+            description: "Add a child SDF primitive node to a named parent node within an object".to_string(),
+            category: ToolCategory::Mutation,
+            parameters: vec![
+                ParameterDef { name: "object_id".to_string(), description: "SDF object ID".to_string(), param_type: ParamType::Integer, required: true, default: None },
+                ParameterDef { name: "parent_node".to_string(), description: "Parent node name".to_string(), param_type: ParamType::String, required: true, default: None },
+                ParameterDef { name: "child_primitive".to_string(), description: "Primitive type: sphere, box, capsule, torus, cylinder, plane".to_string(), param_type: ParamType::String, required: true, default: None },
+                ParameterDef { name: "params".to_string(), description: "Shape parameters (e.g. [0.5] for sphere radius)".to_string(), param_type: ParamType::Array, required: false, default: Some(serde_json::json!([])) },
+                ParameterDef { name: "name".to_string(), description: "Name for the new child node".to_string(), param_type: ParamType::String, required: true, default: None },
+                ParameterDef { name: "material_id".to_string(), description: "Material table index".to_string(), param_type: ParamType::Integer, required: false, default: Some(serde_json::json!(0)) },
+            ],
+            return_type: ReturnTypeDef { description: "Confirmation".to_string(), return_type: ParamType::Object },
+            mode: ToolMode::Editor,
+        },
+        Arc::new(NodeAddChildHandler),
+    );
+
+    registry.register(
+        ToolDefinition {
+            name: "node_remove".to_string(),
+            description: "Remove a named node from an object's SDF tree".to_string(),
+            category: ToolCategory::Mutation,
+            parameters: vec![
+                ParameterDef { name: "object_id".to_string(), description: "SDF object ID".to_string(), param_type: ParamType::Integer, required: true, default: None },
+                ParameterDef { name: "node_name".to_string(), description: "Node name to remove".to_string(), param_type: ParamType::String, required: true, default: None },
+            ],
+            return_type: ReturnTypeDef { description: "Confirmation".to_string(), return_type: ParamType::Object },
+            mode: ToolMode::Editor,
+        },
+        Arc::new(NodeRemoveHandler),
+    );
+
+    // --- Multi-scene tools ---
+
+    registry.register(
+        ToolDefinition {
+            name: "scene_create".to_string(),
+            description: "Create a new empty scene and return its index".to_string(),
+            category: ToolCategory::Mutation,
+            parameters: vec![
+                ParameterDef { name: "name".to_string(), description: "Scene name".to_string(), param_type: ParamType::String, required: true, default: None },
+            ],
+            return_type: ReturnTypeDef { description: "New scene index".to_string(), return_type: ParamType::Object },
+            mode: ToolMode::Editor,
+        },
+        Arc::new(SceneCreateHandler),
+    );
+
+    registry.register(
+        ToolDefinition {
+            name: "scene_list".to_string(),
+            description: "List all scenes with names, active state, and persistence flags".to_string(),
+            category: ToolCategory::Observation,
+            parameters: vec![],
+            return_type: ReturnTypeDef { description: "JSON array of scene info".to_string(), return_type: ParamType::Array },
+            mode: ToolMode::Both,
+        },
+        Arc::new(SceneListHandler),
+    );
+
+    registry.register(
+        ToolDefinition {
+            name: "scene_set_active".to_string(),
+            description: "Set the active scene by index".to_string(),
+            category: ToolCategory::Mutation,
+            parameters: vec![
+                ParameterDef { name: "index".to_string(), description: "Scene index".to_string(), param_type: ParamType::Integer, required: true, default: None },
+            ],
+            return_type: ReturnTypeDef { description: "Confirmation".to_string(), return_type: ParamType::Object },
+            mode: ToolMode::Editor,
+        },
+        Arc::new(SceneSetActiveHandler),
+    );
+
+    registry.register(
+        ToolDefinition {
+            name: "scene_set_persistent".to_string(),
+            description: "Mark a scene as persistent (survives scene swaps) or not".to_string(),
+            category: ToolCategory::Mutation,
+            parameters: vec![
+                ParameterDef { name: "index".to_string(), description: "Scene index".to_string(), param_type: ParamType::Integer, required: true, default: None },
+                ParameterDef { name: "persistent".to_string(), description: "Whether the scene is persistent".to_string(), param_type: ParamType::Boolean, required: true, default: None },
+            ],
+            return_type: ReturnTypeDef { description: "Confirmation".to_string(), return_type: ParamType::Object },
+            mode: ToolMode::Editor,
+        },
+        Arc::new(SceneSetPersistentHandler),
+    );
+
+    registry.register(
+        ToolDefinition {
+            name: "scene_swap".to_string(),
+            description: "Unload all non-persistent scenes, keeping persistent ones".to_string(),
+            category: ToolCategory::Mutation,
+            parameters: vec![],
+            return_type: ReturnTypeDef { description: "Removed scene names and remaining count".to_string(), return_type: ParamType::Object },
+            mode: ToolMode::Editor,
+        },
+        Arc::new(SceneSwapHandler),
+    );
+
+    // --- Camera entity tools ---
+
+    registry.register(
+        ToolDefinition {
+            name: "camera_spawn".to_string(),
+            description: "Spawn a camera entity at a position with orientation and FOV".to_string(),
+            category: ToolCategory::Mutation,
+            parameters: vec![
+                ParameterDef { name: "label".to_string(), description: "Camera display name".to_string(), param_type: ParamType::String, required: true, default: None },
+                ParameterDef { name: "x".to_string(), description: "X position".to_string(), param_type: ParamType::Number, required: false, default: Some(serde_json::json!(0.0)) },
+                ParameterDef { name: "y".to_string(), description: "Y position".to_string(), param_type: ParamType::Number, required: false, default: Some(serde_json::json!(0.0)) },
+                ParameterDef { name: "z".to_string(), description: "Z position".to_string(), param_type: ParamType::Number, required: false, default: Some(serde_json::json!(0.0)) },
+                ParameterDef { name: "yaw".to_string(), description: "Yaw in degrees".to_string(), param_type: ParamType::Number, required: false, default: Some(serde_json::json!(0.0)) },
+                ParameterDef { name: "pitch".to_string(), description: "Pitch in degrees".to_string(), param_type: ParamType::Number, required: false, default: Some(serde_json::json!(0.0)) },
+                ParameterDef { name: "fov".to_string(), description: "Vertical FOV in degrees".to_string(), param_type: ParamType::Number, required: false, default: Some(serde_json::json!(60.0)) },
+            ],
+            return_type: ReturnTypeDef { description: "Entity ID of the spawned camera".to_string(), return_type: ParamType::Object },
+            mode: ToolMode::Editor,
+        },
+        Arc::new(CameraSpawnHandler),
+    );
+
+    registry.register(
+        ToolDefinition {
+            name: "camera_list".to_string(),
+            description: "List all camera entities with positions, orientations, and FOV".to_string(),
+            category: ToolCategory::Observation,
+            parameters: vec![],
+            return_type: ReturnTypeDef { description: "JSON array of camera entities".to_string(), return_type: ParamType::Array },
+            mode: ToolMode::Both,
+        },
+        Arc::new(CameraListHandler),
+    );
+
+    registry.register(
+        ToolDefinition {
+            name: "camera_snap_to".to_string(),
+            description: "Snap the rendering viewport camera to a camera entity's position and orientation".to_string(),
+            category: ToolCategory::Mutation,
+            parameters: vec![
+                ParameterDef { name: "entity_id".to_string(), description: "Camera entity ID".to_string(), param_type: ParamType::Integer, required: true, default: None },
+            ],
+            return_type: ReturnTypeDef { description: "Confirmation".to_string(), return_type: ParamType::Object },
+            mode: ToolMode::Editor,
+        },
+        Arc::new(CameraSnapToHandler),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -741,6 +1112,126 @@ pub fn standard_tool_definitions() -> Value {
                 },
                 "required": []
             }
+        },
+        // --- Node tree tools ---
+        {
+            "name": "node_find",
+            "description": "Find a node by name within an object's SDF tree and return its properties",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "object_id": { "type": "integer", "description": "SDF object ID" },
+                    "node_name": { "type": "string", "description": "Node name to find" }
+                },
+                "required": ["object_id", "node_name"]
+            }
+        },
+        {
+            "name": "node_add_child",
+            "description": "Add a child SDF primitive node to a named parent node within an object",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "object_id": { "type": "integer", "description": "SDF object ID" },
+                    "parent_node": { "type": "string", "description": "Parent node name" },
+                    "child_primitive": { "type": "string", "description": "Primitive type: sphere, box, capsule, torus, cylinder, plane" },
+                    "params": { "type": "array", "description": "Shape parameters", "default": [] },
+                    "name": { "type": "string", "description": "Name for the new child node" },
+                    "material_id": { "type": "integer", "description": "Material table index", "default": 0 }
+                },
+                "required": ["object_id", "parent_node", "child_primitive", "name"]
+            }
+        },
+        {
+            "name": "node_remove",
+            "description": "Remove a named node from an object's SDF tree",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "object_id": { "type": "integer", "description": "SDF object ID" },
+                    "node_name": { "type": "string", "description": "Node name to remove" }
+                },
+                "required": ["object_id", "node_name"]
+            }
+        },
+        // --- Multi-scene tools ---
+        {
+            "name": "scene_create",
+            "description": "Create a new empty scene and return its index",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Scene name" }
+                },
+                "required": ["name"]
+            }
+        },
+        {
+            "name": "scene_list",
+            "description": "List all scenes with names, active state, and persistence flags",
+            "inputSchema": { "type": "object", "properties": {}, "required": [] }
+        },
+        {
+            "name": "scene_set_active",
+            "description": "Set the active scene by index",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "index": { "type": "integer", "description": "Scene index" }
+                },
+                "required": ["index"]
+            }
+        },
+        {
+            "name": "scene_set_persistent",
+            "description": "Mark a scene as persistent (survives scene swaps) or not",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "index": { "type": "integer", "description": "Scene index" },
+                    "persistent": { "type": "boolean", "description": "Whether the scene is persistent" }
+                },
+                "required": ["index", "persistent"]
+            }
+        },
+        {
+            "name": "scene_swap",
+            "description": "Unload all non-persistent scenes, keeping persistent ones",
+            "inputSchema": { "type": "object", "properties": {}, "required": [] }
+        },
+        // --- Camera entity tools ---
+        {
+            "name": "camera_spawn",
+            "description": "Spawn a camera entity at a position with orientation and FOV",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "label": { "type": "string", "description": "Camera display name" },
+                    "x": { "type": "number", "description": "X position", "default": 0.0 },
+                    "y": { "type": "number", "description": "Y position", "default": 0.0 },
+                    "z": { "type": "number", "description": "Z position", "default": 0.0 },
+                    "yaw": { "type": "number", "description": "Yaw in degrees", "default": 0.0 },
+                    "pitch": { "type": "number", "description": "Pitch in degrees", "default": 0.0 },
+                    "fov": { "type": "number", "description": "Vertical FOV in degrees", "default": 60.0 }
+                },
+                "required": ["label"]
+            }
+        },
+        {
+            "name": "camera_list",
+            "description": "List all camera entities with positions, orientations, and FOV",
+            "inputSchema": { "type": "object", "properties": {}, "required": [] }
+        },
+        {
+            "name": "camera_snap_to",
+            "description": "Snap the rendering viewport camera to a camera entity's position and orientation",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "entity_id": { "type": "integer", "description": "Camera entity ID" }
+                },
+                "required": ["entity_id"]
+            }
         }
     ])
 }
@@ -883,6 +1374,149 @@ pub fn dispatch_tool_call(
                 Err(e) => Ok(tool_err_json(&e.to_string())),
             }
         }
+        // --- Node tree tools ---
+        "node_find" => {
+            let object_id = match args.get("object_id").and_then(|v| v.as_u64()) {
+                Some(id) => id as u32,
+                None => return Ok(tool_err_json("object_id is required")),
+            };
+            let node_name = match args.get("node_name").and_then(|v| v.as_str()) {
+                Some(n) => n,
+                None => return Ok(tool_err_json("node_name is required")),
+            };
+            match api.node_find(object_id, node_name) {
+                Ok(json_str) => {
+                    let val: Value = serde_json::from_str(&json_str).unwrap_or(Value::String(json_str));
+                    Ok(tool_ok_json(val))
+                }
+                Err(e) => Ok(tool_err_json(&e)),
+            }
+        }
+        "node_add_child" => {
+            let object_id = match args.get("object_id").and_then(|v| v.as_u64()) {
+                Some(id) => id as u32,
+                None => return Ok(tool_err_json("object_id is required")),
+            };
+            let parent_node = match args.get("parent_node").and_then(|v| v.as_str()) {
+                Some(n) => n,
+                None => return Ok(tool_err_json("parent_node is required")),
+            };
+            let child_primitive = match args.get("child_primitive").and_then(|v| v.as_str()) {
+                Some(p) => p,
+                None => return Ok(tool_err_json("child_primitive is required")),
+            };
+            let p: Vec<f32> = args.get("params").and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect())
+                .unwrap_or_default();
+            let name = match args.get("name").and_then(|v| v.as_str()) {
+                Some(n) => n,
+                None => return Ok(tool_err_json("name is required")),
+            };
+            let material_id = args.get("material_id").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+            match api.node_add_child(object_id, parent_node, child_primitive, &p, name, material_id) {
+                Ok(()) => Ok(tool_ok_json(serde_json::json!({"status": "ok"}))),
+                Err(e) => Ok(tool_err_json(&e)),
+            }
+        }
+        "node_remove" => {
+            let object_id = match args.get("object_id").and_then(|v| v.as_u64()) {
+                Some(id) => id as u32,
+                None => return Ok(tool_err_json("object_id is required")),
+            };
+            let node_name = match args.get("node_name").and_then(|v| v.as_str()) {
+                Some(n) => n,
+                None => return Ok(tool_err_json("node_name is required")),
+            };
+            match api.node_remove(object_id, node_name) {
+                Ok(()) => Ok(tool_ok_json(serde_json::json!({"status": "ok"}))),
+                Err(e) => Ok(tool_err_json(&e)),
+            }
+        }
+        // --- Multi-scene tools ---
+        "scene_create" => {
+            let name = match args.get("name").and_then(|v| v.as_str()) {
+                Some(n) => n,
+                None => return Ok(tool_err_json("name is required")),
+            };
+            match api.scene_create(name) {
+                Ok(index) => Ok(tool_ok_json(serde_json::json!({"status": "ok", "index": index}))),
+                Err(e) => Ok(tool_err_json(&e)),
+            }
+        }
+        "scene_list" => match api.scene_list() {
+            Ok(json_str) => {
+                let val: Value = serde_json::from_str(&json_str).unwrap_or(Value::String(json_str));
+                Ok(tool_ok_json(val))
+            }
+            Err(e) => Ok(tool_err_json(&e)),
+        },
+        "scene_set_active" => {
+            let index = match args.get("index").and_then(|v| v.as_u64()) {
+                Some(i) => i as usize,
+                None => return Ok(tool_err_json("index is required")),
+            };
+            match api.scene_set_active(index) {
+                Ok(()) => Ok(tool_ok_json(serde_json::json!({"status": "ok"}))),
+                Err(e) => Ok(tool_err_json(&e)),
+            }
+        }
+        "scene_set_persistent" => {
+            let index = match args.get("index").and_then(|v| v.as_u64()) {
+                Some(i) => i as usize,
+                None => return Ok(tool_err_json("index is required")),
+            };
+            let persistent = match args.get("persistent").and_then(|v| v.as_bool()) {
+                Some(p) => p,
+                None => return Ok(tool_err_json("persistent is required")),
+            };
+            match api.scene_set_persistent(index, persistent) {
+                Ok(()) => Ok(tool_ok_json(serde_json::json!({"status": "ok"}))),
+                Err(e) => Ok(tool_err_json(&e)),
+            }
+        }
+        "scene_swap" => match api.scene_swap() {
+            Ok(json_str) => {
+                let val: Value = serde_json::from_str(&json_str).unwrap_or(Value::String(json_str));
+                Ok(tool_ok_json(val))
+            }
+            Err(e) => Ok(tool_err_json(&e)),
+        },
+        // --- Camera entity tools ---
+        "camera_spawn" => {
+            let label = match args.get("label").and_then(|v| v.as_str()) {
+                Some(l) => l,
+                None => return Ok(tool_err_json("label is required")),
+            };
+            let position = [
+                args.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+                args.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+                args.get("z").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+            ];
+            let yaw = args.get("yaw").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+            let pitch = args.get("pitch").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+            let fov = args.get("fov").and_then(|v| v.as_f64()).unwrap_or(60.0) as f32;
+            match api.camera_spawn(label, position, yaw, pitch, fov) {
+                Ok(entity_id) => Ok(tool_ok_json(serde_json::json!({"status": "ok", "entity_id": entity_id}))),
+                Err(e) => Ok(tool_err_json(&e)),
+            }
+        }
+        "camera_list" => match api.camera_list() {
+            Ok(json_str) => {
+                let val: Value = serde_json::from_str(&json_str).unwrap_or(Value::String(json_str));
+                Ok(tool_ok_json(val))
+            }
+            Err(e) => Ok(tool_err_json(&e)),
+        },
+        "camera_snap_to" => {
+            let entity_id = match args.get("entity_id").and_then(|v| v.as_u64()) {
+                Some(id) => id,
+                None => return Ok(tool_err_json("entity_id is required")),
+            };
+            match api.camera_snap_to(entity_id) {
+                Ok(()) => Ok(tool_ok_json(serde_json::json!({"status": "ok"}))),
+                Err(e) => Ok(tool_err_json(&e)),
+            }
+        }
         _ => Err(AutomationError::NotImplemented("unknown tool")),
     }
 }
@@ -896,23 +1530,24 @@ mod tests {
     fn register_all_observation_tools() {
         let mut registry = ToolRegistry::new();
         register_observation_tools(&mut registry);
-        assert_eq!(registry.len(), 13);
+        assert_eq!(registry.len(), 24);
     }
 
     #[test]
-    fn all_observation_tools_visible_in_debug_mode() {
+    fn observation_tools_visible_in_debug_mode() {
         let mut registry = ToolRegistry::new();
         register_observation_tools(&mut registry);
         let tools = registry.list_tools(ToolMode::Debug);
-        assert_eq!(tools.len(), 13);
+        // Debug mode sees "Both" tools only (13 original + node_find + scene_list + camera_list)
+        assert_eq!(tools.len(), 16);
     }
 
     #[test]
-    fn all_observation_tools_visible_in_editor_mode() {
+    fn all_tools_visible_in_editor_mode() {
         let mut registry = ToolRegistry::new();
         register_observation_tools(&mut registry);
         let tools = registry.list_tools(ToolMode::Editor);
-        assert_eq!(tools.len(), 13);
+        assert_eq!(tools.len(), 24);
     }
 
     #[test]
