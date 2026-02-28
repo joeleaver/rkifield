@@ -14,7 +14,7 @@ use rkf_core::aabb::Aabb;
 use rkf_core::brick_map::BrickMapAllocator;
 use rkf_core::brick_pool::BrickPool;
 use rkf_core::scene::{Scene, SceneObject};
-use rkf_core::scene_node::SceneNode;
+use rkf_core::scene_node::{BlendMode, SceneNode, SdfSource, Transform as NodeTransform};
 use rkf_core::WorldPosition;
 
 use super::entity::Entity;
@@ -731,6 +731,95 @@ impl World {
         let root = self.root_node(entity)?;
         Ok(root.node_count())
     }
+
+    // ── Node tree mutation ──────────────────────────────────────────────
+
+    /// Set the local transform of a named node within an entity's tree.
+    pub fn set_node_transform(
+        &mut self,
+        entity: Entity,
+        node_name: &str,
+        transform: NodeTransform,
+    ) -> Result<(), WorldError> {
+        let node = self.find_node_mut(entity, node_name)?;
+        node.local_transform = transform;
+        Ok(())
+    }
+
+    /// Add a child node to a named parent node within an entity's tree.
+    pub fn add_child_node(
+        &mut self,
+        entity: Entity,
+        parent_name: &str,
+        child: SceneNode,
+    ) -> Result<(), WorldError> {
+        let parent = self.find_node_mut(entity, parent_name)?;
+        parent.add_child(child);
+        Ok(())
+    }
+
+    /// Remove a named node from an entity's tree, returning it.
+    ///
+    /// Searches the tree for the node's parent and removes it from the
+    /// parent's children. Cannot remove the root node itself.
+    pub fn remove_child_node(
+        &mut self,
+        entity: Entity,
+        node_name: &str,
+    ) -> Result<SceneNode, WorldError> {
+        let root = self.root_node_mut(entity)?;
+        // Cannot remove root itself
+        if root.name == node_name {
+            return Err(WorldError::NodeNotFound(format!(
+                "cannot remove root node '{}'",
+                node_name
+            )));
+        }
+        remove_named_child(root, node_name)
+            .ok_or_else(|| WorldError::NodeNotFound(node_name.to_string()))
+    }
+
+    /// Set the blend mode of a named node within an entity's tree.
+    pub fn set_node_blend_mode(
+        &mut self,
+        entity: Entity,
+        node_name: &str,
+        mode: BlendMode,
+    ) -> Result<(), WorldError> {
+        let node = self.find_node_mut(entity, node_name)?;
+        node.blend_mode = mode;
+        Ok(())
+    }
+
+    /// Set the SDF source of a named node within an entity's tree.
+    pub fn set_node_sdf_source(
+        &mut self,
+        entity: Entity,
+        node_name: &str,
+        source: SdfSource,
+    ) -> Result<(), WorldError> {
+        let node = self.find_node_mut(entity, node_name)?;
+        node.sdf_source = source;
+        Ok(())
+    }
+}
+
+// ── Node tree helpers ──────────────────────────────────────────────────────
+
+/// Recursively find and remove a child with the given name from the tree.
+/// Returns the removed node, or None if not found.
+fn remove_named_child(parent: &mut SceneNode, name: &str) -> Option<SceneNode> {
+    // Check direct children first
+    if let Some(pos) = parent.children.iter().position(|c| c.name == name) {
+        return Some(parent.children.remove(pos));
+    }
+    // Recurse into children
+    for child in &mut parent.children {
+        if let Some(removed) = remove_named_child(child, name) {
+            return Some(removed);
+        }
+    }
+    None
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -1572,6 +1661,119 @@ mod tests {
         root.add_child(SceneNode::new("b"));
         let e = world.spawn("obj").sdf_tree(root).build();
         assert_eq!(world.node_count(e).unwrap(), 3);
+    }
+
+    // ── Node tree mutation (B.2) ─────────────────────────────────────────
+
+    #[test]
+    fn set_node_transform_updates_child() {
+        use rkf_core::scene_node::Transform;
+        let mut world = World::new("test");
+        let mut root = SceneNode::new("root");
+        root.add_child(SceneNode::new("arm"));
+        let e = world.spawn("obj").sdf_tree(root).build();
+        let t = Transform::new(Vec3::new(1.0, 0.0, 0.0), Quat::IDENTITY, Vec3::ONE);
+        world.set_node_transform(e, "arm", t).unwrap();
+        let node = world.find_node(e, "arm").unwrap();
+        assert_eq!(node.local_transform.position, Vec3::new(1.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn set_node_transform_nonexistent_errors() {
+        use rkf_core::scene_node::Transform;
+        let mut world = World::new("test");
+        let e = world
+            .spawn("obj")
+            .sdf(SdfPrimitive::Sphere { radius: 0.5 })
+            .material(1)
+            .build();
+        let t = Transform::default();
+        assert!(matches!(
+            world.set_node_transform(e, "nope", t),
+            Err(WorldError::NodeNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn add_child_node_appends() {
+        let mut world = World::new("test");
+        let root = SceneNode::new("root");
+        let e = world.spawn("obj").sdf_tree(root).build();
+        world
+            .add_child_node(e, "root", SceneNode::new("new_child"))
+            .unwrap();
+        assert_eq!(world.node_count(e).unwrap(), 2);
+        assert!(world.find_node(e, "new_child").is_ok());
+    }
+
+    #[test]
+    fn add_child_node_to_nonexistent_parent_errors() {
+        let mut world = World::new("test");
+        let e = world
+            .spawn("obj")
+            .sdf(SdfPrimitive::Sphere { radius: 0.5 })
+            .material(1)
+            .build();
+        assert!(matches!(
+            world.add_child_node(e, "nope", SceneNode::new("c")),
+            Err(WorldError::NodeNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn remove_child_node_returns_removed() {
+        let mut world = World::new("test");
+        let mut root = SceneNode::new("root");
+        root.add_child(SceneNode::new("to_remove"));
+        root.add_child(SceneNode::new("keep"));
+        let e = world.spawn("obj").sdf_tree(root).build();
+        let removed = world.remove_child_node(e, "to_remove").unwrap();
+        assert_eq!(removed.name, "to_remove");
+        assert_eq!(world.node_count(e).unwrap(), 2); // root + keep
+    }
+
+    #[test]
+    fn remove_child_node_nonexistent_errors() {
+        let mut world = World::new("test");
+        let e = world
+            .spawn("obj")
+            .sdf(SdfPrimitive::Sphere { radius: 0.5 })
+            .material(1)
+            .build();
+        assert!(matches!(
+            world.remove_child_node(e, "nope"),
+            Err(WorldError::NodeNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn set_node_blend_mode_changes_mode() {
+        use rkf_core::scene_node::BlendMode;
+        let mut world = World::new("test");
+        let mut root = SceneNode::new("root");
+        root.add_child(SceneNode::new("child"));
+        let e = world.spawn("obj").sdf_tree(root).build();
+        world
+            .set_node_blend_mode(e, "child", BlendMode::Subtract)
+            .unwrap();
+        let node = world.find_node(e, "child").unwrap();
+        assert!(matches!(node.blend_mode, BlendMode::Subtract));
+    }
+
+    #[test]
+    fn set_node_sdf_source_changes_source() {
+        use rkf_core::scene_node::SdfSource;
+        let mut world = World::new("test");
+        let mut root = SceneNode::new("root");
+        root.add_child(SceneNode::new("child"));
+        let e = world.spawn("obj").sdf_tree(root).build();
+        let source = SdfSource::Analytical {
+            primitive: SdfPrimitive::Sphere { radius: 1.0 },
+            material_id: 5,
+        };
+        world.set_node_sdf_source(e, "child", source).unwrap();
+        let node = world.find_node(e, "child").unwrap();
+        assert!(matches!(node.sdf_source, SdfSource::Analytical { material_id: 5, .. }));
     }
 
     #[test]
