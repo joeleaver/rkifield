@@ -351,6 +351,53 @@ impl SceneNode {
     pub fn iter_children_mut(&mut self) -> std::slice::IterMut<'_, SceneNode> {
         self.children.iter_mut()
     }
+
+    // ── Path-based access ───────────────────────────────────────────────
+
+    /// Find a descendant by slash-separated path relative to this node.
+    ///
+    /// Example: `"spine/chest/head"` walks from this node → `spine` → `chest` → `head`.
+    pub fn find_by_path(&self, path: &str) -> Option<&SceneNode> {
+        if path.is_empty() {
+            return None;
+        }
+        let mut current = self;
+        for segment in path.split('/') {
+            current = current.children.iter().find(|c| c.name == segment)?;
+        }
+        Some(current)
+    }
+
+    /// Find a descendant by slash-separated path (mutable).
+    pub fn find_by_path_mut(&mut self, path: &str) -> Option<&mut SceneNode> {
+        if path.is_empty() {
+            return None;
+        }
+        let mut current = self;
+        for segment in path.split('/') {
+            current = current.children.iter_mut().find(|c| c.name == segment)?;
+        }
+        Some(current)
+    }
+
+    /// Depth-first pre-order traversal yielding `(depth, &SceneNode)`.
+    pub fn walk(&self) -> Vec<(usize, &SceneNode)> {
+        let mut result = Vec::new();
+        self.walk_inner(0, &mut result);
+        result
+    }
+
+    fn walk_inner<'a>(&'a self, depth: usize, out: &mut Vec<(usize, &'a SceneNode)>) {
+        out.push((depth, self));
+        for child in &self.children {
+            child.walk_inner(depth + 1, out);
+        }
+    }
+
+    /// Collect all node names in depth-first pre-order.
+    pub fn all_names(&self) -> Vec<String> {
+        self.walk().into_iter().map(|(_, n)| n.name.clone()).collect()
+    }
 }
 
 impl std::fmt::Display for SceneNode {
@@ -706,6 +753,82 @@ mod tests {
         }
         assert!(node.child(0).unwrap().metadata.locked);
         assert!(node.child(1).unwrap().metadata.locked);
+    }
+
+    // ── Path-based access (A.2) ────────────────────────────────────────
+
+    #[test]
+    fn find_by_path_single_segment() {
+        let mut root = SceneNode::new("root");
+        root.add_child(SceneNode::new("child"));
+        assert_eq!(root.find_by_path("child").unwrap().name, "child");
+    }
+
+    #[test]
+    fn find_by_path_multi_segment() {
+        let mut root = SceneNode::new("root");
+        let mut spine = SceneNode::new("spine");
+        let mut chest = SceneNode::new("chest");
+        chest.add_child(SceneNode::new("head"));
+        spine.add_child(chest);
+        root.add_child(spine);
+        assert_eq!(
+            root.find_by_path("spine/chest/head").unwrap().name,
+            "head"
+        );
+    }
+
+    #[test]
+    fn find_by_path_not_found() {
+        let mut root = SceneNode::new("root");
+        root.add_child(SceneNode::new("child"));
+        assert!(root.find_by_path("nope").is_none());
+        assert!(root.find_by_path("child/deep").is_none());
+    }
+
+    #[test]
+    fn find_by_path_empty_returns_none() {
+        let root = SceneNode::new("root");
+        assert!(root.find_by_path("").is_none());
+    }
+
+    #[test]
+    fn find_by_path_mut_modifies() {
+        let mut root = SceneNode::new("root");
+        let mut spine = SceneNode::new("spine");
+        spine.add_child(SceneNode::new("chest"));
+        root.add_child(spine);
+        root.find_by_path_mut("spine/chest").unwrap().metadata.locked = true;
+        assert!(root.find_by_path("spine/chest").unwrap().metadata.locked);
+    }
+
+    #[test]
+    fn walk_yields_correct_order() {
+        let mut root = SceneNode::new("root");
+        let mut a = SceneNode::new("a");
+        a.add_child(SceneNode::new("a1"));
+        root.add_child(a);
+        root.add_child(SceneNode::new("b"));
+        let names: Vec<&str> = root.walk().iter().map(|(_, n)| n.name.as_str()).collect();
+        assert_eq!(names, vec!["root", "a", "a1", "b"]);
+    }
+
+    #[test]
+    fn walk_yields_correct_depths() {
+        let mut root = SceneNode::new("root");
+        let mut a = SceneNode::new("a");
+        a.add_child(SceneNode::new("a1"));
+        root.add_child(a);
+        let depths: Vec<usize> = root.walk().iter().map(|(d, _)| *d).collect();
+        assert_eq!(depths, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn all_names_collects_tree() {
+        let mut root = SceneNode::new("root");
+        root.add_child(SceneNode::new("x"));
+        root.add_child(SceneNode::new("y"));
+        assert_eq!(root.all_names(), vec!["root", "x", "y"]);
     }
 
     #[test]
