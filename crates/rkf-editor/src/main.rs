@@ -75,6 +75,30 @@ fn start_ipc_server(
     (handle, socket_path)
 }
 
+/// Map a user-facing primitive name to an SdfPrimitive.
+fn primitive_from_name(name: &str) -> rkf_core::SdfPrimitive {
+    use rkf_core::SdfPrimitive;
+    match name {
+        "Sphere" => SdfPrimitive::Sphere { radius: 0.5 },
+        "Box" | "Cube" => SdfPrimitive::Box {
+            half_extents: glam::Vec3::splat(0.5),
+        },
+        "Capsule" => SdfPrimitive::Capsule {
+            radius: 0.2,
+            half_height: 0.4,
+        },
+        "Torus" => SdfPrimitive::Torus {
+            major_radius: 0.4,
+            minor_radius: 0.12,
+        },
+        "Cylinder" => SdfPrimitive::Cylinder {
+            radius: 0.3,
+            half_height: 0.5,
+        },
+        _ => SdfPrimitive::Sphere { radius: 0.5 }, // fallback
+    }
+}
+
 fn cleanup_ipc(socket_path: &str) {
     let _ = std::fs::remove_file(socket_path);
     let meta_path = socket_path.replace(".sock", ".json");
@@ -268,6 +292,81 @@ fn engine_thread(data: EngineThreadData) {
                 es.pending_redo = false;
                 if let Some(action) = es.undo.redo() {
                     es.apply_undo_action(&action, false);
+                }
+            }
+
+            // Consume pending spawn.
+            if let Some(prim_name) = es.pending_spawn.take() {
+                let pos = es.editor_camera.target;
+                let primitive = primitive_from_name(&prim_name);
+                let entity = es.world.spawn(&prim_name)
+                    .position_vec3(pos)
+                    .sdf(primitive)
+                    .material(0)
+                    .build();
+                es.selected_entity = Some(editor_state::SelectedEntity::Object(entity.to_u64()));
+                es.undo.push(crate::undo::UndoAction {
+                    kind: crate::undo::UndoActionKind::SpawnEntity {
+                        entity_id: entity.to_u64(),
+                    },
+                    timestamp_ms: 0,
+                    description: format!("Spawn {prim_name}"),
+                });
+            }
+
+            // Consume pending delete.
+            if es.pending_delete {
+                es.pending_delete = false;
+                if let Some(editor_state::SelectedEntity::Object(eid)) = es.selected_entity {
+                    if let Some(entity) = es.world.find_entity_by_id(eid) {
+                        es.undo.push(crate::undo::UndoAction {
+                            kind: crate::undo::UndoActionKind::DespawnEntity {
+                                entity_id: eid,
+                            },
+                            timestamp_ms: 0,
+                            description: "Delete object".into(),
+                        });
+                        let _ = es.world.despawn(entity);
+                        es.selected_entity = None;
+                    }
+                }
+            }
+
+            // Consume pending duplicate.
+            if es.pending_duplicate {
+                es.pending_duplicate = false;
+                if let Some(editor_state::SelectedEntity::Object(eid)) = es.selected_entity {
+                    if let Some(src_entity) = es.world.find_entity_by_id(eid) {
+                        if let (Ok(pos), Ok(rot), Ok(scale)) = (
+                            es.world.position(src_entity),
+                            es.world.rotation(src_entity),
+                            es.world.scale(src_entity),
+                        ) {
+                            let root = es.world.root_node(src_entity).ok().cloned();
+                            if let Some(root_node) = root {
+                                let offset = rkf_core::WorldPosition::new(
+                                    glam::IVec3::ZERO,
+                                    pos.to_vec3() + glam::Vec3::new(1.0, 0.0, 0.0),
+                                );
+                                let new_entity = es.world.spawn(&root_node.name)
+                                    .position(offset)
+                                    .rotation(rot)
+                                    .scale(scale)
+                                    .sdf_tree(root_node)
+                                    .build();
+                                es.selected_entity = Some(
+                                    editor_state::SelectedEntity::Object(new_entity.to_u64()),
+                                );
+                                es.undo.push(crate::undo::UndoAction {
+                                    kind: crate::undo::UndoActionKind::SpawnEntity {
+                                        entity_id: new_entity.to_u64(),
+                                    },
+                                    timestamp_ms: 0,
+                                    description: "Duplicate object".into(),
+                                });
+                            }
+                        }
+                    }
                 }
             }
 
