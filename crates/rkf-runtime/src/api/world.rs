@@ -5,7 +5,7 @@
 //! interact with a single entity handle ([`Entity`]) that transparently spans
 //! both storage backends.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use glam::{Quat, Vec3};
@@ -290,6 +290,85 @@ impl World {
         }
 
         Ok(name)
+    }
+
+    // ── Entity tracking resync ──────────────────────────────────────────────
+
+    /// Resynchronize entity tracking with the contents of all scenes.
+    ///
+    /// Scans every scene for objects that are not yet tracked in
+    /// `sdf_to_entity` and creates entity records for them. Also removes
+    /// stale records whose objects no longer exist in any scene.
+    ///
+    /// Call this after directly mutating a scene (e.g. assigning a demo
+    /// scene or loading objects via `scene_mut()`) to bring entity tracking
+    /// back in sync.
+    pub fn resync_entity_tracking(&mut self) {
+        // 1. Register any scene objects not yet tracked.
+        for scene_idx in 0..self.scenes.len() {
+            for obj_idx in 0..self.scenes[scene_idx].scene.objects.len() {
+                let obj = &self.scenes[scene_idx].scene.objects[obj_idx];
+                let obj_id = obj.id;
+
+                if self.sdf_to_entity.contains_key(&obj_id) {
+                    continue;
+                }
+
+                let position = WorldPosition::new(
+                    glam::IVec3::ZERO,
+                    obj.position,
+                );
+                let rotation = obj.rotation;
+                let scale = obj.scale;
+                let name = obj.name.clone();
+
+                let generation = self.next_generation;
+                self.next_generation += 1;
+                let entity = Entity::sdf(obj_id, generation);
+
+                let ecs_entity = self.ecs.spawn((SceneLink { object_id: obj_id },));
+
+                let record = EntityRecord {
+                    ecs_entity,
+                    sdf_object_id: Some(obj_id),
+                    position,
+                    rotation,
+                    scale,
+                    name,
+                };
+
+                self.entities.insert(entity, record);
+                self.sdf_to_entity.insert(obj_id, entity);
+                self.entity_scene.insert(entity, scene_idx);
+
+                if obj_id >= self.next_sdf_id {
+                    self.next_sdf_id = obj_id + 1;
+                }
+            }
+        }
+
+        // 2. Remove stale entries (objects no longer in any scene).
+        let all_obj_ids: HashSet<u32> = self
+            .scenes
+            .iter()
+            .flat_map(|s| s.scene.objects.iter().map(|o| o.id))
+            .collect();
+
+        let stale_ids: Vec<u32> = self
+            .sdf_to_entity
+            .keys()
+            .copied()
+            .filter(|id| !all_obj_ids.contains(id))
+            .collect();
+
+        for obj_id in stale_ids {
+            if let Some(entity) = self.sdf_to_entity.remove(&obj_id) {
+                if let Some(record) = self.entities.remove(&entity) {
+                    let _ = self.ecs.despawn(record.ecs_entity);
+                }
+                self.entity_scene.remove(&entity);
+            }
+        }
     }
 
     // ── Spawning ───────────────────────────────────────────────────────────
@@ -2667,5 +2746,125 @@ mod tests {
         assert_eq!(loaded.len(), 0);
 
         let _ = std::fs::remove_file(path);
+    }
+
+    // ── Resync entity tracking ────────────────────────────────────────────
+
+    #[test]
+    fn resync_registers_untracked() {
+        use rkf_core::scene::SceneObject;
+        use rkf_core::scene_node::SceneNode;
+        use rkf_core::aabb::Aabb;
+
+        let mut world = World::new("test");
+        assert_eq!(world.entity_count(), 0);
+
+        // Directly push objects into the scene (bypassing World::spawn).
+        {
+            let scene = world.scene_mut();
+            scene.objects.push(SceneObject {
+                id: 10,
+                name: "direct_a".into(),
+                parent_id: None,
+                position: Vec3::new(1.0, 2.0, 3.0),
+                rotation: Quat::IDENTITY,
+                scale: Vec3::ONE,
+                root_node: SceneNode::new("direct_a"),
+                aabb: Aabb::new(Vec3::ZERO, Vec3::ZERO),
+            });
+            scene.objects.push(SceneObject {
+                id: 20,
+                name: "direct_b".into(),
+                parent_id: None,
+                position: Vec3::ZERO,
+                rotation: Quat::IDENTITY,
+                scale: Vec3::ONE,
+                root_node: SceneNode::new("direct_b"),
+                aabb: Aabb::new(Vec3::ZERO, Vec3::ZERO),
+            });
+        }
+
+        // Before resync: no entity records exist.
+        assert_eq!(world.entity_count(), 0);
+
+        world.resync_entity_tracking();
+
+        // After resync: both objects are tracked.
+        assert_eq!(world.entity_count(), 2);
+        assert!(world.find("direct_a").is_some());
+        assert!(world.find("direct_b").is_some());
+
+        // Entity position should match the object position.
+        let entity_a = world.find("direct_a").unwrap();
+        let pos = world.position(entity_a).unwrap();
+        assert_eq!(pos.to_vec3(), Vec3::new(1.0, 2.0, 3.0));
+
+        // find_entity_by_id should work for automation API.
+        assert!(world.find_entity_by_id(10).is_some());
+        assert!(world.find_entity_by_id(20).is_some());
+    }
+
+    #[test]
+    fn resync_removes_stale() {
+        let mut world = World::new("test");
+
+        // Spawn normally.
+        let e = world
+            .spawn("obj")
+            .sdf(SdfPrimitive::Sphere { radius: 0.5 })
+            .material(0)
+            .build();
+        assert_eq!(world.entity_count(), 1);
+
+        // Directly remove the object from the scene (bypassing World::despawn).
+        {
+            let scene = world.scene_mut();
+            scene.objects.clear();
+        }
+
+        // Entity record still exists (stale).
+        assert_eq!(world.entity_count(), 1);
+
+        world.resync_entity_tracking();
+
+        // After resync: stale record removed.
+        assert_eq!(world.entity_count(), 0);
+        assert!(!world.is_alive(e));
+    }
+
+    #[test]
+    fn resync_idempotent() {
+        use rkf_core::scene::SceneObject;
+        use rkf_core::scene_node::SceneNode;
+        use rkf_core::aabb::Aabb;
+
+        let mut world = World::new("test");
+
+        // Directly push an object.
+        {
+            let scene = world.scene_mut();
+            scene.objects.push(SceneObject {
+                id: 5,
+                name: "obj".into(),
+                parent_id: None,
+                position: Vec3::ZERO,
+                rotation: Quat::IDENTITY,
+                scale: Vec3::ONE,
+                root_node: SceneNode::new("obj"),
+                aabb: Aabb::new(Vec3::ZERO, Vec3::ZERO),
+            });
+        }
+
+        world.resync_entity_tracking();
+        assert_eq!(world.entity_count(), 1);
+        let entity_first = world.find("obj").unwrap();
+
+        // Calling resync again should not create duplicates.
+        world.resync_entity_tracking();
+        assert_eq!(world.entity_count(), 1);
+        let entity_second = world.find("obj").unwrap();
+
+        // Same entity handle — not a new one.
+        assert_eq!(entity_first, entity_second);
     }
 }

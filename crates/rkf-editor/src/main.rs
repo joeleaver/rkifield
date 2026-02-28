@@ -136,6 +136,7 @@ fn engine_thread(data: EngineThreadData) {
     // 4. Store demo scene in editor_state (set world's scene directly).
     if let Ok(mut es) = editor_state.lock() {
         *es.world.scene_mut() = demo_scene;
+        es.world.resync_entity_tracking();
 
         // Seed editor light list from render lights (point/spot only).
         for rl in &engine.world_lights {

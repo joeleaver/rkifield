@@ -759,6 +759,9 @@ impl EditorState {
             }
         }
 
+        // Resync entity tracking to register all loaded objects.
+        self.world.resync_entity_tracking();
+
         // Track the current scene path.
         self.current_scene_path = Some(path.to_string());
         self.unsaved_changes.mark_saved();
