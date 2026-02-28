@@ -43,7 +43,9 @@ use rkf_render::{
     VolUpscalePass, WireframePass, COARSE_VOXEL_SIZE,
 };
 
+use super::error::WorldError;
 use super::world::World;
+use crate::components::CameraComponent;
 
 /// Offscreen render target format for the compositor path.
 ///
@@ -992,6 +994,27 @@ impl Renderer {
         self.camera.fov_degrees = fov_degrees;
     }
 
+    /// Copy a camera entity's state to the viewport (rendering) camera.
+    ///
+    /// Reads the entity's position from `World` and its `CameraComponent`
+    /// from ECS, then sets the renderer's camera position, orientation,
+    /// and field of view to match.
+    pub fn snap_camera_to(
+        &mut self,
+        world: &World,
+        entity: super::entity::Entity,
+    ) -> Result<(), WorldError> {
+        let pos = world.position(entity)?;
+        let cam = world
+            .get::<CameraComponent>(entity)
+            .map_err(|_| WorldError::MissingComponent(entity, "CameraComponent"))?;
+        self.camera.position = pos.to_vec3();
+        self.camera.yaw = cam.yaw.to_radians();
+        self.camera.pitch = cam.pitch.to_radians();
+        self.camera.fov_degrees = cam.fov_degrees;
+        Ok(())
+    }
+
     /// Camera-relative view-projection matrix for overlay rendering.
     pub fn view_projection(&self) -> Mat4 {
         self.camera
@@ -1770,5 +1793,51 @@ mod tests {
         };
         let s = format!("{:?}", hit);
         assert!(s.contains("42"));
+    }
+
+    // snap_camera_to tests — verify World-side prerequisites.
+    // Full integration (GPU + snap) is tested via rkf-testbed.
+
+    #[test]
+    fn snap_camera_non_camera_entity_would_error() {
+        use rkf_core::scene_node::SdfPrimitive;
+        let mut world = World::new("test");
+        let e = world
+            .spawn("cube")
+            .sdf(SdfPrimitive::Sphere { radius: 0.5 })
+            .material(1)
+            .build();
+        // Attempting to snap to a non-camera entity fails on get::<CameraComponent>
+        assert!(!world.has::<CameraComponent>(e));
+    }
+
+    #[test]
+    fn camera_entity_has_component() {
+        use rkf_core::WorldPosition;
+        let mut world = World::new("test");
+        let cam = world.spawn_camera("Main", WorldPosition::default(), 45.0, -15.0, 75.0);
+        assert!(world.has::<CameraComponent>(cam));
+        let c = world.get::<CameraComponent>(cam).unwrap();
+        assert!((c.fov_degrees - 75.0).abs() < 1e-6);
+        assert!((c.yaw - 45.0).abs() < 1e-6);
+        assert!((c.pitch - -15.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn camera_position_accessible() {
+        use rkf_core::WorldPosition;
+        let mut world = World::new("test");
+        let pos = WorldPosition::new(glam::IVec3::new(1, 2, 3), Vec3::new(0.5, 0.5, 0.5));
+        let cam = world.spawn_camera("Cam", pos, 0.0, 0.0, 60.0);
+        assert_eq!(world.position(cam).unwrap(), pos);
+    }
+
+    #[test]
+    fn snap_camera_requires_camera_component() {
+        // Verify a non-camera entity lacks CameraComponent
+        let mut world = World::new("test");
+        let e = world.spawn("ecs_only").build();
+        let result = world.get::<CameraComponent>(e);
+        assert!(result.is_err());
     }
 }
