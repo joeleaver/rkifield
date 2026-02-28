@@ -427,6 +427,91 @@ pub trait AutomationApi: Send + Sync {
     fn env_override(&self, property: &str, value: f32) -> Result<(), String> {
         Err("env_override not supported".into())
     }
+
+    // --- Node tree operations (default: unsupported) -------------------------
+
+    /// Find a node by name within an object's scene node tree.
+    /// Returns a JSON string describing the node.
+    #[allow(unused_variables)]
+    fn node_find(&self, object_id: u32, node_name: &str) -> Result<String, String> {
+        Err("node_find not supported".into())
+    }
+
+    /// Add a child node to a named parent node within an object's tree.
+    #[allow(unused_variables)]
+    fn node_add_child(
+        &self,
+        object_id: u32,
+        parent_node: &str,
+        child_primitive: &str,
+        params: &[f32],
+        name: &str,
+        material_id: u16,
+    ) -> Result<(), String> {
+        Err("node_add_child not supported".into())
+    }
+
+    /// Remove a named node from an object's tree.
+    #[allow(unused_variables)]
+    fn node_remove(&self, object_id: u32, node_name: &str) -> Result<(), String> {
+        Err("node_remove not supported".into())
+    }
+
+    // --- Multi-scene operations (default: unsupported) -----------------------
+
+    /// Create a new empty scene, returning its index.
+    #[allow(unused_variables)]
+    fn scene_create(&self, name: &str) -> Result<usize, String> {
+        Err("scene_create not supported".into())
+    }
+
+    /// List all scenes as a JSON string.
+    fn scene_list(&self) -> Result<String, String> {
+        Err("scene_list not supported".into())
+    }
+
+    /// Set the active scene by index.
+    #[allow(unused_variables)]
+    fn scene_set_active(&self, index: usize) -> Result<(), String> {
+        Err("scene_set_active not supported".into())
+    }
+
+    /// Mark a scene as persistent or not.
+    #[allow(unused_variables)]
+    fn scene_set_persistent(&self, index: usize, persistent: bool) -> Result<(), String> {
+        Err("scene_set_persistent not supported".into())
+    }
+
+    /// Swap scenes: unload non-persistent scenes. Returns names of removed scenes.
+    fn scene_swap(&self) -> Result<String, String> {
+        Err("scene_swap not supported".into())
+    }
+
+    // --- Camera entity operations (default: unsupported) ---------------------
+
+    /// Spawn a camera entity. Returns the entity ID as u64.
+    #[allow(unused_variables)]
+    fn camera_spawn(
+        &self,
+        label: &str,
+        position: [f32; 3],
+        yaw: f32,
+        pitch: f32,
+        fov: f32,
+    ) -> Result<u64, String> {
+        Err("camera_spawn not supported".into())
+    }
+
+    /// List all camera entities as a JSON string.
+    fn camera_list(&self) -> Result<String, String> {
+        Err("camera_list not supported".into())
+    }
+
+    /// Snap the rendering camera to a camera entity.
+    #[allow(unused_variables)]
+    fn camera_snap_to(&self, entity_id: u64) -> Result<(), String> {
+        Err("camera_snap_to not supported".into())
+    }
 }
 
 // ---------------------------------------------------------------------------
