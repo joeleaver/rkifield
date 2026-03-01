@@ -196,6 +196,7 @@ struct ShadeUniforms {
 const PI: f32 = 3.14159265359;
 const MAX_FLOAT: f32 = 3.402823e+38;
 const EMPTY_SLOT: u32 = 0xFFFFFFFFu;
+const INTERIOR_SLOT: u32 = 0xFFFFFFFEu;
 const BVH_INVALID: u32 = 0xFFFFFFFFu;
 const BVH_STACK_SIZE: u32 = 32u;
 
@@ -226,7 +227,7 @@ const MAX_SHADOW_STEPS: u32 = 64u;
 const SHADOW_EPSILON: f32 = 0.005;
 const SHADOW_K: f32 = 16.0;
 const SHADOW_MAX_DIST: f32 = 50.0;
-const SHADOW_BIAS: f32 = 0.05;
+const SHADOW_BIAS: f32 = 0.08;
 const SHADOW_ATMO_DENSITY: f32 = 0.04;
 const SHADOW_ATMO_MAX_FILL: f32 = 0.65;
 
@@ -307,7 +308,10 @@ fn sample_voxel_at(obj_offset: u32, vc: vec3<i32>, dims: vec3<u32>,
     let flat_brick = brick.x + brick.y * dims.x + brick.z * dims.x * dims.y;
     let slot = brick_maps[obj_offset + flat_brick];
     if slot == EMPTY_SLOT {
-        return vs * 4.0;
+        return vs * 2.0;
+    }
+    if slot == INTERIOR_SLOT {
+        return -(vs * 2.0);
     }
     let idx = slot * 512u + local.x + local.y * 8u + local.z * 64u;
     return extract_distance(brick_pool[idx].word0);
@@ -1105,6 +1109,54 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
         case 6u: {
             // GI only — indirect diffuse + specular, no direct lighting
             color = (gi_diffuse + gi_specular) * contact;
+        }
+        case 7u: {
+            // SDF distance visualization: blue (inside) → white (surface) → red (outside)
+            let sdf_d = textureLoad(gbuf_motion, coord, 0).w;
+            let scale = 10.0; // amplify small values for visibility
+            let t7 = clamp(sdf_d * scale, -1.0, 1.0);
+            if t7 < 0.0 {
+                color = mix(vec3<f32>(1.0), vec3<f32>(0.0, 0.0, 1.0), -t7);
+            } else {
+                color = mix(vec3<f32>(1.0), vec3<f32>(1.0, 0.0, 0.0), t7);
+            }
+        }
+        case 8u: {
+            // Brick boundary overlay with hash-colored bricks and voxel sub-grid
+            let obj_id = (packed_mat >> 24u) & 0xFFu;
+            if obj_id > 0u {
+                let obj = objects[obj_id - 1u];
+                let local_pos = (obj.inverse_world * vec4<f32>(world_pos - shade_uniforms.camera_pos.xyz, 1.0)).xyz;
+                let vs = obj.voxel_size;
+                let grid_size = vec3<f32>(f32(obj.brick_map_dims_x), f32(obj.brick_map_dims_y), f32(obj.brick_map_dims_z)) * vs * 8.0;
+                let grid_pos = local_pos + grid_size * 0.5;
+                let voxel_coord = grid_pos / vs;
+                let brick_coord = vec3<u32>(floor(voxel_coord / 8.0));
+                let local_voxel = fract(voxel_coord / 8.0) * 8.0;
+
+                // Brick boundary detection
+                let edge_dist = min(local_voxel, vec3<f32>(8.0) - local_voxel);
+                let min_edge = min(edge_dist.x, min(edge_dist.y, edge_dist.z));
+                let on_brick_edge = 1.0 - smoothstep(0.2, 0.5, min_edge);
+
+                // Voxel sub-grid (faint lines)
+                let vf = fract(voxel_coord);
+                let ve = min(vf, vec3<f32>(1.0) - vf);
+                let on_voxel = (1.0 - smoothstep(0.1, 0.2, min(ve.x, min(ve.y, ve.z)))) * 0.2;
+
+                // Hash brick coordinate for a unique color per brick
+                let h = brick_coord.x * 73u + brick_coord.y * 157u + brick_coord.z * 311u;
+                let bc = vec3<f32>(
+                    f32((h * 13u + 7u) % 256u) / 255.0,
+                    f32((h * 29u + 11u) % 256u) / 255.0,
+                    f32((h * 43u + 17u) % 256u) / 255.0
+                ) * 0.5 + 0.25;
+
+                color = mix(bc, vec3<f32>(1.0, 1.0, 0.0), on_brick_edge);
+                color = mix(color, vec3<f32>(0.6), on_voxel);
+            } else {
+                color = normal * 0.5 + 0.5; // fallback for non-objects
+            }
         }
         default: {
             // Normal shading (already computed)

@@ -104,6 +104,11 @@ pub enum ToolResponse {
         /// MIME type (e.g., "image/png").
         mime_type: String,
     },
+    /// Pre-formed content blocks from the engine — passed through without wrapping.
+    ///
+    /// Used by `use_tool` to forward engine responses (which already contain
+    /// properly structured content blocks) without double-wrapping them.
+    RawContent(Vec<crate::protocol::ContentBlock>),
 }
 
 impl From<serde_json::Value> for ToolResponse {

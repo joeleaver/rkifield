@@ -570,6 +570,51 @@ impl AutomationApi for BridgeAutomationApi {
         .map(|_| ())
         .map_err(|e| e.to_string())
     }
+
+    // --- Diagnostic tools (forwarded over IPC) -------------------------------
+
+    fn voxel_slice(
+        &self,
+        object_id: u32,
+        y_coord: f32,
+    ) -> AutomationResult<VoxelSliceResult> {
+        let result = self.call_tool(
+            "voxel_slice",
+            serde_json::json!({"object_id": object_id, "y_coord": y_coord}),
+        )?;
+        serde_json::from_value(result).map_err(|e| AutomationError::EngineError(e.to_string()))
+    }
+
+    fn sculpt_apply(
+        &self,
+        object_id: u32,
+        position: [f32; 3],
+        mode: &str,
+        radius: f32,
+        strength: f32,
+        material_id: u16,
+    ) -> AutomationResult<()> {
+        self.call_tool(
+            "sculpt_apply",
+            serde_json::json!({
+                "object_id": object_id,
+                "position": position,
+                "mode": mode,
+                "radius": radius,
+                "strength": strength,
+                "material_id": material_id,
+            }),
+        )?;
+        Ok(())
+    }
+
+    fn object_shape(&self, object_id: u32) -> AutomationResult<ObjectShapeResult> {
+        let result = self.call_tool(
+            "object_shape",
+            serde_json::json!({"object_id": object_id}),
+        )?;
+        serde_json::from_value(result).map_err(|e| AutomationError::EngineError(e.to_string()))
+    }
 }
 
 #[cfg(test)]

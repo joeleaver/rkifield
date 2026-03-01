@@ -138,6 +138,7 @@ struct CoarseFieldInfo {
 const PI: f32 = 3.14159265359;
 const MAX_FLOAT: f32 = 3.402823e+38;
 const EMPTY_SLOT: u32 = 0xFFFFFFFFu;
+const INTERIOR_SLOT: u32 = 0xFFFFFFFEu;
 const BVH_INVALID: u32 = 0xFFFFFFFFu;
 const BVH_STACK_SIZE: u32 = 32u;
 
@@ -218,7 +219,10 @@ fn sample_voxel_at(obj_offset: u32, vc: vec3<i32>, dims: vec3<u32>,
     let flat_brick = brick.x + brick.y * dims.x + brick.z * dims.x * dims.y;
     let slot = brick_maps[obj_offset + flat_brick];
     if slot == EMPTY_SLOT {
-        return vs * 4.0;
+        return vs * 2.0;
+    }
+    if slot == INTERIOR_SLOT {
+        return -(vs * 2.0);
     }
     let idx = slot * 512u + local.x + local.y * 8u + local.z * 64u;
     return extract_distance(brick_pool[idx].word0);

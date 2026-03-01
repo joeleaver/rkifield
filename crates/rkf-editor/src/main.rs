@@ -162,6 +162,9 @@ fn engine_thread(data: EngineThreadData) {
         *es.world.scene_mut() = demo_scene;
         es.world.resync_entity_tracking();
 
+        // Fill SDF padding bricks for smooth normals at narrow-band boundaries.
+        engine.init_sdf_padding(es.world.scene_mut());
+
         // Seed editor light list from render lights (point/spot only).
         for rl in &engine.world_lights {
             use crate::light_editor::{EditorLight, EditorLightType};
@@ -231,13 +234,25 @@ fn engine_thread(data: EngineThreadData) {
         //    then release before touching editor_state — avoids nested locks).
         let pending_camera;
         let pending_debug;
+        let pending_voxel_slice;
+        let pending_spatial_query;
+        let pending_mcp_sculpt;
+        let pending_object_shape;
         {
             if let Ok(mut ss) = shared_state.lock() {
                 pending_camera = ss.pending_camera.take();
                 pending_debug = ss.pending_debug_mode.take();
+                pending_voxel_slice = ss.pending_voxel_slice.take();
+                pending_spatial_query = ss.pending_spatial_query.take();
+                pending_mcp_sculpt = ss.pending_mcp_sculpt.take();
+                pending_object_shape = ss.pending_object_shape.take();
             } else {
                 pending_camera = None;
                 pending_debug = None;
+                pending_voxel_slice = None;
+                pending_spatial_query = None;
+                pending_mcp_sculpt = None;
+                pending_object_shape = None;
             }
         }
 
@@ -248,6 +263,7 @@ fn engine_thread(data: EngineThreadData) {
             camera, f_debug_mode, f_revoxelize, f_environment, f_lights,
             mut scene_clone, f_selected, f_gizmo_mode, f_gizmo_axis,
             f_show_grid, f_editor_mode, f_brush_radius,
+            f_sculpt_edits, f_sculpt_undo, f_sculpting_active,
         ) = {
             let mut es = match editor_state.lock() {
                 Ok(es) => es,
@@ -440,12 +456,18 @@ fn engine_thread(data: EngineThreadData) {
             let gm = es.gizmo.mode;
             let grid = es.show_grid;
             let emode = es.mode;
+            let sculpting_active = es.sculpt.active_stroke.is_some();
+
+            // Drain pending sculpt edits and undo.
+            let sculpt_edits = std::mem::take(&mut es.pending_sculpt_edits);
+            let sculpt_undo = es.pending_sculpt_undo.take();
 
             // Reset per-frame deltas last.
             es.reset_frame_deltas();
 
             (cam, debug_mode, revoxelize, environment, lights,
-             scene, sel, gm, gizmo_axis, grid, emode, brush_radius)
+             scene, sel, gm, gizmo_axis, grid, emode, brush_radius,
+             sculpt_edits, sculpt_undo, sculpting_active)
         };
 
         // d. Apply extracted data to engine (no lock held — UI thread runs freely).
@@ -464,6 +486,174 @@ fn engine_thread(data: EngineThreadData) {
         if let Some(obj_id) = f_revoxelize {
             if let Ok(mut es) = editor_state.lock() {
                 engine.process_revoxelize(es.world.scene_mut(), obj_id);
+            }
+        }
+
+        // e2. Process sculpt undo (restore brick snapshots to CPU pool + GPU).
+        if let Some(snapshots) = f_sculpt_undo {
+            engine.apply_sculpt_undo(&snapshots);
+        }
+
+        // e3. Process sculpt edits (CPU-side CSG, targeted GPU upload).
+        if !f_sculpt_edits.is_empty() {
+            if let Ok(mut es) = editor_state.lock() {
+                // Ensure undo accumulator exists for this stroke.
+                if es.sculpt_undo_accumulator.is_none() {
+                    let obj_id = f_sculpt_edits[0].object_id as u64;
+                    es.sculpt_undo_accumulator = Some(
+                        editor_state::SculptUndoAccumulator {
+                            object_id: obj_id,
+                            captured_slots: std::collections::HashSet::new(),
+                            snapshots: Vec::new(),
+                        },
+                    );
+                }
+
+                let mut undo_acc = es.sculpt_undo_accumulator.take();
+                let scene = es.world.scene_mut();
+                let _modified = engine.apply_sculpt_edits(
+                    scene,
+                    &f_sculpt_edits,
+                    undo_acc.as_mut(),
+                );
+                es.sculpt_undo_accumulator = undo_acc;
+
+                // Rebuild the render clone since scene may have changed.
+                scene_clone = {
+                    let mut merged = rkf_core::scene::Scene::new("merged");
+                    merged.objects = es.world.all_objects().cloned().collect();
+                    for obj in &mut merged.objects {
+                        obj.aabb = crate::placement::compute_object_local_aabb(obj);
+                    }
+                    merged
+                };
+            }
+        }
+
+        // e4. Process pending voxel_slice request (CPU-side brick pool lookup).
+        if let Some(req) = pending_voxel_slice {
+            let result = engine.sample_voxel_slice(&scene_clone, req.object_id, req.y_coord);
+            if let Ok(mut ss) = shared_state.lock() {
+                match result {
+                    Ok(slice) => ss.voxel_slice_result = Some(slice),
+                    Err(e) => {
+                        ss.push_log(rkf_core::automation::LogLevel::Error,
+                            format!("voxel_slice error: {e}"));
+                        // Store an empty result so the polling doesn't hang.
+                        ss.voxel_slice_result = Some(rkf_core::automation::VoxelSliceResult {
+                            origin: [0.0, 0.0],
+                            spacing: 0.0,
+                            width: 0,
+                            height: 0,
+                            y_coord: req.y_coord,
+                            distances: vec![],
+                            slot_status: vec![],
+                        });
+                    }
+                }
+            }
+        }
+
+        // e5. Process pending spatial_query request (CPU-side SDF evaluation).
+        if let Some(req) = pending_spatial_query {
+            let result = engine.sample_spatial_query(&scene_clone, req.world_pos);
+            if let Ok(mut ss) = shared_state.lock() {
+                ss.spatial_query_result = Some(result);
+            }
+        }
+
+        // e6. Process pending MCP sculpt request (one-shot brush hit + undo).
+        if let Some(req) = pending_mcp_sculpt {
+            let sculpt_result = (|| -> Result<(), String> {
+                let brush_type = match req.mode.as_str() {
+                    "add" => crate::sculpt::BrushType::Add,
+                    "subtract" => crate::sculpt::BrushType::Subtract,
+                    "smooth" => crate::sculpt::BrushType::Smooth,
+                    other => return Err(format!("invalid mode: {other}")),
+                };
+
+                let edit_request = crate::sculpt::SculptEditRequest {
+                    object_id: req.object_id,
+                    world_position: req.position,
+                    settings: crate::sculpt::BrushSettings {
+                        brush_type,
+                        shape: crate::sculpt::BrushShape::Sphere,
+                        radius: req.radius,
+                        strength: req.strength,
+                        material_id: req.material_id,
+                        falloff: 0.5,
+                    },
+                };
+
+                // Create one-shot undo accumulator.
+                let mut undo_acc = editor_state::SculptUndoAccumulator {
+                    object_id: req.object_id as u64,
+                    captured_slots: std::collections::HashSet::new(),
+                    snapshots: Vec::new(),
+                };
+
+                if let Ok(mut es) = editor_state.lock() {
+                    let scene = es.world.scene_mut();
+                    engine.apply_sculpt_edits(
+                        scene,
+                        &[edit_request],
+                        Some(&mut undo_acc),
+                    );
+
+                    // Push undo entry immediately.
+                    if !undo_acc.snapshots.is_empty() {
+                        es.undo.push(crate::undo::UndoAction {
+                            kind: crate::undo::UndoActionKind::SculptStroke {
+                                object_id: req.object_id as u64,
+                                brick_snapshots: undo_acc.snapshots,
+                            },
+                            timestamp_ms: 0,
+                            description: format!("MCP sculpt ({}) on obj {}", req.mode, req.object_id),
+                        });
+                    }
+
+                    // Rebuild scene_clone since voxel data changed.
+                    scene_clone = {
+                        let mut merged = rkf_core::scene::Scene::new("merged");
+                        merged.objects = es.world.all_objects().cloned().collect();
+                        for obj in &mut merged.objects {
+                            obj.aabb = crate::placement::compute_object_local_aabb(obj);
+                        }
+                        merged
+                    };
+                }
+
+                Ok(())
+            })();
+
+            if let Ok(mut ss) = shared_state.lock() {
+                ss.mcp_sculpt_result = Some(sculpt_result);
+            }
+        }
+
+        // e7. Process pending object_shape request (CPU-side brick map lookup).
+        if let Some(obj_id) = pending_object_shape {
+            let result = engine.sample_object_shape(&scene_clone, obj_id);
+            if let Ok(mut ss) = shared_state.lock() {
+                match result {
+                    Ok(shape) => ss.object_shape_result = Some(shape),
+                    Err(e) => {
+                        ss.push_log(rkf_core::automation::LogLevel::Error,
+                            format!("object_shape error: {e}"));
+                        // Store a minimal result so polling doesn't hang.
+                        ss.object_shape_result = Some(rkf_core::automation::ObjectShapeResult {
+                            object_id: obj_id,
+                            dims: [0, 0, 0],
+                            voxel_size: 0.0,
+                            aabb_min: [0.0; 3],
+                            aabb_max: [0.0; 3],
+                            empty_count: 0,
+                            interior_count: 0,
+                            surface_count: 0,
+                            y_slices: vec![],
+                        });
+                    }
+                }
             }
         }
 
@@ -501,7 +691,8 @@ fn engine_thread(data: EngineThreadData) {
             }
 
             // Selection AABB + transform gizmo for selected objects.
-            if let Some(editor_state::SelectedEntity::Object(eid)) = f_selected {
+            // Hidden while actively sculpting to avoid visual clutter.
+            if let Some(editor_state::SelectedEntity::Object(eid)) = f_selected.filter(|_| !f_sculpting_active) {
                 let color = [0.3, 0.7, 1.0, 1.0]; // Light blue
                 let mut gizmo_center: Option<glam::Vec3> = None;
 
@@ -614,21 +805,24 @@ fn engine_thread(data: EngineThreadData) {
         //    directly, writing results back to shared_state before returning.
 
         // l. Process GPU pick result — sets selected_entity, signals main thread.
+        //    Suppressed while actively sculpting to prevent accidental selection changes.
         {
             let pick = shared_state.lock().ok()
                 .and_then(|mut ss| ss.pick_result.take());
             if let Some(object_id) = pick {
-                let picked_entity = if object_id > 0 {
-                    Some(editor_state::SelectedEntity::Object(object_id as u64))
-                } else {
-                    None
-                };
-                if let Ok(mut es) = editor_state.lock() {
-                    es.selected_entity = picked_entity;
-                }
-                // Signal the main thread to update selection signal.
-                if let Ok(mut ss) = shared_state.lock() {
-                    ss.pick_completed = true;
+                if !f_sculpting_active {
+                    let picked_entity = if object_id > 0 {
+                        Some(editor_state::SelectedEntity::Object(object_id as u64))
+                    } else {
+                        None
+                    };
+                    if let Ok(mut es) = editor_state.lock() {
+                        es.selected_entity = picked_entity;
+                    }
+                    // Signal the main thread to update selection signal.
+                    if let Ok(mut ss) = shared_state.lock() {
+                        ss.pick_completed = true;
+                    }
                 }
             }
         }
@@ -638,26 +832,50 @@ fn engine_thread(data: EngineThreadData) {
             let brush_hit = shared_state.lock().ok()
                 .and_then(|mut ss| ss.brush_hit_result.take());
             if let Some(hit) = brush_hit {
-                let (left_down, mode) = editor_state.lock().ok()
-                    .map(|es| (es.editor_input.mouse_buttons[0], es.mode))
-                    .unwrap_or((false, editor_state::EditorMode::Default));
+                let (left_down, mode, selected_obj_id) = editor_state.lock().ok()
+                    .map(|es| {
+                        let sel_id = match es.selected_entity {
+                            Some(editor_state::SelectedEntity::Object(eid)) => Some(eid as u32),
+                            _ => None,
+                        };
+                        (es.editor_input.mouse_buttons[0], es.mode, sel_id)
+                    })
+                    .unwrap_or((false, editor_state::EditorMode::Default, None));
+
+                // Only allow sculpt/paint on the currently selected object.
+                let hit_on_selected = selected_obj_id == Some(hit.object_id);
 
                 if left_down {
                     if let Ok(mut es) = editor_state.lock() {
                         match mode {
-                            editor_state::EditorMode::Sculpt => {
+                            editor_state::EditorMode::Sculpt if hit_on_selected => {
                                 if es.sculpt.active_stroke.is_some() {
                                     es.sculpt.continue_stroke(hit.position);
                                 } else {
                                     es.sculpt.begin_stroke(hit.position);
                                 }
+                                // Queue a real-time sculpt edit for this point.
+                                let settings = es.sculpt.current_settings.clone();
+                                es.pending_sculpt_edits.push(
+                                    sculpt::SculptEditRequest {
+                                        object_id: hit.object_id,
+                                        world_position: hit.position,
+                                        settings,
+                                    },
+                                );
                             }
-                            editor_state::EditorMode::Paint => {
+                            editor_state::EditorMode::Sculpt => {
+                                // Hit a non-selected object — ignore.
+                            }
+                            editor_state::EditorMode::Paint if hit_on_selected => {
                                 if es.paint.active_stroke.is_some() {
                                     es.paint.continue_stroke(hit.position);
                                 } else {
                                     es.paint.begin_stroke(hit.position);
                                 }
+                            }
+                            editor_state::EditorMode::Paint => {
+                                // Hit a non-selected object — ignore.
                             }
                             _ => {}
                         }
@@ -675,7 +893,22 @@ fn engine_thread(data: EngineThreadData) {
                 if !left_down && matches!(mode, editor_state::EditorMode::Sculpt | editor_state::EditorMode::Paint) {
                     if let Ok(mut es) = editor_state.lock() {
                         match mode {
-                            editor_state::EditorMode::Sculpt => es.sculpt.end_stroke(),
+                            editor_state::EditorMode::Sculpt => {
+                                es.sculpt.end_stroke();
+                                // Finalize sculpt undo: push accumulated brick snapshots.
+                                if let Some(acc) = es.sculpt_undo_accumulator.take() {
+                                    if !acc.snapshots.is_empty() {
+                                        es.undo.push(undo::UndoAction {
+                                            kind: undo::UndoActionKind::SculptStroke {
+                                                object_id: acc.object_id,
+                                                brick_snapshots: acc.snapshots,
+                                            },
+                                            timestamp_ms: 0,
+                                            description: "Sculpt stroke".into(),
+                                        });
+                                    }
+                                }
+                            }
                             editor_state::EditorMode::Paint => es.paint.end_stroke(),
                             _ => {}
                         }

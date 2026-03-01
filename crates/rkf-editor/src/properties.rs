@@ -7,6 +7,7 @@
 #![allow(dead_code)]
 
 use glam::{Quat, Vec3};
+use rkf_core::scene_node::SdfSource;
 
 /// A typed property value that can appear in the inspector.
 #[derive(Debug, Clone, PartialEq)]
@@ -216,6 +217,47 @@ pub fn build_transform_properties(entity_id: u64, pos: Vec3, rot: Quat, scale: V
     sheet
 }
 
+/// Build a full object property sheet including transform and SDF source info.
+///
+/// For voxelized objects, shows `voxel_size` as a read-only float.
+/// For analytical objects, shows "Analytical (infinite resolution)" as a read-only string.
+pub fn build_object_properties(
+    entity_id: u64,
+    pos: Vec3,
+    rot: Quat,
+    scale: Vec3,
+    sdf_source: &SdfSource,
+) -> PropertySheet {
+    let mut sheet = build_transform_properties(entity_id, pos, rot, scale);
+
+    match sdf_source {
+        SdfSource::Analytical { .. } => {
+            sheet.add_property_def(PropertyDef::read_only(
+                "sdf_source",
+                PropertyValue::String("Analytical (infinite resolution)".to_string()),
+            ));
+        }
+        SdfSource::Voxelized { voxel_size, .. } => {
+            sheet.add_property_def(PropertyDef::read_only(
+                "sdf_source",
+                PropertyValue::String("Voxelized".to_string()),
+            ));
+            sheet.add_property_def(PropertyDef::read_only(
+                "voxel_size",
+                PropertyValue::Float(*voxel_size),
+            ));
+        }
+        SdfSource::None => {
+            sheet.add_property_def(PropertyDef::read_only(
+                "sdf_source",
+                PropertyValue::String("None (group node)".to_string()),
+            ));
+        }
+    }
+
+    sheet
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -420,5 +462,62 @@ mod tests {
         assert_eq!(sheet.entity_id, 99);
         assert!(sheet.properties.is_empty());
         assert!(sheet.property_names().is_empty());
+    }
+
+    #[test]
+    fn test_build_object_properties_analytical() {
+        use rkf_core::scene_node::SdfPrimitive;
+
+        let sdf = SdfSource::Analytical {
+            primitive: SdfPrimitive::Sphere { radius: 1.0 },
+            material_id: 0,
+        };
+        let sheet = build_object_properties(1, Vec3::ZERO, Quat::IDENTITY, Vec3::ONE, &sdf);
+        // 9 transform + sdf_source
+        assert_eq!(sheet.properties.len(), 10);
+        assert_eq!(
+            sheet.get_property("sdf_source"),
+            Some(&PropertyValue::String("Analytical (infinite resolution)".to_string())),
+        );
+        assert!(sheet.get_property("voxel_size").is_none());
+    }
+
+    #[test]
+    fn test_build_object_properties_voxelized() {
+        use rkf_core::scene_node::BrickMapHandle;
+
+        let sdf = SdfSource::Voxelized {
+            brick_map_handle: BrickMapHandle {
+                offset: 0,
+                dims: glam::UVec3::new(4, 4, 4),
+            },
+            voxel_size: 0.02,
+            aabb: rkf_core::Aabb::new(Vec3::ZERO, Vec3::ONE),
+        };
+        let sheet = build_object_properties(1, Vec3::ZERO, Quat::IDENTITY, Vec3::ONE, &sdf);
+        // 9 transform + sdf_source + voxel_size
+        assert_eq!(sheet.properties.len(), 11);
+        assert_eq!(
+            sheet.get_property("sdf_source"),
+            Some(&PropertyValue::String("Voxelized".to_string())),
+        );
+        assert_eq!(
+            sheet.get_property("voxel_size"),
+            Some(&PropertyValue::Float(0.02)),
+        );
+        // voxel_size should be read-only
+        let vs = sheet.properties.iter().find(|p| p.name == "voxel_size").unwrap();
+        assert!(vs.read_only);
+    }
+
+    #[test]
+    fn test_build_object_properties_none() {
+        let sdf = SdfSource::None;
+        let sheet = build_object_properties(1, Vec3::ZERO, Quat::IDENTITY, Vec3::ONE, &sdf);
+        assert_eq!(sheet.properties.len(), 10);
+        assert_eq!(
+            sheet.get_property("sdf_source"),
+            Some(&PropertyValue::String("None (group node)".to_string())),
+        );
     }
 }

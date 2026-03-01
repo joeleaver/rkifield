@@ -6,6 +6,7 @@
 #![allow(dead_code)]
 
 use glam::{IVec3, Quat, Vec3};
+use rkf_core::brick::Brick;
 
 /// The kind of action that can be undone/redone.
 #[derive(Debug, Clone)]
@@ -24,10 +25,16 @@ pub enum UndoActionKind {
     SpawnEntity { entity_id: u64 },
     /// An entity was despawned (undo = respawn it).
     DespawnEntity { entity_id: u64 },
-    /// A voxel edit operation on a chunk.
+    /// A voxel edit operation on a chunk (v1 legacy).
     VoxelEdit {
         chunk: IVec3,
         description: String,
+    },
+    /// A sculpt stroke — captures brick pool snapshots before modification.
+    /// Undo restores each `(slot, brick_data)` to the CPU pool + GPU upload.
+    SculptStroke {
+        object_id: u64,
+        brick_snapshots: Vec<(u32, Brick)>,
     },
     /// A property was changed on an entity.
     PropertyChange {

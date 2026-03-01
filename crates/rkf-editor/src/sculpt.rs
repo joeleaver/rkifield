@@ -58,7 +58,7 @@ impl Default for BrushSettings {
             shape: BrushShape::Sphere,
             radius: 1.0,
             strength: 0.5,
-            material_id: 0,
+            material_id: 1,
             falloff: 0.5,
         }
     }
@@ -104,6 +104,20 @@ impl SculptStroke {
     pub fn finish(&mut self) {
         self.started = false;
     }
+}
+
+/// A sculpt edit request queued for processing by the engine.
+///
+/// Created per brush-hit point during an active stroke, consumed by the
+/// engine's render loop to apply CPU-side CSG edits to brick pool data.
+#[derive(Debug, Clone)]
+pub struct SculptEditRequest {
+    /// Scene object ID to edit.
+    pub object_id: u32,
+    /// World-space hit position on the object's surface.
+    pub world_position: Vec3,
+    /// Brush settings for this edit point.
+    pub settings: BrushSettings,
 }
 
 /// Manages sculpt mode state including the current brush, active stroke, and history.
@@ -275,7 +289,7 @@ mod tests {
         assert_eq!(settings.shape, BrushShape::Sphere);
         assert!(approx_eq(settings.radius, 1.0));
         assert!(approx_eq(settings.strength, 0.5));
-        assert_eq!(settings.material_id, 0);
+        assert_eq!(settings.material_id, 1);
         assert!(approx_eq(settings.falloff, 0.5));
     }
 

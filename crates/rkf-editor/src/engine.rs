@@ -59,11 +59,90 @@ struct DemoScene {
     character_obj_index: usize,
 }
 
-/// Build the demo scene with 5 analytical + 1 voxelized + 1 animated character.
+/// Try to load a voxelized object from a .rkf file into the brick pool.
+///
+/// Returns `(BrickMapHandle, voxel_size, grid_aabb, brick_count)` on success.
+fn load_rkf_into_pool(
+    path: &str,
+    pool: &mut rkf_core::brick_pool::Pool<rkf_core::brick::Brick>,
+    alloc: &mut BrickMapAllocator,
+) -> Result<(rkf_core::scene_node::BrickMapHandle, f32, Aabb, u32), String> {
+    use rkf_core::asset_file::{load_object_header, load_object_lod};
+    use rkf_core::brick_map::EMPTY_SLOT;
+    use std::io::BufReader;
+
+    let file = std::fs::File::open(path).map_err(|e| format!("open {path}: {e}"))?;
+    let mut reader = BufReader::new(file);
+
+    let header = load_object_header(&mut reader).map_err(|e| format!("header: {e}"))?;
+    if header.lod_entries.is_empty() {
+        return Err("no LOD levels in .rkf".into());
+    }
+
+    // Load the finest LOD (last entry, since they're sorted coarsest-first).
+    let finest_idx = header.lod_entries.len() - 1;
+    let lod = load_object_lod(&mut reader, &header, finest_idx)
+        .map_err(|e| format!("lod: {e}"))?;
+
+    let voxel_size = header.lod_entries[finest_idx].voxel_size;
+    let brick_count = lod.brick_data.len() as u32;
+
+    // Allocate pool slots for all bricks.
+    let slots = pool.allocate_range(brick_count)
+        .ok_or_else(|| format!("pool full: need {brick_count} bricks"))?;
+
+    // Build a new BrickMap with real pool slot indices, and copy brick data.
+    let dims = lod.brick_map.dims;
+    let mut brick_map = rkf_core::brick_map::BrickMap::new(dims);
+    let mut slot_idx = 0usize;
+
+    for bz in 0..dims.z {
+        for by in 0..dims.y {
+            for bx in 0..dims.x {
+                let local_idx = lod.brick_map.get(bx, by, bz).unwrap_or(EMPTY_SLOT);
+                if local_idx == EMPTY_SLOT {
+                    continue;
+                }
+
+                let pool_slot = slots[slot_idx];
+                slot_idx += 1;
+                brick_map.set(bx, by, bz, pool_slot);
+
+                // Copy voxel data into the pool brick.
+                let src = &lod.brick_data[local_idx as usize];
+                let dst = pool.get_mut(pool_slot);
+                dst.voxels.copy_from_slice(src);
+            }
+        }
+    }
+
+    // Register the brick map in the allocator.
+    let handle = alloc.allocate(&brick_map);
+
+    // Compute grid-aligned AABB from dims.
+    let brick_world_size = voxel_size * 8.0;
+    let grid_half = Vec3::new(
+        dims.x as f32 * brick_world_size * 0.5,
+        dims.y as f32 * brick_world_size * 0.5,
+        dims.z as f32 * brick_world_size * 0.5,
+    );
+    let grid_aabb = Aabb::new(-grid_half, grid_half);
+
+    log::info!(
+        "Loaded {path}: {brick_count} bricks, dims={dims:?}, voxel_size={voxel_size}"
+    );
+
+    Ok((handle, voxel_size, grid_aabb, brick_count))
+}
+
+/// Build the demo scene.
+///
+/// If `scenes/test_cross.rkf` exists, loads it as the primary voxelized object.
+/// Otherwise falls back to an inline voxelized sphere.
 fn build_demo_scene() -> DemoScene {
     let mut scene = Scene::new("editor_demo");
 
-    // 1. Ground plane (large flat box)
+    // Ground plane
     let ground = SceneNode::analytical("ground", SdfPrimitive::Box {
         half_extents: Vec3::new(10.0, 0.1, 10.0),
     }, 1);
@@ -71,7 +150,7 @@ fn build_demo_scene() -> DemoScene {
         id: 0,
         name: "ground".into(),
         parent_id: None,
-        position: Vec3::new(0.0, -0.6, 0.0),
+        position: Vec3::new(0.0, -0.8, 0.0),
         rotation: Quat::IDENTITY,
         scale: Vec3::ONE,
         root_node: ground,
@@ -79,118 +158,83 @@ fn build_demo_scene() -> DemoScene {
     };
     scene.add_object_full(ground_obj);
 
-    // 2. Sphere (analytical)
-    let sphere = SceneNode::analytical("sphere", SdfPrimitive::Sphere { radius: 0.5 }, 2);
-    let sphere_obj = SceneObject {
-        id: 0,
-        name: "sphere".into(),
-        parent_id: None,
-        position: Vec3::new(-1.5, 0.0, -2.0),
-        rotation: Quat::IDENTITY,
-        scale: Vec3::ONE,
-        root_node: sphere,
-        aabb: Aabb::new(Vec3::new(-0.5, -0.5, -0.5), Vec3::new(0.5, 0.5, 0.5)),
-    };
-    scene.add_object_full(sphere_obj);
-
-    // 3. Box (analytical)
-    let box_node = SceneNode::analytical("box", SdfPrimitive::Box {
-        half_extents: Vec3::new(0.35, 0.35, 0.35),
-    }, 3);
-    let box_obj = SceneObject {
-        id: 0,
-        name: "box".into(),
-        parent_id: None,
-        position: Vec3::new(0.0, 0.0, -2.0),
-        rotation: Quat::from_rotation_y(0.5),
-        scale: Vec3::ONE,
-        root_node: box_node,
-        aabb: Aabb::new(Vec3::new(-0.5, -0.5, -0.5), Vec3::new(0.5, 0.5, 0.5)),
-    };
-    scene.add_object_full(box_obj);
-
-    // 4. Capsule (analytical)
-    let capsule = SceneNode::analytical("capsule", SdfPrimitive::Capsule {
-        radius: 0.2,
-        half_height: 0.4,
-    }, 4);
-    let capsule_obj = SceneObject {
-        id: 0,
-        name: "capsule".into(),
-        parent_id: None,
-        position: Vec3::new(1.5, 0.0, -2.0),
-        rotation: Quat::IDENTITY,
-        scale: Vec3::ONE,
-        root_node: capsule,
-        aabb: Aabb::new(Vec3::new(-0.5, -0.6, -0.5), Vec3::new(0.5, 0.6, 0.5)),
-    };
-    scene.add_object_full(capsule_obj);
-
-    // 5. Torus (analytical)
-    let torus = SceneNode::analytical("torus", SdfPrimitive::Torus {
-        major_radius: 0.4,
-        minor_radius: 0.12,
-    }, 5);
-    let torus_obj = SceneObject {
-        id: 0,
-        name: "torus".into(),
-        parent_id: None,
-        position: Vec3::new(0.0, 0.3, -3.5),
-        rotation: Quat::IDENTITY,
-        scale: Vec3::ONE,
-        root_node: torus,
-        aabb: Aabb::new(Vec3::new(-0.6, -0.5, -0.6), Vec3::new(0.6, 0.5, 0.6)),
-    };
-    scene.add_object_full(torus_obj);
-
-    // 6. Voxelized sphere
     let mut brick_pool = BrickPool::new(4096);
     let mut brick_map_alloc = BrickMapAllocator::new();
 
-    let vox_radius = 0.4;
-    let voxel_size = 0.04;
-    let margin = voxel_size * 2.0;
-    let vox_aabb = Aabb::new(
-        Vec3::splat(-vox_radius - margin),
-        Vec3::splat(vox_radius + margin),
-    );
+    // Try loading from .rkf file on disk.
+    let rkf_path = "scenes/test_cross.rkf";
+    match load_rkf_into_pool(rkf_path, &mut brick_pool, &mut brick_map_alloc) {
+        Ok((handle, voxel_size, grid_aabb, _brick_count)) => {
+            let mut vox_node = SceneNode::new("vox_cross");
+            vox_node.sdf_source = SdfSource::Voxelized {
+                brick_map_handle: handle,
+                voxel_size,
+                aabb: grid_aabb,
+            };
+            let vox_obj = SceneObject {
+                id: 0,
+                name: "vox_cross".into(),
+                parent_id: None,
+                position: Vec3::new(0.0, 0.0, -2.0),
+                rotation: Quat::IDENTITY,
+                scale: Vec3::ONE,
+                root_node: vox_node,
+                aabb: grid_aabb,
+            };
+            scene.add_object_full(vox_obj);
+        }
+        Err(e) => {
+            log::warn!("Failed to load {rkf_path}: {e} — falling back to inline sphere");
 
-    let sdf_fn = |pos: Vec3| -> (f32, u16) {
-        (pos.length() - vox_radius, 6u16)
-    };
+            // Fallback: inline voxelized sphere
+            let vox_radius = 0.4;
+            let voxel_size = 0.04;
+            let margin = voxel_size * 2.0;
+            let vox_aabb = Aabb::new(
+                Vec3::splat(-vox_radius - margin),
+                Vec3::splat(vox_radius + margin),
+            );
+            let sdf_fn = |pos: Vec3| -> (f32, u16) {
+                (pos.length() - vox_radius, 6u16)
+            };
+            let (handle, brick_count) = voxelize_sdf(
+                sdf_fn, &vox_aabb, voxel_size, &mut brick_pool, &mut brick_map_alloc,
+            ).expect("voxelize sphere");
 
-    let (handle, brick_count) = voxelize_sdf(
-        sdf_fn, &vox_aabb, voxel_size, &mut brick_pool, &mut brick_map_alloc,
-    ).expect("voxelize sphere");
+            let vox_brick_size = voxel_size * 8.0;
+            let vox_grid_half = Vec3::new(
+                handle.dims.x as f32 * vox_brick_size * 0.5,
+                handle.dims.y as f32 * vox_brick_size * 0.5,
+                handle.dims.z as f32 * vox_brick_size * 0.5,
+            );
+            let vox_grid_aabb = Aabb::new(-vox_grid_half, vox_grid_half);
 
-    log::info!(
-        "Voxelized sphere: {} bricks, handle offset={} dims={:?}",
-        brick_count, handle.offset, handle.dims
-    );
+            log::info!(
+                "Voxelized sphere: {} bricks, handle offset={} dims={:?}",
+                brick_count, handle.offset, handle.dims
+            );
 
-    let mut vox_node = SceneNode::new("vox_sphere");
-    vox_node.sdf_source = SdfSource::Voxelized {
-        brick_map_handle: handle,
-        voxel_size,
-        aabb: vox_aabb,
-    };
+            let mut vox_node = SceneNode::new("vox_sphere");
+            vox_node.sdf_source = SdfSource::Voxelized {
+                brick_map_handle: handle,
+                voxel_size,
+                aabb: vox_grid_aabb,
+            };
+            let vox_obj = SceneObject {
+                id: 0,
+                name: "vox_sphere".into(),
+                parent_id: None,
+                position: Vec3::new(0.0, 0.0, -2.0),
+                rotation: Quat::IDENTITY,
+                scale: Vec3::ONE,
+                root_node: vox_node,
+                aabb: vox_grid_aabb,
+            };
+            scene.add_object_full(vox_obj);
+        }
+    }
 
-    let vox_obj = SceneObject {
-        id: 0,
-        name: "vox_sphere".into(),
-        parent_id: None,
-        position: Vec3::new(3.0, 0.0, -2.0),
-        rotation: Quat::IDENTITY,
-        scale: Vec3::ONE,
-        root_node: vox_node,
-        aabb: Aabb::new(
-            Vec3::new(-vox_radius - margin, -vox_radius - margin, -vox_radius - margin),
-            Vec3::new(vox_radius + margin, vox_radius + margin, vox_radius + margin),
-        ),
-    };
-    scene.add_object_full(vox_obj);
-
-    // 7. Animated humanoid character
+    // Animated humanoid character (required by DemoScene struct)
     let skeleton = build_humanoid_skeleton();
     let visuals = build_humanoid_visuals(5);
     let walk_clip = build_walk_clip();
@@ -215,6 +259,25 @@ fn build_demo_scene() -> DemoScene {
         brick_map_alloc,
         character,
         character_obj_index,
+    }
+}
+
+/// Compute the diameter of an analytical SDF primitive's bounding sphere.
+fn primitive_diameter(prim: &rkf_core::SdfPrimitive) -> f32 {
+    use rkf_core::SdfPrimitive;
+    match *prim {
+        SdfPrimitive::Sphere { radius } => radius * 2.0,
+        SdfPrimitive::Box { half_extents } => half_extents.length() * 2.0,
+        SdfPrimitive::Capsule { radius, half_height } => {
+            (radius + half_height) * 2.0
+        }
+        SdfPrimitive::Torus { major_radius, minor_radius } => {
+            (major_radius + minor_radius) * 2.0
+        }
+        SdfPrimitive::Cylinder { radius, half_height } => {
+            Vec3::new(radius, half_height, radius).length() * 2.0
+        }
+        SdfPrimitive::Plane { .. } => 2.0, // planes get default size
     }
 }
 
@@ -613,6 +676,67 @@ impl EditorEngine {
             cpu_brick_map_alloc: demo.brick_map_alloc,
         };
         (engine, scene)
+    }
+
+    /// Fill 1 layer of SDF padding bricks around each voxelized object.
+    ///
+    /// At load time, narrow-band bricks go straight to EMPTY_SLOT with no
+    /// transition. This causes gradient discontinuities (faceted normals) at
+    /// the narrow-band boundary because `sample_voxel_at` returns a constant
+    /// for EMPTY_SLOT bricks. This method allocates padding bricks and fills
+    /// them with properly trilinear-sampled SDF values, making the gradient
+    /// smooth across the boundary.
+    pub fn init_sdf_padding(&mut self, scene: &mut Scene) {
+        for obj in &mut scene.objects {
+            let (handle, voxel_size, aabb_min) = match &obj.root_node.sdf_source {
+                SdfSource::Voxelized { brick_map_handle, voxel_size, aabb } => {
+                    (*brick_map_handle, *voxel_size, aabb.min)
+                }
+                _ => continue,
+            };
+
+            // Mark interior empties first (needed for correct sign in padding).
+            self.mark_interior_empties(&handle);
+
+            // Create a fake EditOp covering the entire object so
+            // ensure_sdf_consistency fills all boundary bricks.
+            let half = Vec3::new(
+                handle.dims.x as f32 * voxel_size * 4.0,
+                handle.dims.y as f32 * voxel_size * 4.0,
+                handle.dims.z as f32 * voxel_size * 4.0,
+            );
+            let fake_op = rkf_edit::edit_op::EditOp {
+                object_id: obj.id,
+                position: Vec3::ZERO,
+                rotation: glam::Quat::IDENTITY,
+                edit_type: rkf_edit::types::EditType::SmoothUnion,
+                shape_type: rkf_edit::types::ShapeType::Sphere,
+                dimensions: half,
+                strength: 1.0,
+                blend_k: 0.0,
+                falloff: rkf_edit::types::FalloffCurve::Smooth,
+                material_id: 0,
+                secondary_id: 0,
+                color_packed: 0,
+            };
+
+            let slots = self.ensure_sdf_consistency(&handle, voxel_size, aabb_min, &fake_op);
+            if !slots.is_empty() {
+                log::info!(
+                    "init_sdf_padding: filled {} padding bricks for '{}'",
+                    slots.len(), obj.name,
+                );
+            }
+        }
+
+        // Reupload all brick data + maps after padding.
+        self.reupload_brick_data();
+        let map_data = self.cpu_brick_map_alloc.as_slice();
+        if !map_data.is_empty() {
+            self.gpu_scene.upload_brick_maps(
+                &self.ctx.device, &self.ctx.queue, map_data,
+            );
+        }
     }
 
     /// Access the wgpu device.
@@ -1148,7 +1272,6 @@ impl EditorEngine {
     /// Returns `true` if a re-voxelize was performed.
     pub fn process_revoxelize(&mut self, scene: &mut Scene, object_id: u32) -> bool {
         use rkf_core::brick::Brick;
-        use rkf_core::brick_map::EMPTY_SLOT;
         use rkf_core::constants::BRICK_DIM;
         use rkf_core::sampling::{sample_brick_trilinear, sample_brick_nearest_material};
 
@@ -1182,7 +1305,7 @@ impl EditorEngine {
                     if let Some(slot) = self.cpu_brick_map_alloc.get_entry(
                         &old_handle, bx, by, bz,
                     ) {
-                        if slot != EMPTY_SLOT {
+                        if !Self::is_unallocated(slot) {
                             old_bricks.insert(
                                 (bx, by, bz),
                                 self.cpu_brick_pool.get(slot).clone(),
@@ -1200,7 +1323,7 @@ impl EditorEngine {
                     if let Some(slot) = self.cpu_brick_map_alloc.get_entry(
                         &old_handle, bx, by, bz,
                     ) {
-                        if slot != EMPTY_SLOT {
+                        if !Self::is_unallocated(slot) {
                             self.cpu_brick_pool.deallocate(slot);
                         }
                     }
@@ -1282,13 +1405,20 @@ impl EditorEngine {
             }
         };
 
-        // 6. Update the object.
+        // 6. Update the object. Use grid-aligned AABB from actual dims.
+        let revox_brick_size = voxel_size * 8.0;
+        let revox_grid_half = Vec3::new(
+            new_handle.dims.x as f32 * revox_brick_size * 0.5,
+            new_handle.dims.y as f32 * revox_brick_size * 0.5,
+            new_handle.dims.z as f32 * revox_brick_size * 0.5,
+        );
+        let revox_grid_aabb = Aabb::new(-revox_grid_half, revox_grid_half);
         obj.root_node.sdf_source = SdfSource::Voxelized {
             brick_map_handle: new_handle,
             voxel_size,
-            aabb: new_aabb,
+            aabb: revox_grid_aabb,
         };
-        obj.aabb = new_aabb;
+        obj.aabb = revox_grid_aabb;
         obj.scale = Vec3::ONE;
 
         // 7. Re-upload brick pool and brick maps to GPU.
@@ -1308,6 +1438,1205 @@ impl EditorEngine {
             object_id,
         );
         true
+    }
+
+    /// Auto-voxelize an analytical object for sculpting.
+    ///
+    /// If the object's root node is `SdfSource::Analytical`, converts it to
+    /// `SdfSource::Voxelized` with a resolution based on the primitive's size
+    /// (diameter / 48, clamped to [0.005, 0.5]).
+    ///
+    /// Returns the new `(voxel_size, aabb, handle)` if voxelization occurred.
+    pub fn ensure_object_voxelized(
+        &mut self,
+        scene: &mut Scene,
+        object_id: u32,
+    ) -> Option<(f32, Aabb, rkf_core::scene_node::BrickMapHandle)> {
+        let obj = scene.objects.iter_mut().find(|o| o.id == object_id)?;
+
+        let (primitive, material_id) = match &obj.root_node.sdf_source {
+            SdfSource::Analytical { primitive, material_id } => (*primitive, *material_id),
+            SdfSource::Voxelized { .. } => return None, // Already voxelized.
+            SdfSource::None => return None,
+        };
+
+        // Compute object diameter from primitive bounding.
+        let diameter = primitive_diameter(&primitive);
+        let voxel_size = (diameter / 48.0).clamp(0.005, 0.5);
+
+        // Build AABB with 50% growth margin for sculpting expansion.
+        let half = diameter * 0.5;
+        let margin = half * 0.5;
+        let aabb = Aabb::new(
+            Vec3::splat(-half - margin),
+            Vec3::splat(half + margin),
+        );
+
+        // Build SDF closure from the primitive.
+        let sdf_fn = move |pos: Vec3| -> (f32, u16) {
+            (rkf_core::evaluate_primitive(&primitive, pos), material_id)
+        };
+
+        let result = rkf_core::voxelize_sdf(
+            sdf_fn,
+            &aabb,
+            voxel_size,
+            &mut self.cpu_brick_pool,
+            &mut self.cpu_brick_map_alloc,
+        );
+
+        let (handle, brick_count) = match result {
+            Some(r) => r,
+            None => {
+                log::warn!("Auto-voxelize failed: not enough brick pool slots");
+                return None;
+            }
+        };
+
+        // Compute the grid-aligned AABB from the actual dims returned by voxelize_sdf.
+        // The GPU shader centers the grid at the object origin: grid_pos = local_pos + grid_size * 0.5.
+        // The voxelizer uses grid_origin = -grid_size/2 (which may differ from aabb.min due to
+        // ceil rounding of dims). We MUST store the grid-aligned AABB so the CPU edit path
+        // (find_affected_bricks, apply_edit_cpu) uses the same coordinate origin as the shader.
+        let brick_size = voxel_size * 8.0;
+        let grid_half = Vec3::new(
+            handle.dims.x as f32 * brick_size * 0.5,
+            handle.dims.y as f32 * brick_size * 0.5,
+            handle.dims.z as f32 * brick_size * 0.5,
+        );
+        let grid_aabb = Aabb::new(-grid_half, grid_half);
+
+        log::info!(
+            "Auto-voxelized object {} ({}): {} bricks, voxel_size={:.4}, dims={:?}, aabb_min={:?} grid_min={:?}",
+            object_id, obj.name, brick_count, voxel_size, handle.dims, aabb.min, grid_aabb.min,
+        );
+
+        // Update the object's SDF source.
+        obj.root_node.sdf_source = SdfSource::Voxelized {
+            brick_map_handle: handle,
+            voxel_size,
+            aabb: grid_aabb,
+        };
+        obj.aabb = grid_aabb;
+
+        // Re-upload brick pool + brick maps to GPU.
+        self.reupload_brick_data();
+
+        Some((voxel_size, grid_aabb, handle))
+    }
+
+    /// Apply a batch of sculpt edit requests to the CPU brick pool and upload changes.
+    ///
+    /// Each request is converted to an `EditOp` in object-local space, then
+    /// `apply_edit_cpu` modifies the CPU brick pool. Changed bricks are
+    /// uploaded to the GPU via targeted `queue.write_buffer()`.
+    ///
+    /// Returns the list of all modified brick pool slot indices.
+    ///
+    /// If `undo_acc` is provided, bricks are snapshot before modification
+    /// so the undo system can restore them.
+    pub fn apply_sculpt_edits(
+        &mut self,
+        scene: &mut Scene,
+        edits: &[crate::sculpt::SculptEditRequest],
+        mut undo_acc: Option<&mut crate::editor_state::SculptUndoAccumulator>,
+    ) -> Vec<u32> {
+        use rkf_edit::cpu_apply::apply_edit_cpu;
+
+        use rkf_edit::types::{EditType, FalloffCurve, ShapeType};
+
+        let mut all_modified_slots = Vec::new();
+
+        for req in edits {
+            // 1. Auto-voxelize if analytical.
+            self.ensure_object_voxelized(scene, req.object_id);
+
+            // 2. Look up the object to get transform + SDF source info.
+            let obj = match scene.objects.iter().find(|o| o.id == req.object_id) {
+                Some(o) => o,
+                None => continue,
+            };
+
+            let (voxel_size, handle_pre, aabb_min_pre) = match &obj.root_node.sdf_source {
+                SdfSource::Voxelized { voxel_size, brick_map_handle, aabb } => {
+                    (*voxel_size, *brick_map_handle, aabb.min)
+                }
+                _ => continue, // Shouldn't happen after auto-voxelize.
+            };
+
+            // 3. Transform world position to object-local space.
+            let local_pos = crate::sculpt::world_to_object_local_v2(
+                req.world_position,
+                obj,
+            );
+
+            // 3b. Sample dominant material from the surface at the brush hit.
+            //
+            // Instead of using a fixed material_id from BrushSettings, sample
+            // the existing voxel data around the hit point and use the most
+            // common (dominant) material. This makes additive sculpting
+            // naturally continue with the object's existing material.
+            let sampled_material = self.sample_dominant_material(
+                &handle_pre, voxel_size, aabb_min_pre, local_pos,
+            );
+
+            // 4. Convert BrushSettings → EditOp.
+            let min_scale = obj.scale.x.min(obj.scale.y.min(obj.scale.z)).max(1e-6);
+            let inv_scale = 1.0 / min_scale;
+
+            let edit_type = match req.settings.brush_type {
+                crate::sculpt::BrushType::Add => EditType::SmoothUnion,
+                crate::sculpt::BrushType::Subtract => EditType::SmoothSubtract,
+                crate::sculpt::BrushType::Smooth => EditType::Smooth,
+                crate::sculpt::BrushType::Flatten => EditType::Flatten,
+                crate::sculpt::BrushType::Sharpen => EditType::Smooth,
+            };
+
+            let shape_type = match req.settings.shape {
+                crate::sculpt::BrushShape::Sphere => ShapeType::Sphere,
+                crate::sculpt::BrushShape::Cube => ShapeType::Box,
+                crate::sculpt::BrushShape::Cylinder => ShapeType::Cylinder,
+            };
+
+            let local_radius = req.settings.radius * inv_scale;
+            let local_dims = match req.settings.shape {
+                crate::sculpt::BrushShape::Sphere => Vec3::new(local_radius, 0.0, 0.0),
+                crate::sculpt::BrushShape::Cube => Vec3::splat(local_radius),
+                crate::sculpt::BrushShape::Cylinder => Vec3::new(local_radius, local_radius, 0.0),
+            };
+
+            let blend_k = local_radius * 0.3; // default smooth blend
+
+            let op = rkf_edit::edit_op::EditOp {
+                object_id: req.object_id,
+                position: local_pos,
+                rotation: glam::Quat::IDENTITY,
+                edit_type,
+                shape_type,
+                dimensions: local_dims,
+                strength: req.settings.strength,
+                blend_k,
+                falloff: FalloffCurve::Smooth,
+                material_id: sampled_material,
+                secondary_id: 0,
+                color_packed: 0,
+            };
+
+            // 5. For all geometry ops, grow map if needed and allocate empty bricks.
+            // Subtractive edits (Subtract, Smooth, Flatten) also need allocated
+            // bricks to carve into — otherwise they silently pass through empty space.
+            log::info!(
+                "Sculpt pool stats BEFORE alloc: {}/{} used ({} free)",
+                self.cpu_brick_pool.allocated_count(),
+                self.cpu_brick_pool.capacity(),
+                self.cpu_brick_pool.free_count(),
+            );
+            let newly_allocated = if !matches!(edit_type, EditType::Paint | EditType::BlendPaint) {
+                self.allocate_bricks_in_region(
+                    scene, req.object_id, &op, voxel_size,
+                )
+            } else {
+                Vec::new()
+            };
+
+            // Re-lookup handle (may have changed after brick allocation).
+            let obj = match scene.objects.iter().find(|o| o.id == req.object_id) {
+                Some(o) => o,
+                None => continue,
+            };
+            let (handle, voxel_size, aabb_min) = match &obj.root_node.sdf_source {
+                SdfSource::Voxelized { brick_map_handle, voxel_size, aabb } => {
+                    (*brick_map_handle, *voxel_size, aabb.min)
+                }
+                _ => continue,
+            };
+
+            // Verify that aabb_min matches the grid-aligned origin.
+            let brick_size = voxel_size * 8.0;
+            let expected_min = Vec3::new(
+                -(handle.dims.x as f32 * brick_size * 0.5),
+                -(handle.dims.y as f32 * brick_size * 0.5),
+                -(handle.dims.z as f32 * brick_size * 0.5),
+            );
+            let aabb_err = (aabb_min - expected_min).abs();
+            if aabb_err.x > 0.001 || aabb_err.y > 0.001 || aabb_err.z > 0.001 {
+                log::error!(
+                    "SCULPT BUG: aabb_min {:?} != grid_origin {:?} (error {:?})",
+                    aabb_min, expected_min, aabb_err,
+                );
+            }
+
+            // 5b. Snapshot newly allocated bricks for undo before they get modified.
+            // These bricks start with constant-fill data; capturing them now
+            // means undo restores the pre-edit constant fill (visually invisible).
+            if let Some(ref mut acc) = undo_acc {
+                for &slot in &newly_allocated {
+                    if acc.captured_slots.insert(slot) {
+                        acc.snapshots.push((slot, self.cpu_brick_pool.get(slot).clone()));
+                    }
+                }
+            }
+
+            // 6. Collect ALL allocated bricks in the object and apply CSG to every one.
+            // This ensures perfectly consistent SDF across the entire object —
+            // no missed bricks, no patchwork from different code paths. The falloff
+            // function naturally zeroes out for bricks far from the brush.
+            log::info!(
+                "Sculpt: obj={}, local_pos={:?}, dims={:?}, aabb_min={:?}, brush_r={:.3}, edit_type={:?}",
+                req.object_id, local_pos, handle.dims, aabb_min, local_radius, edit_type,
+            );
+
+            let all_bricks = Self::collect_all_allocated_bricks(
+                &self.cpu_brick_map_alloc, &handle, voxel_size, aabb_min,
+            );
+
+            log::info!("  all allocated: {} bricks, newly_alloc: {}", all_bricks.len(), newly_allocated.len());
+
+            if all_bricks.is_empty() {
+                log::warn!("  No allocated bricks found — skipping");
+                continue;
+            }
+
+            // 6b. Snapshot bricks for undo before modifying them.
+            if let Some(ref mut acc) = undo_acc {
+                for ab in &all_bricks {
+                    let slot = ab.brick_base_index / 512;
+                    if acc.captured_slots.insert(slot) {
+                        // First time seeing this slot — capture pre-edit state.
+                        acc.snapshots.push((slot, self.cpu_brick_pool.get(slot).clone()));
+                    }
+                }
+            }
+
+            let modified = apply_edit_cpu(&mut self.cpu_brick_pool, &all_bricks, &op);
+            log::info!("  modified: {} brick slots", modified.len());
+
+            // 6c. Reset newly allocated bricks that the CSG didn't touch.
+            //
+            // `allocate_bricks_in_region` fills new bricks with constant
+            // ±vs*2.0. Bricks near the brush center are overwritten by
+            // `apply_edit_cpu` with proper CSG-blended values, but bricks
+            // at the periphery (within falloff sphere but outside actual
+            // brush influence) keep the constant fill. This creates massive
+            // SDF discontinuities at boundaries with original bricks that
+            // have correct, larger distances — manifesting as crease/shelf
+            // artifacts.
+            //
+            // Fix: revert unmodified newly-allocated bricks to EMPTY_SLOT
+            // so `ensure_sdf_consistency` can fill them via BFS from
+            // neighboring bricks with properly interpolated values.
+            {
+                let modified_set: std::collections::HashSet<u32> =
+                    modified.iter().copied().collect();
+                let unmodified: Vec<u32> = newly_allocated.iter()
+                    .copied()
+                    .filter(|s| !modified_set.contains(s))
+                    .collect();
+
+                if !unmodified.is_empty() {
+                    // Build reverse map: slot → (bx, by, bz) in a single pass.
+                    let unmod_set: std::collections::HashSet<u32> =
+                        unmodified.iter().copied().collect();
+                    let dims = handle.dims;
+                    let mut slot_to_coord: std::collections::HashMap<u32, (u32, u32, u32)> =
+                        std::collections::HashMap::new();
+                    for bz in 0..dims.z {
+                        for by in 0..dims.y {
+                            for bx in 0..dims.x {
+                                if let Some(s) = self.cpu_brick_map_alloc.get_entry(&handle, bx, by, bz) {
+                                    if unmod_set.contains(&s) {
+                                        slot_to_coord.insert(s, (bx, by, bz));
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    let mut reverted = 0u32;
+                    for slot in &unmodified {
+                        if let Some(&(bx, by, bz)) = slot_to_coord.get(slot) {
+                            self.cpu_brick_map_alloc.set_entry(
+                                &handle, bx, by, bz,
+                                rkf_core::brick_map::EMPTY_SLOT,
+                            );
+                            self.cpu_brick_pool.deallocate(*slot);
+                            reverted += 1;
+                        }
+                    }
+                    if reverted > 0 {
+                        log::info!(
+                            "  reverted {} unmodified newly-allocated bricks to EMPTY_SLOT",
+                            reverted,
+                        );
+                    }
+                }
+            }
+
+            // 6d. Mark interior empties and fill padding bricks with proper SDF.
+            let _interior_changed = self.mark_interior_empties(&handle);
+            let consistency_slots = self.ensure_sdf_consistency(&handle, voxel_size, aabb_min, &op);
+            if !consistency_slots.is_empty() {
+                log::info!("  consistency: filled {} padding bricks", consistency_slots.len());
+            }
+
+            log::info!(
+                "Sculpt pool stats AFTER all: {}/{} used ({} free)",
+                self.cpu_brick_pool.allocated_count(),
+                self.cpu_brick_pool.capacity(),
+                self.cpu_brick_pool.free_count(),
+            );
+
+            // 7. Full GPU reupload — ensures CPU and GPU brick data are always
+            //    perfectly in sync. This is the safe path; partial uploads can be
+            //    re-enabled once the sculpt pipeline is validated.
+            self.reupload_brick_data();
+
+            // Always re-upload brick maps — new allocations, interior markers,
+            // and consistency passes all modify brick map entries.
+            {
+                let map_data = self.cpu_brick_map_alloc.as_slice();
+                if !map_data.is_empty() {
+                    self.gpu_scene.upload_brick_maps(
+                        &self.ctx.device, &self.ctx.queue, map_data,
+                    );
+                }
+            }
+
+            all_modified_slots.extend(&modified);
+        }
+
+        all_modified_slots
+    }
+
+    /// Grow the brick map if the edit extends beyond the current grid.
+    ///
+    /// The grid is always centered at the object's local origin. When a sculpt
+    /// edit extends past the current grid boundary, this method:
+    /// 1. Computes new (larger) grid dimensions that contain the edit
+    /// 2. Creates a new BrickMap with expanded dims
+    /// 3. Copies existing slot entries (with coordinate offset for centering)
+    /// 4. Deallocates old map, allocates new map
+    /// 5. Updates SdfSource with new handle/AABB
+    /// 6. Re-uploads brick maps to GPU
+    ///
+    /// Returns true if the map was grown.
+    fn grow_brick_map_if_needed(
+        &mut self,
+        scene: &mut Scene,
+        object_id: u32,
+        op: &rkf_edit::edit_op::EditOp,
+    ) -> bool {
+        use rkf_core::brick_map::BrickMap;
+
+        let obj = match scene.objects.iter().find(|o| o.id == object_id) {
+            Some(o) => o,
+            None => return false,
+        };
+
+        let (handle, voxel_size) = match &obj.root_node.sdf_source {
+            SdfSource::Voxelized { brick_map_handle, voxel_size, .. } => {
+                (*brick_map_handle, *voxel_size)
+            }
+            _ => return false,
+        };
+
+        let brick_size = voxel_size * 8.0;
+        let (edit_min, edit_max) = op.local_aabb();
+        let grid_origin = -Vec3::new(
+            handle.dims.x as f32 * brick_size * 0.5,
+            handle.dims.y as f32 * brick_size * 0.5,
+            handle.dims.z as f32 * brick_size * 0.5,
+        );
+        let grid_end = -grid_origin;
+
+        // Check if edit fits within current grid (with padding margin).
+        // ensure_sdf_consistency needs 4 bricks of BFS padding, plus 1 extra
+        // for Catmull-Rom gradient sampling at the padding edge = 5 bricks.
+        let margin = brick_size * 5.0;
+        if edit_min.x >= grid_origin.x + margin
+            && edit_min.y >= grid_origin.y + margin
+            && edit_min.z >= grid_origin.z + margin
+            && edit_max.x <= grid_end.x - margin
+            && edit_max.y <= grid_end.y - margin
+            && edit_max.z <= grid_end.z - margin
+        {
+            return false; // Fits fine, no growth needed.
+        }
+
+        // Compute required extent: union of current grid and edit AABB, plus margin.
+        // 6 bricks: 4 for consistency BFS padding + 1 for gradient sampling + 1 spare.
+        let growth_margin = brick_size * 6.0;
+        let required_min = edit_min.min(grid_origin) - Vec3::splat(growth_margin);
+        let required_max = edit_max.max(grid_end) + Vec3::splat(growth_margin);
+
+        // New grid must be symmetric about origin (shader assumes centered).
+        // The dimension change must be even so that integer pad = (new - old) / 2
+        // exactly matches the floating-point centering offset. An odd delta
+        // would shift old data by half a brick, scrambling the SDF.
+        let half_extent = required_min.abs().max(required_max.abs());
+        let raw_dims = glam::UVec3::new(
+            ((half_extent.x * 2.0 / brick_size).ceil() as u32).max(handle.dims.x),
+            ((half_extent.y * 2.0 / brick_size).ceil() as u32).max(handle.dims.y),
+            ((half_extent.z * 2.0 / brick_size).ceil() as u32).max(handle.dims.z),
+        );
+        // Ensure (new_dims - old_dims) is even on each axis.
+        let fix_parity = |new: u32, old: u32| -> u32 {
+            if (new.wrapping_sub(old)) % 2 != 0 { new + 1 } else { new }
+        };
+        let new_dims = glam::UVec3::new(
+            fix_parity(raw_dims.x, handle.dims.x),
+            fix_parity(raw_dims.y, handle.dims.y),
+            fix_parity(raw_dims.z, handle.dims.z),
+        );
+
+        if new_dims == handle.dims {
+            return false; // Already big enough.
+        }
+
+        // Compute offset: old brick (0,0,0) maps to new brick at this offset.
+        let pad_x = (new_dims.x - handle.dims.x) / 2;
+        let pad_y = (new_dims.y - handle.dims.y) / 2;
+        let pad_z = (new_dims.z - handle.dims.z) / 2;
+
+        // Build new BrickMap and copy existing entries.
+        let mut new_map = BrickMap::new(new_dims);
+        for bz in 0..handle.dims.z {
+            for by in 0..handle.dims.y {
+                for bx in 0..handle.dims.x {
+                    if let Some(slot) = self.cpu_brick_map_alloc.get_entry(&handle, bx, by, bz) {
+                        if !Self::is_unallocated(slot) {
+                            new_map.set(bx + pad_x, by + pad_y, bz + pad_z, slot);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Deallocate old, allocate new.
+        self.cpu_brick_map_alloc.deallocate(handle);
+        let new_handle = self.cpu_brick_map_alloc.allocate(&new_map);
+
+        // Update AABB to match new grid extent (centered at origin).
+        let new_half = Vec3::new(
+            new_dims.x as f32 * brick_size * 0.5,
+            new_dims.y as f32 * brick_size * 0.5,
+            new_dims.z as f32 * brick_size * 0.5,
+        );
+        let new_aabb = Aabb::new(-new_half, new_half);
+
+        // Update the scene object.
+        let obj = scene.objects.iter_mut().find(|o| o.id == object_id).unwrap();
+        obj.root_node.sdf_source = SdfSource::Voxelized {
+            brick_map_handle: new_handle,
+            voxel_size,
+            aabb: new_aabb,
+        };
+        obj.aabb = new_aabb;
+
+        // Re-upload brick maps to GPU.
+        let map_data = self.cpu_brick_map_alloc.as_slice();
+        if !map_data.is_empty() {
+            self.gpu_scene.upload_brick_maps(
+                &self.ctx.device, &self.ctx.queue, map_data,
+            );
+        }
+
+        true
+    }
+
+    /// Sample the CPU brick pool SDF at an object-local position using trilinear
+    /// interpolation — matching the GPU shader's `sample_voxelized`.
+    ///
+    /// Sample the dominant material_id from the CPU brick pool near `local_pos`.
+    ///
+    /// Checks a small neighborhood of voxels (3x3x3 around the nearest voxel)
+    /// and returns the most common non-zero material_id. Falls back to 1 if
+    /// no material is found (all voxels are empty or material 0).
+    fn sample_dominant_material(
+        &self,
+        handle: &rkf_core::scene_node::BrickMapHandle,
+        voxel_size: f32,
+        _aabb_min: Vec3,
+        local_pos: Vec3,
+    ) -> u16 {
+        let vs = voxel_size;
+        let brick_extent = vs * 8.0;
+        let dims = handle.dims;
+        let grid_size = Vec3::new(
+            dims.x as f32 * brick_extent,
+            dims.y as f32 * brick_extent,
+            dims.z as f32 * brick_extent,
+        );
+
+        // Convert local_pos to grid-space (grid is centered at origin).
+        let grid_pos = local_pos + grid_size * 0.5;
+        let center_voxel = (grid_pos / vs).floor();
+        let cx = center_voxel.x as i32;
+        let cy = center_voxel.y as i32;
+        let cz = center_voxel.z as i32;
+
+        let total_x = (dims.x * 8) as i32;
+        let total_y = (dims.y * 8) as i32;
+        let total_z = (dims.z * 8) as i32;
+
+        // Sample a 3x3x3 neighborhood and count material occurrences.
+        // Only count voxels near the surface (negative SDF, i.e. inside).
+        let mut counts: std::collections::HashMap<u16, u32> = std::collections::HashMap::new();
+
+        for dz in -1..=1i32 {
+            for dy in -1..=1i32 {
+                for dx in -1..=1i32 {
+                    let vx = (cx + dx).clamp(0, total_x - 1);
+                    let vy = (cy + dy).clamp(0, total_y - 1);
+                    let vz = (cz + dz).clamp(0, total_z - 1);
+
+                    let bx = (vx / 8) as u32;
+                    let by = (vy / 8) as u32;
+                    let bz = (vz / 8) as u32;
+                    let lx = (vx % 8) as u32;
+                    let ly = (vy % 8) as u32;
+                    let lz = (vz % 8) as u32;
+
+                    if let Some(slot) = self.cpu_brick_map_alloc.get_entry(handle, bx, by, bz) {
+                        if !Self::is_unallocated(slot) {
+                            let sample = self.cpu_brick_pool.get(slot).sample(lx, ly, lz);
+                            let mid = sample.material_id();
+                            // Only count non-zero materials from voxels near/on surface.
+                            if mid != 0 && sample.distance_f32() < voxel_size {
+                                *counts.entry(mid).or_insert(0) += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Return the most common material, or 1 as fallback.
+        counts
+            .into_iter()
+            .max_by_key(|&(_, count)| count)
+            .map(|(mid, _)| mid)
+            .unwrap_or(1)
+    }
+
+    /// For positions in EMPTY_SLOT bricks, determines the sign (inside/outside)
+    /// by using a precomputed interior/exterior classification for EMPTY_SLOT
+    /// bricks. Exterior empty bricks return `+vs*4.0`, interior ones return
+    /// `-vs*4.0`. This prevents false surfaces in object interiors and
+    /// ensures correct normals at brick boundaries.
+    fn sample_sdf_cpu(
+        pool: &rkf_core::brick_pool::Pool<rkf_core::brick::Brick>,
+        alloc: &rkf_core::brick_map::BrickMapAllocator,
+        handle: &rkf_core::scene_node::BrickMapHandle,
+        voxel_size: f32,
+        local_pos: Vec3,
+        exterior_bricks: &std::collections::HashSet<(u32, u32, u32)>,
+    ) -> f32 {
+        let vs = voxel_size;
+        let brick_extent = vs * 8.0;
+        let dims = handle.dims;
+        let grid_size = Vec3::new(
+            dims.x as f32 * brick_extent,
+            dims.y as f32 * brick_extent,
+            dims.z as f32 * brick_extent,
+        );
+        let grid_pos = local_pos + grid_size * 0.5;
+
+        // Clamp to valid range.
+        let eps = vs * 0.01;
+        let clamped = grid_pos.clamp(Vec3::splat(eps), grid_size - Vec3::splat(eps));
+
+        // Convert to continuous voxel coordinates (voxel centers at integers, -0.5 shift).
+        let voxel_coord = clamped / vs - Vec3::splat(0.5);
+        let v0x = voxel_coord.x.floor() as i32;
+        let v0y = voxel_coord.y.floor() as i32;
+        let v0z = voxel_coord.z.floor() as i32;
+        let tx = voxel_coord.x - v0x as f32;
+        let ty = voxel_coord.y - v0y as f32;
+        let tz = voxel_coord.z - v0z as f32;
+
+        let total_x = (dims.x * 8) as i32;
+        let total_y = (dims.y * 8) as i32;
+        let total_z = (dims.z * 8) as i32;
+
+        let read_voxel = |vx: i32, vy: i32, vz: i32| -> f32 {
+            let cx = vx.clamp(0, total_x - 1);
+            let cy = vy.clamp(0, total_y - 1);
+            let cz = vz.clamp(0, total_z - 1);
+            let bx = (cx / 8) as u32;
+            let by = (cy / 8) as u32;
+            let bz = (cz / 8) as u32;
+            let lx = (cx % 8) as u32;
+            let ly = (cy % 8) as u32;
+            let lz = (cz % 8) as u32;
+
+            match alloc.get_entry(handle, bx, by, bz) {
+                Some(slot) if !Self::is_unallocated(slot) => {
+                    pool.get(slot).sample(lx, ly, lz).distance_f32()
+                }
+                _ => {
+                    // Must match GPU EMPTY_SLOT/INTERIOR_SLOT returns (vs*2)
+                    // so that ensure_sdf_consistency produces values that
+                    // transition smoothly to what the GPU sees for empty bricks.
+                    if exterior_bricks.contains(&(bx, by, bz)) {
+                        vs * 2.0
+                    } else {
+                        -(vs * 2.0)
+                    }
+                }
+            }
+        };
+
+        // 8-corner trilinear interpolation.
+        let c000 = read_voxel(v0x, v0y, v0z);
+        let c100 = read_voxel(v0x + 1, v0y, v0z);
+        let c010 = read_voxel(v0x, v0y + 1, v0z);
+        let c110 = read_voxel(v0x + 1, v0y + 1, v0z);
+        let c001 = read_voxel(v0x, v0y, v0z + 1);
+        let c101 = read_voxel(v0x + 1, v0y, v0z + 1);
+        let c011 = read_voxel(v0x, v0y + 1, v0z + 1);
+        let c111 = read_voxel(v0x + 1, v0y + 1, v0z + 1);
+
+        let c00 = c000 + (c100 - c000) * tx;
+        let c10 = c010 + (c110 - c010) * tx;
+        let c01 = c001 + (c101 - c001) * tx;
+        let c11 = c011 + (c111 - c011) * tx;
+        let c0 = c00 + (c10 - c00) * ty;
+        let c1 = c01 + (c11 - c01) * ty;
+        c0 + (c1 - c0) * tz
+    }
+
+    /// Classify all EMPTY_SLOT bricks as exterior or interior via flood-fill.
+    ///
+    /// BFS from all EMPTY_SLOT bricks on the grid boundary (faces of the 3D
+    /// grid), expanding through EMPTY_SLOT only — allocated bricks act as
+    /// walls. Any EMPTY_SLOT reachable from the boundary is exterior (should
+    /// return `+vs*4.0`). Any EMPTY_SLOT NOT reachable is interior (should
+    /// return `-vs*4.0`).
+    ///
+    /// This replaces the unreliable face-neighbor heuristic that defaulted to
+    /// positive for bricks with no allocated neighbors, causing false surfaces
+    /// inside sculpted geometry.
+    /// Returns true if a brick map slot is unallocated (no pool data).
+    fn is_unallocated(slot: u32) -> bool {
+        slot == rkf_core::brick_map::EMPTY_SLOT || slot == rkf_core::brick_map::INTERIOR_SLOT
+    }
+
+    /// Collect ALL allocated bricks in an object's brick map.
+    ///
+    /// Returns an `AffectedBrick` for every non-empty brick in the grid.
+    /// Used to apply CSG to the entire object (not just the edit AABB),
+    /// ensuring perfectly consistent SDF with no missed bricks.
+    fn collect_all_allocated_bricks(
+        alloc: &rkf_core::brick_map::BrickMapAllocator,
+        handle: &rkf_core::scene_node::BrickMapHandle,
+        voxel_size: f32,
+        aabb_min: Vec3,
+    ) -> Vec<rkf_edit::edit_op::AffectedBrick> {
+        let brick_size = voxel_size * 8.0;
+        let mut bricks = Vec::new();
+
+        for bz in 0..handle.dims.z {
+            for by in 0..handle.dims.y {
+                for bx in 0..handle.dims.x {
+                    if let Some(slot) = alloc.get_entry(handle, bx, by, bz) {
+                        if !Self::is_unallocated(slot) {
+                            let brick_local_min = aabb_min
+                                + Vec3::new(
+                                    bx as f32 * brick_size,
+                                    by as f32 * brick_size,
+                                    bz as f32 * brick_size,
+                                );
+                            bricks.push(rkf_edit::edit_op::AffectedBrick {
+                                brick_base_index: slot * 512,
+                                brick_local_min: brick_local_min.into(),
+                                voxel_size,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        bricks
+    }
+
+    fn classify_exterior_bricks(
+        alloc: &rkf_core::brick_map::BrickMapAllocator,
+        handle: &rkf_core::scene_node::BrickMapHandle,
+    ) -> std::collections::HashSet<(u32, u32, u32)> {
+        use std::collections::{HashSet, VecDeque};
+
+        let dims = handle.dims;
+        let mut exterior: HashSet<(u32, u32, u32)> = HashSet::new();
+        let mut queue: VecDeque<(u32, u32, u32)> = VecDeque::new();
+
+        // Seed: all unallocated bricks on any face of the brick map grid.
+        for bz in 0..dims.z {
+            for by in 0..dims.y {
+                for bx in 0..dims.x {
+                    let is_boundary = bx == 0 || bx == dims.x - 1
+                        || by == 0 || by == dims.y - 1
+                        || bz == 0 || bz == dims.z - 1;
+                    if !is_boundary {
+                        continue;
+                    }
+                    if let Some(slot) = alloc.get_entry(handle, bx, by, bz) {
+                        if Self::is_unallocated(slot) {
+                            if exterior.insert((bx, by, bz)) {
+                                queue.push_back((bx, by, bz));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // BFS through unallocated neighbors. Allocated bricks block traversal.
+        let deltas: [(i32, i32, i32); 6] = [
+            (-1, 0, 0), (1, 0, 0),
+            (0, -1, 0), (0, 1, 0),
+            (0, 0, -1), (0, 0, 1),
+        ];
+
+        while let Some((bx, by, bz)) = queue.pop_front() {
+            for &(dx, dy, dz) in &deltas {
+                let nx = bx as i32 + dx;
+                let ny = by as i32 + dy;
+                let nz = bz as i32 + dz;
+                if nx < 0 || ny < 0 || nz < 0
+                    || nx >= dims.x as i32
+                    || ny >= dims.y as i32
+                    || nz >= dims.z as i32
+                {
+                    continue;
+                }
+                let coord = (nx as u32, ny as u32, nz as u32);
+                if let Some(slot) = alloc.get_entry(handle, coord.0, coord.1, coord.2) {
+                    if Self::is_unallocated(slot) && exterior.insert(coord) {
+                        queue.push_back(coord);
+                    }
+                }
+            }
+        }
+
+        exterior
+    }
+
+    /// Allocate new bricks in the edit region for additive operations.
+    ///
+    /// When sculpting "add" material, the brush may extend into brick map cells
+    /// that are currently unallocated. This method allocates new bricks and
+    /// fills them with a constant SDF based on interior/exterior classification.
+    ///
+    /// The CSG edit (`apply_edit_cpu`) then creates the correct zero crossings
+    /// from the brush shape SDF blended with these constants. This is simpler
+    /// and more correct than trilinear interpolation from fallback values, which
+    /// produces wrong SDF magnitudes that cause gradient artifacts.
+    ///
+    /// Also grows the brick map if the edit extends beyond the current grid.
+    ///
+    /// Returns the list of newly allocated pool slot indices.
+    fn allocate_bricks_in_region(
+        &mut self,
+        scene: &mut Scene,
+        object_id: u32,
+        op: &rkf_edit::edit_op::EditOp,
+        voxel_size: f32,
+    ) -> Vec<u32> {
+        use rkf_core::voxel::VoxelSample;
+
+        self.grow_brick_map_if_needed(scene, object_id, op);
+
+        let obj = match scene.objects.iter_mut().find(|o| o.id == object_id) {
+            Some(o) => o,
+            None => return Vec::new(),
+        };
+
+        let (handle, _aabb_min) = match &obj.root_node.sdf_source {
+            SdfSource::Voxelized { brick_map_handle, aabb, .. } => (*brick_map_handle, aabb.min),
+            _ => return Vec::new(),
+        };
+
+        let brick_size = voxel_size * 8.0;
+        let (edit_min, edit_max) = op.local_aabb();
+
+        let bmin = ((edit_min - _aabb_min) / brick_size).floor();
+        let bmax = ((edit_max - _aabb_min) / brick_size - Vec3::splat(0.001)).ceil();
+
+        let bmin_x = (bmin.x as i32).max(0) as u32;
+        let bmin_y = (bmin.y as i32).max(0) as u32;
+        let bmin_z = (bmin.z as i32).max(0) as u32;
+        let bmax_x = ((bmax.x as i32).max(0) as u32).min(handle.dims.x.saturating_sub(1));
+        let bmax_y = ((bmax.y as i32).max(0) as u32).min(handle.dims.y.saturating_sub(1));
+        let bmax_z = ((bmax.z as i32).max(0) as u32).min(handle.dims.z.saturating_sub(1));
+
+        // The CSG falloff is spherical (Euclidean distance from brush center),
+        // but the AABB is a cube. Bricks at the AABB corners are outside the
+        // falloff sphere and won't be modified by CSG. If we allocate them with
+        // constant-fill values (±vs*2.0 based on interior/exterior), the sign
+        // boundary between interior and exterior creates a false zero-crossing —
+        // a phantom surface that renders as "stalactite" artifacts.
+        //
+        // Fix: only allocate bricks whose centers are within the falloff sphere
+        // (plus half a brick diagonal for overlap margin). Bricks outside stay
+        // as EMPTY_SLOT and get properly filled by ensure_sdf_consistency's BFS.
+        let max_dim = op.dimensions.x.max(op.dimensions.y).max(op.dimensions.z);
+        let falloff_radius = max_dim + op.blend_k;
+        let brick_half_diag = brick_size * 0.5 * (3.0f32).sqrt();
+        let alloc_radius = falloff_radius + brick_half_diag;
+        let alloc_radius_sq = alloc_radius * alloc_radius;
+
+        // Classify exterior/interior via flood-fill from grid boundary.
+        let exterior = Self::classify_exterior_bricks(&self.cpu_brick_map_alloc, &handle);
+
+        // Constants: exterior gets positive SDF, interior gets negative.
+        // Must match GPU EMPTY_SLOT/INTERIOR_SLOT returns (±vs*2.0) so the
+        // ray marcher doesn't overshoot when stepping through constant-fill
+        // bricks adjacent to real SDF data.
+        let exterior_fill = voxel_size * 2.0;
+        let interior_fill = -(voxel_size * 2.0);
+
+        let mut new_slots = Vec::new();
+
+        for bz in bmin_z..=bmax_z {
+            for by in bmin_y..=bmax_y {
+                for bx in bmin_x..=bmax_x {
+                    if let Some(s) = self.cpu_brick_map_alloc.get_entry(&handle, bx, by, bz) {
+                        if !Self::is_unallocated(s) {
+                            continue; // Already allocated — skip.
+                        }
+                    }
+
+                    // Check if this brick's center is within the falloff sphere.
+                    // Bricks outside the sphere won't be modified by CSG and
+                    // should stay EMPTY_SLOT for the consistency BFS to handle.
+                    let brick_center = _aabb_min + Vec3::new(
+                        (bx as f32 + 0.5) * brick_size,
+                        (by as f32 + 0.5) * brick_size,
+                        (bz as f32 + 0.5) * brick_size,
+                    );
+                    let dist_sq = (brick_center - op.position).length_squared();
+                    if dist_sq > alloc_radius_sq {
+                        continue; // Outside falloff sphere — skip.
+                    }
+
+                    if let Some(new_slot) = self.cpu_brick_pool.allocate() {
+                        let fill_d = if exterior.contains(&(bx, by, bz)) {
+                            exterior_fill
+                        } else {
+                            interior_fill
+                        };
+
+                        let brick = self.cpu_brick_pool.get_mut(new_slot);
+                        for z in 0u32..8 {
+                            for y in 0u32..8 {
+                                for x in 0u32..8 {
+                                    brick.set(x, y, z, VoxelSample::new(fill_d, 0, 0, 0, 0));
+                                }
+                            }
+                        }
+
+                        self.cpu_brick_map_alloc.set_entry(&handle, bx, by, bz, new_slot);
+                        new_slots.push(new_slot);
+                    }
+                }
+            }
+        }
+
+        if !new_slots.is_empty() {
+            log::info!(
+                "  allocate_bricks_in_region: allocated {} new bricks (constant fill)",
+                new_slots.len(),
+            );
+            let map_data = self.cpu_brick_map_alloc.as_slice();
+            if !map_data.is_empty() {
+                self.gpu_scene.upload_brick_maps(
+                    &self.ctx.device, &self.ctx.queue, map_data,
+                );
+            }
+        }
+
+        new_slots
+    }
+
+    /// Ensure SDF consistency in the region around a sculpt edit.
+    ///
+    /// After a CSG edit, the GPU may see gradient discontinuities at boundaries
+    /// between allocated bricks (with real SDF) and EMPTY_SLOT bricks (which
+    /// the GPU shader treats as `+vs*4.0`). This produces flipped normals on
+    /// the interior side of sculpted geometry.
+    ///
+    /// This method fixes the problem by brute-force: it allocates and fills
+    /// ALL EMPTY_SLOT bricks within a padded region around the edit. Bricks
+    /// are processed in BFS layers outward from already-allocated bricks, so
+    /// each layer can sample SDF from previously-filled neighbors. The region
+    /// extends far enough past the brush influence that the boundary is
+    /// entirely positive SDF, guaranteeing no false surfaces from EMPTY_SLOT.
+    ///
+    /// Returns newly allocated pool slot indices.
+    fn ensure_sdf_consistency(
+        &mut self,
+        handle: &rkf_core::scene_node::BrickMapHandle,
+        voxel_size: f32,
+        aabb_min: Vec3,
+        edit_op: &rkf_edit::edit_op::EditOp,
+    ) -> Vec<u32> {
+        use std::collections::{HashSet, VecDeque};
+        use rkf_core::voxel::VoxelSample;
+
+        let dims = handle.dims;
+        let brick_size = voxel_size * 8.0;
+
+        // Compute a padded region: the edit AABB expanded by 2 bricks on
+        // each side. This ensures the allocated boundary is well past the
+        // brush influence zone, where SDF is safely positive.
+        // NOTE: mark_interior_empties must run BEFORE this function so that
+        // interior classification uses the original topology (before padding
+        // bricks change it).
+        let (edit_min, edit_max) = edit_op.local_aabb();
+        let pad = brick_size * 4.0;
+        let region_min = edit_min - Vec3::splat(pad);
+        let region_max = edit_max + Vec3::splat(pad);
+
+        // Convert to brick coordinates, clamped to grid bounds.
+        let bmin = ((region_min - aabb_min) / brick_size).floor();
+        let bmax = ((region_max - aabb_min) / brick_size - Vec3::splat(0.001)).ceil();
+        let bmin_x = (bmin.x as i32).max(0) as u32;
+        let bmin_y = (bmin.y as i32).max(0) as u32;
+        let bmin_z = (bmin.z as i32).max(0) as u32;
+        let bmax_x = ((bmax.x as i32).max(0) as u32).min(dims.x.saturating_sub(1));
+        let bmax_y = ((bmax.y as i32).max(0) as u32).min(dims.y.saturating_sub(1));
+        let bmax_z = ((bmax.z as i32).max(0) as u32).min(dims.z.saturating_sub(1));
+
+        // Collect all EMPTY_SLOT bricks in the region and seed the BFS
+        // from all already-allocated bricks.
+        let mut empty_set: HashSet<(u32, u32, u32)> = HashSet::new();
+        let mut bfs_seeds: VecDeque<(u32, u32, u32)> = VecDeque::new();
+
+        for bz in bmin_z..=bmax_z {
+            for by in bmin_y..=bmax_y {
+                for bx in bmin_x..=bmax_x {
+                    match self.cpu_brick_map_alloc.get_entry(handle, bx, by, bz) {
+                        Some(s) if !Self::is_unallocated(s) => {
+                            bfs_seeds.push_back((bx, by, bz));
+                        }
+                        _ => {
+                            empty_set.insert((bx, by, bz));
+                        }
+                    }
+                }
+            }
+        }
+
+        if empty_set.is_empty() {
+            return Vec::new();
+        }
+
+        log::info!(
+            "  ensure_sdf_consistency: region [{},{}]→[{},{}], {} empty bricks to fill",
+            bmin_x, bmin_y, bmax_x, bmax_y, empty_set.len(),
+        );
+
+        // BFS from allocated bricks outward. Each "wave" processes all
+        // EMPTY_SLOT bricks adjacent to the current frontier. Because each
+        // wave is registered before the next starts, `sample_sdf_cpu` can
+        // read from previously-filled bricks for correct sign propagation.
+        let deltas: [(i32, i32, i32); 6] = [
+            (-1, 0, 0), (1, 0, 0),
+            (0, -1, 0), (0, 1, 0),
+            (0, 0, -1), (0, 0, 1),
+        ];
+
+        let mut visited: HashSet<(u32, u32, u32)> = HashSet::new();
+        let mut new_slots: Vec<(u32, u32, u32, u32)> = Vec::new(); // (bx, by, bz, slot)
+
+        // Classify exterior vs interior EMPTY_SLOT bricks via flood-fill.
+        let exterior = Self::classify_exterior_bricks(&self.cpu_brick_map_alloc, handle);
+
+        // Mark all seeds as visited (they're already allocated).
+        for &coord in bfs_seeds.iter() {
+            visited.insert(coord);
+        }
+
+        // BFS layer by layer.
+        while !bfs_seeds.is_empty() {
+            // Collect the next wave: all EMPTY_SLOT neighbors of the current
+            // frontier that haven't been visited yet.
+            let mut next_wave: Vec<(u32, u32, u32)> = Vec::new();
+            for &(bx, by, bz) in bfs_seeds.iter() {
+                for &(dx, dy, dz) in &deltas {
+                    let nx = bx as i32 + dx;
+                    let ny = by as i32 + dy;
+                    let nz = bz as i32 + dz;
+                    if nx < 0 || ny < 0 || nz < 0 {
+                        continue;
+                    }
+                    let coord = (nx as u32, ny as u32, nz as u32);
+                    if empty_set.contains(&coord) && visited.insert(coord) {
+                        next_wave.push(coord);
+                    }
+                }
+            }
+
+            if next_wave.is_empty() {
+                break;
+            }
+
+            // Allocate + fill every brick in this wave.
+            for &(nbx, nby, nbz) in &next_wave {
+                // Sample SDF into temp buffer (immutable borrows of pool).
+                let mut sdf_buf = [0.0f32; 512];
+                for z in 0u32..8 {
+                    for y in 0u32..8 {
+                        for x in 0u32..8 {
+                            let voxel_pos = aabb_min
+                                + Vec3::new(
+                                    (nbx * 8 + x) as f32 * voxel_size + voxel_size * 0.5,
+                                    (nby * 8 + y) as f32 * voxel_size + voxel_size * 0.5,
+                                    (nbz * 8 + z) as f32 * voxel_size + voxel_size * 0.5,
+                                );
+                            sdf_buf[(x + y * 8 + z * 64) as usize] = Self::sample_sdf_cpu(
+                                &self.cpu_brick_pool,
+                                &self.cpu_brick_map_alloc,
+                                handle,
+                                voxel_size,
+                                voxel_pos,
+                                &exterior,
+                            );
+                        }
+                    }
+                }
+
+                // Allocate and fill (mutable borrows).
+                if let Some(new_slot) = self.cpu_brick_pool.allocate() {
+                    let nbrick = self.cpu_brick_pool.get_mut(new_slot);
+                    for z in 0u32..8 {
+                        for y in 0u32..8 {
+                            for x in 0u32..8 {
+                                let d = sdf_buf[(x + y * 8 + z * 64) as usize];
+                                nbrick.set(x, y, z, VoxelSample::new(d, 0, 0, 0, 0));
+                            }
+                        }
+                    }
+                    self.cpu_brick_map_alloc.set_entry(handle, nbx, nby, nbz, new_slot);
+                    new_slots.push((nbx, nby, nbz, new_slot));
+                }
+            }
+
+            // Remove filled bricks from the empty set so they're not
+            // re-processed, and use this wave as the next frontier.
+            for &coord in &next_wave {
+                empty_set.remove(&coord);
+            }
+            bfs_seeds.clear();
+            bfs_seeds.extend(next_wave);
+        }
+
+        let slot_ids: Vec<u32> = new_slots.iter().map(|&(_, _, _, s)| s).collect();
+
+        if !slot_ids.is_empty() {
+            log::info!("  ensure_sdf_consistency: allocated {} bricks", slot_ids.len());
+            let map_data = self.cpu_brick_map_alloc.as_slice();
+            if !map_data.is_empty() {
+                self.gpu_scene.upload_brick_maps(
+                    &self.ctx.device, &self.ctx.queue, map_data,
+                );
+            }
+        }
+
+        slot_ids
+    }
+
+    /// Mark all interior EMPTY_SLOT bricks with INTERIOR_SLOT in the brick map.
+    ///
+    /// The GPU shader returns `+vs*4.0` for EMPTY_SLOT and `-vs*4.0` for
+    /// INTERIOR_SLOT. This method classifies unallocated bricks via flood-fill
+    /// from the grid boundary and sets INTERIOR_SLOT for any EMPTY_SLOT brick
+    /// that isn't reachable from the boundary (i.e. enclosed by allocated bricks).
+    ///
+    /// Unlike `fill_interior_empties`, this does NOT allocate pool memory — it
+    /// only updates the brick map entries. The GPU handles the sign correctly
+    /// without needing constant-fill bricks that create gradient discontinuities.
+    ///
+    /// Returns `true` if any entries were changed (brick maps need re-upload).
+    fn mark_interior_empties(
+        &mut self,
+        handle: &rkf_core::scene_node::BrickMapHandle,
+    ) -> bool {
+        use rkf_core::brick_map::{EMPTY_SLOT, INTERIOR_SLOT};
+
+        let exterior = Self::classify_exterior_bricks(&self.cpu_brick_map_alloc, handle);
+        let dims = handle.dims;
+        let mut changed = false;
+
+        for bz in 0..dims.z {
+            for by in 0..dims.y {
+                for bx in 0..dims.x {
+                    if let Some(slot) = self.cpu_brick_map_alloc.get_entry(handle, bx, by, bz) {
+                        if slot == EMPTY_SLOT && !exterior.contains(&(bx, by, bz)) {
+                            self.cpu_brick_map_alloc.set_entry(handle, bx, by, bz, INTERIOR_SLOT);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        if changed {
+            log::info!("  mark_interior_empties: marked interior bricks as INTERIOR_SLOT");
+        }
+
+        changed
+    }
+
+    /// Restore brick pool data from undo snapshots.
+    ///
+    /// Writes each snapshot brick back to the CPU pool and uploads to GPU.
+    pub fn apply_sculpt_undo(&mut self, snapshots: &[(u32, rkf_core::brick::Brick)]) {
+        let brick_byte_size = std::mem::size_of::<rkf_core::brick::Brick>() as u64;
+        for (slot, brick) in snapshots {
+            *self.cpu_brick_pool.get_mut(*slot) = brick.clone();
+            let offset = *slot as u64 * brick_byte_size;
+            let brick_data: &[u8] = bytemuck::bytes_of(self.cpu_brick_pool.get(*slot));
+            let gpu_buf_size = self.gpu_scene.brick_pool_buffer().size();
+            if offset + brick_byte_size <= gpu_buf_size {
+                self.ctx.queue.write_buffer(
+                    self.gpu_scene.brick_pool_buffer(),
+                    offset,
+                    brick_data,
+                );
+            }
+        }
+    }
+
+    /// Re-upload the entire CPU brick pool and brick maps to the GPU.
+    ///
+    /// Called after voxelization or when the GPU buffer needs to grow.
+    fn reupload_brick_data(&mut self) {
+        let pool_data: &[u8] = bytemuck::cast_slice(self.cpu_brick_pool.as_slice());
+        let gpu_buf = self.gpu_scene.brick_pool_buffer();
+
+        if pool_data.len() as u64 > gpu_buf.size() {
+            // GPU buffer too small — recreate it.
+            let new_buf = self.ctx.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("brick_pool"),
+                size: pool_data.len() as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.ctx.queue.write_buffer(&new_buf, 0, pool_data);
+            self.gpu_scene.set_brick_pool(&self.ctx.device, new_buf);
+        } else {
+            self.ctx.queue.write_buffer(gpu_buf, 0, pool_data);
+        }
+
+        let map_data = self.cpu_brick_map_alloc.as_slice();
+        if !map_data.is_empty() {
+            self.gpu_scene.upload_brick_maps(
+                &self.ctx.device, &self.ctx.queue, map_data,
+            );
+        }
     }
 
     /// Render one frame without UI overlay (full-screen engine blit).
@@ -2818,5 +4147,243 @@ impl EditorEngine {
         }
 
         self.frame_index += 1;
+    }
+
+    /// Sample a 2D XZ slice of SDF distances from an object's voxel brick data.
+    ///
+    /// Walks the object-local XZ extent at the given Y coordinate, sampling
+    /// the CPU brick pool at each voxel center. Returns a `VoxelSliceResult`
+    /// with the distance grid and per-sample slot status.
+    pub fn sample_voxel_slice(
+        &self,
+        scene: &rkf_core::Scene,
+        object_id: u32,
+        y_coord: f32,
+    ) -> Result<rkf_core::automation::VoxelSliceResult, String> {
+        use rkf_core::automation::VoxelSliceResult;
+        use rkf_core::brick_map::{EMPTY_SLOT, INTERIOR_SLOT};
+        use rkf_core::SdfSource;
+
+        // Find the object in the scene.
+        let obj = scene.objects.iter()
+            .find(|o| o.id == object_id)
+            .ok_or_else(|| format!("object {object_id} not found"))?;
+
+        // Must be voxelized.
+        let (handle, voxel_size, _aabb) = match &obj.root_node.sdf_source {
+            SdfSource::Voxelized { brick_map_handle, voxel_size, aabb } => {
+                (brick_map_handle, *voxel_size, aabb)
+            }
+            _ => return Err(format!("object {object_id} is not voxelized")),
+        };
+
+        let dims = handle.dims;
+        let brick_extent = voxel_size * 8.0;
+        let grid_size_x = dims.x as f32 * brick_extent;
+        let grid_size_z = dims.z as f32 * brick_extent;
+        let x_min = -(grid_size_x * 0.5);
+        let z_min = -(grid_size_z * 0.5);
+
+        let total_voxels_x = dims.x * 8;
+        let total_voxels_z = dims.z * 8;
+
+        let mut distances = Vec::with_capacity((total_voxels_x * total_voxels_z) as usize);
+        let mut slot_status = Vec::with_capacity((total_voxels_x * total_voxels_z) as usize);
+
+        // Sample at voxel centers across the XZ extent.
+        for vz in 0..total_voxels_z {
+            for vx in 0..total_voxels_x {
+                let _local_x = x_min + (vx as f32 + 0.5) * voxel_size;
+                let _local_z = z_min + (vz as f32 + 0.5) * voxel_size;
+
+                // Determine brick and local voxel coordinates.
+                let bx = vx / 8;
+                let bz = vz / 8;
+                // Compute brick Y from y_coord.
+                let grid_y = y_coord + (dims.y as f32 * brick_extent * 0.5);
+                let vy_f = grid_y / voxel_size;
+                let by = (vy_f / 8.0).floor() as u32;
+                let ly = ((vy_f as u32) % 8).min(7);
+                let lx = vx % 8;
+                let lz = vz % 8;
+
+                if by >= dims.y {
+                    distances.push(f32::MAX);
+                    slot_status.push(0); // EMPTY
+                    continue;
+                }
+
+                match self.cpu_brick_map_alloc.get_entry(handle, bx, by, bz) {
+                    Some(slot) if slot == EMPTY_SLOT => {
+                        distances.push(voxel_size * 2.0);
+                        slot_status.push(0);
+                    }
+                    Some(slot) if slot == INTERIOR_SLOT => {
+                        distances.push(-(voxel_size * 2.0));
+                        slot_status.push(1);
+                    }
+                    Some(slot) => {
+                        let sample = self.cpu_brick_pool.get(slot).sample(lx, ly, lz);
+                        distances.push(sample.distance_f32());
+                        slot_status.push(2);
+                    }
+                    None => {
+                        distances.push(f32::MAX);
+                        slot_status.push(0);
+                    }
+                }
+            }
+        }
+
+        Ok(VoxelSliceResult {
+            origin: [x_min, z_min],
+            spacing: voxel_size,
+            width: total_voxels_x,
+            height: total_voxels_z,
+            y_coord,
+            distances,
+            slot_status,
+        })
+    }
+
+    /// Sample the SDF distance at a world-space position by iterating scene objects.
+    ///
+    /// Transforms the query position into each object's local space and evaluates
+    /// the SDF. Returns the closest result across all objects.
+    pub fn sample_spatial_query(
+        &self,
+        scene: &rkf_core::Scene,
+        world_pos: Vec3,
+    ) -> rkf_core::automation::SpatialQueryResult {
+        use rkf_core::automation::SpatialQueryResult;
+        use rkf_core::SdfSource;
+
+        let mut best_dist = f32::MAX;
+        let mut best_mat: u16 = 0;
+
+        for obj in &scene.objects {
+            // Transform world_pos to object-local space.
+            let inv = glam::Mat4::from_scale_rotation_translation(
+                obj.scale, obj.rotation, obj.position,
+            ).inverse();
+            let local_pos = inv.transform_point3(world_pos);
+
+            let dist = match &obj.root_node.sdf_source {
+                SdfSource::Voxelized { brick_map_handle, voxel_size, .. } => {
+                    let exterior = Self::classify_exterior_bricks(
+                        &self.cpu_brick_map_alloc, brick_map_handle,
+                    );
+                    Self::sample_sdf_cpu(
+                        &self.cpu_brick_pool,
+                        &self.cpu_brick_map_alloc,
+                        brick_map_handle,
+                        *voxel_size,
+                        local_pos,
+                        &exterior,
+                    )
+                }
+                SdfSource::Analytical { primitive, .. } => {
+                    rkf_core::evaluate_primitive(primitive, local_pos)
+                }
+                SdfSource::None => continue,
+            };
+
+            // Apply conservative scale correction.
+            let scale_min = obj.scale.min_element();
+            let scaled_dist = dist * scale_min;
+
+            if scaled_dist.abs() < best_dist.abs() {
+                best_dist = scaled_dist;
+                best_mat = match &obj.root_node.sdf_source {
+                    SdfSource::Analytical { material_id, .. } => *material_id,
+                    _ => 0,
+                };
+            }
+        }
+
+        SpatialQueryResult {
+            distance: best_dist,
+            material_id: best_mat,
+            inside: best_dist < 0.0,
+        }
+    }
+
+    /// Sample a compact brick-level 3D shape overview of an object.
+    ///
+    /// Each brick is categorized as empty (`.`), interior (`#`), or
+    /// surface/allocated (`+`). Returns per-Y-level ASCII slices.
+    pub fn sample_object_shape(
+        &self,
+        scene: &rkf_core::Scene,
+        object_id: u32,
+    ) -> Result<rkf_core::automation::ObjectShapeResult, String> {
+        use rkf_core::automation::ObjectShapeResult;
+        use rkf_core::brick_map::{EMPTY_SLOT, INTERIOR_SLOT};
+        use rkf_core::SdfSource;
+
+        let obj = scene.objects.iter()
+            .find(|o| o.id == object_id)
+            .ok_or_else(|| format!("object {object_id} not found"))?;
+
+        let (handle, voxel_size, aabb) = match &obj.root_node.sdf_source {
+            SdfSource::Voxelized { brick_map_handle, voxel_size, aabb } => {
+                (brick_map_handle, *voxel_size, aabb)
+            }
+            _ => return Err(format!("object {object_id} is not voxelized")),
+        };
+
+        let dims = handle.dims;
+        let brick_extent = voxel_size * 8.0;
+        let _half_x = dims.x as f32 * brick_extent * 0.5;
+        let _half_y = dims.y as f32 * brick_extent * 0.5;
+        let _half_z = dims.z as f32 * brick_extent * 0.5;
+
+        let mut empty_count = 0u32;
+        let mut interior_count = 0u32;
+        let mut surface_count = 0u32;
+        let mut y_slices = Vec::with_capacity(dims.y as usize);
+
+        for by in 0..dims.y {
+            let mut slice = String::new();
+            for bz in 0..dims.z {
+                for bx in 0..dims.x {
+                    let ch = match self.cpu_brick_map_alloc.get_entry(handle, bx, by, bz) {
+                        Some(slot) if slot == EMPTY_SLOT => {
+                            empty_count += 1;
+                            '.'
+                        }
+                        Some(slot) if slot == INTERIOR_SLOT => {
+                            interior_count += 1;
+                            '#'
+                        }
+                        Some(_) => {
+                            surface_count += 1;
+                            '+'
+                        }
+                        None => {
+                            empty_count += 1;
+                            '.'
+                        }
+                    };
+                    slice.push(ch);
+                }
+                if bz + 1 < dims.z {
+                    slice.push('\n');
+                }
+            }
+            y_slices.push(slice);
+        }
+
+        Ok(ObjectShapeResult {
+            object_id,
+            dims: [dims.x, dims.y, dims.z],
+            voxel_size,
+            aabb_min: [aabb.min.x, aabb.min.y, aabb.min.z],
+            aabb_max: [aabb.max.x, aabb.max.y, aabb.max.z],
+            empty_count,
+            interior_count,
+            surface_count,
+            y_slices,
+        })
     }
 }

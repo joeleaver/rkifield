@@ -27,7 +27,14 @@ use crate::scene_node::BrickMapHandle;
 /// Sentinel value indicating an empty (unallocated) brick map entry.
 ///
 /// No brick is stored at this position — the object has no geometry there.
+/// On the GPU, returns `+vs*4.0` (exterior/positive distance).
 pub const EMPTY_SLOT: u32 = u32::MAX;
+
+/// Interior empty slot — no brick allocated, but known to be inside the object.
+/// On the GPU, returns `-vs*4.0` (interior/negative distance).
+/// Used after sculpting to tell the GPU the correct sign for unallocated
+/// interior bricks without wasting brick pool memory on constant-fill data.
+pub const INTERIOR_SLOT: u32 = u32::MAX - 1;
 
 /// A per-object brick map — flat 3D array of brick pool slot indices.
 ///

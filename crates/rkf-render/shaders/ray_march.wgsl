@@ -23,6 +23,7 @@ const PRIM_CYLINDER: u32 = 4u;
 const PRIM_PLANE: u32    = 5u;
 
 const EMPTY_SLOT: u32 = 0xFFFFFFFFu;
+const INTERIOR_SLOT: u32 = 0xFFFFFFFEu;
 const BVH_INVALID: u32 = 0xFFFFFFFFu;
 const MAX_FLOAT: f32 = 3.402823e+38;
 const HIT_EPSILON: f32 = 0.001;
@@ -259,21 +260,59 @@ fn sample_voxel_at(obj_offset: u32, vc: vec3<i32>, dims: vec3<u32>,
     let slot = brick_maps[obj_offset + flat_brick];
 
     if slot == EMPTY_SLOT {
-        // Conservative fallback: return distance proportional to grid extent.
-        return vs * 4.0;
+        // Exterior empty: positive distance (outside the object).
+        // Use vs*2 (quarter brick) — small enough to prevent ray marcher
+        // overshooting at the narrow-band boundary, large enough for
+        // efficient stepping. vs*32 caused massive gradient discontinuities
+        // leading to glassy/transparent artifacts.
+        return vs * 2.0;
+    }
+    if slot == INTERIOR_SLOT {
+        // Interior empty: negative distance (deep inside the object).
+        return -(vs * 2.0);
     }
 
     let idx = slot * 512u + local.x + local.y * 8u + local.z * 64u;
     return extract_distance(brick_pool[idx].word0);
 }
 
+/// Catmull-Rom basis weights for parameter t in [0,1].
+/// Returns weights for the 4 control points: p[-1], p[0], p[1], p[2].
+fn catmull_rom_weights(t: f32) -> vec4<f32> {
+    let t2 = t * t;
+    let t3 = t2 * t;
+    return vec4<f32>(
+        -0.5 * t3 + t2 - 0.5 * t,           // w[-1]
+         1.5 * t3 - 2.5 * t2 + 1.0,          // w[0]
+        -1.5 * t3 + 2.0 * t2 + 0.5 * t,      // w[1]
+         0.5 * t3 - 0.5 * t2,                 // w[2]
+    );
+}
+
+/// Catmull-Rom basis weight derivatives for parameter t in [0,1].
+/// Returns d(weight)/dt for the 4 control points.
+fn catmull_rom_dweights(t: f32) -> vec4<f32> {
+    let t2 = t * t;
+    return vec4<f32>(
+        -1.5 * t2 + 2.0 * t - 0.5,           // dw[-1]/dt
+         4.5 * t2 - 5.0 * t,                  // dw[0]/dt
+        -4.5 * t2 + 4.0 * t + 0.5,            // dw[1]/dt
+         1.5 * t2 - t,                         // dw[2]/dt
+    );
+}
+
+/// 1D Catmull-Rom interpolation over 4 values using precomputed weights.
+fn cr_interp(w: vec4<f32>, v0: f32, v1: f32, v2: f32, v3: f32) -> f32 {
+    return w.x * v0 + w.y * v1 + w.z * v2 + w.w * v3;
+}
+
 /// Sample a voxelized object's brick map at a local-space position.
-/// Uses global-grid trilinear interpolation that seamlessly crosses brick boundaries.
+/// Uses trilinear interpolation (8 voxel samples) for conservative distance
+/// values that never overshoot — critical for safe ray march stepping.
 ///
-/// For positions outside the grid, returns the trilinear value at the nearest grid
-/// point plus the Euclidean distance to the grid boundary. This smooth extrapolation
-/// is critical for normal computation (finite differences need valid SDF values
-/// slightly outside the grid) and also improves ray marching near grid edges.
+/// Normals use tricubic Catmull-Rom (see sample_voxelized_gradient) for C1
+/// smooth gradients. This split avoids false zero-crossings from cubic
+/// overshoot while still producing beautiful normals.
 fn sample_voxelized(local_pos: vec3<f32>, obj: GpuObject) -> f32 {
     let vs = obj.voxel_size;
     let brick_extent = vs * 8.0;
@@ -322,10 +361,11 @@ fn sample_voxelized(local_pos: vec3<f32>, obj: GpuObject) -> f32 {
     return mix(c0, c1, t.z) + outside_dist;
 }
 
-/// Compute the analytical gradient of the trilinear SDF field at a local-space position.
-/// Returns the local-space gradient (∂sdf/∂x, ∂sdf/∂y, ∂sdf/∂z) derived directly from
-/// the 8 trilinear corner values. This avoids the finite-difference sampling artifacts
-/// that cause wavy normals on voxelized objects.
+/// Compute the analytical gradient of the tricubic Catmull-Rom SDF field.
+/// Returns the local-space gradient (∂sdf/∂x, ∂sdf/∂y, ∂sdf/∂z) with C1 continuity.
+///
+/// Each partial derivative uses the Catmull-Rom derivative weights along its axis
+/// and normal Catmull-Rom weights along the other two axes.
 fn sample_voxelized_gradient(local_pos: vec3<f32>, obj: GpuObject) -> vec3<f32> {
     let vs = obj.voxel_size;
     let brick_extent = vs * 8.0;
@@ -334,44 +374,79 @@ fn sample_voxelized_gradient(local_pos: vec3<f32>, obj: GpuObject) -> vec3<f32> 
     let grid_pos = local_pos + grid_size * 0.5;
 
     if any(grid_pos < vec3<f32>(0.0)) || any(grid_pos >= grid_size) {
-        return vec3<f32>(0.0, 1.0, 0.0);
+        let eps = vs * 1.5;
+        let gx = sample_voxelized(local_pos + vec3<f32>(eps, 0.0, 0.0), obj)
+               - sample_voxelized(local_pos - vec3<f32>(eps, 0.0, 0.0), obj);
+        let gy = sample_voxelized(local_pos + vec3<f32>(0.0, eps, 0.0), obj)
+               - sample_voxelized(local_pos - vec3<f32>(0.0, eps, 0.0), obj);
+        let gz = sample_voxelized(local_pos + vec3<f32>(0.0, 0.0, eps), obj)
+               - sample_voxelized(local_pos - vec3<f32>(0.0, 0.0, eps), obj);
+        return vec3<f32>(gx, gy, gz);
     }
 
     let voxel_coord = grid_pos / vs - vec3<f32>(0.5);
     let v0 = vec3<i32>(floor(voxel_coord));
     let t = voxel_coord - vec3<f32>(v0);
     let total_voxels = vec3<i32>(dims) * 8;
+    let off = obj.brick_map_offset;
 
-    let c000 = sample_voxel_at(obj.brick_map_offset, v0 + vec3<i32>(0, 0, 0), dims, total_voxels, vs);
-    let c100 = sample_voxel_at(obj.brick_map_offset, v0 + vec3<i32>(1, 0, 0), dims, total_voxels, vs);
-    let c010 = sample_voxel_at(obj.brick_map_offset, v0 + vec3<i32>(0, 1, 0), dims, total_voxels, vs);
-    let c110 = sample_voxel_at(obj.brick_map_offset, v0 + vec3<i32>(1, 1, 0), dims, total_voxels, vs);
-    let c001 = sample_voxel_at(obj.brick_map_offset, v0 + vec3<i32>(0, 0, 1), dims, total_voxels, vs);
-    let c101 = sample_voxel_at(obj.brick_map_offset, v0 + vec3<i32>(1, 0, 1), dims, total_voxels, vs);
-    let c011 = sample_voxel_at(obj.brick_map_offset, v0 + vec3<i32>(0, 1, 1), dims, total_voxels, vs);
-    let c111 = sample_voxel_at(obj.brick_map_offset, v0 + vec3<i32>(1, 1, 1), dims, total_voxels, vs);
+    // Weights and derivative weights for each axis.
+    let wx = catmull_rom_weights(t.x);
+    let wy = catmull_rom_weights(t.y);
+    let wz = catmull_rom_weights(t.z);
+    let dwx = catmull_rom_dweights(t.x);
+    let dwy = catmull_rom_dweights(t.y);
+    let dwz = catmull_rom_dweights(t.z);
 
-    // Analytical partial derivatives of trilinear interpolation f(tx,ty,tz):
-    //   ∂f/∂tx = bilinear interpolation of (c1xx - c0xx)
-    //   ∂f/∂ty = bilinear interpolation of (cx1x - cx0x)
-    //   ∂f/∂tz = bilinear interpolation of (cxx1 - cxx0)
-    let tx = t.x; let ty = t.y; let tz = t.z;
-    let otx = 1.0 - tx; let oty = 1.0 - ty; let otz = 1.0 - tz;
+    // Sample the 4x4x4 grid once and reuse for all three partials.
+    // s[iz][iy][ix] = sample at (v0.x + ix - 1, v0.y + iy - 1, v0.z + iz - 1)
+    var s: array<array<array<f32, 4>, 4>, 4>;
+    for (var iz = 0; iz < 4; iz++) {
+        for (var iy = 0; iy < 4; iy++) {
+            for (var ix = 0; ix < 4; ix++) {
+                s[iz][iy][ix] = sample_voxel_at(
+                    off, v0 + vec3<i32>(ix - 1, iy - 1, iz - 1),
+                    dims, total_voxels, vs,
+                );
+            }
+        }
+    }
 
-    let gx = oty * otz * (c100 - c000)
-           + ty  * otz * (c110 - c010)
-           + oty * tz  * (c101 - c001)
-           + ty  * tz  * (c111 - c011);
-    let gy = otx * otz * (c010 - c000)
-           + tx  * otz * (c110 - c100)
-           + otx * tz  * (c011 - c001)
-           + tx  * tz  * (c111 - c101);
-    let gz = otx * oty * (c001 - c000)
-           + tx  * oty * (c101 - c100)
-           + otx * ty  * (c011 - c010)
-           + tx  * ty  * (c111 - c110);
+    // ∂f/∂x: derivative weights along X, normal weights along Y and Z.
+    var gx = 0.0;
+    for (var iz = 0; iz < 4; iz++) {
+        var gy_acc = 0.0;
+        for (var iy = 0; iy < 4; iy++) {
+            let x_val = cr_interp(dwx, s[iz][iy][0], s[iz][iy][1], s[iz][iy][2], s[iz][iy][3]);
+            gy_acc += wy[iy] * x_val;
+        }
+        gx += wz[iz] * gy_acc;
+    }
 
-    return vec3<f32>(gx, gy, gz);
+    // ∂f/∂y: normal weights along X, derivative weights along Y, normal along Z.
+    var gy = 0.0;
+    for (var iz = 0; iz < 4; iz++) {
+        var dy_acc = 0.0;
+        for (var iy = 0; iy < 4; iy++) {
+            let x_val = cr_interp(wx, s[iz][iy][0], s[iz][iy][1], s[iz][iy][2], s[iz][iy][3]);
+            dy_acc += dwy[iy] * x_val;
+        }
+        gy += wz[iz] * dy_acc;
+    }
+
+    // ∂f/∂z: normal weights along X and Y, derivative weights along Z.
+    var gz = 0.0;
+    for (var iz = 0; iz < 4; iz++) {
+        var yz_acc = 0.0;
+        for (var iy = 0; iy < 4; iy++) {
+            let x_val = cr_interp(wx, s[iz][iy][0], s[iz][iy][1], s[iz][iy][2], s[iz][iy][3]);
+            yz_acc += wy[iy] * x_val;
+        }
+        gz += dwz[iz] * yz_acc;
+    }
+
+    // Convert from voxel-space gradient to local-space: divide by voxel_size.
+    return vec3<f32>(gx, gy, gz) / vs;
 }
 
 /// Get material ID from a voxelized object at a local position (nearest neighbor).
@@ -396,7 +471,7 @@ fn sample_voxelized_material(local_pos: vec3<f32>, obj: GpuObject) -> u32 {
 
     let flat_brick = brick.x + brick.y * dims.x + brick.z * dims.x * dims.y;
     let slot = brick_maps[obj.brick_map_offset + flat_brick];
-    if slot == EMPTY_SLOT {
+    if slot == EMPTY_SLOT || slot == INTERIOR_SLOT {
         return 0u;
     }
 
@@ -695,30 +770,46 @@ fn sample_object(pos: vec3<f32>, obj_idx: u32) -> f32 {
     return evaluate_object(cam_rel, obj_idx).x;
 }
 
-/// Compute surface normal for a specific object via central differences.
-/// Voxelized objects use a larger epsilon (~4 voxels) to average over trilinear
-/// cell boundary gradient discontinuities, producing smooth normals.
-/// Analytical objects use a small epsilon for crisp, exact normals.
+/// Compute surface normal for a specific object at a world-space hit position.
+///
+/// Voxelized objects use the analytical gradient of the trilinear interpolation
+/// field. This avoids the finite-difference artifact where epsilon-offset samples
+/// cross into EMPTY_SLOT bricks and return the large background value (vs*32),
+/// producing incorrect gradient directions at narrow-band boundaries.
+///
+/// Analytical objects use central finite differences with a small epsilon.
 fn compute_normal_for_object(pos: vec3<f32>, obj_idx: u32) -> vec3<f32> {
     let obj = objects[obj_idx];
-    var e: f32;
+
     if obj.sdf_type == SDF_TYPE_VOXELIZED {
-        // Epsilon spans ~4 voxels: wide enough to average over trilinear
-        // cell boundary discontinuities for smooth normals.
-        let normal_min_scale = min(obj.accumulated_scale_x, min(obj.accumulated_scale_y, obj.accumulated_scale_z));
-        e = obj.voxel_size * normal_min_scale * 4.0;
+        // Transform hit position to object-local space.
+        let cam_rel = pos - camera.position.xyz;
+        let local_pos = (obj.inverse_world * vec4<f32>(cam_rel, 1.0)).xyz;
+
+        // Analytical gradient in local space from trilinear corner values.
+        let local_grad = sample_voxelized_gradient(local_pos, obj);
+
+        // Transform gradient from local → world space.
+        // Normal transform = transpose(inverse_world) (since inverse_world = M^-1,
+        // transpose(M^-1) transforms normals from local to world).
+        let world_grad = (transpose(obj.inverse_world) * vec4<f32>(local_grad, 0.0)).xyz;
+
+        let len = length(world_grad);
+        if len < 1e-10 {
+            return vec3<f32>(0.0, 1.0, 0.0);
+        }
+        return world_grad / len;
     } else {
         // Small epsilon for analytical SDFs (smooth gradients everywhere).
-        e = scene.hit_threshold * 10.0;
+        let e = scene.hit_threshold * 10.0;
+        let nx = sample_object(pos + vec3<f32>(e, 0.0, 0.0), obj_idx)
+               - sample_object(pos - vec3<f32>(e, 0.0, 0.0), obj_idx);
+        let ny = sample_object(pos + vec3<f32>(0.0, e, 0.0), obj_idx)
+               - sample_object(pos - vec3<f32>(0.0, e, 0.0), obj_idx);
+        let nz = sample_object(pos + vec3<f32>(0.0, 0.0, e), obj_idx)
+               - sample_object(pos - vec3<f32>(0.0, 0.0, e), obj_idx);
+        return normalize(vec3<f32>(nx, ny, nz));
     }
-
-    let nx = sample_object(pos + vec3<f32>(e, 0.0, 0.0), obj_idx)
-           - sample_object(pos - vec3<f32>(e, 0.0, 0.0), obj_idx);
-    let ny = sample_object(pos + vec3<f32>(0.0, e, 0.0), obj_idx)
-           - sample_object(pos - vec3<f32>(0.0, e, 0.0), obj_idx);
-    let nz = sample_object(pos + vec3<f32>(0.0, 0.0, e), obj_idx)
-           - sample_object(pos - vec3<f32>(0.0, 0.0, e), obj_idx);
-    return normalize(vec3<f32>(nx, ny, nz));
 }
 
 // ---------- Entry Point ----------
@@ -761,6 +852,14 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
         textureStore(gbuf_normal, coord, vec4<f32>(normal, 0.0));
         textureStore(gbuf_material, coord, vec4<u32>(result.material_id | (result.object_id << 24u), 0u, 0u, 0u));
 
+        // Re-evaluate SDF distance at hit point for debug visualization.
+        var sdf_at_hit = 0.0;
+        let hit_obj = objects[result.obj_idx];
+        if hit_obj.sdf_type == SDF_TYPE_VOXELIZED {
+            let local_hit = (hit_obj.inverse_world * vec4<f32>(hit_pos - camera.position.xyz, 1.0)).xyz;
+            sdf_at_hit = sample_voxelized(local_hit, hit_obj);
+        }
+
         // Motion vectors.
         let prev_clip = camera.prev_vp * vec4<f32>(hit_pos, 1.0);
         var motion = vec2<f32>(0.0);
@@ -770,7 +869,7 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
             let curr_uv = (vec2<f32>(pixel.xy) + 0.5) / vec2<f32>(dims);
             motion = curr_uv - prev_uv;
         }
-        textureStore(gbuf_motion, coord, vec4<f32>(motion, 1.0, 0.0));
+        textureStore(gbuf_motion, coord, vec4<f32>(motion, 1.0, sdf_at_hit));
     } else {
         // Sky / miss.
         textureStore(gbuf_position, coord, vec4<f32>(0.0, 0.0, 0.0, MAX_FLOAT));

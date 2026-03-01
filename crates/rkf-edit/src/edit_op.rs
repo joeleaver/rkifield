@@ -7,7 +7,7 @@
 use glam::{Quat, Vec3};
 
 use crate::types::{EditParams, EditType, FalloffCurve, ShapeType};
-use rkf_core::brick_map::{BrickMapAllocator, EMPTY_SLOT};
+use rkf_core::brick_map::{BrickMapAllocator, EMPTY_SLOT, INTERIOR_SLOT};
 use rkf_core::scene_node::BrickMapHandle;
 
 /// A CSG/sculpt edit operation targeting a specific object in local space.
@@ -109,7 +109,7 @@ pub fn find_affected_bricks(
 
     // Convert edit AABB to brick coordinates
     let bmin = ((edit_min - object_aabb_min) / brick_size).floor();
-    let bmax = ((edit_max - object_aabb_min) / brick_size).floor();
+    let bmax = ((edit_max - object_aabb_min) / brick_size - Vec3::splat(0.001)).ceil();
 
     let bmin_x = (bmin.x as i32).max(0) as u32;
     let bmin_y = (bmin.y as i32).max(0) as u32;
@@ -124,7 +124,7 @@ pub fn find_affected_bricks(
         for by in bmin_y..=bmax_y {
             for bx in bmin_x..=bmax_x {
                 if let Some(slot) = allocator.get_entry(handle, bx, by, bz) {
-                    if slot != EMPTY_SLOT {
+                    if slot != EMPTY_SLOT && slot != INTERIOR_SLOT {
                         let brick_local_min = object_aabb_min
                             + Vec3::new(
                                 bx as f32 * brick_size,

@@ -454,6 +454,69 @@ impl ToolHandler for CameraSnapToHandler {
     }
 }
 
+// --- Voxel Slice tool ---
+
+struct VoxelSliceHandler;
+
+impl ToolHandler for VoxelSliceHandler {
+    fn call(&self, api: &dyn AutomationApi, params: serde_json::Value) -> Result<ToolResponse, ToolError> {
+        let object_id = params.get("object_id").and_then(|v| v.as_u64())
+            .ok_or_else(|| ToolError::InvalidParams("object_id is required".to_string()))? as u32;
+        let y_coord = params.get("y_coord").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+
+        match api.voxel_slice(object_id, y_coord) {
+            Ok(result) => Ok(serde_json::to_value(result).map_err(ToolError::from)?.into()),
+            Err(e) => Err(ToolError::EngineError(e.to_string())),
+        }
+    }
+}
+
+// --- Sculpt Apply tool ---
+
+struct SculptApplyHandler;
+
+impl ToolHandler for SculptApplyHandler {
+    fn call(&self, api: &dyn AutomationApi, params: serde_json::Value) -> Result<ToolResponse, ToolError> {
+        let object_id = params.get("object_id").and_then(|v| v.as_u64())
+            .ok_or_else(|| ToolError::InvalidParams("object_id is required".to_string()))? as u32;
+
+        let position = match params.get("position").and_then(|v| v.as_array()) {
+            Some(arr) if arr.len() >= 3 => [
+                arr[0].as_f64().unwrap_or(0.0) as f32,
+                arr[1].as_f64().unwrap_or(0.0) as f32,
+                arr[2].as_f64().unwrap_or(0.0) as f32,
+            ],
+            _ => return Err(ToolError::InvalidParams("position is required as [x, y, z]".to_string())),
+        };
+
+        let mode = params.get("mode").and_then(|v| v.as_str()).unwrap_or("add");
+        let radius = params.get("radius").and_then(|v| v.as_f64()).unwrap_or(0.5) as f32;
+        let strength = params.get("strength").and_then(|v| v.as_f64()).unwrap_or(0.5) as f32;
+        let material_id = params.get("material_id").and_then(|v| v.as_u64()).unwrap_or(1) as u16;
+
+        match api.sculpt_apply(object_id, position, mode, radius, strength, material_id) {
+            Ok(()) => Ok(serde_json::json!({"status": "ok"}).into()),
+            Err(e) => Err(ToolError::EngineError(e.to_string())),
+        }
+    }
+}
+
+// --- Object Shape tool ---
+
+struct ObjectShapeHandler;
+
+impl ToolHandler for ObjectShapeHandler {
+    fn call(&self, api: &dyn AutomationApi, params: serde_json::Value) -> Result<ToolResponse, ToolError> {
+        let object_id = params.get("object_id").and_then(|v| v.as_u64())
+            .ok_or_else(|| ToolError::InvalidParams("object_id is required".to_string()))? as u32;
+
+        match api.object_shape(object_id) {
+            Ok(result) => Ok(serde_json::to_value(result).map_err(ToolError::from)?.into()),
+            Err(e) => Err(ToolError::EngineError(e.to_string())),
+        }
+    }
+}
+
 /// Register all built-in observation tools with the registry.
 pub fn register_observation_tools(registry: &mut ToolRegistry) {
     registry.register(
@@ -664,11 +727,11 @@ pub fn register_observation_tools(registry: &mut ToolRegistry) {
     registry.register(
         ToolDefinition {
             name: "debug_mode".to_string(),
-            description: "Set shading debug visualization mode. 0=normal, 1=normals, 2=positions, 3=material IDs, 4=diffuse only, 5=specular only".to_string(),
+            description: "Set shading debug visualization mode. 0=normal, 1=normals, 2=positions, 3=material IDs, 4=diffuse, 5=specular, 6=GI, 7=SDF distance, 8=brick boundaries".to_string(),
             category: ToolCategory::Observation,
             parameters: vec![ParameterDef {
                 name: "mode".to_string(),
-                description: "Debug mode (0=normal shading, 1=normals, 2=positions, 3=material IDs, 4=diffuse only, 5=specular only)".to_string(),
+                description: "Debug mode (0=normal, 1=normals, 2=positions, 3=material IDs, 4=diffuse, 5=specular, 6=GI, 7=SDF distance, 8=brick boundaries)".to_string(),
                 param_type: ParamType::Integer,
                 required: true,
                 default: None,
@@ -951,6 +1014,119 @@ pub fn register_observation_tools(registry: &mut ToolRegistry) {
         },
         Arc::new(CameraSnapToHandler),
     );
+
+    // --- Diagnostic tools ---
+
+    registry.register(
+        ToolDefinition {
+            name: "voxel_slice".to_string(),
+            description: "Sample a 2D XZ slice of raw SDF distances from an object's voxel data. Returns distance grid and slot status for diagnosing sculpt artifacts.".to_string(),
+            category: ToolCategory::Observation,
+            parameters: vec![
+                ParameterDef {
+                    name: "object_id".to_string(),
+                    description: "Scene object ID (from scene_graph)".to_string(),
+                    param_type: ParamType::Integer,
+                    required: true,
+                    default: None,
+                },
+                ParameterDef {
+                    name: "y_coord".to_string(),
+                    description: "Object-local Y coordinate for the slice (default 0.0)".to_string(),
+                    param_type: ParamType::Number,
+                    required: false,
+                    default: Some(serde_json::json!(0.0)),
+                },
+            ],
+            return_type: ReturnTypeDef {
+                description: "Grid of SDF distances with origin, spacing, dimensions, and slot status".to_string(),
+                return_type: ParamType::Object,
+            },
+            mode: ToolMode::Both,
+        },
+        Arc::new(VoxelSliceHandler),
+    );
+
+    registry.register(
+        ToolDefinition {
+            name: "sculpt_apply".to_string(),
+            description: "Apply a single sculpt brush hit to an object. Creates an undo entry. Use mode 'add' to build geometry, 'subtract' to carve, 'smooth' to blur.".to_string(),
+            category: ToolCategory::Mutation,
+            parameters: vec![
+                ParameterDef {
+                    name: "object_id".to_string(),
+                    description: "Scene object ID (from scene_graph)".to_string(),
+                    param_type: ParamType::Integer,
+                    required: true,
+                    default: None,
+                },
+                ParameterDef {
+                    name: "position".to_string(),
+                    description: "World-space position [x, y, z] for the brush center".to_string(),
+                    param_type: ParamType::Array,
+                    required: true,
+                    default: None,
+                },
+                ParameterDef {
+                    name: "mode".to_string(),
+                    description: "Sculpt mode: 'add', 'subtract', or 'smooth'".to_string(),
+                    param_type: ParamType::String,
+                    required: false,
+                    default: Some(serde_json::json!("add")),
+                },
+                ParameterDef {
+                    name: "radius".to_string(),
+                    description: "Brush radius in world units".to_string(),
+                    param_type: ParamType::Number,
+                    required: false,
+                    default: Some(serde_json::json!(0.5)),
+                },
+                ParameterDef {
+                    name: "strength".to_string(),
+                    description: "Brush strength (0.0 to 1.0)".to_string(),
+                    param_type: ParamType::Number,
+                    required: false,
+                    default: Some(serde_json::json!(0.5)),
+                },
+                ParameterDef {
+                    name: "material_id".to_string(),
+                    description: "Material table index for added geometry".to_string(),
+                    param_type: ParamType::Integer,
+                    required: false,
+                    default: Some(serde_json::json!(1)),
+                },
+            ],
+            return_type: ReturnTypeDef {
+                description: "Confirmation of sculpt operation".to_string(),
+                return_type: ParamType::Object,
+            },
+            mode: ToolMode::Editor,
+        },
+        Arc::new(SculptApplyHandler),
+    );
+
+    registry.register(
+        ToolDefinition {
+            name: "object_shape".to_string(),
+            description: "Return a compact brick-level 3D shape overview. Each brick is categorized as '.' (empty), '#' (interior), or '+' (surface). Per-Y-level ASCII slices provide spatial understanding in one call.".to_string(),
+            category: ToolCategory::Observation,
+            parameters: vec![
+                ParameterDef {
+                    name: "object_id".to_string(),
+                    description: "Scene object ID (from scene_graph)".to_string(),
+                    param_type: ParamType::Integer,
+                    required: true,
+                    default: None,
+                },
+            ],
+            return_type: ReturnTypeDef {
+                description: "Object shape with brick grid dims, AABB, counts, and ASCII y-slices".to_string(),
+                return_type: ParamType::Object,
+            },
+            mode: ToolMode::Both,
+        },
+        Arc::new(ObjectShapeHandler),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1066,11 +1242,11 @@ pub fn standard_tool_definitions() -> Value {
         },
         {
             "name": "debug_mode",
-            "description": "Set shading debug visualization mode. 0=normal, 1=normals, 2=positions, 3=material IDs, 4=diffuse only, 5=specular only",
+            "description": "Set shading debug visualization mode. 0=normal, 1=normals, 2=positions, 3=material IDs, 4=diffuse, 5=specular, 6=GI, 7=SDF distance, 8=brick boundaries",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "mode": { "type": "integer", "description": "Debug mode (0=normal shading, 1=normals, 2=positions, 3=material IDs, 4=diffuse only, 5=specular only)" }
+                    "mode": { "type": "integer", "description": "Debug mode (0=normal, 1=normals, 2=positions, 3=material IDs, 4=diffuse, 5=specular, 6=GI, 7=SDF distance, 8=brick boundaries)" }
                 },
                 "required": ["mode"]
             }
@@ -1231,6 +1407,46 @@ pub fn standard_tool_definitions() -> Value {
                     "entity_id": { "type": "integer", "description": "Camera entity ID" }
                 },
                 "required": ["entity_id"]
+            }
+        },
+        // --- Diagnostic tools ---
+        {
+            "name": "voxel_slice",
+            "description": "Sample a 2D XZ slice of raw SDF distances from an object's voxel data",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "object_id": { "type": "integer", "description": "Scene object ID (from scene_graph)" },
+                    "y_coord": { "type": "number", "description": "Object-local Y coordinate for the slice", "default": 0.0 }
+                },
+                "required": ["object_id"]
+            }
+        },
+        {
+            "name": "sculpt_apply",
+            "description": "Apply a single sculpt brush hit to an object. Creates an undo entry.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "object_id": { "type": "integer", "description": "Scene object ID" },
+                    "position": { "type": "array", "description": "World-space [x, y, z]" },
+                    "mode": { "type": "string", "description": "add/subtract/smooth", "default": "add" },
+                    "radius": { "type": "number", "description": "Brush radius", "default": 0.5 },
+                    "strength": { "type": "number", "description": "Brush strength 0-1", "default": 0.5 },
+                    "material_id": { "type": "integer", "description": "Material index", "default": 1 }
+                },
+                "required": ["object_id", "position"]
+            }
+        },
+        {
+            "name": "object_shape",
+            "description": "Return a compact brick-level 3D shape overview with ASCII y-slices",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "object_id": { "type": "integer", "description": "Scene object ID" }
+                },
+                "required": ["object_id"]
             }
         }
     ])
@@ -1517,6 +1733,50 @@ pub fn dispatch_tool_call(
                 Err(e) => Ok(tool_err_json(&e)),
             }
         }
+        // --- Diagnostic tools ---
+        "voxel_slice" => {
+            let object_id = match args.get("object_id").and_then(|v| v.as_u64()) {
+                Some(id) => id as u32,
+                None => return Ok(tool_err_json("object_id is required")),
+            };
+            let y_coord = args.get("y_coord").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+            match api.voxel_slice(object_id, y_coord) {
+                Ok(result) => Ok(tool_ok_json(serde_json::to_value(result).unwrap())),
+                Err(e) => Ok(tool_err_json(&e.to_string())),
+            }
+        }
+        "sculpt_apply" => {
+            let object_id = match args.get("object_id").and_then(|v| v.as_u64()) {
+                Some(id) => id as u32,
+                None => return Ok(tool_err_json("object_id is required")),
+            };
+            let position = match args.get("position").and_then(|v| v.as_array()) {
+                Some(arr) if arr.len() >= 3 => [
+                    arr[0].as_f64().unwrap_or(0.0) as f32,
+                    arr[1].as_f64().unwrap_or(0.0) as f32,
+                    arr[2].as_f64().unwrap_or(0.0) as f32,
+                ],
+                _ => return Ok(tool_err_json("position is required as [x, y, z]")),
+            };
+            let mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("add");
+            let radius = args.get("radius").and_then(|v| v.as_f64()).unwrap_or(0.5) as f32;
+            let strength = args.get("strength").and_then(|v| v.as_f64()).unwrap_or(0.5) as f32;
+            let material_id = args.get("material_id").and_then(|v| v.as_u64()).unwrap_or(1) as u16;
+            match api.sculpt_apply(object_id, position, mode, radius, strength, material_id) {
+                Ok(()) => Ok(tool_ok_json(serde_json::json!({"status": "ok"}))),
+                Err(e) => Ok(tool_err_json(&e.to_string())),
+            }
+        }
+        "object_shape" => {
+            let object_id = match args.get("object_id").and_then(|v| v.as_u64()) {
+                Some(id) => id as u32,
+                None => return Ok(tool_err_json("object_id is required")),
+            };
+            match api.object_shape(object_id) {
+                Ok(result) => Ok(tool_ok_json(serde_json::to_value(result).unwrap())),
+                Err(e) => Ok(tool_err_json(&e.to_string())),
+            }
+        }
         _ => Err(AutomationError::NotImplemented("unknown tool")),
     }
 }
@@ -1530,7 +1790,7 @@ mod tests {
     fn register_all_observation_tools() {
         let mut registry = ToolRegistry::new();
         register_observation_tools(&mut registry);
-        assert_eq!(registry.len(), 24);
+        assert_eq!(registry.len(), 27);
     }
 
     #[test]
@@ -1538,8 +1798,8 @@ mod tests {
         let mut registry = ToolRegistry::new();
         register_observation_tools(&mut registry);
         let tools = registry.list_tools(ToolMode::Debug);
-        // Debug mode sees "Both" tools only (13 original + node_find + scene_list + camera_list)
-        assert_eq!(tools.len(), 16);
+        // Debug mode sees "Both" tools only (+object_shape is Both)
+        assert_eq!(tools.len(), 18);
     }
 
     #[test]
@@ -1547,7 +1807,7 @@ mod tests {
         let mut registry = ToolRegistry::new();
         register_observation_tools(&mut registry);
         let tools = registry.list_tools(ToolMode::Editor);
-        assert_eq!(tools.len(), 24);
+        assert_eq!(tools.len(), 27);
     }
 
     #[test]

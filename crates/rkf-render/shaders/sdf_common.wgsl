@@ -19,6 +19,7 @@ const PRIM_CYLINDER: u32 = 4u;
 const PRIM_PLANE: u32    = 5u;
 
 const EMPTY_SLOT: u32 = 0xFFFFFFFFu;
+const INTERIOR_SLOT: u32 = 0xFFFFFFFEu;
 const BVH_INVALID: u32 = 0xFFFFFFFFu;
 const MAX_FLOAT: f32 = 3.402823e+38;
 
@@ -240,6 +241,9 @@ fn sample_brick_map(local_pos: vec3<f32>, obj: GpuObject,
     let slot = (*brick_maps)[obj.brick_map_offset + flat_brick];
     if slot == EMPTY_SLOT {
         return vec2<f32>(MAX_FLOAT, 0.0);
+    }
+    if slot == INTERIOR_SLOT {
+        return vec2<f32>(-(obj.voxel_size * 2.0), 0.0);
     }
 
     // Local position within brick.

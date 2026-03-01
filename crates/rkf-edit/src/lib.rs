@@ -20,6 +20,7 @@
 #![warn(missing_docs)]
 
 pub mod brush;
+pub mod cpu_apply;
 pub mod edit_op;
 pub mod pipeline;
 pub mod transform_ops;

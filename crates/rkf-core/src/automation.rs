@@ -162,6 +162,56 @@ pub struct SpatialQueryResult {
     pub inside: bool,
 }
 
+/// Compact 3D shape overview of an object at brick granularity.
+///
+/// Each brick (8x8x8 voxels) is categorized as empty (`.`), interior (`#`),
+/// or surface/allocated (`+`). Per-Y-level ASCII slices provide a spatial
+/// overview in a single MCP call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObjectShapeResult {
+    /// Scene object ID.
+    pub object_id: u32,
+    /// Brick grid dimensions `[x, y, z]`.
+    pub dims: [u32; 3],
+    /// Voxel size in metres.
+    pub voxel_size: f32,
+    /// Object-local AABB minimum `[x, y, z]`.
+    pub aabb_min: [f32; 3],
+    /// Object-local AABB maximum `[x, y, z]`.
+    pub aabb_max: [f32; 3],
+    /// Number of empty brick slots.
+    pub empty_count: u32,
+    /// Number of interior brick slots.
+    pub interior_count: u32,
+    /// Number of surface/allocated brick slots.
+    pub surface_count: u32,
+    /// Per-Y-level ASCII slices (index = brick Y coordinate).
+    /// Each string is Z rows of X characters, newline-separated.
+    pub y_slices: Vec<String>,
+}
+
+/// Result of sampling a 2D slice of voxel SDF distances for an object.
+///
+/// The slice is an XZ grid at a fixed Y coordinate in object-local space.
+/// Used for diagnosing sculpt artifacts by inspecting raw voxel data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VoxelSliceResult {
+    /// Origin of the grid in object-local space `[x_min, z_min]`.
+    pub origin: [f32; 2],
+    /// Sample spacing (= voxel_size).
+    pub spacing: f32,
+    /// Number of samples along X.
+    pub width: u32,
+    /// Number of samples along Z.
+    pub height: u32,
+    /// The Y coordinate of the slice in object-local space.
+    pub y_coord: f32,
+    /// Row-major distance values (width * height floats).
+    pub distances: Vec<f32>,
+    /// Per-sample slot status: 0=EMPTY, 1=INTERIOR, 2=allocated.
+    pub slot_status: Vec<u8>,
+}
+
 // ---------------------------------------------------------------------------
 // Mutation input types
 // ---------------------------------------------------------------------------
@@ -512,6 +562,48 @@ pub trait AutomationApi: Send + Sync {
     fn camera_snap_to(&self, entity_id: u64) -> Result<(), String> {
         Err("camera_snap_to not supported".into())
     }
+
+    // --- Diagnostic tools (default: unsupported) -----------------------------
+
+    /// Sample a 2D XZ slice of raw SDF distances from an object's voxel data.
+    ///
+    /// `object_id` identifies the scene object. `y_coord` is the object-local
+    /// Y coordinate for the slice. Returns a grid of distance values and
+    /// per-sample brick slot status.
+    #[allow(unused_variables)]
+    fn voxel_slice(
+        &self,
+        object_id: u32,
+        y_coord: f32,
+    ) -> AutomationResult<VoxelSliceResult> {
+        Err(AutomationError::NotImplemented("voxel_slice"))
+    }
+
+    /// Apply a single sculpt brush hit to an object via MCP.
+    ///
+    /// Creates a one-shot undo entry. `position` is world-space `[x, y, z]`.
+    /// `mode` is `"add"`, `"subtract"`, or `"smooth"`.
+    #[allow(unused_variables)]
+    fn sculpt_apply(
+        &self,
+        object_id: u32,
+        position: [f32; 3],
+        mode: &str,
+        radius: f32,
+        strength: f32,
+        material_id: u16,
+    ) -> AutomationResult<()> {
+        Err(AutomationError::NotImplemented("sculpt_apply"))
+    }
+
+    /// Return a compact brick-level 3D shape overview of an object.
+    ///
+    /// Each brick is categorized as empty, interior, or surface/allocated.
+    /// Returns per-Y-level ASCII slices for spatial reasoning.
+    #[allow(unused_variables)]
+    fn object_shape(&self, object_id: u32) -> AutomationResult<ObjectShapeResult> {
+        Err(AutomationError::NotImplemented("object_shape"))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -843,6 +935,45 @@ mod tests {
         let json = serde_json::to_string(&stats).unwrap();
         let back: BrickPoolStats = serde_json::from_str(&json).unwrap();
         assert_eq!(back.allocated, 1024);
+    }
+
+    #[test]
+    fn object_shape_result_serde_roundtrip() {
+        let res = ObjectShapeResult {
+            object_id: 2,
+            dims: [32, 16, 32],
+            voxel_size: 0.03,
+            aabb_min: [-3.84, -1.92, -3.84],
+            aabb_max: [3.84, 1.92, 3.84],
+            empty_count: 14000,
+            interior_count: 200,
+            surface_count: 2184,
+            y_slices: vec!["....++++....".to_string()],
+        };
+        let json = serde_json::to_string(&res).unwrap();
+        let back: ObjectShapeResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.object_id, 2);
+        assert_eq!(back.dims, [32, 16, 32]);
+        assert_eq!(back.y_slices.len(), 1);
+    }
+
+    #[test]
+    fn voxel_slice_result_serde_roundtrip() {
+        let res = VoxelSliceResult {
+            origin: [-0.5, -0.5],
+            spacing: 0.04,
+            width: 25,
+            height: 25,
+            y_coord: 0.0,
+            distances: vec![0.1; 625],
+            slot_status: vec![2; 625],
+        };
+        let json = serde_json::to_string(&res).unwrap();
+        let back: VoxelSliceResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.width, 25);
+        assert_eq!(back.height, 25);
+        assert!((back.spacing - 0.04).abs() < 1e-6);
+        assert_eq!(back.distances.len(), 625);
     }
 
     #[test]

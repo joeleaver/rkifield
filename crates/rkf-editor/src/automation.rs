@@ -82,6 +82,46 @@ pub struct SharedState {
     pub log_entries: VecDeque<LogEntry>,
     /// Engine start time for log timestamps.
     pub start_time: Instant,
+    /// Pending voxel slice request (set by MCP, consumed by render loop).
+    pub pending_voxel_slice: Option<VoxelSliceRequest>,
+    /// Voxel slice result (set by render loop, consumed by MCP polling).
+    pub voxel_slice_result: Option<rkf_core::automation::VoxelSliceResult>,
+    /// Pending spatial query request (set by MCP, consumed by render loop).
+    pub pending_spatial_query: Option<SpatialQueryRequest>,
+    /// Spatial query result (set by render loop, consumed by MCP polling).
+    pub spatial_query_result: Option<rkf_core::automation::SpatialQueryResult>,
+    /// Pending MCP sculpt request (set by MCP, consumed by render loop).
+    pub pending_mcp_sculpt: Option<McpSculptRequest>,
+    /// MCP sculpt result (set by render loop, consumed by MCP polling).
+    pub mcp_sculpt_result: Option<Result<(), String>>,
+    /// Pending object_shape request (set by MCP, consumed by render loop).
+    pub pending_object_shape: Option<u32>,
+    /// Object shape result (set by render loop, consumed by MCP polling).
+    pub object_shape_result: Option<rkf_core::automation::ObjectShapeResult>,
+}
+
+/// Request for a voxel slice diagnostic.
+#[derive(Debug, Clone)]
+pub struct VoxelSliceRequest {
+    pub object_id: u32,
+    pub y_coord: f32,
+}
+
+/// Single MCP sculpt brush hit request.
+#[derive(Debug, Clone)]
+pub struct McpSculptRequest {
+    pub object_id: u32,
+    pub position: Vec3,
+    pub mode: String,
+    pub radius: f32,
+    pub strength: f32,
+    pub material_id: u16,
+}
+
+/// Request for a spatial query at a world position.
+#[derive(Debug, Clone)]
+pub struct SpatialQueryRequest {
+    pub world_pos: Vec3,
 }
 
 /// Maximum number of log entries kept in the ring buffer.
@@ -113,6 +153,14 @@ impl SharedState {
             brush_preview_pos: None,
             log_entries: VecDeque::with_capacity(MAX_LOG_ENTRIES),
             start_time: Instant::now(),
+            pending_voxel_slice: None,
+            voxel_slice_result: None,
+            pending_spatial_query: None,
+            spatial_query_result: None,
+            pending_mcp_sculpt: None,
+            mcp_sculpt_result: None,
+            pending_object_shape: None,
+            object_shape_result: None,
         }
     }
 
@@ -501,23 +549,32 @@ impl AutomationApi for EditorAutomationApi {
 
     fn spatial_query(
         &self,
-        chunk: [i32; 3],
+        _chunk: [i32; 3],
         local: [f32; 3],
     ) -> AutomationResult<SpatialQueryResult> {
-        if chunk != [0, 0, 0] {
-            return Ok(SpatialQueryResult {
-                distance: f32::MAX,
-                material_id: 0,
-                inside: false,
-            });
+        // Submit request to the engine thread and poll for result.
+        let world_pos = Vec3::new(local[0], local[1], local[2]);
+        {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|e| AutomationError::EngineError(format!("lock poisoned: {e}")))?;
+            state.spatial_query_result = None;
+            state.pending_spatial_query = Some(SpatialQueryRequest { world_pos });
         }
-        let pos = Vec3::new(local[0], local[1], local[2]);
-        let distance = pos.length() - 0.5;
-        Ok(SpatialQueryResult {
-            distance,
-            material_id: if distance < 0.0 { 1 } else { 0 },
-            inside: distance < 0.0,
-        })
+
+        // Poll for up to 2 seconds.
+        for _ in 0..200 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            if let Ok(mut state) = self.state.lock() {
+                if let Some(result) = state.spatial_query_result.take() {
+                    return Ok(result);
+                }
+            }
+        }
+        Err(AutomationError::EngineError(
+            "spatial_query timed out waiting for engine".into(),
+        ))
     }
 
     fn scene_graph(&self) -> AutomationResult<SceneGraphSnapshot> {
@@ -679,12 +736,12 @@ impl AutomationApi for EditorAutomationApi {
             ["debug_mode", mode_str] => {
                 let mode: u32 = mode_str.parse().map_err(|_| {
                     AutomationError::InvalidParameter(format!(
-                        "invalid debug mode: {mode_str} (expected 0-6)"
+                        "invalid debug mode: {mode_str} (expected 0-8)"
                     ))
                 })?;
-                if mode > 6 {
+                if mode > 8 {
                     return Err(AutomationError::InvalidParameter(format!(
-                        "debug mode {mode} out of range (expected 0-6)"
+                        "debug mode {mode} out of range (expected 0-8)"
                     )));
                 }
                 let mut state = self
@@ -700,12 +757,14 @@ impl AutomationApi for EditorAutomationApi {
                     4 => "diffuse only",
                     5 => "specular only",
                     6 => "GI only",
+                    7 => "SDF distance",
+                    8 => "brick boundaries",
                     _ => "unknown",
                 };
                 Ok(format!("debug mode set to {mode} ({mode_name})"))
             }
             ["debug_mode"] => Err(AutomationError::InvalidParameter(
-                "usage: debug_mode <0-6>".to_string(),
+                "usage: debug_mode <0-8>".to_string(),
             )),
             ["camera_set", x_s, y_s, z_s, yaw_s, pitch_s] => {
                 let x: f32 = x_s.parse().map_err(|_| {
@@ -1246,6 +1305,110 @@ impl AutomationApi for EditorAutomationApi {
 
         es.environment.mark_dirty();
         Ok(())
+    }
+
+    fn voxel_slice(
+        &self,
+        object_id: u32,
+        y_coord: f32,
+    ) -> AutomationResult<VoxelSliceResult> {
+        // Submit request to the engine thread and poll for result.
+        {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|e| AutomationError::EngineError(format!("lock poisoned: {e}")))?;
+            state.voxel_slice_result = None;
+            state.pending_voxel_slice = Some(VoxelSliceRequest { object_id, y_coord });
+        }
+
+        // Poll for up to 2 seconds.
+        for _ in 0..200 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            if let Ok(mut state) = self.state.lock() {
+                if let Some(result) = state.voxel_slice_result.take() {
+                    return Ok(result);
+                }
+            }
+        }
+        Err(AutomationError::EngineError(
+            "voxel_slice timed out waiting for engine".into(),
+        ))
+    }
+
+    fn sculpt_apply(
+        &self,
+        object_id: u32,
+        position: [f32; 3],
+        mode: &str,
+        radius: f32,
+        strength: f32,
+        material_id: u16,
+    ) -> AutomationResult<()> {
+        // Validate mode.
+        match mode {
+            "add" | "subtract" | "smooth" => {}
+            other => {
+                return Err(AutomationError::InvalidParameter(format!(
+                    "invalid sculpt mode: {other} (expected add/subtract/smooth)"
+                )));
+            }
+        }
+
+        // Submit request to the engine thread and poll for result.
+        {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|e| AutomationError::EngineError(format!("lock poisoned: {e}")))?;
+            state.mcp_sculpt_result = None;
+            state.pending_mcp_sculpt = Some(McpSculptRequest {
+                object_id,
+                position: Vec3::new(position[0], position[1], position[2]),
+                mode: mode.to_string(),
+                radius,
+                strength,
+                material_id,
+            });
+        }
+
+        // Poll for up to 2 seconds.
+        for _ in 0..200 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            if let Ok(mut state) = self.state.lock() {
+                if let Some(result) = state.mcp_sculpt_result.take() {
+                    return result.map_err(|e| AutomationError::EngineError(e));
+                }
+            }
+        }
+        Err(AutomationError::EngineError(
+            "sculpt_apply timed out waiting for engine".into(),
+        ))
+    }
+
+    fn object_shape(&self, object_id: u32) -> AutomationResult<ObjectShapeResult> {
+        // Submit request to the engine thread and poll for result.
+        {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|e| AutomationError::EngineError(format!("lock poisoned: {e}")))?;
+            state.object_shape_result = None;
+            state.pending_object_shape = Some(object_id);
+        }
+
+        // Poll for up to 2 seconds.
+        for _ in 0..200 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            if let Ok(mut state) = self.state.lock() {
+                if let Some(result) = state.object_shape_result.take() {
+                    return Ok(result);
+                }
+            }
+        }
+        Err(AutomationError::EngineError(
+            "object_shape timed out waiting for engine".into(),
+        ))
     }
 }
 

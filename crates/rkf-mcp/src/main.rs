@@ -106,10 +106,13 @@ async fn main() -> anyhow::Result<()> {
     // and the lock released before tool dispatch (prevents deadlocks with meta tools).
     let api_slot: ApiSlot = Arc::new(RwLock::new(Arc::new(StubAutomationApi)));
 
-    // Build tool registry — only meta tools live locally.
-    // Observation/mutation tools are discovered from the engine via IPC.
+    // Build tool registry — meta tools + generic search/use tools live locally.
+    // Engine-specific tools are discovered dynamically via search_tools and
+    // called via use_tool, so we never need to restart the MCP server when
+    // adding new engine functionality.
     let mut registry = rkf_mcp::registry::ToolRegistry::new();
     tools::meta::register_meta_tools(&mut registry, Arc::clone(&api_slot));
+    tools::dynamic::register_dynamic_tools(&mut registry);
     let registry = Arc::new(registry);
 
     // Auto-discover and connect to a running engine

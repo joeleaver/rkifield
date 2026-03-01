@@ -346,6 +346,7 @@ fn tool_response_to_content(response: crate::registry::ToolResponse) -> Vec<Cont
                 mime_type,
             }]
         }
+        ToolResponse::RawContent(blocks) => blocks,
     }
 }
 

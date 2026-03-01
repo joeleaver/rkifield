@@ -1,0 +1,43 @@
+(
+    name: "voxtest",
+    objects: [
+        (
+            name: "ground",
+            position: (0.0, -0.8, 0.0),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            scale: (1.0, 1.0, 1.0),
+            material_id: Some(1),
+            analytical: Some("box"),
+            analytical_params: Some([10.0, 0.1, 10.0]),
+            importance_bias: 1.0,
+        ),
+        (
+            name: "vox_cross",
+            asset_path: Some("scenes/test_cross.rkf"),
+            position: (0.0, 0.0, -2.0),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            scale: (1.0, 1.0, 1.0),
+            importance_bias: 1.0,
+        ),
+    ],
+    cameras: [
+        (
+            name: "default",
+            position: (0.0, 1.0, 1.0),
+            yaw: 0.0,
+            pitch: -15.0,
+            fov: 60.0,
+        ),
+    ],
+    lights: [
+        (
+            name: "sun",
+            light_type: Directional,
+            position: (0.0, 0.0, 0.0),
+            direction: (0.5, 1.0, 0.3),
+            color: (1.0, 0.95, 0.85),
+            intensity: 3.0,
+            range: 0.0,
+        ),
+    ],
+)

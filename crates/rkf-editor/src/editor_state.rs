@@ -18,8 +18,11 @@ use crate::scene_io::{RecentFiles, UnsavedChangesState};
 use crate::sculpt::SculptState;
 use crate::undo::UndoStack;
 
+use std::collections::HashSet;
+
 use glam::Vec3;
 use rinch::prelude::Signal;
+use rkf_core::brick::Brick;
 use rkf_runtime::api::World;
 
 /// What is currently selected in the scene tree.
@@ -390,6 +393,20 @@ impl EditorMode {
     }
 }
 
+/// Accumulates brick snapshots during a sculpt stroke for undo support.
+///
+/// Created when a sculpt stroke begins. Before each edit, any not-yet-captured
+/// brick slots are snapshot from the CPU brick pool. On stroke end, the
+/// accumulated snapshots are pushed as an undo action.
+pub struct SculptUndoAccumulator {
+    /// The object being sculpted.
+    pub object_id: u64,
+    /// Brick pool slots that have already been captured.
+    pub captured_slots: HashSet<u32>,
+    /// Pre-edit snapshots: (slot_index, brick_data_before_edit).
+    pub snapshots: Vec<(u32, Brick)>,
+}
+
 /// Aggregated editor state, shared between the event loop and the UI.
 pub struct EditorState {
     // ── Mode ─────────────────────────────────────────────────
@@ -483,6 +500,19 @@ pub struct EditorState {
     /// current non-uniform scale, resetting scale to (1,1,1) afterwards.
     pub pending_revoxelize: Option<u32>,
 
+    // ── Sculpt pipeline (UI → render loop) ──────────────────
+    /// Queued sculpt edit requests — one per brush-hit point during a stroke.
+    /// Drained by the render loop each frame and applied to the CPU brick pool.
+    pub pending_sculpt_edits: Vec<crate::sculpt::SculptEditRequest>,
+
+    /// Accumulates brick snapshots during a sculpt stroke for undo.
+    /// Created on stroke begin, finalized on stroke end.
+    pub sculpt_undo_accumulator: Option<SculptUndoAccumulator>,
+
+    /// Pending sculpt undo: brick snapshots to restore.
+    /// Set by apply_undo_action, consumed by the render loop.
+    pub pending_sculpt_undo: Option<Vec<(u32, Brick)>>,
+
     // ── World (unified game state) ──────────────────────────
     /// The unified world container. Wraps `Scene` (SDF objects) + ECS +
     /// brick pool. Replaces the former `v2_scene: Option<Scene>`.
@@ -549,6 +579,9 @@ impl EditorState {
             pending_minimize: false,
             pending_maximize: false,
             pending_revoxelize: None,
+            pending_sculpt_edits: Vec::new(),
+            sculpt_undo_accumulator: None,
+            pending_sculpt_undo: None,
             world: World::new("editor"),
         }
     }
@@ -650,6 +683,13 @@ impl EditorState {
             }
             UndoActionKind::DespawnEntity { entity_id: _ } => {
                 // Undo despawn would need stored object data — not supported yet.
+            }
+            UndoActionKind::SculptStroke { brick_snapshots, .. } => {
+                if reverse {
+                    // Undo: queue brick restoration for the render loop.
+                    self.pending_sculpt_undo = Some(brick_snapshots.clone());
+                }
+                // Redo is not supported for sculpt strokes.
             }
             _ => {
                 // VoxelEdit, PropertyChange, EnvironmentChange — future work.
