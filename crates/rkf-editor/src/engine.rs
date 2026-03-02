@@ -1440,6 +1440,744 @@ impl EditorEngine {
         true
     }
 
+    /// Per-stroke SDF repair via flat-array FMM with restricted write-back.
+    ///
+    /// Called after every sculpt stroke to correct the distance magnitudes introduced
+    /// by CSG in the brush region.  Correct magnitudes are critical because the
+    /// Catmull-Rom normal kernel uses a 4×4×4 voxel neighbourhood — wrong magnitudes
+    /// produce banding and incorrect normals.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Define outer box  = brush_center ± (inner_half + 1-brick margin) in voxel coords.
+    /// 2. Load the outer box into flat f32 arrays (post-CSG for inner, original for margin).
+    /// 3. Detect zero-crossings, seed FMM at |d|.min(h).
+    /// 4. Run heap-based FMM on the flat array — O(N log N) with O(1) index arithmetic
+    ///    (≈50–100× faster than the HashMap-based full-object FMM).
+    /// 5. Determine sign: seed BFS from all margin voxels (valid sign, untouched by CSG),
+    ///    flood into the inner box stopping at sign changes.
+    /// 6. Write back ONLY the inner voxels.  The margin is read-only — no discontinuity
+    ///    is created at the boundary, so the next stroke's zero-crossing detection sees
+    ///    clean SDF values in the surrounding region.
+    fn sculpt_fmm_repair(
+        &mut self,
+        scene: &mut Scene,
+        object_id: u32,
+        center_local: glam::Vec3,
+        inner_half_voxels: i32,
+    ) -> bool {
+        use std::collections::BinaryHeap;
+        use std::cmp::Reverse;
+        use std::collections::VecDeque;
+        use rkf_core::constants::BRICK_DIM;
+        use rkf_core::brick::brick_index;
+        use rkf_core::voxel::VoxelSample;
+
+        // 1. Look up object's voxel data.
+        let obj = match scene.objects.iter().find(|o| o.id == object_id) {
+            Some(o) => o, None => return false,
+        };
+        let (handle, voxel_size, aabb_min) = match &obj.root_node.sdf_source {
+            SdfSource::Voxelized { brick_map_handle, voxel_size, aabb } =>
+                (brick_map_handle.clone(), *voxel_size, aabb.min),
+            _ => return false,
+        };
+        let dims = handle.dims;
+        let bd = BRICK_DIM as i32;
+        let gw = dims.x as i32 * bd;
+        let gh = dims.y as i32 * bd;
+        let gd_ = dims.z as i32 * bd;
+        let h = voxel_size;
+
+        // 2. Define outer box (inner + 1-brick margin), clamped to grid.
+        let margin_v = bd;
+        let outer_half = inner_half_voxels + margin_v;
+
+        let cx = ((center_local.x - aabb_min.x) / h).round() as i32;
+        let cy = ((center_local.y - aabb_min.y) / h).round() as i32;
+        let cz = ((center_local.z - aabb_min.z) / h).round() as i32;
+
+        let ox0 = (cx - outer_half).clamp(0, gw - 1) as usize;
+        let oy0 = (cy - outer_half).clamp(0, gh - 1) as usize;
+        let oz0 = (cz - outer_half).clamp(0, gd_ - 1) as usize;
+        let ox1 = (cx + outer_half).clamp(0, gw - 1) as usize;
+        let oy1 = (cy + outer_half).clamp(0, gh - 1) as usize;
+        let oz1 = (cz + outer_half).clamp(0, gd_ - 1) as usize;
+
+        let fw  = ox1 - ox0 + 1;
+        let fh  = oy1 - oy0 + 1;
+        let _fd = oz1 - oz0 + 1;
+        let fw_fh = fw * fh;
+        let fn_count = fw * fh * (oz1 - oz0 + 1);
+        if fn_count == 0 { return false; }
+
+        // Flat index: (gx, gy, gz) → usize.  All coords in absolute voxel space.
+        let fidx = |gx: usize, gy: usize, gz: usize| -> usize {
+            (gz - oz0) * fw_fh + (gy - oy0) * fw + (gx - ox0)
+        };
+        // Is global voxel (gx,gy,gz) in the inner box?
+        let is_inner = |gx: i32, gy: i32, gz: i32| -> bool {
+            (gx - cx).abs() <= inner_half_voxels
+                && (gy - cy).abs() <= inner_half_voxels
+                && (gz - cz).abs() <= inner_half_voxels
+        };
+
+        // 3. Allocate flat buffers.
+        let large_dist = h * gw.max(gh).max(gd_) as f32;
+        let mut stored_d    = vec![large_dist; fn_count]; // post-CSG signed distance
+        let mut is_alloc    = vec![false; fn_count];       // in brick pool?
+        let mut fmm_d       = vec![f32::MAX; fn_count];   // unsigned FMM distance
+        let mut fmm_settled = vec![false; fn_count];
+        // For write-back: store (slot, brick_index) for allocated inner voxels.
+        let mut write_slot = vec![u32::MAX; fn_count];
+        let mut write_vi   = vec![0u32; fn_count];
+
+        // 4. Load from brick pool.
+        for gz in oz0..=oz1 {
+            for gy in oy0..=oy1 {
+                for gx in ox0..=ox1 {
+                    let bd_us = BRICK_DIM as usize;
+                    let bx = (gx / bd_us) as u32;
+                    let by = (gy / bd_us) as u32;
+                    let bz = (gz / bd_us) as u32;
+                    let lx = (gx % bd_us) as u32;
+                    let ly = (gy % bd_us) as u32;
+                    let lz = (gz % bd_us) as u32;
+                    let fi = fidx(gx, gy, gz);
+                    if let Some(slot) = self.cpu_brick_map_alloc.get_entry(&handle, bx, by, bz) {
+                        if !Self::is_unallocated(slot) {
+                            let vi = brick_index(lx, ly, lz);
+                            let d = self.cpu_brick_pool.get(slot).voxels[vi].distance_f32();
+                            stored_d[fi] = d;
+                            is_alloc[fi] = true;
+                            if is_inner(gx as i32, gy as i32, gz as i32) {
+                                write_slot[fi] = slot;
+                                write_vi[fi]   = vi as u32;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 5. Detect zero-crossings, seed FMM.
+        let face_dx: [i32; 6] = [-1, 1,  0, 0,  0, 0];
+        let face_dy: [i32; 6] = [ 0, 0, -1, 1,  0, 0];
+        let face_dz: [i32; 6] = [ 0, 0,  0, 0, -1, 1];
+
+        for gz in oz0..=oz1 {
+            for gy in oy0..=oy1 {
+                for gx in ox0..=ox1 {
+                    let fi = fidx(gx, gy, gz);
+                    if !is_alloc[fi] { continue; }
+                    let d = stored_d[fi];
+                    if !d.is_finite() { continue; }
+                    for dir in 0..6usize {
+                        let nx = gx as i32 + face_dx[dir];
+                        let ny = gy as i32 + face_dy[dir];
+                        let nz = gz as i32 + face_dz[dir];
+                        if nx < ox0 as i32 || ny < oy0 as i32 || nz < oz0 as i32 { continue; }
+                        if nx > ox1 as i32 || ny > oy1 as i32 || nz > oz1 as i32 { continue; }
+                        let nfi = fidx(nx as usize, ny as usize, nz as usize);
+                        if !is_alloc[nfi] { continue; }
+                        let nd = stored_d[nfi];
+                        if !nd.is_finite() || d * nd >= 0.0 { continue; }
+                        let sd  = d.abs().min(h);
+                        let snd = nd.abs().min(h);
+                        if sd  < fmm_d[fi]  { fmm_d[fi]  = sd;  }
+                        if snd < fmm_d[nfi] { fmm_d[nfi] = snd; }
+                    }
+                }
+            }
+        }
+
+        // 6. Heap-based FMM on flat array — O(1) neighbour lookup via index arithmetic.
+        let eikonal = |a: f32, b: f32, c: f32| -> f32 {
+            if a == f32::MAX { return f32::MAX; }
+            let u1 = a + h;
+            if b == f32::MAX || u1 <= b { return u1; }
+            let disc2 = 2.0 * h * h - (b - a) * (b - a);
+            let u2 = if disc2 >= 0.0 { (a + b + disc2.sqrt()) * 0.5 } else { a + h };
+            if c == f32::MAX || u2 <= c { return u2; }
+            let s = a + b + c;
+            let disc3 = s * s - 3.0 * (a * a + b * b + c * c - h * h);
+            if disc3 >= 0.0 { (s + disc3.sqrt()) / 3.0 } else { u2 }
+        };
+
+        let mut heap: BinaryHeap<Reverse<(u32, u32)>> = BinaryHeap::new();
+        for fi in 0..fn_count {
+            if fmm_d[fi] < f32::MAX {
+                heap.push(Reverse((fmm_d[fi].to_bits(), fi as u32)));
+            }
+        }
+
+        while let Some(Reverse((bits, fi_u32))) = heap.pop() {
+            let fi = fi_u32 as usize;
+            if fmm_settled[fi] { continue; }
+            let dist = f32::from_bits(bits);
+            if dist > fmm_d[fi] + h * 0.01 { continue; }
+            fmm_settled[fi] = true;
+
+            // Recover absolute coords from flat index.
+            let gx = ox0 + (fi % fw);
+            let gy = oy0 + (fi / fw) % fh;
+            let gz = oz0 + (fi / fw_fh);
+
+            for dir in 0..6usize {
+                let nx = gx as i32 + face_dx[dir];
+                let ny = gy as i32 + face_dy[dir];
+                let nz = gz as i32 + face_dz[dir];
+                if nx < ox0 as i32 || ny < oy0 as i32 || nz < oz0 as i32 { continue; }
+                if nx > ox1 as i32 || ny > oy1 as i32 || nz > oz1 as i32 { continue; }
+                let nfi = fidx(nx as usize, ny as usize, nz as usize);
+                if !is_alloc[nfi] || fmm_settled[nfi] { continue; }
+
+                let nfx = nx as usize; let nfy = ny as usize; let nfz = nz as usize;
+                // Per-axis minimum settled distance for Eikonal update.
+                let mut da = [f32::MAX; 3];
+                macro_rules! check_nbr {
+                    ($i:expr, $ax:expr, $ay:expr, $az:expr) => {
+                        let ax = nfx as i32 + $ax; let ay = nfy as i32 + $ay; let az = nfz as i32 + $az;
+                        if ax >= ox0 as i32 && ay >= oy0 as i32 && az >= oz0 as i32
+                            && ax <= ox1 as i32 && ay <= oy1 as i32 && az <= oz1 as i32 {
+                            let afi = fidx(ax as usize, ay as usize, az as usize);
+                            if fmm_settled[afi] { da[$i] = da[$i].min(fmm_d[afi]); }
+                        }
+                    }
+                }
+                check_nbr!(0, -1, 0, 0); check_nbr!(0, 1, 0, 0);
+                check_nbr!(1, 0, -1, 0); check_nbr!(1, 0, 1, 0);
+                check_nbr!(2, 0, 0, -1); check_nbr!(2, 0, 0, 1);
+                da.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let new_d = eikonal(da[0], da[1], da[2]);
+                if new_d < fmm_d[nfi] {
+                    fmm_d[nfi] = new_d;
+                    heap.push(Reverse((new_d.to_bits(), nfi as u32)));
+                }
+            }
+        }
+        // Unsettled allocated voxels: fall back to large_dist.
+        for fi in 0..fn_count {
+            if is_alloc[fi] && !fmm_settled[fi] { fmm_d[fi] = large_dist; }
+        }
+
+        // 7. Sign BFS: seed from margin voxels (valid sign, untouched by CSG),
+        //    flood into the inner box stopping at zero-crossings.
+        //    Margin sign: stored_d > 0 = exterior (valid because CSG didn't touch margin).
+        //    Unallocated voxels = exterior (empty space).
+        let mut ext_sign = vec![0i8; fn_count]; // 1=ext, -1=int, 0=unknown
+        let mut bfs: VecDeque<usize> = VecDeque::new();
+
+        for gz in oz0..=oz1 {
+            for gy in oy0..=oy1 {
+                for gx in ox0..=ox1 {
+                    let fi = fidx(gx, gy, gz);
+                    let in_inner = is_inner(gx as i32, gy as i32, gz as i32);
+                    if !in_inner {
+                        // Margin: seed with valid sign.
+                        let sign = if !is_alloc[fi] || stored_d[fi] > 0.0 { 1i8 } else { -1i8 };
+                        ext_sign[fi] = sign;
+                        bfs.push_back(fi);
+                    }
+                }
+            }
+        }
+
+        while let Some(fi) = bfs.pop_front() {
+            let sign = ext_sign[fi];
+            let d_here = stored_d[fi];
+            let gx = ox0 + (fi % fw);
+            let gy = oy0 + (fi / fw) % fh;
+            let gz = oz0 + (fi / fw_fh);
+            for dir in 0..6usize {
+                let nx = gx as i32 + face_dx[dir];
+                let ny = gy as i32 + face_dy[dir];
+                let nz = gz as i32 + face_dz[dir];
+                if nx < ox0 as i32 || ny < oy0 as i32 || nz < oz0 as i32 { continue; }
+                if nx > ox1 as i32 || ny > oy1 as i32 || nz > oz1 as i32 { continue; }
+                let nfi = fidx(nx as usize, ny as usize, nz as usize);
+                if ext_sign[nfi] != 0 { continue; }
+                if !is_alloc[nfi] { ext_sign[nfi] = 1; bfs.push_back(nfi); continue; }
+                let d_nc = stored_d[nfi];
+                if d_here.is_finite() && d_nc.is_finite() && d_here * d_nc < 0.0 { continue; }
+                ext_sign[nfi] = sign;
+                bfs.push_back(nfi);
+            }
+        }
+        // Fallback for inner voxels BFS didn't reach: use post-CSG sign.
+        for fi in 0..fn_count {
+            if ext_sign[fi] == 0 && is_alloc[fi] {
+                ext_sign[fi] = if stored_d[fi] > 0.0 { 1 } else { -1 };
+            }
+        }
+
+        // 8. Write back: only inner allocated voxels.
+        //    Exterior → FMM distance (correct Euclidean, fixes normals).
+        //    Interior → original magnitude (preserves smooth-min blending).
+        for fi in 0..fn_count {
+            let slot = write_slot[fi];
+            if slot == u32::MAX { continue; } // not inner or not allocated
+            let vi = write_vi[fi] as usize;
+            let orig = self.cpu_brick_pool.get(slot).voxels[vi];
+            let sign = ext_sign[fi] as f32;
+            let mag = if sign > 0.0 {
+                fmm_d[fi] // exterior: use FMM Euclidean distance
+            } else {
+                orig.distance_f32().abs().max(h * 0.01) // interior: keep original
+            };
+            self.cpu_brick_pool.get_mut(slot).voxels[vi] = VoxelSample::new(
+                sign * mag,
+                orig.material_id(),
+                orig.blend_weight(),
+                orig.secondary_id(),
+                orig.flags(),
+            );
+        }
+
+        true
+    }
+
+    /// Recompute correct SDF magnitudes from zero-crossings via BFS (Dijkstra).
+    ///
+    /// After iterative sculpting, the CSG formula leaves surrounding voxels with
+    /// incorrect distance magnitudes — each stroke compounds the error. This method
+    /// repairs the field without changing geometry:
+    ///
+    /// 1. Collect all allocated voxels.
+    /// 2. Seed a min-heap with voxels adjacent to sign changes (|original dist|).
+    /// 3. Dijkstra: propagate distance + voxel_size to 6-face neighbors.
+    /// 4. Sign flood-fill from boundary voxels (always exterior) to determine
+    ///    interior vs exterior; propagate through positive-sign voxels, stop at
+    ///    sign changes.
+    /// 5. Write back: ±bfs_distance, preserving material_id/blend_weight/flags.
+    /// 6. Re-run mark_interior_empties and full GPU reupload.
+    ///
+    /// Returns `true` if a fix was performed.
+    pub fn process_fix_sdfs(&mut self, scene: &mut Scene, object_id: u32) -> bool {
+        // Get handle before running fix.
+        let handle = match scene.objects.iter().find(|o| o.id == object_id) {
+            Some(o) => match &o.root_node.sdf_source {
+                SdfSource::Voxelized { brick_map_handle, .. } => *brick_map_handle,
+                _ => return false,
+            },
+            None => return false,
+        };
+
+        // Clear stale INTERIOR_SLOT markers before repair.
+        //
+        // mark_interior_empties is safe after initial voxelization (single connected
+        // body), but NOT during/after sculpting. After sculpting, the brush expands
+        // the brick map and allocates peripheral bricks (filled with vs*2.0). These
+        // peripheral bricks form "walls" that enclose empty regions, causing
+        // mark_interior_empties to incorrectly classify them as INTERIOR_SLOT.
+        // INTERIOR_SLOT bricks return -(vs*2.0) from the shader — a negative SDF
+        // that registers as a hit, producing false shadows across the entire AABB.
+        //
+        // Solution: clear all INTERIOR_SLOT → EMPTY_SLOT, run the FMM repair
+        // (which assigns large positive distances to peripheral bricks), and do NOT
+        // re-mark interior bricks. The correct SDF magnitudes from fix_sdfs_cpu make
+        // EMPTY_SLOT bricks harmless (the shader returns MAX_FLOAT, skipped quickly).
+        {
+            use rkf_core::brick_map::{EMPTY_SLOT, INTERIOR_SLOT};
+            let dims = handle.dims;
+            for bz in 0..dims.z {
+                for by in 0..dims.y {
+                    for bx in 0..dims.x {
+                        if let Some(slot) = self.cpu_brick_map_alloc.get_entry(&handle, bx, by, bz) {
+                            if slot == INTERIOR_SLOT {
+                                self.cpu_brick_map_alloc.set_entry(&handle, bx, by, bz, EMPTY_SLOT);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if !self.fix_sdfs_cpu(scene, object_id, None) {
+            return false;
+        }
+
+        // Do NOT call mark_interior_empties here — see comment above.
+        self.reupload_brick_data();
+        true
+    }
+
+    /// Recompute correct SDF distances via FMM for the given object.
+    /// CPU-only — does NOT upload to GPU or call mark_interior_empties.
+    ///
+    /// `scope`: if Some((center_local, radius_local)), only processes voxels
+    /// within that sphere (in object-local space). Used by the sculpt loop to
+    /// scope work to the brush region instead of the whole object.
+    /// If None, processes all allocated voxels (used by the Fix SDFs button).
+    fn fix_sdfs_cpu(
+        &mut self,
+        scene: &mut Scene,
+        object_id: u32,
+        scope: Option<(glam::Vec3, f32)>,
+    ) -> bool {
+        use rkf_core::constants::BRICK_DIM;
+        use rkf_core::brick::brick_index;
+        use rkf_core::voxel::VoxelSample;
+        use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
+        use std::cmp::Reverse;
+
+        // 1. Get handle + voxel_size + aabb_min.
+        let (handle, voxel_size, aabb_min) = {
+            let obj = match scene.objects.iter().find(|o| o.id == object_id) {
+                Some(o) => o,
+                None => return false,
+            };
+            match &obj.root_node.sdf_source {
+                SdfSource::Voxelized { brick_map_handle, voxel_size, aabb } => {
+                    (*brick_map_handle, *voxel_size, aabb.min)
+                }
+                _ => return false,
+            }
+        };
+
+        let dims = handle.dims;
+        let bd = BRICK_DIM as u32;
+        let gw = dims.x * bd;
+        let gh = dims.y * bd;
+        let gd = dims.z * bd;
+
+        // Compute brick-range for scope (or full grid if None).
+        // We expand the scope by 3 bricks on each side so the FMM has enough
+        // neighbouring zero-crossings to anchor boundary distances correctly.
+        let margin_bricks = 1u32;
+        let (bx_lo, by_lo, bz_lo, bx_hi, by_hi, bz_hi) = if let Some((center, radius)) = scope {
+            let r = radius + margin_bricks as f32 * (voxel_size * bd as f32);
+            let lo = center - glam::Vec3::splat(r);
+            let hi = center + glam::Vec3::splat(r);
+            let brick_size = voxel_size * bd as f32;
+            let bx0 = (((lo.x - aabb_min.x) / brick_size).floor() as i32)
+                .clamp(0, dims.x as i32 - 1) as u32;
+            let by0 = (((lo.y - aabb_min.y) / brick_size).floor() as i32)
+                .clamp(0, dims.y as i32 - 1) as u32;
+            let bz0 = (((lo.z - aabb_min.z) / brick_size).floor() as i32)
+                .clamp(0, dims.z as i32 - 1) as u32;
+            let bx1 = (((hi.x - aabb_min.x) / brick_size).ceil() as i32)
+                .clamp(0, dims.x as i32 - 1) as u32;
+            let by1 = (((hi.y - aabb_min.y) / brick_size).ceil() as i32)
+                .clamp(0, dims.y as i32 - 1) as u32;
+            let bz1 = (((hi.z - aabb_min.z) / brick_size).ceil() as i32)
+                .clamp(0, dims.z as i32 - 1) as u32;
+            (bx0, by0, bz0, bx1, by1, bz1)
+        } else {
+            (0, 0, 0, dims.x - 1, dims.y - 1, dims.z - 1)
+        };
+
+        // 2. Collect allocated voxels within the brick range.
+        let mut voxels: HashMap<(u32, u32, u32), VoxelSample> = HashMap::new();
+        let mut brick_slots: HashMap<(u32, u32, u32), u32> = HashMap::new();
+
+        for bz in bz_lo..=bz_hi {
+            for by in by_lo..=by_hi {
+                for bx in bx_lo..=bx_hi {
+                    if let Some(slot) = self.cpu_brick_map_alloc.get_entry(&handle, bx, by, bz) {
+                        if !Self::is_unallocated(slot) {
+                            brick_slots.insert((bx, by, bz), slot);
+                            let brick = self.cpu_brick_pool.get(slot);
+                            for lz in 0..bd {
+                                for ly in 0..bd {
+                                    for lx in 0..bd {
+                                        let vi = brick_index(lx, ly, lz);
+                                        voxels.insert(
+                                            (bx * bd + lx, by * bd + ly, bz * bd + lz),
+                                            brick.voxels[vi],
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if voxels.is_empty() {
+            return false;
+        }
+
+        let face_deltas: [(i32, i32, i32); 6] = [
+            (-1, 0, 0), (1, 0, 0),
+            (0, -1, 0), (0, 1, 0),
+            (0, 0, -1), (0, 0, 1),
+        ];
+        let h = voxel_size;
+        let in_bounds = |x: i32, y: i32, z: i32| -> bool {
+            x >= 0 && y >= 0 && z >= 0
+                && x < gw as i32 && y < gh as i32 && z < gd as i32
+        };
+
+        // 3. Zero-crossing seeds.
+        //
+        //    Zero-crossings (d * nd < 0 in stored data) are the most reliable part of a
+        //    corrupted SDF — CSG preserves surface position even as it corrupts magnitudes.
+        //
+        //    For each crossing pair:
+        //      fmm seed distance  = d.abs().min(voxel_size)  — sub-voxel accurate, non-zero
+        //      sign seed          = d > 0.0  (positive side = exterior)
+        //
+        //    Two maps are built: fmm_init (best seed distance per voxel) and
+        //    sign_seeds (exterior bool per voxel). A voxel appears in sign_seeds only
+        //    from its own stored sign; consistent regardless of which neighbor triggered it.
+        let mut fmm_init: HashMap<(u32, u32, u32), f32> = HashMap::new();
+        let mut sign_seeds: HashMap<(u32, u32, u32), bool> = HashMap::new(); // true = exterior
+
+        for (&(gx, gy, gz), vs) in &voxels {
+            let d = vs.distance_f32();
+            if !d.is_finite() { continue; }
+            for &(dx, dy, dz) in &face_deltas {
+                let (nx, ny, nz) = (gx as i32 + dx, gy as i32 + dy, gz as i32 + dz);
+                if !in_bounds(nx, ny, nz) { continue; }
+                let nc = (nx as u32, ny as u32, nz as u32);
+                let nd = match voxels.get(&nc) { Some(v) => v.distance_f32(), None => continue };
+                if !nd.is_finite() || d * nd >= 0.0 { continue; }
+                // This voxel.
+                let seed_d = d.abs().min(h);
+                let e = fmm_init.entry((gx, gy, gz)).or_insert(f32::MAX);
+                if seed_d < *e { *e = seed_d; }
+                sign_seeds.entry((gx, gy, gz)).or_insert(d > 0.0);
+                // Neighbor.
+                let seed_nd = nd.abs().min(h);
+                let en = fmm_init.entry(nc).or_insert(f32::MAX);
+                if seed_nd < *en { *en = seed_nd; }
+                sign_seeds.entry(nc).or_insert(nd > 0.0);
+            }
+        }
+
+        // 4. Fast Marching Method — true Euclidean distance from zero-crossings.
+        //
+        //    Unlike Dijkstra (which propagates dist+h per step and gives grid/L∞ distances
+        //    with visible banding artifacts), FMM solves the Eikonal equation |∇u|=1.
+        //    Given settled distances a≤b≤c in the three axis directions, the update is:
+        //      solve (u-a)²+(u-b)²+(u-c)² = h²
+        //    This gives the true Euclidean distance to the nearest seed.
+        //
+        //    FMM propagates through ALL allocated voxels (no stopping at the surface) —
+        //    we want unsigned Euclidean distance for both interior and exterior.
+        //    Sign is determined separately in step 5.
+        let eikonal = |a: f32, b: f32, c: f32| -> f32 {
+            // a≤b≤c; f32::MAX means no settled neighbor in that axis.
+            if a == f32::MAX { return f32::MAX; }
+            let u1 = a + h;
+            if b == f32::MAX || u1 <= b { return u1; }
+            // 2D update.
+            let disc2 = 2.0 * h * h - (b - a) * (b - a);
+            let u2 = if disc2 >= 0.0 { (a + b + disc2.sqrt()) / 2.0 } else { a + h };
+            if c == f32::MAX || u2 <= c { return u2; }
+            // 3D update.
+            let s = a + b + c;
+            let disc3 = s * s - 3.0 * (a * a + b * b + c * c - h * h);
+            if disc3 >= 0.0 { (s + disc3.sqrt()) / 3.0 } else { u2 }
+        };
+
+        let axis_pairs: [[(i32, i32, i32); 2]; 3] = [
+            [(-1, 0, 0), (1, 0, 0)],
+            [(0, -1, 0), (0, 1, 0)],
+            [(0, 0, -1), (0, 0, 1)],
+        ];
+
+        let mut fmm_best: HashMap<(u32, u32, u32), f32> = fmm_init.clone();
+        let mut fmm_heap: BinaryHeap<Reverse<(u32, u32, u32, u32)>> = BinaryHeap::new();
+        for (&coord, &d) in &fmm_init {
+            fmm_heap.push(Reverse((d.to_bits(), coord.0, coord.1, coord.2)));
+        }
+        let mut settled_dist: HashMap<(u32, u32, u32), f32> = HashMap::new();
+
+        while let Some(Reverse((dist_bits, gx, gy, gz))) = fmm_heap.pop() {
+            let coord = (gx, gy, gz);
+            if settled_dist.contains_key(&coord) { continue; }
+            let dist = f32::from_bits(dist_bits);
+            if dist > fmm_best.get(&coord).copied().unwrap_or(f32::MAX) + h * 0.01 { continue; }
+            settled_dist.insert(coord, dist);
+
+            for &(dx, dy, dz) in &face_deltas {
+                let (nx, ny, nz) = (gx as i32 + dx, gy as i32 + dy, gz as i32 + dz);
+                if !in_bounds(nx, ny, nz) { continue; }
+                let nc = (nx as u32, ny as u32, nz as u32);
+                if !voxels.contains_key(&nc) || settled_dist.contains_key(&nc) { continue; }
+
+                // Collect min settled distance in each axis for this neighbor.
+                let mut d_axis = [f32::MAX; 3];
+                for (i, dirs) in axis_pairs.iter().enumerate() {
+                    for &(adx, ady, adz) in dirs {
+                        let (ax, ay, az) = (nc.0 as i32 + adx, nc.1 as i32 + ady, nc.2 as i32 + adz);
+                        if !in_bounds(ax, ay, az) { continue; }
+                        let ac = (ax as u32, ay as u32, az as u32);
+                        if let Some(&ad) = settled_dist.get(&ac) {
+                            d_axis[i] = d_axis[i].min(ad);
+                        }
+                    }
+                }
+                let mut sorted = d_axis;
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let new_d = eikonal(sorted[0], sorted[1], sorted[2]);
+                if new_d < fmm_best.get(&nc).copied().unwrap_or(f32::MAX) {
+                    fmm_best.insert(nc, new_d);
+                    fmm_heap.push(Reverse((new_d.to_bits(), nc.0, nc.1, nc.2)));
+                }
+            }
+        }
+
+        // Fill any voxels unreachable from seeds (deep interior with no surface path).
+        let large_dist = voxel_size * (dims.x.max(dims.y).max(dims.z)) as f32 * bd as f32;
+        for &coord in voxels.keys() {
+            settled_dist.entry(coord).or_insert(large_dist);
+        }
+
+        // 5. Sign BFS from zero-crossing seeds.
+        //
+        //    Exterior and interior propagate as separate BFS passes, each stopping at
+        //    zero-crossing edges (d_here * d_nc < 0 in original data = surface boundary).
+        //    This gives correct sign for every voxel reachable from the surface and is
+        //    necessary even for scoped strokes — using `orig.distance_f32() > 0` directly
+        //    perpetuates accumulated sign corruption from prior CSG strokes.
+        //
+        //    The expensive part skipped when scoped is `classify_exterior_bricks`, which
+        //    walks the full brick map to handle voxels that have no path to a zero-crossing.
+        //    Within a brush region those voxels are rare; we fall back to original sign.
+        let mut is_exterior: HashSet<(u32, u32, u32)> = HashSet::new();
+        let mut is_interior: HashSet<(u32, u32, u32)> = HashSet::new();
+        {
+            let mut ext_q: VecDeque<(u32, u32, u32)> = VecDeque::new();
+            let mut int_q: VecDeque<(u32, u32, u32)> = VecDeque::new();
+
+            for (&coord, &ext) in &sign_seeds {
+                if ext { is_exterior.insert(coord); ext_q.push_back(coord); }
+                else   { is_interior.insert(coord); int_q.push_back(coord); }
+            }
+
+            // Exterior BFS.
+            while let Some((gx, gy, gz)) = ext_q.pop_front() {
+                let d_here = voxels[&(gx, gy, gz)].distance_f32();
+                for &(dx, dy, dz) in &face_deltas {
+                    let (nx, ny, nz) = (gx as i32 + dx, gy as i32 + dy, gz as i32 + dz);
+                    if !in_bounds(nx, ny, nz) { continue; }
+                    let nc = (nx as u32, ny as u32, nz as u32);
+                    if !voxels.contains_key(&nc) || is_exterior.contains(&nc) { continue; }
+                    let d_nc = voxels[&nc].distance_f32();
+                    if d_here.is_finite() && d_nc.is_finite() && d_here * d_nc < 0.0 { continue; }
+                    is_exterior.insert(nc);
+                    ext_q.push_back(nc);
+                }
+            }
+
+            // Interior BFS.
+            while let Some((gx, gy, gz)) = int_q.pop_front() {
+                let d_here = voxels[&(gx, gy, gz)].distance_f32();
+                for &(dx, dy, dz) in &face_deltas {
+                    let (nx, ny, nz) = (gx as i32 + dx, gy as i32 + dy, gz as i32 + dz);
+                    if !in_bounds(nx, ny, nz) { continue; }
+                    let nc = (nx as u32, ny as u32, nz as u32);
+                    if !voxels.contains_key(&nc) || is_interior.contains(&nc) { continue; }
+                    let d_nc = voxels[&nc].distance_f32();
+                    if d_here.is_finite() && d_nc.is_finite() && d_here * d_nc < 0.0 { continue; }
+                    is_interior.insert(nc);
+                    int_q.push_back(nc);
+                }
+            }
+        }
+
+        // 6. Fallback for voxels unreachable from any zero-crossing.
+        //    Full repair: use brick-level topology (expensive classify_exterior_bricks call).
+        //    Scoped: fall back to original sign — deep voxels far from the stroke are
+        //    unlikely to have accumulated sign corruption.
+        if scope.is_none() {
+            let exterior_empty_bricks =
+                Self::classify_exterior_bricks(&self.cpu_brick_map_alloc, &handle);
+
+            for &(gx, gy, gz) in voxels.keys() {
+                let coord = (gx, gy, gz);
+                if is_exterior.contains(&coord) || is_interior.contains(&coord) { continue; }
+                let bx = gx / bd;
+                let by = gy / bd;
+                let bz = gz / bd;
+                let mut is_ext = false;
+                'adj: for &(dx, dy, dz) in &face_deltas {
+                    let nbx = bx as i32 + dx;
+                    let nby = by as i32 + dy;
+                    let nbz = bz as i32 + dz;
+                    if nbx < 0 || nby < 0 || nbz < 0
+                        || nbx >= dims.x as i32 || nby >= dims.y as i32 || nbz >= dims.z as i32
+                    {
+                        is_ext = true;
+                        break 'adj;
+                    }
+                    if exterior_empty_bricks.contains(&(nbx as u32, nby as u32, nbz as u32)) {
+                        is_ext = true;
+                        break 'adj;
+                    }
+                }
+                if is_ext { is_exterior.insert(coord); } else { is_interior.insert(coord); }
+            }
+        } else {
+            // Scoped fallback: use original sign for BFS-unreachable voxels.
+            for (&coord, orig) in &voxels {
+                if !is_exterior.contains(&coord) && !is_interior.contains(&coord) {
+                    if orig.distance_f32() > 0.0 {
+                        is_exterior.insert(coord);
+                    } else {
+                        is_interior.insert(coord);
+                    }
+                }
+            }
+        }
+
+        // 7. Write back: FMM distance + sign. Preserve material metadata.
+        //
+        //    Distance strategy:
+        //      Exterior voxels → FMM distance (fixes banding; exterior gradients drive normals)
+        //      Interior voxels → original magnitude + recalculated sign
+        //
+        //    Rationale: sculpting banding artifacts live in the exterior (wrong exterior
+        //    gradients → wrong surface normals). Interior corruption doesn't directly cause
+        //    banding. Preserving original interior magnitude retains the smooth_min blending
+        //    that prevents medial-axis creasing at narrow intersections — any sharp FMM
+        //    cutoff boundary inside the object creates lumpiness in the gradient.
+        for bz in 0..dims.z {
+            for by in 0..dims.y {
+                for bx in 0..dims.x {
+                    if let Some(&slot) = brick_slots.get(&(bx, by, bz)) {
+                        let brick = self.cpu_brick_pool.get_mut(slot);
+                        for lz in 0..bd {
+                            for ly in 0..bd {
+                                for lx in 0..bd {
+                                    let coord = (bx * bd + lx, by * bd + ly, bz * bd + lz);
+                                    if let Some(orig) = voxels.get(&coord) {
+                                        let ext = is_exterior.contains(&coord);
+                                        let mag = if ext {
+                                            // Exterior: use FMM for correct Euclidean distance.
+                                            settled_dist[&coord]
+                                        } else {
+                                            // Interior: keep original magnitude. CSG preserves
+                                            // the smooth_min blending; a FMM interior would
+                                            // introduce medial-axis ridges at narrow necks.
+                                            orig.distance_f32().abs().max(voxel_size * 0.01)
+                                        };
+                                        let sign = if ext { 1.0_f32 } else { -1.0_f32 };
+                                        let vi = brick_index(lx, ly, lz);
+                                        brick.voxels[vi] = VoxelSample::new(
+                                            sign * mag,
+                                            orig.material_id(),
+                                            orig.blend_weight(),
+                                            orig.secondary_id(),
+                                            orig.flags(),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        log::info!("fix_sdfs_cpu: repaired SDF for object {}", object_id);
+        true
+    }
+
     /// Auto-voxelize an analytical object for sculpting.
     ///
     /// If the object's root node is `SdfSource::Analytical`, converts it to
@@ -1667,14 +2405,22 @@ impl EditorEngine {
             }
 
             // 5b. Snapshot newly allocated bricks for undo before they get modified.
-            // These bricks start with constant-fill data; capturing them now
-            // means undo restores the pre-edit constant fill (visually invisible).
+            // These bricks have large constant-fill data (vs*32); capturing them
+            // means undo restores the pre-edit constant fill (visually invisible
+            // since the large positive SDF means no surface is rendered).
             if let Some(ref mut acc) = undo_acc {
                 for &slot in &newly_allocated {
                     if acc.captured_slots.insert(slot) {
                         acc.snapshots.push((slot, self.cpu_brick_pool.get(slot).clone()));
                     }
                 }
+            }
+
+            // 5c. Pre-CSG: extrapolate old brick face values into new bricks.
+            // This gives CSG the correct background SDF at the boundary so
+            // smooth_min produces consistent results on both sides (no crease).
+            if !newly_allocated.is_empty() {
+                self.prefill_new_brick_faces(&handle, voxel_size, &newly_allocated);
             }
 
             // 6. Collect ALL allocated bricks in the object and apply CSG to every one.
@@ -1711,32 +2457,49 @@ impl EditorEngine {
             let modified = apply_edit_cpu(&mut self.cpu_brick_pool, &all_bricks, &op);
             log::info!("  modified: {} brick slots", modified.len());
 
-            // 6c. Reset newly allocated bricks that the CSG didn't touch.
+            // 6c. Revert newly-allocated bricks that contribute no surface geometry.
             //
-            // `allocate_bricks_in_region` fills new bricks with constant
-            // ±vs*2.0. Bricks near the brush center are overwritten by
-            // `apply_edit_cpu` with proper CSG-blended values, but bricks
-            // at the periphery (within falloff sphere but outside actual
-            // brush influence) keep the constant fill. This creates massive
-            // SDF discontinuities at boundaries with original bricks that
-            // have correct, larger distances — manifesting as crease/shelf
-            // artifacts.
+            // Two classes of newly-allocated bricks must be reverted:
             //
-            // Fix: revert unmodified newly-allocated bricks to EMPTY_SLOT
-            // so `ensure_sdf_consistency` can fill them via BFS from
-            // neighboring bricks with properly interpolated values.
+            // (a) Unmodified: `apply_edit_cpu` left them at the constant fill
+            //     (vs*2.0). These bricks are entirely outside the brush falloff.
+            //
+            // (b) Modified-but-surfaceless: the CSG reduced distances slightly
+            //     (e.g. vs*2.0 → vs*1.5, triggering `any_changed = true`) but
+            //     created no zero-crossing. All 512 voxels remain non-negative.
+            //     These bricks render nothing, but their small positive distances
+            //     (~vs) return sub-voxel values to shadow rays several metres
+            //     away — `soft_shadow` accumulates `k*d/t` which can be < 1.0
+            //     even at 2 m, producing a phantom penumbra over the ground plane.
+            //
+            // Fix: revert both classes to EMPTY_SLOT. The GPU returns vs*2.0 for
+            // EMPTY_SLOT bricks via the geom_dist path, giving the ray marcher a
+            // safe step size without the false-shadow side effect.
             {
                 let modified_set: std::collections::HashSet<u32> =
                     modified.iter().copied().collect();
-                let unmodified: Vec<u32> = newly_allocated.iter()
-                    .copied()
-                    .filter(|s| !modified_set.contains(s))
-                    .collect();
 
-                if !unmodified.is_empty() {
+                // Classify each newly-allocated brick.
+                let mut to_revert: Vec<u32> = Vec::new();
+                for &slot in &newly_allocated {
+                    if !modified_set.contains(&slot) {
+                        // (a) Untouched — revert unconditionally.
+                        to_revert.push(slot);
+                    } else {
+                        // (b) Modified — revert only if no interior voxels exist.
+                        let has_interior = self.cpu_brick_pool.get(slot)
+                            .voxels.iter()
+                            .any(|v| v.distance_f32() < 0.0);
+                        if !has_interior {
+                            to_revert.push(slot);
+                        }
+                    }
+                }
+
+                if !to_revert.is_empty() {
                     // Build reverse map: slot → (bx, by, bz) in a single pass.
-                    let unmod_set: std::collections::HashSet<u32> =
-                        unmodified.iter().copied().collect();
+                    let revert_set: std::collections::HashSet<u32> =
+                        to_revert.iter().copied().collect();
                     let dims = handle.dims;
                     let mut slot_to_coord: std::collections::HashMap<u32, (u32, u32, u32)> =
                         std::collections::HashMap::new();
@@ -1744,7 +2507,7 @@ impl EditorEngine {
                         for by in 0..dims.y {
                             for bx in 0..dims.x {
                                 if let Some(s) = self.cpu_brick_map_alloc.get_entry(&handle, bx, by, bz) {
-                                    if unmod_set.contains(&s) {
+                                    if revert_set.contains(&s) {
                                         slot_to_coord.insert(s, (bx, by, bz));
                                     }
                                 }
@@ -1753,7 +2516,7 @@ impl EditorEngine {
                     }
 
                     let mut reverted = 0u32;
-                    for slot in &unmodified {
+                    for slot in &to_revert {
                         if let Some(&(bx, by, bz)) = slot_to_coord.get(slot) {
                             self.cpu_brick_map_alloc.set_entry(
                                 &handle, bx, by, bz,
@@ -1765,19 +2528,39 @@ impl EditorEngine {
                     }
                     if reverted > 0 {
                         log::info!(
-                            "  reverted {} unmodified newly-allocated bricks to EMPTY_SLOT",
+                            "  reverted {} newly-allocated bricks to EMPTY_SLOT (no surface)",
                             reverted,
                         );
                     }
                 }
             }
 
-            // 6d. Mark interior empties and fill padding bricks with proper SDF.
-            let _interior_changed = self.mark_interior_empties(&handle);
-            let consistency_slots = self.ensure_sdf_consistency(&handle, voxel_size, aabb_min, &op);
-            if !consistency_slots.is_empty() {
-                log::info!("  consistency: filled {} padding bricks", consistency_slots.len());
+            // 6d. Per-stroke SDF repair via flat-array FMM with restricted write-back.
+            //
+            // Fix 1 (CSG formula): no more lerp — effective brush formula produces
+            // approximately valid SDFs from the start.
+            // Fix 2 (FMM repair): load outer box (inner + 1-brick margin) into flat
+            // arrays, run FMM seeded from zero-crossings, sign BFS from margin
+            // (valid, untouched), write back ONLY inner voxels.  The margin is
+            // never overwritten → no boundary discontinuity → no phantom crossings
+            // on the next stroke.
+            {
+                let inner_half = ((local_radius + blend_k) / voxel_size).ceil() as i32;
+                self.sculpt_fmm_repair(scene, req.object_id, local_pos, inner_half);
             }
+
+            // NOTE: we intentionally do NOT call mark_interior_empties() here.
+            // The flood-fill heuristic (unreachable from boundary = interior)
+            // fails when sculpting creates disconnected bodies — EMPTY bricks
+            // between them get incorrectly marked INTERIOR, causing the GPU to
+            // render concentric ring artifacts. Interior marking is only safe
+            // during initial voxelization (single connected body).
+            //
+            // ensure_sdf_consistency is also disabled — post-CSG stitching (6d)
+            // handles boundary continuity. Empty/unfilled bricks return brick_extent
+            // from the GPU so they are invisible to rays.
+            let _consistency_slots: Vec<u32> = Vec::new();
+            let _ = &op; // suppress unused warning
 
             log::info!(
                 "Sculpt pool stats AFTER all: {}/{} used ({} free)",
@@ -1850,9 +2633,9 @@ impl EditorEngine {
         let grid_end = -grid_origin;
 
         // Check if edit fits within current grid (with padding margin).
-        // ensure_sdf_consistency needs 4 bricks of BFS padding, plus 1 extra
-        // for Catmull-Rom gradient sampling at the padding edge = 5 bricks.
-        let margin = brick_size * 5.0;
+        // ensure_sdf_consistency BFS needs ~2 bricks of padding plus 1 for
+        // gradient sampling at the boundary = 3 bricks total.
+        let margin = brick_size * 3.0;
         if edit_min.x >= grid_origin.x + margin
             && edit_min.y >= grid_origin.y + margin
             && edit_min.z >= grid_origin.z + margin
@@ -1864,8 +2647,10 @@ impl EditorEngine {
         }
 
         // Compute required extent: union of current grid and edit AABB, plus margin.
-        // 6 bricks: 4 for consistency BFS padding + 1 for gradient sampling + 1 spare.
-        let growth_margin = brick_size * 6.0;
+        // 4 bricks: 2 for consistency BFS padding + 1 for Catmull-Rom gradient + 1 safety.
+        // The brick MAP (flat u32 index array) is cheap; actual GPU cost is only allocated
+        // brick pool slots (4KB each), which are proportional to surface area, not grid dims.
+        let growth_margin = brick_size * 4.0;
         let required_min = edit_min.min(grid_origin) - Vec3::splat(growth_margin);
         let required_max = edit_max.max(grid_end) + Vec3::splat(growth_margin);
 
@@ -1899,12 +2684,18 @@ impl EditorEngine {
         let pad_z = (new_dims.z - handle.dims.z) / 2;
 
         // Build new BrickMap and copy existing entries.
+        // IMPORTANT: copy both allocated bricks AND INTERIOR_SLOT markers.
+        // is_unallocated() returns true for INTERIOR_SLOT, but interior markers
+        // must be preserved — they tell the GPU that these bricks are deep inside
+        // the object (returns -vs*2.0). If lost during growth, they'd become
+        // EMPTY_SLOT (returns +vs*2.0), flipping the SDF sign and creating
+        // concentric ring artifacts.
         let mut new_map = BrickMap::new(new_dims);
         for bz in 0..handle.dims.z {
             for by in 0..handle.dims.y {
                 for bx in 0..handle.dims.x {
                     if let Some(slot) = self.cpu_brick_map_alloc.get_entry(&handle, bx, by, bz) {
-                        if !Self::is_unallocated(slot) {
+                        if slot != rkf_core::brick_map::EMPTY_SLOT {
                             new_map.set(bx + pad_x, by + pad_y, bz + pad_z, slot);
                         }
                     }
@@ -2030,7 +2821,7 @@ impl EditorEngine {
         handle: &rkf_core::scene_node::BrickMapHandle,
         voxel_size: f32,
         local_pos: Vec3,
-        exterior_bricks: &std::collections::HashSet<(u32, u32, u32)>,
+        _exterior_bricks: &std::collections::HashSet<(u32, u32, u32)>,
     ) -> f32 {
         let vs = voxel_size;
         let brick_extent = vs * 8.0;
@@ -2075,14 +2866,16 @@ impl EditorEngine {
                     pool.get(slot).sample(lx, ly, lz).distance_f32()
                 }
                 _ => {
-                    // Must match GPU EMPTY_SLOT/INTERIOR_SLOT returns (vs*2)
-                    // so that ensure_sdf_consistency produces values that
-                    // transition smoothly to what the GPU sees for empty bricks.
-                    if exterior_bricks.contains(&(bx, by, bz)) {
-                        vs * 2.0
-                    } else {
-                        -(vs * 2.0)
-                    }
+                    // Unallocated bricks always return positive distance,
+                    // matching GPU EMPTY_SLOT behavior (vs * 2.0).
+                    // Using the flood-fill exterior/interior distinction here
+                    // caused false surfaces between disconnected sculpt bodies
+                    // (the flood fill can't reach enclosed empty bricks from
+                    // the boundary, so they'd get classified as "interior" and
+                    // return negative distance, creating concentric ring artifacts).
+                    // The BFS in ensure_sdf_consistency naturally propagates
+                    // correct negative values from allocated neighbor bricks.
+                    vs * 2.0
                 }
             }
         };
@@ -2237,6 +3030,11 @@ impl EditorEngine {
     /// Also grows the brick map if the edit extends beyond the current grid.
     ///
     /// Returns the list of newly allocated pool slot indices.
+    ///
+    /// **Important:** After allocation, `prefill_new_brick_faces()` should be
+    /// called to replace constant fill with SDF extrapolated from existing
+    /// neighbors before CSG is applied. Without this, constant fill creates
+    /// seam artifacts at the transition between old and new bricks.
     fn allocate_bricks_in_region(
         &mut self,
         scene: &mut Scene,
@@ -2287,15 +3085,20 @@ impl EditorEngine {
         let alloc_radius = falloff_radius + brick_half_diag;
         let alloc_radius_sq = alloc_radius * alloc_radius;
 
-        // Classify exterior/interior via flood-fill from grid boundary.
-        let exterior = Self::classify_exterior_bricks(&self.cpu_brick_map_alloc, &handle);
-
-        // Constants: exterior gets positive SDF, interior gets negative.
-        // Must match GPU EMPTY_SLOT/INTERIOR_SLOT returns (±vs*2.0) so the
-        // ray marcher doesn't overshoot when stepping through constant-fill
-        // bricks adjacent to real SDF data.
-        let exterior_fill = voxel_size * 2.0;
-        let interior_fill = -(voxel_size * 2.0);
+        // Fill newly allocated bricks with brick_extent (vs*8) — matching the
+        // value the GPU now returns for EMPTY_SLOT bricks in `sample_voxel_at`.
+        //
+        // The Catmull-Rom gradient kernel (4x4x4) samples across brick
+        // boundaries. The gradient-specific `sample_voxel_at_norm` keeps vs*2.0
+        // for EMPTY_SLOT to preserve smooth normals at the geometry edge.
+        // The stepping `sample_voxel_at` returns vs*8.0 so rays skip empty
+        // bricks instantly instead of consuming step budget at vs*2.0 per step.
+        //
+        // New brick fill = vs*8.0 matches the stepping path, ensuring a
+        // consistent step size at new-brick boundaries before the CSG pass
+        // overwrites interior voxels with real SDF values.
+        let brick_extent_fill = voxel_size * 8.0;
+        let constant_fill = brick_extent_fill;
 
         let mut new_slots = Vec::new();
 
@@ -2322,17 +3125,11 @@ impl EditorEngine {
                     }
 
                     if let Some(new_slot) = self.cpu_brick_pool.allocate() {
-                        let fill_d = if exterior.contains(&(bx, by, bz)) {
-                            exterior_fill
-                        } else {
-                            interior_fill
-                        };
-
                         let brick = self.cpu_brick_pool.get_mut(new_slot);
                         for z in 0u32..8 {
                             for y in 0u32..8 {
                                 for x in 0u32..8 {
-                                    brick.set(x, y, z, VoxelSample::new(fill_d, 0, 0, 0, 0));
+                                    brick.set(x, y, z, VoxelSample::new(constant_fill, 0, 0, 0, 0));
                                 }
                             }
                         }
@@ -2358,6 +3155,207 @@ impl EditorEngine {
         }
 
         new_slots
+    }
+
+    /// Pre-fill new brick voxels by extrapolating from adjacent filled bricks.
+    ///
+    /// Before CSG runs, this ensures the boundary between old and new bricks
+    /// has consistent background SDF. Since `smooth_min(same_bg, brush, k)`
+    /// produces identical results on both sides, there's no gradient discontinuity
+    /// and no visible shading seam.
+    ///
+    /// Uses multi-pass flood fill: each pass propagates from already-filled
+    /// bricks (old or previously-filled new) into unfilled new bricks. Fills
+    /// all 8 voxels deep (full brick depth) using linear extrapolation with
+    /// (d+1) spatial offset correction to account for voxel center spacing
+    /// across the brick boundary. Repeats until all reachable new bricks
+    /// have smooth, continuous SDF background.
+    fn prefill_new_brick_faces(
+        &mut self,
+        handle: &rkf_core::scene_node::BrickMapHandle,
+        voxel_size: f32,
+        newly_allocated: &[u32],
+    ) {
+        use std::collections::HashSet;
+        use rkf_core::voxel::VoxelSample;
+
+        if newly_allocated.is_empty() {
+            return;
+        }
+
+        let vs = voxel_size;
+        let dims = handle.dims;
+        let new_set: HashSet<u32> = newly_allocated.iter().copied().collect();
+
+        // Build (bx, by, bz, slot) for new bricks.
+        let mut new_coords: Vec<(u32, u32, u32, u32)> = Vec::new();
+        for bz in 0..dims.z {
+            for by in 0..dims.y {
+                for bx in 0..dims.x {
+                    if let Some(s) = self.cpu_brick_map_alloc.get_entry(handle, bx, by, bz) {
+                        if new_set.contains(&s) {
+                            new_coords.push((bx, by, bz, s));
+                        }
+                    }
+                }
+            }
+        }
+
+        let face_dirs: [(i32, i32, i32); 6] = [
+            (-1, 0, 0), (1, 0, 0),
+            (0, -1, 0), (0, 1, 0),
+            (0, 0, -1), (0, 0, 1),
+        ];
+
+        let fill = vs * 2.0; // constant fill value
+        let depth = 8u32; // fill entire brick
+
+        // Multi-pass flood fill: propagate from old bricks through layers of
+        // new bricks. Each pass fills unfilled new bricks from any filled
+        // neighbor (old or previously-filled new). This ensures ALL new bricks
+        // the brush touches have a smooth, continuous SDF background.
+        let mut filled_set: HashSet<u32> = HashSet::new();
+        // All non-new allocated bricks are "filled" (they have real SDF data).
+        for bz in 0..dims.z {
+            for by in 0..dims.y {
+                for bx in 0..dims.x {
+                    if let Some(s) = self.cpu_brick_map_alloc.get_entry(handle, bx, by, bz) {
+                        if !Self::is_unallocated(s) && !new_set.contains(&s) {
+                            filled_set.insert(s);
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut total_copied = 0u32;
+        let mut pass = 0u32;
+        let max_passes = 10; // safety limit
+
+        loop {
+            pass += 1;
+            if pass > max_passes { break; }
+
+            let mut pass_copied = 0u32;
+            let mut newly_filled: Vec<u32> = Vec::new();
+
+            for &(nbx, nby, nbz, new_slot) in &new_coords {
+                if filled_set.contains(&new_slot) { continue; }
+
+                let mut brick_got_data = false;
+
+                for &(dx, dy, dz) in &face_dirs {
+                    let ax = nbx as i32 + dx;
+                    let ay = nby as i32 + dy;
+                    let az = nbz as i32 + dz;
+                    if ax < 0 || ay < 0 || az < 0 { continue; }
+                    let (abx, aby, abz) = (ax as u32, ay as u32, az as u32);
+                    if abx >= dims.x || aby >= dims.y || abz >= dims.z { continue; }
+
+                    // Copy from any FILLED neighbor (old or already-filled new).
+                    let adj_slot = match self.cpu_brick_map_alloc.get_entry(handle, abx, aby, abz) {
+                        Some(s) if filled_set.contains(&s) => s,
+                        _ => continue,
+                    };
+
+                    // Pre-read face data to avoid borrow conflict with get_mut.
+                    let mut face_data = [[(0.0f32, 0.0f32, 0u16); 8]; 8];
+                    {
+                        let adj_brick = self.cpu_brick_pool.get(adj_slot);
+                        for a in 0u32..8 {
+                            for b in 0u32..8 {
+                                let (fv, pv, mat) = if dx == -1 {
+                                    (adj_brick.sample(7, a, b).distance_f32(),
+                                     adj_brick.sample(6, a, b).distance_f32(),
+                                     adj_brick.sample(7, a, b).material_id())
+                                } else if dx == 1 {
+                                    (adj_brick.sample(0, a, b).distance_f32(),
+                                     adj_brick.sample(1, a, b).distance_f32(),
+                                     adj_brick.sample(0, a, b).material_id())
+                                } else if dy == -1 {
+                                    (adj_brick.sample(a, 7, b).distance_f32(),
+                                     adj_brick.sample(a, 6, b).distance_f32(),
+                                     adj_brick.sample(a, 7, b).material_id())
+                                } else if dy == 1 {
+                                    (adj_brick.sample(a, 0, b).distance_f32(),
+                                     adj_brick.sample(a, 1, b).distance_f32(),
+                                     adj_brick.sample(a, 0, b).material_id())
+                                } else if dz == -1 {
+                                    (adj_brick.sample(a, b, 7).distance_f32(),
+                                     adj_brick.sample(a, b, 6).distance_f32(),
+                                     adj_brick.sample(a, b, 7).material_id())
+                                } else {
+                                    (adj_brick.sample(a, b, 0).distance_f32(),
+                                     adj_brick.sample(a, b, 1).distance_f32(),
+                                     adj_brick.sample(a, b, 0).material_id())
+                                };
+                                face_data[a as usize][b as usize] = (fv, pv, mat);
+                            }
+                        }
+                    }
+
+                    // Extrapolate `depth` voxels from neighbor's face into new brick.
+                    // Use (d+1) offset because voxel centers are spaced 1*vs apart:
+                    // face voxel (A[7]) is at 7.5*vs, dest voxel B[0] is at 8.5*vs.
+                    // So B[d] should have value at face_val + grad*(d+1), not face_val + grad*d.
+                    for a in 0u32..8 {
+                        for b in 0u32..8 {
+                            let (face_val, prev_val, mat) = face_data[a as usize][b as usize];
+                            let grad = (face_val - prev_val).clamp(-vs, vs);
+
+                            for d in 0..depth {
+                                // Clamp to positive: prevents false surfaces from
+                                // negative extrapolation in concave/corner regions.
+                                let val = (face_val + grad * ((d + 1) as f32)).max(vs * 0.5);
+
+                                let (dst_x, dst_y, dst_z) = if dx == -1 {
+                                    (d, a, b)
+                                } else if dx == 1 {
+                                    (7 - d, a, b)
+                                } else if dy == -1 {
+                                    (a, d, b)
+                                } else if dy == 1 {
+                                    (a, 7 - d, b)
+                                } else if dz == -1 {
+                                    (a, b, d)
+                                } else {
+                                    (a, b, 7 - d)
+                                };
+
+                                let cur = self.cpu_brick_pool.get(new_slot)
+                                    .sample(dst_x, dst_y, dst_z).distance_f32();
+                                if (cur - fill).abs() < 0.01 || val.abs() < cur.abs() {
+                                    self.cpu_brick_pool.get_mut(new_slot).set(
+                                        dst_x, dst_y, dst_z,
+                                        VoxelSample::new(val, mat, 0, 0, 0),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    brick_got_data = true;
+                    pass_copied += 1;
+                }
+
+                if brick_got_data {
+                    newly_filled.push(new_slot);
+                }
+            }
+
+            for s in &newly_filled {
+                filled_set.insert(*s);
+            }
+            total_copied += pass_copied;
+
+            if pass_copied == 0 { break; }
+        }
+
+        if total_copied > 0 {
+            log::info!(
+                "  prefill_new_brick_faces: extrapolated {} face boundaries over {} passes",
+                total_copied, pass - 1,
+            );
+        }
     }
 
     /// Ensure SDF consistency in the region around a sculpt edit.
@@ -2388,12 +3386,9 @@ impl EditorEngine {
         let dims = handle.dims;
         let brick_size = voxel_size * 8.0;
 
-        // Compute a padded region: the edit AABB expanded by 2 bricks on
+        // Compute a padded region: the edit AABB expanded by 4 bricks on
         // each side. This ensures the allocated boundary is well past the
         // brush influence zone, where SDF is safely positive.
-        // NOTE: mark_interior_empties must run BEFORE this function so that
-        // interior classification uses the original topology (before padding
-        // bricks change it).
         let (edit_min, edit_max) = edit_op.local_aabb();
         let pad = brick_size * 4.0;
         let region_min = edit_min - Vec3::splat(pad);
@@ -2487,6 +3482,7 @@ impl EditorEngine {
             for &(nbx, nby, nbz) in &next_wave {
                 // Sample SDF into temp buffer (immutable borrows of pool).
                 let mut sdf_buf = [0.0f32; 512];
+                let mut min_val = f32::MAX;
                 for z in 0u32..8 {
                     for y in 0u32..8 {
                         for x in 0u32..8 {
@@ -2496,7 +3492,7 @@ impl EditorEngine {
                                     (nby * 8 + y) as f32 * voxel_size + voxel_size * 0.5,
                                     (nbz * 8 + z) as f32 * voxel_size + voxel_size * 0.5,
                                 );
-                            sdf_buf[(x + y * 8 + z * 64) as usize] = Self::sample_sdf_cpu(
+                            let d = Self::sample_sdf_cpu(
                                 &self.cpu_brick_pool,
                                 &self.cpu_brick_map_alloc,
                                 handle,
@@ -2504,8 +3500,20 @@ impl EditorEngine {
                                 voxel_pos,
                                 &exterior,
                             );
+                            sdf_buf[(x + y * 8 + z * 64) as usize] = d;
+                            if d < min_val { min_val = d; }
                         }
                     }
+                }
+
+                // Skip bricks that are entirely outside any surface.
+                // When the interpolated SDF is uniformly positive (min > vs),
+                // this brick is in open air (e.g. between cross arms). Allocating
+                // it would create false surfaces from interpolation artifacts.
+                // The GPU returns vs*2.0 for EMPTY_SLOT, which is close enough
+                // that there's no visible discontinuity.
+                if min_val > voxel_size {
+                    continue;
                 }
 
                 // Allocate and fill (mutable borrows).
@@ -2554,6 +3562,52 @@ impl EditorEngine {
     /// INTERIOR_SLOT. This method classifies unallocated bricks via flood-fill
     /// from the grid boundary and sets INTERIOR_SLOT for any EMPTY_SLOT brick
     /// that isn't reachable from the boundary (i.e. enclosed by allocated bricks).
+    /// Compute the tight local-space AABB of all non-EMPTY_SLOT bricks for a
+    /// voxelized FlatNode. Returns `([0.0;3], [0.0;3])` for non-voxelized nodes
+    /// or when no bricks are allocated (disables the geometry AABB optimization).
+    ///
+    /// Used to populate `GpuObject::geometry_aabb_min/max` so the shader can
+    /// skip the empty expanded region that `grow_brick_map_if_needed` adds.
+    fn compute_geometry_aabb_for_flat_node(
+        &self,
+        flat: &rkf_core::transform_flatten::FlatNode,
+    ) -> ([f32; 3], [f32; 3]) {
+        use rkf_core::brick_map::{EMPTY_SLOT, INTERIOR_SLOT};
+        let (handle, vs) = match &flat.sdf_source {
+            rkf_core::SdfSource::Voxelized { brick_map_handle, voxel_size, .. } => {
+                (*brick_map_handle, *voxel_size)
+            }
+            _ => return ([0.0; 3], [0.0; 3]),
+        };
+        let brick_extent = vs * 8.0;
+        let dims = handle.dims;
+        let grid_size = Vec3::new(dims.x as f32, dims.y as f32, dims.z as f32) * brick_extent;
+        let mut gmin = Vec3::splat(f32::MAX);
+        let mut gmax = Vec3::splat(f32::MIN);
+        for bz in 0..dims.z {
+            for by in 0..dims.y {
+                for bx in 0..dims.x {
+                    let slot = match self.cpu_brick_map_alloc.get_entry(&handle, bx, by, bz) {
+                        Some(s) => s,
+                        None => continue,
+                    };
+                    // Skip sentinel values — only real pool slots contribute geometry.
+                    if slot == EMPTY_SLOT || slot == INTERIOR_SLOT {
+                        continue;
+                    }
+                    let brick_min = Vec3::new(bx as f32, by as f32, bz as f32) * brick_extent - grid_size * 0.5;
+                    let brick_max = Vec3::new((bx + 1) as f32, (by + 1) as f32, (bz + 1) as f32) * brick_extent - grid_size * 0.5;
+                    gmin = gmin.min(brick_min);
+                    gmax = gmax.max(brick_max);
+                }
+            }
+        }
+        if gmin.x > gmax.x {
+            return ([0.0; 3], [0.0; 3]);
+        }
+        (gmin.to_array(), gmax.to_array())
+    }
+
     ///
     /// Unlike `fill_interior_empties`, this does NOT allocate pool memory — it
     /// only updates the brick map entries. The GPU handles the sign correctly
@@ -2729,11 +3783,14 @@ impl EditorEngine {
                 let gpu_idx = gpu_objects.len() as u32;
                 let cam_rel_min = world_aabb.min - self.camera.position;
                 let cam_rel_max = world_aabb.max - self.camera.position;
+                let (geom_min, geom_max) = self.compute_geometry_aabb_for_flat_node(flat);
                 gpu_objects.push(GpuObject::from_flat_node(
                     flat,
                     obj.id,
                     [cam_rel_min.x, cam_rel_min.y, cam_rel_min.z, 0.0],
                     [cam_rel_max.x, cam_rel_max.y, cam_rel_max.z, 0.0],
+                    geom_min,
+                    geom_max,
                 ));
                 bvh_pairs.push((gpu_idx, world_aabb));
             }
@@ -3696,10 +4753,13 @@ impl EditorEngine {
                 let gpu_idx = gpu_objects.len() as u32;
                 let cam_rel_min = world_aabb.min - self.camera.position;
                 let cam_rel_max = world_aabb.max - self.camera.position;
+                let (geom_min, geom_max) = self.compute_geometry_aabb_for_flat_node(flat);
                 gpu_objects.push(GpuObject::from_flat_node(
                     flat, obj.id,
                     [cam_rel_min.x, cam_rel_min.y, cam_rel_min.z, 0.0],
                     [cam_rel_max.x, cam_rel_max.y, cam_rel_max.z, 0.0],
+                    geom_min,
+                    geom_max,
                 ));
                 bvh_pairs.push((gpu_idx, world_aabb));
             }

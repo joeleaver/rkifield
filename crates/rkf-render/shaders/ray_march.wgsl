@@ -69,9 +69,16 @@ struct GpuObject {
     lod_level: u32,              // 4 bytes @ offset 160
     object_id: u32,              // 4 bytes @ offset 164
     primitive_type: u32,         // 4 bytes @ offset 168
-    // 84 bytes of padding (21 × f32)
-    _pad0: f32, _pad1: f32, _pad2: f32, _pad3: f32,
-    _pad4: f32, _pad5: f32, _pad6: f32, _pad7: f32,
+    // Tight local-space AABB of allocated bricks (for empty-space skipping).
+    // Zero for analytical objects (disables optimization).
+    geometry_aabb_min_x: f32,    // 4 bytes @ offset 172
+    geometry_aabb_min_y: f32,    // 4 bytes @ offset 176
+    geometry_aabb_min_z: f32,    // 4 bytes @ offset 180
+    geometry_aabb_max_x: f32,    // 4 bytes @ offset 184
+    geometry_aabb_max_y: f32,    // 4 bytes @ offset 188
+    geometry_aabb_max_z: f32,    // 4 bytes @ offset 192
+    // 60 bytes of padding (15 × f32)
+    _pad6: f32, _pad7: f32,
     _pad8: f32, _pad9: f32, _pad10: f32, _pad11: f32,
     _pad12: f32, _pad13: f32, _pad14: f32, _pad15: f32,
     _pad16: f32, _pad17: f32, _pad18: f32, _pad19: f32,
@@ -246,32 +253,44 @@ fn evaluate_analytical(local_pos: vec3<f32>, obj: GpuObject) -> f32 {
 
 /// Sample a single voxel from a brick map at global grid coordinates.
 /// Returns the SDF distance, or a large fallback for empty/out-of-bounds slots.
+/// Sample a single voxel for ray-march stepping.
+/// EMPTY_SLOT returns brick_extent so rays skip the entire empty brick in one step.
 fn sample_voxel_at(obj_offset: u32, vc: vec3<i32>, dims: vec3<u32>,
                     total_voxels: vec3<i32>, vs: f32) -> f32 {
-    // Clamp to grid bounds.
     let c = clamp(vc, vec3<i32>(0), total_voxels - vec3<i32>(1));
-
-    // Which brick?
     let brick = vec3<u32>(c / vec3<i32>(8));
-    // Which voxel within the brick?
     let local = vec3<u32>(c % vec3<i32>(8));
-
     let flat_brick = brick.x + brick.y * dims.x + brick.z * dims.x * dims.y;
     let slot = brick_maps[obj_offset + flat_brick];
-
     if slot == EMPTY_SLOT {
-        // Exterior empty: positive distance (outside the object).
-        // Use vs*2 (quarter brick) — small enough to prevent ray marcher
-        // overshooting at the narrow-band boundary, large enough for
-        // efficient stepping. vs*32 caused massive gradient discontinuities
-        // leading to glassy/transparent artifacts.
+        // Empty brick: no geometry here. Return brick_extent so the ray steps
+        // completely over this brick in one iteration — empty slots must never
+        // slow down the ray marcher or contribute shadow penumbra.
+        return vs * 8.0;
+    }
+    if slot == INTERIOR_SLOT {
+        return -(vs * 2.0);
+    }
+    let idx = slot * 512u + local.x + local.y * 8u + local.z * 64u;
+    return extract_distance(brick_pool[idx].word0);
+}
+
+/// Sample a single voxel for the Catmull-Rom normal gradient kernel.
+/// EMPTY_SLOT returns vs*2 — a smooth SDF continuation that avoids sharp
+/// gradient discontinuities at the geometry surface boundary.
+fn sample_voxel_at_norm(obj_offset: u32, vc: vec3<i32>, dims: vec3<u32>,
+                         total_voxels: vec3<i32>, vs: f32) -> f32 {
+    let c = clamp(vc, vec3<i32>(0), total_voxels - vec3<i32>(1));
+    let brick = vec3<u32>(c / vec3<i32>(8));
+    let local = vec3<u32>(c % vec3<i32>(8));
+    let flat_brick = brick.x + brick.y * dims.x + brick.z * dims.x * dims.y;
+    let slot = brick_maps[obj_offset + flat_brick];
+    if slot == EMPTY_SLOT {
         return vs * 2.0;
     }
     if slot == INTERIOR_SLOT {
-        // Interior empty: negative distance (deep inside the object).
         return -(vs * 2.0);
     }
-
     let idx = slot * 512u + local.x + local.y * 8u + local.z * 64u;
     return extract_distance(brick_pool[idx].word0);
 }
@@ -329,6 +348,20 @@ fn sample_voxelized(local_pos: vec3<f32>, obj: GpuObject) -> f32 {
     // If we're far outside the grid (> 2 brick extents), early-out with large value.
     if outside_dist > brick_extent * 2.0 {
         return outside_dist;
+    }
+
+    // Geometry AABB early-out: if a tight allocated-brick AABB is set (non-zero),
+    // and the sample point is outside it by more than one brick extent, return the
+    // distance to the geometry AABB directly. This skips the slow vs*2.0 stepping
+    // through the empty expanded region that grow_brick_map_if_needed adds.
+    let geom_min = vec3<f32>(obj.geometry_aabb_min_x, obj.geometry_aabb_min_y, obj.geometry_aabb_min_z);
+    let geom_max = vec3<f32>(obj.geometry_aabb_max_x, obj.geometry_aabb_max_y, obj.geometry_aabb_max_z);
+    if geom_max.x > geom_min.x {
+        let geom_closest = clamp(local_pos, geom_min, geom_max);
+        let geom_dist = length(local_pos - geom_closest);
+        if geom_dist > brick_extent {
+            return geom_dist + outside_dist;
+        }
     }
 
     // Convert to continuous voxel coordinates. Voxel centers are at integers
@@ -404,7 +437,7 @@ fn sample_voxelized_gradient(local_pos: vec3<f32>, obj: GpuObject) -> vec3<f32> 
     for (var iz = 0; iz < 4; iz++) {
         for (var iy = 0; iy < 4; iy++) {
             for (var ix = 0; ix < 4; ix++) {
-                s[iz][iy][ix] = sample_voxel_at(
+                s[iz][iy][ix] = sample_voxel_at_norm(
                     off, v0 + vec3<i32>(ix - 1, iy - 1, iz - 1),
                     dims, total_voxels, vs,
                 );

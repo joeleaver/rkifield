@@ -69,8 +69,9 @@ struct GpuObject {
     lod_level: u32,
     object_id: u32,
     primitive_type: u32,
-    _pad0: f32, _pad1: f32, _pad2: f32, _pad3: f32,
-    _pad4: f32, _pad5: f32, _pad6: f32, _pad7: f32,
+    geometry_aabb_min_x: f32, geometry_aabb_min_y: f32, geometry_aabb_min_z: f32,
+    geometry_aabb_max_x: f32, geometry_aabb_max_y: f32, geometry_aabb_max_z: f32,
+    _pad6: f32, _pad7: f32,
     _pad8: f32, _pad9: f32, _pad10: f32, _pad11: f32,
     _pad12: f32, _pad13: f32, _pad14: f32, _pad15: f32,
     _pad16: f32, _pad17: f32, _pad18: f32, _pad19: f32,
@@ -308,7 +309,9 @@ fn sample_voxel_at(obj_offset: u32, vc: vec3<i32>, dims: vec3<u32>,
     let flat_brick = brick.x + brick.y * dims.x + brick.z * dims.x * dims.y;
     let slot = brick_maps[obj_offset + flat_brick];
     if slot == EMPTY_SLOT {
-        return vs * 2.0;
+        // Empty brick: no geometry. Return brick_extent so shadow rays step
+        // completely over this brick — empty slots must never cast shadows.
+        return vs * 8.0;
     }
     if slot == INTERIOR_SLOT {
         return -(vs * 2.0);
@@ -327,6 +330,16 @@ fn sample_voxelized(local_pos: vec3<f32>, obj: GpuObject) -> f32 {
     let outside_dist = length(grid_pos - clamped);
     if outside_dist > brick_extent * 2.0 {
         return outside_dist;
+    }
+    // Geometry AABB early-out: skip empty expanded brick-map region.
+    let geom_min = vec3<f32>(obj.geometry_aabb_min_x, obj.geometry_aabb_min_y, obj.geometry_aabb_min_z);
+    let geom_max = vec3<f32>(obj.geometry_aabb_max_x, obj.geometry_aabb_max_y, obj.geometry_aabb_max_z);
+    if geom_max.x > geom_min.x {
+        let geom_closest = clamp(local_pos, geom_min, geom_max);
+        let geom_dist = length(local_pos - geom_closest);
+        if geom_dist > brick_extent {
+            return geom_dist + outside_dist;
+        }
     }
     let voxel_coord = clamped / vs - vec3<f32>(0.5);
     let v0 = vec3<i32>(floor(voxel_coord));
