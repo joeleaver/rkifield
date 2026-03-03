@@ -2106,13 +2106,27 @@ impl EditorEngine {
         }
 
         // Run GPU JFA.
-        let distances = match self.jfa_sdf.repair(
+        let mut distances = match self.jfa_sdf.repair(
             &self.ctx.device, &self.ctx.queue,
             &solid, gw, gh, gd, voxel_size,
         ) {
             Some(d) => d,
             None => return false,
         };
+
+        // Smooth the JFA distances to remove Voronoi cell boundary artifacts.
+        //
+        // JFA gives correct Euclidean distances, but the gradient is a Voronoi
+        // diagram: discontinuous at cell boundaries between different nearest seeds.
+        // Without smoothing this produces "squarish" normals (brick-sized faceting).
+        //
+        // 3 iterations of sign-preserving 6-neighbour box blur restores smooth
+        // gradients while keeping the zero-crossing in place (no geometry change).
+        // Only allocated voxels participate — avoids pulling surface distances
+        // toward the large empty-brick fallback values.
+        Self::smooth_sdf_distances(
+            &mut distances, &is_allocated, gw, gh, gd, voxel_size, 3,
+        );
 
         // Write corrected distances back to allocated bricks only.
         for bz in 0..dims.z {
@@ -2148,6 +2162,69 @@ impl EditorEngine {
             object_id, gw, gh, gd,
         );
         true
+    }
+
+    /// Smooth a dense flat SDF distance grid to remove Voronoi cell artifacts.
+    ///
+    /// Applies `iters` iterations of sign-preserving 6-neighbour box blur.
+    /// Only allocated voxels contribute to (and receive) averages, so empty-brick
+    /// fallback values don't bleed into the surface region.
+    ///
+    /// Sign preservation: each voxel keeps its original sign after blurring, so
+    /// the zero-crossing (and therefore the geometry) does not move.
+    fn smooth_sdf_distances(
+        distances:    &mut [f32],
+        is_allocated: &[bool],
+        gw: usize, gh: usize, gd: usize,
+        voxel_size: f32,
+        iters: u32,
+    ) {
+        let total = gw * gh * gd;
+        let idx3 = |x: usize, y: usize, z: usize| -> usize { z * gh * gw + y * gw + x };
+        let min_mag = voxel_size * 0.01;
+
+        let mut tmp = vec![0.0f32; total];
+
+        for _ in 0..iters {
+            for gz in 0..gd {
+                for gy in 0..gh {
+                    for gx in 0..gw {
+                        let i = idx3(gx, gy, gz);
+
+                        if !is_allocated[i] {
+                            tmp[i] = distances[i];
+                            continue;
+                        }
+
+                        let d0    = distances[i];
+                        let mut sum   = d0;
+                        let mut count = 1.0f32;
+
+                        macro_rules! add_neighbor {
+                            ($nx:expr, $ny:expr, $nz:expr) => {{
+                                let ni = idx3($nx, $ny, $nz);
+                                if is_allocated[ni] {
+                                    sum   += distances[ni];
+                                    count += 1.0;
+                                }
+                            }};
+                        }
+
+                        if gx > 0       { add_neighbor!(gx - 1, gy,     gz    ); }
+                        if gx + 1 < gw  { add_neighbor!(gx + 1, gy,     gz    ); }
+                        if gy > 0       { add_neighbor!(gx,     gy - 1, gz    ); }
+                        if gy + 1 < gh  { add_neighbor!(gx,     gy + 1, gz    ); }
+                        if gz > 0       { add_neighbor!(gx,     gy,     gz - 1); }
+                        if gz + 1 < gd  { add_neighbor!(gx,     gy,     gz + 1); }
+
+                        // Preserve the sign of the centre voxel — zero-crossing stays put.
+                        let avg = sum / count;
+                        tmp[i] = if d0 < 0.0 { avg.min(-min_mag) } else { avg.max(min_mag) };
+                    }
+                }
+            }
+            distances.copy_from_slice(&tmp);
+        }
     }
 
     /// Recompute correct SDF distances via 3D Euclidean Distance Transform (EDT).
@@ -2670,14 +2747,23 @@ impl EditorEngine {
                 apply_edit_cpu(&mut self.cpu_brick_pool, &all_bricks, &op)
             };
 
-            // NOTE: Per-stroke JFA repair disabled — JFA produces Euclidean
-            // (Voronoi) distances whose gradient is discontinuous at Voronoi cell
-            // boundaries, causing faceted brick-sized normal artifacts that are
-            // worse than the smooth smin normals. JFA is only invoked via the
-            // "Fix SDFs" button (process_fix_sdfs) where the user explicitly
-            // trades smooth normals for corrected distance magnitudes.
-            // TODO: Consider a near-surface smoothing pass after JFA to restore
-            // gradient smoothness while keeping corrected far-field distances.
+            // GPU JFA SDF repair — run after every CSG/sculpt stroke.
+            //
+            // The smin stamp writes smooth SDF-like values near the surface, but
+            // magnitudes drift after repeated strokes and at brick boundaries.
+            // JFA rederives correct Euclidean distances from the binary surface,
+            // then smooth_sdf_distances() applies 3 iterations of sign-preserving
+            // box blur to restore smooth gradients (Voronoi boundaries would
+            // otherwise produce squarish normals without this pass).
+            // Paint/Smooth/Flatten don't change geometry so don't need repair.
+            if matches!(edit_type, EditType::CsgUnion
+                                 | EditType::CsgSubtract
+                                 | EditType::CsgIntersect
+                                 | EditType::SmoothUnion
+                                 | EditType::SmoothSubtract)
+            {
+                self.run_jfa_repair(scene, req.object_id);
+            }
 
             // NOTE: we intentionally do NOT call mark_interior_empties() here.
             // The flood-fill heuristic (unreachable from boundary = interior)
