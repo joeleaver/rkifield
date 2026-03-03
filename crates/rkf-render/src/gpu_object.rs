@@ -33,7 +33,9 @@ use bytemuck::{Pod, Zeroable};
 /// | 160    | 4    | lod_level (u32) |
 /// | 164    | 4    | object_id (u32) |
 /// | 168    | 4    | primitive_type (u32) |
-/// | 172    | 84   | _padding |
+/// | 172    | 12   | geometry_aabb_min ([f32; 3]) — tight local-space AABB of allocated bricks |
+/// | 184    | 12   | geometry_aabb_max ([f32; 3]) |
+/// | 196    | 60   | _padding |
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Pod, Zeroable)]
 pub struct GpuObject {
@@ -81,8 +83,15 @@ pub struct GpuObject {
     /// Primitive type for analytical objects (see [`primitive_type`] module).
     pub primitive_type: u32,
 
+    /// Tight local-space AABB of allocated bricks for voxelized objects (minimum corner).
+    /// Zero when not set — disables the empty-space skipping optimization.
+    pub geometry_aabb_min: [f32; 3],
+    /// Tight local-space AABB of allocated bricks for voxelized objects (maximum corner).
+    /// Zero when not set — disables the empty-space skipping optimization.
+    pub geometry_aabb_max: [f32; 3],
+
     /// Padding to 256 bytes.
-    pub _padding: [f32; 21],
+    pub _padding: [f32; 15],
 }
 
 /// SDF type constants for [`GpuObject::sdf_type`].
@@ -125,11 +134,17 @@ pub mod blend_mode {
 
 impl GpuObject {
     /// Build a `GpuObject` from a flattened node and its parent object data.
+    ///
+    /// `geometry_aabb_min/max` are the tight local-space bounding box of
+    /// allocated bricks for voxelized objects (used for empty-space skipping).
+    /// Pass `[0.0; 3]` for both when there is no geometry AABB.
     pub fn from_flat_node(
         flat: &rkf_core::transform_flatten::FlatNode,
         object_id: u32,
         aabb_min: [f32; 4],
         aabb_max: [f32; 4],
+        geometry_aabb_min: [f32; 3],
+        geometry_aabb_max: [f32; 3],
     ) -> Self {
         let inv = flat.inverse_world.to_cols_array_2d();
 
@@ -196,7 +211,9 @@ impl GpuObject {
             lod_level: 0,
             object_id,
             primitive_type: prim_type,
-            _padding: [0.0; 21],
+            geometry_aabb_min,
+            geometry_aabb_max,
+            _padding: [0.0; 15],
         }
     }
 }
@@ -287,7 +304,9 @@ mod tests {
             lod_level: 0,
             object_id: 99,
             primitive_type: primitive_type::SPHERE,
-            _padding: [0.0; 21],
+            geometry_aabb_min: [0.0; 3],
+            geometry_aabb_max: [0.0; 3],
+            _padding: [0.0; 15],
         };
 
         let bytes = bytemuck::bytes_of(&obj);
@@ -320,6 +339,8 @@ mod tests {
             42,
             [-0.5, -0.5, -0.5, 0.0],
             [0.5, 0.5, 0.5, 0.0],
+            [0.0; 3],
+            [0.0; 3],
         );
 
         assert_eq!(gpu.object_id, 42);
@@ -355,6 +376,8 @@ mod tests {
             7,
             [-1.0, -1.0, -1.0, 0.0],
             [1.0, 1.0, 1.0, 0.0],
+            [0.0; 3],
+            [0.0; 3],
         );
 
         assert_eq!(gpu.sdf_type, sdf_type::VOXELIZED);
@@ -376,7 +399,7 @@ mod tests {
             name: "group".into(),
         };
 
-        let gpu = GpuObject::from_flat_node(&flat, 1, [0.0; 4], [0.0; 4]);
+        let gpu = GpuObject::from_flat_node(&flat, 1, [0.0; 4], [0.0; 4], [0.0; 3], [0.0; 3]);
         assert_eq!(gpu.sdf_type, sdf_type::NONE);
         assert_eq!(gpu.blend_mode, blend_mode::SUBTRACT);
     }

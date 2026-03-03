@@ -499,6 +499,9 @@ pub struct EditorState {
     /// of the voxelized object whose brick map should be resampled at the
     /// current non-uniform scale, resetting scale to (1,1,1) afterwards.
     pub pending_revoxelize: Option<u32>,
+    /// Set by "Fix SDFs" button in sculpt panel. Contains the object ID whose
+    /// SDF magnitudes should be recomputed from zero-crossings via BFS.
+    pub pending_fix_sdfs: Option<u32>,
 
     // ── Sculpt pipeline (UI → render loop) ──────────────────
     /// Queued sculpt edit requests — one per brush-hit point during a stroke.
@@ -579,6 +582,7 @@ impl EditorState {
             pending_minimize: false,
             pending_maximize: false,
             pending_revoxelize: None,
+            pending_fix_sdfs: None,
             pending_sculpt_edits: Vec::new(),
             sculpt_undo_accumulator: None,
             pending_sculpt_undo: None,

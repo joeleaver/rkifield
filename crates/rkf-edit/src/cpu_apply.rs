@@ -33,6 +33,18 @@ pub fn apply_edit_cpu(
     let inv_rot = op.rotation.inverse();
     let mut modified_slots = Vec::with_capacity(affected.len());
 
+    // Maximum extent of the brush shape: the deepest point inside any brush has
+    // |shape_d| ≤ max_dim.  Used to build the "effective brush at strength t":
+    //   effective_shape_d = shape_d + (1 − strength) × max_extent
+    // This replaces the old lerp(existing, csg_result, strength) pattern.
+    // At strength=1: effective_shape_d = shape_d  → full brush stamped.
+    // At strength=0: effective_shape_d very positive → brush has no effect.
+    // Because smin/min of two valid SDFs is a valid SDF, and the offset just
+    // shifts the brush surface inward, the result is always an approximately
+    // valid SDF — gradient error is bounded to the smin blend zone (width k),
+    // not spread across the entire brush volume as the lerp formula did.
+    let max_extent = op.dimensions.x.max(op.dimensions.y).max(op.dimensions.z);
+
     for ab in affected {
         let slot = ab.brick_base_index / 512;
         let vs = ab.voxel_size;
@@ -71,73 +83,78 @@ pub fn apply_edit_cpu(
                     let existing_d = half::f16::to_f32(sample.distance());
                     let strength = op.strength * falloff_weight;
 
+                    // Threshold for considering a voxel "meaningfully changed".
+                    // Peripheral bricks within the falloff sphere but far from actual
+                    // geometry will have smin(vs*2.0, large_effective_d, k) ≈ vs*2.0
+                    // — the CSG result is indistinguishable from the initial fill.
+                    // Using this threshold prevents those bricks from being counted
+                    // as "modified", so the revert-to-EMPTY_SLOT step can clean them up.
+                    let change_threshold = ab.voxel_size * 0.1;
+
                     match EditType::from_u8(op.edit_type as u8).unwrap_or(EditType::CsgUnion) {
                         EditType::CsgUnion => {
-                            let new_d = existing_d.min(shape_d);
-                            let blended = lerp(existing_d, new_d, strength);
-                            // Use brush material when the new shape contributes,
-                            // or when the voxel ends up inside the surface with
-                            // a null material (e.g. from newly allocated bricks).
-                            let mat = if shape_d < existing_d {
+                            let effective_shape_d = shape_d + (1.0 - strength) * max_extent;
+                            let new_d = existing_d.min(effective_shape_d);
+                            let mat = if effective_shape_d < existing_d {
                                 op.material_id
-                            } else if blended < 0.0 && sample.material_id() == 0 {
+                            } else if new_d < 0.0 && sample.material_id() == 0 {
                                 op.material_id
                             } else {
                                 sample.material_id()
                             };
                             brick.set(vx, vy, vz, VoxelSample::new(
-                                blended, mat,
+                                new_d, mat,
                                 sample.blend_weight(), sample.secondary_id(), sample.flags(),
                             ));
-                            any_changed = true;
+                            any_changed |= (new_d - existing_d).abs() > change_threshold;
                         }
                         EditType::CsgSubtract => {
-                            let new_d = existing_d.max(-shape_d);
-                            let blended = lerp(existing_d, new_d, strength);
+                            let effective_shape_d = shape_d + (1.0 - strength) * max_extent;
+                            let new_d = existing_d.max(-effective_shape_d);
                             brick.set(vx, vy, vz, VoxelSample::new(
-                                blended, sample.material_id(),
+                                new_d, sample.material_id(),
                                 sample.blend_weight(), sample.secondary_id(), sample.flags(),
                             ));
-                            any_changed = true;
+                            any_changed |= (new_d - existing_d).abs() > change_threshold;
                         }
                         EditType::CsgIntersect => {
-                            let new_d = existing_d.max(shape_d);
-                            let blended = lerp(existing_d, new_d, strength);
+                            // Intersection: keep only what's inside the brush.
+                            // At strength=0: effective brush is pushed far out → no clipping.
+                            // At strength=1: full max(existing, shape_d) intersection.
+                            let effective_shape_d = shape_d - (1.0 - strength) * max_extent;
+                            let new_d = existing_d.max(effective_shape_d);
                             brick.set(vx, vy, vz, VoxelSample::new(
-                                blended, sample.material_id(),
+                                new_d, sample.material_id(),
                                 sample.blend_weight(), sample.secondary_id(), sample.flags(),
                             ));
-                            any_changed = true;
+                            any_changed |= (new_d - existing_d).abs() > change_threshold;
                         }
                         EditType::SmoothUnion => {
                             let k = op.blend_k.max(0.001);
-                            let new_d = smin(existing_d, shape_d, k);
-                            let blended = lerp(existing_d, new_d, strength);
-                            // Use brush material when the new shape contributes,
-                            // or when the voxel ends up inside the surface with
-                            // a null material (e.g. from newly allocated bricks).
-                            let mat = if shape_d < existing_d {
+                            let effective_shape_d = shape_d + (1.0 - strength) * max_extent;
+                            let new_d = smin(existing_d, effective_shape_d, k);
+                            let mat = if effective_shape_d < existing_d {
                                 op.material_id
-                            } else if blended < 0.0 && sample.material_id() == 0 {
+                            } else if new_d < 0.0 && sample.material_id() == 0 {
                                 op.material_id
                             } else {
                                 sample.material_id()
                             };
                             brick.set(vx, vy, vz, VoxelSample::new(
-                                blended, mat,
+                                new_d, mat,
                                 sample.blend_weight(), sample.secondary_id(), sample.flags(),
                             ));
-                            any_changed = true;
+                            any_changed |= (new_d - existing_d).abs() > change_threshold;
                         }
                         EditType::SmoothSubtract => {
                             let k = op.blend_k.max(0.001);
-                            let new_d = -smin(-existing_d, shape_d, k);
-                            let blended = lerp(existing_d, new_d, strength);
+                            let effective_shape_d = shape_d + (1.0 - strength) * max_extent;
+                            let new_d = -smin(-existing_d, effective_shape_d, k);
                             brick.set(vx, vy, vz, VoxelSample::new(
-                                blended, sample.material_id(),
+                                new_d, sample.material_id(),
                                 sample.blend_weight(), sample.secondary_id(), sample.flags(),
                             ));
-                            any_changed = true;
+                            any_changed |= (new_d - existing_d).abs() > change_threshold;
                         }
                         EditType::Smooth => {
                             // Pull toward zero (surface) — a simplified smooth that
@@ -147,7 +164,7 @@ pub fn apply_edit_cpu(
                                 new_d, sample.material_id(),
                                 sample.blend_weight(), sample.secondary_id(), sample.flags(),
                             ));
-                            any_changed = true;
+                            any_changed |= (new_d - existing_d).abs() > change_threshold;
                         }
                         EditType::Flatten => {
                             // Pull SDF toward the reference plane at edit center Y.
@@ -159,7 +176,7 @@ pub fn apply_edit_cpu(
                                 new_d, sample.material_id(),
                                 sample.blend_weight(), sample.secondary_id(), sample.flags(),
                             ));
-                            any_changed = true;
+                            any_changed |= (new_d - existing_d).abs() > change_threshold;
                         }
                         EditType::Paint => {
                             // Only paint near-surface voxels.
@@ -198,10 +215,48 @@ pub fn apply_edit_cpu(
     modified_slots
 }
 
+/// Fill a brick with per-voxel brush SDF values.
+///
+/// Replaces the old "constant fill" pattern. Instead of filling every voxel
+/// with a single arbitrary value (e.g. `vs * 2.0`), this function evaluates
+/// the actual brush SDF at each voxel center and stores that as the initial
+/// distance. This means:
+///
+/// - Voxels inside the brush start with correct negative distances.
+/// - Voxels outside the brush start with the true distance to the brush surface.
+/// - No gradient discontinuity between CSG-written voxels and "background" voxels.
+/// - Conservative ray marching: fill IS the SDF, so it never over-estimates.
+///
+/// Values are clamped to `voxel_size * 8.0` (one brick extent) to cap step sizes
+/// for voxels far outside the brush — matching what EMPTY_SLOT returns for stepping.
+pub fn fill_brick_with_brush_sdf(
+    brick: &mut rkf_core::brick::Brick,
+    brick_local_min: glam::Vec3,
+    voxel_size: f32,
+    op: &crate::edit_op::EditOp,
+) {
+    let inv_rot = op.rotation.inverse();
+    let max_d = voxel_size * 8.0;
+
+    for vz in 0u32..8 {
+        for vy in 0u32..8 {
+            for vx in 0u32..8 {
+                let voxel_center = brick_local_min
+                    + glam::Vec3::new(vx as f32, vy as f32, vz as f32) * voxel_size
+                    + glam::Vec3::splat(voxel_size * 0.5);
+                let edit_local = inv_rot * (voxel_center - op.position);
+                let d = evaluate_shape(op.shape_type, &op.dimensions, edit_local).min(max_d);
+                let mat = if d < 0.0 { op.material_id } else { 0 };
+                brick.set(vx, vy, vz, VoxelSample::new(d, mat, 0, 0, 0));
+            }
+        }
+    }
+}
+
 /// Evaluate an analytic SDF shape at a local-space position.
 ///
 /// The position is already in edit-local space (edit rotation applied).
-fn evaluate_shape(shape: ShapeType, dims: &Vec3, pos: Vec3) -> f32 {
+pub fn evaluate_shape(shape: ShapeType, dims: &Vec3, pos: Vec3) -> f32 {
     match shape {
         ShapeType::Sphere => pos.length() - dims.x,
         ShapeType::Box => {

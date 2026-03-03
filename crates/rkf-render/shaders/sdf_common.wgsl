@@ -53,9 +53,15 @@ struct GpuObject {
     lod_level: u32,              // 4 bytes @ offset 160
     object_id: u32,              // 4 bytes @ offset 164
     primitive_type: u32,         // 4 bytes @ offset 168
-    // 84 bytes of padding (21 × f32)
-    _pad0: f32, _pad1: f32, _pad2: f32, _pad3: f32,
-    _pad4: f32, _pad5: f32, _pad6: f32, _pad7: f32,
+    // Tight local-space AABB of allocated bricks (for empty-space skipping).
+    geometry_aabb_min_x: f32,    // 4 bytes @ offset 172
+    geometry_aabb_min_y: f32,    // 4 bytes @ offset 176
+    geometry_aabb_min_z: f32,    // 4 bytes @ offset 180
+    geometry_aabb_max_x: f32,    // 4 bytes @ offset 184
+    geometry_aabb_max_y: f32,    // 4 bytes @ offset 188
+    geometry_aabb_max_z: f32,    // 4 bytes @ offset 192
+    // 60 bytes of padding (15 × f32)
+    _pad6: f32, _pad7: f32,
     _pad8: f32, _pad9: f32, _pad10: f32, _pad11: f32,
     _pad12: f32, _pad13: f32, _pad14: f32, _pad15: f32,
     _pad16: f32, _pad17: f32, _pad18: f32, _pad19: f32,

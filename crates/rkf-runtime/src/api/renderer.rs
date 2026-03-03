@@ -653,6 +653,8 @@ impl Renderer {
                     obj.id,
                     [cam_rel_min.x, cam_rel_min.y, cam_rel_min.z, 0.0],
                     [cam_rel_max.x, cam_rel_max.y, cam_rel_max.z, 0.0],
+                    [0.0; 3],
+                    [0.0; 3],
                 ));
                 bvh_pairs.push((gpu_idx, world_aabb));
             }

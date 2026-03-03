@@ -377,6 +377,8 @@ pub struct EditorEngine {
     // CPU-side brick data retained for re-voxelize operations.
     cpu_brick_pool: BrickPool,
     cpu_brick_map_alloc: BrickMapAllocator,
+    // GPU JFA pipeline for per-stroke SDF repair.
+    jfa_sdf: crate::jfa_sdf::JfaSdfPass,
 }
 
 impl EditorEngine {
@@ -599,6 +601,8 @@ impl EditorEngine {
             &ctx.device, window_width, window_height,
         );
 
+        let jfa_sdf = crate::jfa_sdf::JfaSdfPass::new(&ctx.device);
+
         let engine = Self {
             ctx,
             surface: Some(surface),
@@ -674,6 +678,7 @@ impl EditorEngine {
             last_frame_time: Instant::now(),
             cpu_brick_pool: demo.brick_pool,
             cpu_brick_map_alloc: demo.brick_map_alloc,
+            jfa_sdf,
         };
         (engine, scene)
     }
@@ -2007,12 +2012,141 @@ impl EditorEngine {
             }
         }
 
-        if !self.fix_sdfs_cpu(scene, object_id, None) {
+        if !self.run_jfa_repair(scene, object_id) {
             return false;
         }
 
         // Do NOT call mark_interior_empties here — see comment above.
         self.reupload_brick_data();
+        true
+    }
+
+    /// Recompute correct SDF distances for `object_id` using GPU JFA.
+    ///
+    /// 1. Builds a dense solid/empty grid from the CPU brick pool.
+    /// 2. Runs GPU JFA (init → log2(N) passes → writeback) to get Euclidean distances.
+    /// 3. Reads back the result and writes distances into `cpu_brick_pool`
+    ///    (preserving material_id, blend_weight, flags).
+    ///
+    /// Does NOT call `reupload_brick_data` — the caller is responsible.
+    /// Returns `false` if the object is not found or has no voxelized data.
+    fn run_jfa_repair(&mut self, scene: &mut Scene, object_id: u32) -> bool {
+        use rkf_core::constants::BRICK_DIM;
+        use rkf_core::brick::brick_index;
+        use rkf_core::voxel::VoxelSample;
+        use rkf_core::brick_map::INTERIOR_SLOT;
+
+        let (handle, voxel_size) = {
+            let obj = match scene.objects.iter().find(|o| o.id == object_id) {
+                Some(o) => o,
+                None => return false,
+            };
+            match &obj.root_node.sdf_source {
+                SdfSource::Voxelized { brick_map_handle, voxel_size, .. } => {
+                    (*brick_map_handle, *voxel_size)
+                }
+                _ => return false,
+            }
+        };
+
+        let dims = handle.dims;
+        let bd = BRICK_DIM as u32;
+        let gw = (dims.x * bd) as usize;
+        let gh = (dims.y * bd) as usize;
+        let gd = (dims.z * bd) as usize;
+        let total = gw * gh * gd;
+        if total == 0 { return false; }
+
+        let idx3 = |x: usize, y: usize, z: usize| -> usize { z * gh * gw + y * gw + x };
+
+        // Build dense solid grid + per-voxel metadata for allocated bricks.
+        let mut solid = vec![false; total];
+        let mut is_allocated = vec![false; total];
+        let mut mat_grid: Vec<u16>  = vec![0; total];
+        let mut blend_grid: Vec<u8> = vec![0; total];
+        let mut sec_id_grid: Vec<u8> = vec![0; total];
+        let mut flags_grid: Vec<u8>  = vec![0; total];
+
+        for bz in 0..dims.z {
+            for by in 0..dims.y {
+                for bx in 0..dims.x {
+                    match self.cpu_brick_map_alloc.get_entry(&handle, bx, by, bz) {
+                        Some(s) if s == INTERIOR_SLOT => {
+                            // Treat entire INTERIOR_SLOT brick as solid.
+                            for lz in 0..bd { for ly in 0..bd { for lx in 0..bd {
+                                solid[idx3(
+                                    (bx*bd+lx) as usize,
+                                    (by*bd+ly) as usize,
+                                    (bz*bd+lz) as usize,
+                                )] = true;
+                            }}}
+                        }
+                        Some(s) if !Self::is_unallocated(s) => {
+                            let brick = self.cpu_brick_pool.get(s);
+                            for lz in 0..bd { for ly in 0..bd { for lx in 0..bd {
+                                let vi = brick_index(lx, ly, lz);
+                                let vs = brick.voxels[vi];
+                                let i = idx3(
+                                    (bx*bd+lx) as usize,
+                                    (by*bd+ly) as usize,
+                                    (bz*bd+lz) as usize,
+                                );
+                                solid[i]      = vs.distance_f32() < 0.0;
+                                is_allocated[i] = true;
+                                mat_grid[i]    = vs.material_id();
+                                blend_grid[i]  = vs.blend_weight();
+                                sec_id_grid[i] = vs.secondary_id();
+                                flags_grid[i]  = vs.flags();
+                            }}}
+                        }
+                        _ => {} // EMPTY_SLOT or None → stays empty/false
+                    }
+                }
+            }
+        }
+
+        // Run GPU JFA.
+        let distances = match self.jfa_sdf.repair(
+            &self.ctx.device, &self.ctx.queue,
+            &solid, gw, gh, gd, voxel_size,
+        ) {
+            Some(d) => d,
+            None => return false,
+        };
+
+        // Write corrected distances back to allocated bricks only.
+        for bz in 0..dims.z {
+            for by in 0..dims.y {
+                for bx in 0..dims.x {
+                    let slot = match self.cpu_brick_map_alloc.get_entry(&handle, bx, by, bz) {
+                        Some(s) if !Self::is_unallocated(s) => s,
+                        _ => continue,
+                    };
+                    let brick = self.cpu_brick_pool.get_mut(slot);
+                    for lz in 0..bd { for ly in 0..bd { for lx in 0..bd {
+                        let i = idx3(
+                            (bx*bd+lx) as usize,
+                            (by*bd+ly) as usize,
+                            (bz*bd+lz) as usize,
+                        );
+                        if !is_allocated[i] { continue; }
+                        let vi = brick_index(lx, ly, lz);
+                        brick.voxels[vi] = VoxelSample::new(
+                            distances[i],
+                            mat_grid[i],
+                            blend_grid[i],
+                            sec_id_grid[i],
+                            flags_grid[i],
+                        );
+                    }}}
+                }
+            }
+        }
+
+        log::info!(
+            "run_jfa_repair: repaired SDF for object {} ({}×{}×{} voxels)",
+            object_id, gw, gh, gd,
+        );
         true
     }
 
@@ -2536,17 +2670,14 @@ impl EditorEngine {
                 apply_edit_cpu(&mut self.cpu_brick_pool, &all_bricks, &op)
             };
 
-            // SDF repair: 3D EDT over the full object after every geometry stroke.
-            //
-            // EDT builds a dense solid/empty grid from ALL brick data (including
-            // INTERIOR_SLOT bricks treated as solid) and runs the Felzenszwalb
-            // separable algorithm for exact Euclidean distances. This avoids all
-            // FMM propagation-gap problems (no INTERIOR_SLOT holes) and scope seams.
-            // For typical sculpt objects (50–200 bricks × 512 voxels = 25K–100K
-            // voxels) this takes ~5–15ms in release builds.
-            if !matches!(edit_type, EditType::Paint | EditType::BlendPaint | EditType::ColorPaint) {
-                self.fix_sdfs_cpu(scene, req.object_id, None);
-            }
+            // NOTE: Per-stroke JFA repair disabled — JFA produces Euclidean
+            // (Voronoi) distances whose gradient is discontinuous at Voronoi cell
+            // boundaries, causing faceted brick-sized normal artifacts that are
+            // worse than the smooth smin normals. JFA is only invoked via the
+            // "Fix SDFs" button (process_fix_sdfs) where the user explicitly
+            // trades smooth normals for corrected distance magnitudes.
+            // TODO: Consider a near-surface smoothing pass after JFA to restore
+            // gradient smoothness while keeping corrected far-field distances.
 
             // NOTE: we intentionally do NOT call mark_interior_empties() here.
             // The flood-fill heuristic (unreachable from boundary = interior)
@@ -4532,6 +4663,8 @@ impl EditorEngine {
             &ctx.device, vp_w, vp_h,
         );
 
+        let jfa_sdf = crate::jfa_sdf::JfaSdfPass::new(&ctx.device);
+
         let engine = Self {
             ctx,
             surface: None,
@@ -4605,6 +4738,7 @@ impl EditorEngine {
             last_frame_time: Instant::now(),
             cpu_brick_pool: demo.brick_pool,
             cpu_brick_map_alloc: demo.brick_map_alloc,
+            jfa_sdf,
         };
         (engine, scene)
     }

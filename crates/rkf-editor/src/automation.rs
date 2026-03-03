@@ -98,6 +98,10 @@ pub struct SharedState {
     pub pending_object_shape: Option<u32>,
     /// Object shape result (set by render loop, consumed by MCP polling).
     pub object_shape_result: Option<rkf_core::automation::ObjectShapeResult>,
+    /// Pending fix_sdfs request (set by MCP, consumed by render loop).
+    pub pending_fix_sdfs: Option<u32>,
+    /// fix_sdfs result: Ok(()) on success, Err(msg) on failure.
+    pub fix_sdfs_result: Option<Result<(), String>>,
 }
 
 /// Request for a voxel slice diagnostic.
@@ -161,6 +165,8 @@ impl SharedState {
             mcp_sculpt_result: None,
             pending_object_shape: None,
             object_shape_result: None,
+            pending_fix_sdfs: None,
+            fix_sdfs_result: None,
         }
     }
 
@@ -1408,6 +1414,30 @@ impl AutomationApi for EditorAutomationApi {
         }
         Err(AutomationError::EngineError(
             "object_shape timed out waiting for engine".into(),
+        ))
+    }
+
+    fn fix_sdfs(&self, object_id: u32) -> AutomationResult<()> {
+        {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|e| AutomationError::EngineError(format!("lock poisoned: {e}")))?;
+            state.fix_sdfs_result = None;
+            state.pending_fix_sdfs = Some(object_id);
+        }
+
+        // fix_sdfs can be slow (full BFS over large grids) — poll for up to 10 s.
+        for _ in 0..1000 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            if let Ok(mut state) = self.state.lock() {
+                if let Some(result) = state.fix_sdfs_result.take() {
+                    return result.map_err(AutomationError::EngineError);
+                }
+            }
+        }
+        Err(AutomationError::EngineError(
+            "fix_sdfs timed out waiting for engine".into(),
         ))
     }
 }

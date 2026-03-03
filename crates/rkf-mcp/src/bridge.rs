@@ -615,6 +615,11 @@ impl AutomationApi for BridgeAutomationApi {
         )?;
         serde_json::from_value(result).map_err(|e| AutomationError::EngineError(e.to_string()))
     }
+
+    fn fix_sdfs(&self, object_id: u32) -> AutomationResult<()> {
+        self.call_tool("fix_sdfs", serde_json::json!({"object_id": object_id}))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

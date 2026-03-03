@@ -1241,6 +1241,31 @@ pub fn RightPanel() -> NodeHandle {
                 build_synced_slider(__scope, &container, "Falloff", "",
                     sliders.brush_falloff, 0.0, 1.0, 0.01, 2);
 
+                // Fix SDFs button — recomputes correct SDF magnitudes from zero-crossings.
+                if let Some(crate::editor_state::SelectedEntity::Object(eid)) = selected_entity {
+                    let btn_row = __scope.create_element("div");
+                    btn_row.set_attribute("style", "padding: 6px 8px;");
+                    let btn = __scope.create_element("button");
+                    btn.set_attribute("style",
+                        "width:100%; padding:4px 8px; background:#223355; \
+                         color:#99ccff; border:1px solid #3355aa; \
+                         border-radius:3px; cursor:pointer; font-size:12px;");
+                    btn.append_child(&__scope.create_text("Fix SDFs"));
+                    let hid = __scope.register_handler({
+                        let es = es.clone();
+                        let rev = revision;
+                        move || {
+                            if let Ok(mut es) = es.lock() {
+                                es.pending_fix_sdfs = Some(eid as u32);
+                            }
+                            rev.bump();
+                        }
+                    });
+                    btn.set_attribute("data-rid", &hid.to_string());
+                    btn_row.append_child(&btn);
+                    container.append_child(&btn_row);
+                }
+
                 // Divider.
                 let div = __scope.create_element("div");
                 div.set_attribute(

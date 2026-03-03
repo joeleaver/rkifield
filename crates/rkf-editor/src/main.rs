@@ -16,6 +16,7 @@ mod debug_viz;
 mod editor_state;
 mod engine;
 mod engine_viewport;
+mod jfa_sdf;
 mod environment;
 mod gizmo;
 mod input;
@@ -238,6 +239,7 @@ fn engine_thread(data: EngineThreadData) {
         let pending_spatial_query;
         let pending_mcp_sculpt;
         let pending_object_shape;
+        let pending_mcp_fix_sdfs;
         {
             if let Ok(mut ss) = shared_state.lock() {
                 pending_camera = ss.pending_camera.take();
@@ -246,6 +248,7 @@ fn engine_thread(data: EngineThreadData) {
                 pending_spatial_query = ss.pending_spatial_query.take();
                 pending_mcp_sculpt = ss.pending_mcp_sculpt.take();
                 pending_object_shape = ss.pending_object_shape.take();
+                pending_mcp_fix_sdfs = ss.pending_fix_sdfs.take();
             } else {
                 pending_camera = None;
                 pending_debug = None;
@@ -253,6 +256,7 @@ fn engine_thread(data: EngineThreadData) {
                 pending_spatial_query = None;
                 pending_mcp_sculpt = None;
                 pending_object_shape = None;
+                pending_mcp_fix_sdfs = None;
             }
         }
 
@@ -260,7 +264,7 @@ fn engine_thread(data: EngineThreadData) {
         //    We inline what was formerly `take_engine_snapshot()` to avoid the
         //    intermediate `EngineSnapshot` struct.
         let (
-            camera, f_debug_mode, f_revoxelize, f_environment, f_lights,
+            camera, f_debug_mode, f_revoxelize, f_fix_sdfs, f_environment, f_lights,
             mut scene_clone, f_selected, f_gizmo_mode, f_gizmo_axis,
             f_show_grid, f_editor_mode, f_brush_radius,
             f_sculpt_edits, f_sculpt_undo, f_sculpting_active,
@@ -296,6 +300,7 @@ fn engine_thread(data: EngineThreadData) {
                 es.debug_mode = mode;
             }
             let revoxelize = es.pending_revoxelize.take();
+            let fix_sdfs = es.pending_fix_sdfs.take();
 
             // Consume undo/redo.
             if es.pending_undo {
@@ -465,7 +470,7 @@ fn engine_thread(data: EngineThreadData) {
             // Reset per-frame deltas last.
             es.reset_frame_deltas();
 
-            (cam, debug_mode, revoxelize, environment, lights,
+            (cam, debug_mode, revoxelize, fix_sdfs, environment, lights,
              scene, sel, gm, gizmo_axis, grid, emode, brush_radius,
              sculpt_edits, sculpt_undo, sculpting_active)
         };
@@ -486,6 +491,13 @@ fn engine_thread(data: EngineThreadData) {
         if let Some(obj_id) = f_revoxelize {
             if let Ok(mut es) = editor_state.lock() {
                 engine.process_revoxelize(es.world.scene_mut(), obj_id);
+            }
+        }
+
+        // e1. Process pending Fix SDFs (BFS SDF re-initialization).
+        if let Some(obj_id) = f_fix_sdfs {
+            if let Ok(mut es) = editor_state.lock() {
+                engine.process_fix_sdfs(es.world.scene_mut(), obj_id);
             }
         }
 
@@ -653,6 +665,20 @@ fn engine_thread(data: EngineThreadData) {
                             y_slices: vec![],
                         });
                     }
+                }
+            }
+        }
+
+        // e8. Process pending MCP fix_sdfs request.
+        if let Some(obj_id) = pending_mcp_fix_sdfs {
+            let ok = engine.process_fix_sdfs(&mut scene_clone, obj_id);
+            if let Ok(mut ss) = shared_state.lock() {
+                if ok {
+                    ss.fix_sdfs_result = Some(Ok(()));
+                } else {
+                    ss.fix_sdfs_result = Some(Err(format!(
+                        "fix_sdfs: object {obj_id} not found or not voxelized"
+                    )));
                 }
             }
         }

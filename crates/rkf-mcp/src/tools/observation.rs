@@ -517,6 +517,20 @@ impl ToolHandler for ObjectShapeHandler {
     }
 }
 
+struct FixSdfsHandler;
+
+impl ToolHandler for FixSdfsHandler {
+    fn call(&self, api: &dyn AutomationApi, params: serde_json::Value) -> Result<ToolResponse, ToolError> {
+        let object_id = params.get("object_id").and_then(|v| v.as_u64())
+            .ok_or_else(|| ToolError::InvalidParams("object_id is required".to_string()))? as u32;
+
+        match api.fix_sdfs(object_id) {
+            Ok(()) => Ok(serde_json::json!({"status": "ok"}).into()),
+            Err(e) => Err(ToolError::EngineError(e.to_string())),
+        }
+    }
+}
+
 /// Register all built-in observation tools with the registry.
 pub fn register_observation_tools(registry: &mut ToolRegistry) {
     registry.register(
@@ -1126,6 +1140,29 @@ pub fn register_observation_tools(registry: &mut ToolRegistry) {
             mode: ToolMode::Both,
         },
         Arc::new(ObjectShapeHandler),
+    );
+
+    registry.register(
+        ToolDefinition {
+            name: "fix_sdfs".to_string(),
+            description: "Recompute correct SDF magnitudes and signs for a voxelized object from its zero-crossings (BFS/FMM re-initialization). Repairs horizontal banding, inside-out normals, and concentric ring artifacts caused by accumulated sculpting. May take up to a second for large objects.".to_string(),
+            category: ToolCategory::Mutation,
+            parameters: vec![
+                ParameterDef {
+                    name: "object_id".to_string(),
+                    description: "Scene object ID of the voxelized object to repair (from scene_graph)".to_string(),
+                    param_type: ParamType::Integer,
+                    required: true,
+                    default: None,
+                },
+            ],
+            return_type: ReturnTypeDef {
+                description: "Empty object on success".to_string(),
+                return_type: ParamType::Object,
+            },
+            mode: ToolMode::Editor,
+        },
+        Arc::new(FixSdfsHandler),
     );
 }
 
@@ -1774,6 +1811,16 @@ pub fn dispatch_tool_call(
             };
             match api.object_shape(object_id) {
                 Ok(result) => Ok(tool_ok_json(serde_json::to_value(result).unwrap())),
+                Err(e) => Ok(tool_err_json(&e.to_string())),
+            }
+        }
+        "fix_sdfs" => {
+            let object_id = match args.get("object_id").and_then(|v| v.as_u64()) {
+                Some(id) => id as u32,
+                None => return Ok(tool_err_json("object_id is required")),
+            };
+            match api.fix_sdfs(object_id) {
+                Ok(()) => Ok(tool_ok_json(serde_json::json!({"status": "ok"}))),
                 Err(e) => Ok(tool_err_json(&e.to_string())),
             }
         }
