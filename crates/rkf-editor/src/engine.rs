@@ -1869,31 +1869,35 @@ impl EditorEngine {
                                 // effective_d = shape_d (full brush). At strength=0,
                                 // effective_d is always positive (no change).
                                 let effective_d = shape_d + (1.0 - op.strength) * max_extent;
-                                // Smooth-min blend: creates smooth stroke junctions so
-                                // the geometry between overlapping strokes is smooth.
-                                // EDT recomputes distances from the resulting binary
-                                // solid/empty field (sign of stored distance).
-                                if effective_d >= op.blend_k { continue; }
+
+                                // Binary stamp: only modify voxels that cross the
+                                // solid/empty boundary inside the brush.
+                                //
+                                // We intentionally do NOT use smin here. smin accumulates
+                                // distance values across strokes, causing |∇d| ≠ 1 drift
+                                // that compounds into banding, inverted normals, and ring
+                                // artifacts. Instead the stamp records only binary topology
+                                // (which voxels are solid/empty) and GPU JFA recomputes
+                                // correct Euclidean SDF from that binary after every stroke.
+                                // No drift is possible because the SDF is never accumulated.
+                                if effective_d >= 0.0 { continue; } // outside brush interior
 
                                 let vi = brick_index(lx, ly, lz);
                                 let orig = self.cpu_brick_pool.get(slot).voxels[vi];
+                                let orig_d = orig.distance_f32();
 
                                 let (new_d, new_mat) = if is_add {
-                                    let d = rkf_core::sdf::smin(
-                                        orig.distance_f32(), effective_d, op.blend_k,
-                                    );
-                                    if d >= orig.distance_f32() { continue; }
-                                    (d, op.material_id)
+                                    // Union: voxels inside brush become solid.
+                                    if orig_d < 0.0 { continue; } // already solid
+                                    // Write a near-surface negative value so this voxel
+                                    // seeds the JFA as solid. effective_d is already a
+                                    // valid sphere SDF, just clamp to stay within one voxel.
+                                    (effective_d.clamp(-h, -h * 0.01), op.material_id)
                                 } else {
-                                    // Smooth subtract: smooth max of orig and the
-                                    // complement of the brush (-effective_d).
-                                    // smax(a,b) = -smin(-a,-b), so
-                                    // smax(orig,-effective_d) = -smin(-orig, effective_d).
-                                    let d = -rkf_core::sdf::smin(
-                                        -orig.distance_f32(), effective_d, op.blend_k,
-                                    );
-                                    if d <= orig.distance_f32() { continue; }
-                                    (d, orig.material_id())
+                                    // Subtract: voxels inside brush become empty.
+                                    if orig_d >= 0.0 { continue; } // already empty
+                                    // Write a small positive value.
+                                    ((-effective_d).clamp(h * 0.01, h), orig.material_id())
                                 };
                                 self.cpu_brick_pool.get_mut(slot).voxels[vi] = VoxelSample::new(
                                     new_d, new_mat,
@@ -2012,7 +2016,7 @@ impl EditorEngine {
             }
         }
 
-        if !self.run_jfa_repair(scene, object_id) {
+        if !self.fix_sdfs_cpu(scene, object_id, None) {
             return false;
         }
 
@@ -2374,12 +2378,31 @@ impl EditorEngine {
             }
         }
 
-        // 5. Write back: sign * (sqrt(edt) − h/2) to allocated bricks only.
+        // 5. Compute signed distances into a flat array.
         //
         //    The zero-crossing is at the voxel boundary (midpoint between adjacent
         //    solid and empty voxel centers), so we subtract h/2 from the Euclidean
         //    distance between centers to get the distance to the surface.
         //    Clamp magnitude to at least h*0.01 to avoid numerical zero.
+        let mut distances = vec![0.0f32; total];
+        for i in 0..total {
+            if !is_allocated[i] { continue; }
+            let is_ext = exterior[i];
+            let edt_sq = if is_ext { edt_to_solid[i] } else { edt_to_empty[i] };
+            let mag = (edt_sq.sqrt() - h * 0.5).max(h * 0.01);
+            distances[i] = if is_ext { mag } else { -mag };
+        }
+
+        // 6. Smooth the EDT distances to remove Voronoi medial-axis kinks.
+        //
+        //    The Euclidean distance transform has a gradient discontinuity at the
+        //    medial axis (where equidistant seeds compete). For concave sculpted
+        //    regions, this axis can lie close to the surface and produce visible
+        //    normal artifacts. 10 iterations of sign-preserving 6-neighbour box blur
+        //    smooths these kinks while keeping the zero-crossing in place.
+        Self::smooth_sdf_distances(&mut distances, &is_allocated, gw, gh, gd, h, 10);
+
+        // 7. Write smoothed distances back to allocated bricks only.
         for bz in 0..dims.z {
             for by in 0..dims.y {
                 for bx in 0..dims.x {
@@ -2395,13 +2418,9 @@ impl EditorEngine {
                             (bz*bd+lz) as usize,
                         );
                         if !is_allocated[i] { continue; }
-                        let is_ext = exterior[i];
-                        let edt_sq = if is_ext { edt_to_solid[i] } else { edt_to_empty[i] };
-                        let mag = (edt_sq.sqrt() - h * 0.5).max(h * 0.01);
-                        let signed_dist = if is_ext { mag } else { -mag };
                         let vi = brick_index(lx, ly, lz);
                         brick.voxels[vi] = VoxelSample::new(
-                            signed_dist,
+                            distances[i],
                             mat_grid[i],
                             blend_grid[i],
                             sec_id_grid[i],
@@ -2747,15 +2766,12 @@ impl EditorEngine {
                 apply_edit_cpu(&mut self.cpu_brick_pool, &all_bricks, &op)
             };
 
-            // GPU JFA SDF repair — run after every CSG/sculpt stroke.
+            // GPU JFA: recompute correct SDF from the binary stamp.
             //
-            // The smin stamp writes smooth SDF-like values near the surface, but
-            // magnitudes drift after repeated strokes and at brick boundaries.
-            // JFA rederives correct Euclidean distances from the binary surface,
-            // then smooth_sdf_distances() applies 3 iterations of sign-preserving
-            // box blur to restore smooth gradients (Voronoi boundaries would
-            // otherwise produce squarish normals without this pass).
-            // Paint/Smooth/Flatten don't change geometry so don't need repair.
+            // The binary stamp above only set voxels that crossed the solid/empty
+            // boundary. JFA now propagates correct Euclidean distances from ALL
+            // zero-crossings (new and pre-existing), giving a valid SDF with no
+            // drift. Only CSG operations change geometry; Paint/Smooth/Flatten don't.
             if matches!(edit_type, EditType::CsgUnion
                                  | EditType::CsgSubtract
                                  | EditType::CsgIntersect
