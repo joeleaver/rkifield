@@ -1,0 +1,516 @@
+//! Combined titlebar component — menus, tool buttons, window controls.
+
+use std::sync::{Arc, Mutex};
+
+use rinch::prelude::*;
+
+use crate::editor_state::{EditorMode, EditorState, UiRevision, UiSignals};
+
+// ── Titlebar ────────────────────────────────────────────────────────────────
+
+/// Combined titlebar with app title, menus, tool buttons, and window controls.
+///
+/// Replaces the separate MenuBar + Toolbar with a single 36px row in a
+/// frameless window. Uses rinch's `rinch-app-menu-*` CSS classes for themed
+/// dropdown rendering. The titlebar background has `data-drag-window` set so
+/// rinch triggers `AppAction::DragWindow` on mousedown on empty areas.
+#[component]
+pub fn TitleBar() -> NodeHandle {
+    use rinch::menu::{Menu, MenuItem, MenuEntryRef};
+
+    let editor_state = use_context::<Arc<Mutex<EditorState>>>();
+    let revision = use_context::<UiRevision>();
+    let ui = use_context::<UiSignals>();
+
+    // -1 = all closed, 0 = File, 1 = Edit, 2 = View.
+    let active_menu: Signal<i32> = Signal::new(-1);
+
+    // Outer wrapper — absolute positioning, last child of root for z-ordering.
+    let wrapper = __scope.create_element("div");
+    wrapper.set_attribute(
+        "style",
+        "position:absolute;top:0;left:0;width:100%;z-index:200;",
+    );
+
+    // ── Click-outside overlay ──────────────────────────────────────────
+    let overlay = __scope.create_element("div");
+    {
+        let overlay_h = overlay.clone();
+        Effect::new(move || {
+            if active_menu.get() >= 0 {
+                overlay_h.set_attribute("class", "rinch-app-menu-bar__overlay");
+                overlay_h.set_attribute("style", "");
+            } else {
+                overlay_h.set_attribute("class", "rinch-app-menu-bar__overlay");
+                overlay_h.set_attribute("style", "display:none;");
+            }
+        });
+    }
+    let overlay_click = __scope.register_handler(move || {
+        active_menu.set(-1);
+    });
+    overlay.set_attribute("data-rid", &overlay_click.to_string());
+    wrapper.append_child(&overlay);
+
+    // ── Titlebar row ───────────────────────────────────────────────────
+    // Uses `rinch-app-menu-bar` class which picks up `--rinch-titlebar-bg`
+    // and `--rinch-titlebar-text` from the theme system.
+    let bar = __scope.create_element("div");
+    bar.set_attribute(
+        "style",
+        "position:relative;z-index:201;background:var(--rinch-titlebar-bg);",
+    );
+    {
+        let bar_h = bar.clone();
+        Effect::new(move || {
+            let cls = if active_menu.get() >= 0 {
+                "rinch-app-menu-bar rinch-app-menu-bar--engaged"
+            } else {
+                "rinch-app-menu-bar"
+            };
+            bar_h.set_attribute("class", cls);
+        });
+    }
+
+    // Titlebar drag — rinch reads `data-drag-window` and emits AppAction::DragWindow
+    // when a mousedown lands on this element (deepest-first: child handlers fire first).
+    bar.set_attribute("data-drag-window", "1");
+
+    // ── App title "RkiField" ───────────────────────────────────────────
+    let title_container = __scope.create_element("div");
+    title_container.set_attribute(
+        "style",
+        "position:relative;overflow:hidden;padding:0 12px 0 10px;\
+         display:flex;align-items:center;",
+    );
+    let title_text = __scope.create_element("span");
+    title_text.set_attribute(
+        "style",
+        "font-size:12px;font-weight:600;color:var(--rinch-color-text);\
+         letter-spacing:0.5px;white-space:nowrap;",
+    );
+    title_text.append_child(&__scope.create_text("RkiField"));
+    title_container.append_child(&title_text);
+    // Gradient fade on right edge.
+    let title_fade = __scope.create_element("span");
+    title_fade.set_attribute(
+        "style",
+        "position:absolute;right:0;top:0;bottom:0;width:16px;\
+         background:linear-gradient(90deg, transparent, var(--rinch-titlebar-bg));",
+    );
+    title_container.append_child(&title_fade);
+    bar.append_child(&title_container);
+
+    // ── Build menu data ────────────────────────────────────────────────
+    let es = editor_state.clone();
+    let rev = revision;
+    let file_menu = Menu::new()
+        .item(MenuItem::new("Open").shortcut("Ctrl+O").on_click({
+            let es = es.clone();
+            let rev = rev;
+            move || {
+                if let Ok(mut s) = es.lock() { s.pending_open = true; }
+                ui.bump_scene();
+                ui.selection.set(None);
+                rev.bump();
+            }
+        }))
+        .item(MenuItem::new("Save").shortcut("Ctrl+S").on_click({
+            let es = es.clone();
+            let rev = rev;
+            move || {
+                if let Ok(mut s) = es.lock() { s.pending_save = true; }
+                rev.bump();
+            }
+        }))
+        .item(MenuItem::new("Save As").shortcut("Ctrl+Shift+S").on_click({
+            let es = es.clone();
+            let rev = rev;
+            move || {
+                if let Ok(mut s) = es.lock() { s.pending_save_as = true; }
+                rev.bump();
+            }
+        }))
+        .separator()
+        .item(MenuItem::new("Quit").shortcut("Esc").on_click(move || {
+            close_current_window();
+        }));
+
+    let spawn_primitives: &[(&str, &str)] = &[
+        ("Box", "Box"),
+        ("Sphere", "Sphere"),
+        ("Capsule", "Capsule"),
+        ("Torus", "Torus"),
+        ("Cylinder", "Cylinder"),
+    ];
+    let mut spawn_menu = Menu::new();
+    for &(label, prim_name) in spawn_primitives {
+        spawn_menu = spawn_menu.item(MenuItem::new(label).on_click({
+            let es = es.clone();
+            let rev = rev;
+            let name = prim_name.to_string();
+            move || {
+                if let Ok(mut s) = es.lock() {
+                    s.pending_spawn = Some(name.clone());
+                }
+                ui.bump_scene();
+                rev.bump();
+            }
+        }));
+    }
+
+    let edit_menu = Menu::new()
+        .item(MenuItem::new("Undo").shortcut("Ctrl+Z").on_click({
+            let es = es.clone();
+            move || {
+                if let Ok(mut s) = es.lock() { s.pending_undo = true; }
+            }
+        }))
+        .item(MenuItem::new("Redo").shortcut("Ctrl+Y").on_click({
+            let es = es.clone();
+            move || {
+                if let Ok(mut s) = es.lock() { s.pending_redo = true; }
+            }
+        }))
+        .separator()
+        .item(MenuItem::new("Delete").shortcut("Del").on_click({
+            let es = es.clone();
+            let rev = rev;
+            move || {
+                if let Ok(mut s) = es.lock() { s.pending_delete = true; }
+                ui.bump_scene();
+                rev.bump();
+            }
+        }))
+        .item(MenuItem::new("Duplicate").shortcut("Ctrl+D").on_click({
+            let es = es.clone();
+            let rev = rev;
+            move || {
+                if let Ok(mut s) = es.lock() { s.pending_duplicate = true; }
+                ui.bump_scene();
+                rev.bump();
+            }
+        }))
+        .separator()
+        .submenu("Spawn", spawn_menu);
+
+    let debug_modes: &[(&str, u32)] = &[
+        ("Normal", 0),
+        ("Normals", 1),
+        ("Positions", 2),
+        ("Material IDs", 3),
+        ("Diffuse", 4),
+        ("Specular", 5),
+        ("GI Only", 6),
+    ];
+    let mut view_menu = Menu::new();
+    for &(label, mode) in debug_modes {
+        view_menu = view_menu.item(MenuItem::new(label).on_click({
+            let es = es.clone();
+            let rev = rev;
+            move || {
+                if let Ok(mut s) = es.lock() {
+                    s.debug_mode = mode;
+                    s.pending_debug_mode = Some(mode);
+                }
+                ui.debug_mode.set(mode);
+                rev.bump();
+            }
+        }));
+    }
+
+    // Camera presets (yaw, pitch in radians).
+    view_menu = view_menu.separator();
+    let cam_presets: &[(&str, f32, f32)] = &[
+        ("Front",       0.0,                    0.0),
+        ("Back",        std::f32::consts::PI,   0.0),
+        ("Left",        std::f32::consts::FRAC_PI_2, 0.0),
+        ("Right",       -std::f32::consts::FRAC_PI_2, 0.0),
+        ("Top",         0.0,                    1.39),  // ~80°
+        ("Perspective",  0.0,                    0.3),
+    ];
+    for &(label, yaw, pitch) in cam_presets {
+        view_menu = view_menu.item(MenuItem::new(label).on_click({
+            let es = es.clone();
+            let rev = rev;
+            move || {
+                if let Ok(mut s) = es.lock() {
+                    s.editor_camera.set_orbit_angles(yaw, pitch);
+                }
+                rev.bump();
+            }
+        }));
+    }
+
+    // Grid overlay toggle.
+    view_menu = view_menu.separator();
+    view_menu = view_menu.item(MenuItem::new("Toggle Grid").shortcut("G").on_click({
+        let es = es.clone();
+        let rev = rev;
+        move || {
+            let new_val = es.lock().ok().map(|mut s| {
+                s.show_grid = !s.show_grid;
+                s.show_grid
+            }).unwrap_or(false);
+            ui.show_grid.set(new_val);
+            rev.bump();
+        }
+    }));
+
+    // ── Build DOM for each top-level menu ──────────────────────────────
+    let menus: &[(&str, &Menu)] = &[
+        ("File", &file_menu),
+        ("Edit", &edit_menu),
+        ("View", &view_menu),
+    ];
+
+    for (idx, &(label, menu)) in menus.iter().enumerate() {
+        let index = idx as i32;
+
+        let item = __scope.create_element("div");
+        {
+            let item_h = item.clone();
+            Effect::new(move || {
+                let cls = if active_menu.get() == index {
+                    "rinch-app-menu-item rinch-app-menu-item--opened"
+                } else {
+                    "rinch-app-menu-item"
+                };
+                item_h.set_attribute("class", cls);
+            });
+        }
+
+        let onenter_id = __scope.register_handler(move || {
+            if active_menu.get() >= 0 {
+                active_menu.set(index);
+            }
+        });
+        item.set_attribute("data-onenter", &onenter_id.to_string());
+
+        let label_node = __scope.create_element("div");
+        label_node.set_attribute("class", "rinch-app-menu-item__label");
+        label_node.append_child(&__scope.create_text(label));
+        let label_click = __scope.register_handler(move || {
+            let current = active_menu.get();
+            if current == index {
+                active_menu.set(-1);
+            } else {
+                active_menu.set(index);
+            }
+        });
+        label_node.set_attribute("data-rid", &label_click.to_string());
+        item.append_child(&label_node);
+
+        let dropdown = __scope.create_element("div");
+        {
+            let dd_h = dropdown.clone();
+            Effect::new(move || {
+                if active_menu.get() == index {
+                    dd_h.set_attribute(
+                        "class",
+                        "rinch-app-menu-item__dropdown rinch-app-menu-item__dropdown--visible",
+                    );
+                } else {
+                    dd_h.set_attribute("class", "rinch-app-menu-item__dropdown");
+                }
+            });
+        }
+
+        for entry in menu.iter_entries() {
+            match entry {
+                MenuEntryRef::Item { label, shortcut, enabled, callback } => {
+                    let entry_node = __scope.create_element("div");
+                    let cls = if enabled {
+                        "rinch-app-menu-entry"
+                    } else {
+                        "rinch-app-menu-entry rinch-app-menu-entry--disabled"
+                    };
+                    entry_node.set_attribute("class", cls);
+
+                    let lbl = __scope.create_element("span");
+                    lbl.set_attribute("class", "rinch-app-menu-entry__label");
+                    lbl.append_child(&__scope.create_text(label));
+                    entry_node.append_child(&lbl);
+
+                    if let Some(sc) = shortcut {
+                        let sc_span = __scope.create_element("span");
+                        sc_span.set_attribute("class", "rinch-app-menu-entry__shortcut");
+                        sc_span.append_child(&__scope.create_text(sc));
+                        entry_node.append_child(&sc_span);
+                    }
+
+                    if enabled {
+                        if let Some(cb) = callback {
+                            let cb = std::rc::Rc::clone(cb);
+                            let hid = __scope.register_handler(move || {
+                                active_menu.set(-1);
+                                cb();
+                            });
+                            entry_node.set_attribute("data-rid", &hid.to_string());
+                        }
+                    }
+
+                    dropdown.append_child(&entry_node);
+                }
+                MenuEntryRef::Separator => {
+                    let sep = __scope.create_element("div");
+                    sep.set_attribute("class", "rinch-app-menu-separator");
+                    dropdown.append_child(&sep);
+                }
+                MenuEntryRef::Submenu { .. } => {}
+            }
+        }
+
+        item.append_child(&dropdown);
+        bar.append_child(&item);
+    }
+
+    // ── Separator between menus and tool buttons ───────────────────────
+    let separator = __scope.create_element("div");
+    separator.set_attribute(
+        "style",
+        "width:1px;height:14px;background:var(--rinch-color-border);margin:0 8px;",
+    );
+    bar.append_child(&separator);
+
+    // ── Tool buttons (Sculpt/Paint) ────────────────────────────────────
+    {
+        let es = editor_state.clone();
+        let tool_container = __scope.create_element("div");
+        tool_container.set_attribute(
+            "style",
+            "display:flex;align-items:center;gap:2px;",
+        );
+
+        rinch::core::reactive_component_dom(__scope, &tool_container, move |__scope| {
+            let _ = ui.editor_mode.get();
+            // Legacy fallback.
+            revision.track();
+
+            let current_mode = {
+                let es = es.lock().unwrap();
+                es.mode
+            };
+
+            let inner = __scope.create_element("div");
+            inner.set_attribute("style", "display:flex;align-items:center;gap:2px;");
+
+            for mode in EditorMode::TOOLS.iter() {
+                let mode = *mode;
+                let btn = __scope.create_element("div");
+                let is_active = mode == current_mode;
+
+                let style = if is_active {
+                    "padding:2px 8px;cursor:pointer;border-radius:3px;\
+                     background:var(--rinch-titlebar-active);\
+                     font-size:11px;color:var(--rinch-color-text);user-select:none;\
+                     border:1px solid var(--rinch-color-border);font-weight:600;"
+                } else {
+                    "padding:2px 8px;cursor:pointer;border-radius:3px;\
+                     background:transparent;\
+                     font-size:11px;color:var(--rinch-color-dimmed);user-select:none;\
+                     border:1px solid transparent;font-weight:400;"
+                };
+
+                btn.set_attribute("style", style);
+
+                btn.append_child(&__scope.create_text(mode.name()));
+
+                let es = es.clone();
+                let handler_id = __scope.register_handler(move || {
+                    let new_mode = if let Ok(mut state) = es.lock() {
+                        if state.mode == mode {
+                            state.mode = EditorMode::Default;
+                            EditorMode::Default
+                        } else {
+                            state.mode = mode;
+                            mode
+                        }
+                    } else {
+                        EditorMode::Default
+                    };
+                    ui.editor_mode.set(new_mode);
+                    revision.bump();
+                });
+                btn.set_attribute("data-rid", &handler_id.to_string());
+
+                inner.append_child(&btn);
+            }
+
+            inner
+        });
+
+        bar.append_child(&tool_container);
+    }
+
+    // ── Spacer ─────────────────────────────────────────────────────────
+    let spacer = __scope.create_element("div");
+    spacer.set_attribute("style", "flex:1;");
+    bar.append_child(&spacer);
+
+    // ── Window controls ────────────────────────────────────────────────
+    let controls = __scope.create_element("div");
+    controls.set_attribute(
+        "style",
+        "display:flex;align-items:center;height:100%;",
+    );
+
+    // Minimize [─]
+    let min_btn = __scope.create_element("div");
+    min_btn.set_attribute("class", "rinch-borderlesswindow__control");
+    min_btn.set_attribute(
+        "style",
+        "width:46px;height:36px;display:flex;align-items:center;\
+         justify-content:center;cursor:pointer;\
+         color:var(--rinch-color-dimmed);font-size:14px;",
+    );
+    min_btn.append_child(&__scope.create_text("\u{2500}"));  // ─
+    {
+        let hid = __scope.register_handler(move || {
+            minimize_current_window();
+        });
+        min_btn.set_attribute("data-rid", &hid.to_string());
+    }
+    controls.append_child(&min_btn);
+
+    // Maximize [□]
+    let max_btn = __scope.create_element("div");
+    max_btn.set_attribute("class", "rinch-borderlesswindow__control");
+    max_btn.set_attribute(
+        "style",
+        "width:46px;height:36px;display:flex;align-items:center;\
+         justify-content:center;cursor:pointer;\
+         color:var(--rinch-color-dimmed);font-size:14px;",
+    );
+    max_btn.append_child(&__scope.create_text("\u{25a1}"));  // □
+    {
+        let hid = __scope.register_handler(move || {
+            toggle_maximize_current_window();
+        });
+        max_btn.set_attribute("data-rid", &hid.to_string());
+    }
+    controls.append_child(&max_btn);
+
+    // Close [×]
+    let close_btn = __scope.create_element("div");
+    close_btn.set_attribute("class", "rinch-borderlesswindow__control rinch-borderlesswindow__control--close");
+    close_btn.set_attribute(
+        "style",
+        "width:46px;height:36px;display:flex;align-items:center;\
+         justify-content:center;cursor:pointer;\
+         color:var(--rinch-color-dimmed);font-size:16px;",
+    );
+    close_btn.append_child(&__scope.create_text("\u{00d7}"));  // ×
+    {
+        let hid = __scope.register_handler(move || {
+            close_current_window();
+        });
+        close_btn.set_attribute("data-rid", &hid.to_string());
+    }
+    controls.append_child(&close_btn);
+
+    bar.append_child(&controls);
+
+    wrapper.append_child(&bar);
+    wrapper
+}

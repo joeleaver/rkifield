@@ -142,6 +142,26 @@ impl<T: Default + Clone> Pool<T> {
     pub fn as_slice(&self) -> &[T] {
         &self.items
     }
+
+    /// Grow the pool to `new_capacity` slots, preserving existing allocations.
+    ///
+    /// Slots `old_capacity..new_capacity` are added to the free list.
+    /// The backing `Vec` is extended with `T::default()` values so the
+    /// contiguous layout required for GPU upload is maintained.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `new_capacity < current capacity`.
+    pub fn grow(&mut self, new_capacity: u32) {
+        let old = self.capacity();
+        assert!(new_capacity >= old, "pool cannot shrink");
+        if new_capacity == old { return; }
+        self.items.resize(new_capacity as usize, T::default());
+        // Push new slots in reverse so pop() yields them in ascending order.
+        for i in (old..new_capacity).rev() {
+            self.free_list.push(i);
+        }
+    }
 }
 
 /// Core geometry brick pool — stores [`Brick`]s (4 KB each).

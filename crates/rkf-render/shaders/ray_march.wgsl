@@ -275,25 +275,6 @@ fn sample_voxel_at(obj_offset: u32, vc: vec3<i32>, dims: vec3<u32>,
     return extract_distance(brick_pool[idx].word0);
 }
 
-/// Sample a single voxel for the Catmull-Rom normal gradient kernel.
-/// EMPTY_SLOT returns vs*2 — a smooth SDF continuation that avoids sharp
-/// gradient discontinuities at the geometry surface boundary.
-fn sample_voxel_at_norm(obj_offset: u32, vc: vec3<i32>, dims: vec3<u32>,
-                         total_voxels: vec3<i32>, vs: f32) -> f32 {
-    let c = clamp(vc, vec3<i32>(0), total_voxels - vec3<i32>(1));
-    let brick = vec3<u32>(c / vec3<i32>(8));
-    let local = vec3<u32>(c % vec3<i32>(8));
-    let flat_brick = brick.x + brick.y * dims.x + brick.z * dims.x * dims.y;
-    let slot = brick_maps[obj_offset + flat_brick];
-    if slot == EMPTY_SLOT {
-        return vs * 2.0;
-    }
-    if slot == INTERIOR_SLOT {
-        return -(vs * 2.0);
-    }
-    let idx = slot * 512u + local.x + local.y * 8u + local.z * 64u;
-    return extract_distance(brick_pool[idx].word0);
-}
 
 /// Catmull-Rom basis weights for parameter t in [0,1].
 /// Returns weights for the 4 control points: p[-1], p[0], p[1], p[2].
@@ -329,9 +310,8 @@ fn cr_interp(w: vec4<f32>, v0: f32, v1: f32, v2: f32, v3: f32) -> f32 {
 /// Uses trilinear interpolation (8 voxel samples) for conservative distance
 /// values that never overshoot — critical for safe ray march stepping.
 ///
-/// Normals use tricubic Catmull-Rom (see sample_voxelized_gradient) for C1
-/// smooth gradients. This split avoids false zero-crossings from cubic
-/// overshoot while still producing beautiful normals.
+/// Surface normals use sample_density_gradient (binary sign field) which is
+/// immune to SDF magnitude artifacts and medial-axis creases.
 fn sample_voxelized(local_pos: vec3<f32>, obj: GpuObject) -> f32 {
     let vs = obj.voxel_size;
     let brick_extent = vs * 8.0;
@@ -394,92 +374,86 @@ fn sample_voxelized(local_pos: vec3<f32>, obj: GpuObject) -> f32 {
     return mix(c0, c1, t.z) + outside_dist;
 }
 
-/// Compute the analytical gradient of the tricubic Catmull-Rom SDF field.
-/// Returns the local-space gradient (∂sdf/∂x, ∂sdf/∂y, ∂sdf/∂z) with C1 continuity.
+/// Sample a voxelized object as a binary density field (solid=1, empty=0).
 ///
-/// Each partial derivative uses the Catmull-Rom derivative weights along its axis
-/// and normal Catmull-Rom weights along the other two axes.
-fn sample_voxelized_gradient(local_pos: vec3<f32>, obj: GpuObject) -> vec3<f32> {
+/// Converts each of the 8 trilinear corner samples to binary (sign-only)
+/// BEFORE interpolating.  The resulting smooth density field has no
+/// dependence on stored SDF magnitudes — only the sign (solid vs empty)
+/// matters.  This eliminates medial-axis creases from overlapping brush
+/// strokes and brick-boundary artifacts from magnitude drift.
+fn sample_density(local_pos: vec3<f32>, obj: GpuObject) -> f32 {
     let vs = obj.voxel_size;
     let brick_extent = vs * 8.0;
     let dims = vec3<u32>(obj.brick_map_dims_x, obj.brick_map_dims_y, obj.brick_map_dims_z);
     let grid_size = vec3<f32>(dims) * brick_extent;
+
     let grid_pos = local_pos + grid_size * 0.5;
+    let clamped = clamp(grid_pos, vec3<f32>(vs * 0.01), grid_size - vec3<f32>(vs * 0.01));
 
-    if any(grid_pos < vec3<f32>(0.0)) || any(grid_pos >= grid_size) {
-        let eps = vs * 1.5;
-        let gx = sample_voxelized(local_pos + vec3<f32>(eps, 0.0, 0.0), obj)
-               - sample_voxelized(local_pos - vec3<f32>(eps, 0.0, 0.0), obj);
-        let gy = sample_voxelized(local_pos + vec3<f32>(0.0, eps, 0.0), obj)
-               - sample_voxelized(local_pos - vec3<f32>(0.0, eps, 0.0), obj);
-        let gz = sample_voxelized(local_pos + vec3<f32>(0.0, 0.0, eps), obj)
-               - sample_voxelized(local_pos - vec3<f32>(0.0, 0.0, eps), obj);
-        return vec3<f32>(gx, gy, gz);
+    // Outside grid → empty.
+    if any(grid_pos < vec3<f32>(-brick_extent)) || any(grid_pos > grid_size + vec3<f32>(brick_extent)) {
+        return 0.0;
     }
 
-    let voxel_coord = grid_pos / vs - vec3<f32>(0.5);
+    let voxel_coord = clamped / vs - vec3<f32>(0.5);
     let v0 = vec3<i32>(floor(voxel_coord));
-    let t = voxel_coord - vec3<f32>(v0);
+    let t  = voxel_coord - vec3<f32>(v0);
     let total_voxels = vec3<i32>(dims) * 8;
-    let off = obj.brick_map_offset;
 
-    // Weights and derivative weights for each axis.
-    let wx = catmull_rom_weights(t.x);
-    let wy = catmull_rom_weights(t.y);
-    let wz = catmull_rom_weights(t.z);
-    let dwx = catmull_rom_dweights(t.x);
-    let dwy = catmull_rom_dweights(t.y);
-    let dwz = catmull_rom_dweights(t.z);
+    // Sample 8 corners, convert to binary (solid=1, empty=0) before lerping.
+    let b000 = select(0.0, 1.0, sample_voxel_at(obj.brick_map_offset, v0 + vec3<i32>(0,0,0), dims, total_voxels, vs) < 0.0);
+    let b100 = select(0.0, 1.0, sample_voxel_at(obj.brick_map_offset, v0 + vec3<i32>(1,0,0), dims, total_voxels, vs) < 0.0);
+    let b010 = select(0.0, 1.0, sample_voxel_at(obj.brick_map_offset, v0 + vec3<i32>(0,1,0), dims, total_voxels, vs) < 0.0);
+    let b110 = select(0.0, 1.0, sample_voxel_at(obj.brick_map_offset, v0 + vec3<i32>(1,1,0), dims, total_voxels, vs) < 0.0);
+    let b001 = select(0.0, 1.0, sample_voxel_at(obj.brick_map_offset, v0 + vec3<i32>(0,0,1), dims, total_voxels, vs) < 0.0);
+    let b101 = select(0.0, 1.0, sample_voxel_at(obj.brick_map_offset, v0 + vec3<i32>(1,0,1), dims, total_voxels, vs) < 0.0);
+    let b011 = select(0.0, 1.0, sample_voxel_at(obj.brick_map_offset, v0 + vec3<i32>(0,1,1), dims, total_voxels, vs) < 0.0);
+    let b111 = select(0.0, 1.0, sample_voxel_at(obj.brick_map_offset, v0 + vec3<i32>(1,1,1), dims, total_voxels, vs) < 0.0);
 
-    // Sample the 4x4x4 grid once and reuse for all three partials.
-    // s[iz][iy][ix] = sample at (v0.x + ix - 1, v0.y + iy - 1, v0.z + iz - 1)
-    var s: array<array<array<f32, 4>, 4>, 4>;
-    for (var iz = 0; iz < 4; iz++) {
-        for (var iy = 0; iy < 4; iy++) {
-            for (var ix = 0; ix < 4; ix++) {
-                s[iz][iy][ix] = sample_voxel_at_norm(
-                    off, v0 + vec3<i32>(ix - 1, iy - 1, iz - 1),
-                    dims, total_voxels, vs,
-                );
-            }
-        }
-    }
+    let b00 = mix(b000, b100, t.x);
+    let b10 = mix(b010, b110, t.x);
+    let b01 = mix(b001, b101, t.x);
+    let b11 = mix(b011, b111, t.x);
+    let b0  = mix(b00,  b10,  t.y);
+    let b1  = mix(b01,  b11,  t.y);
+    return mix(b0, b1, t.z);
+}
 
-    // ∂f/∂x: derivative weights along X, normal weights along Y and Z.
-    var gx = 0.0;
-    for (var iz = 0; iz < 4; iz++) {
-        var gy_acc = 0.0;
-        for (var iy = 0; iy < 4; iy++) {
-            let x_val = cr_interp(dwx, s[iz][iy][0], s[iz][iy][1], s[iz][iy][2], s[iz][iy][3]);
-            gy_acc += wy[iy] * x_val;
-        }
-        gx += wz[iz] * gy_acc;
-    }
+/// Compute the surface normal gradient via 6-sample central difference.
+///
+/// Gradient of stored SDF values via 6-sample central difference.
+fn sample_voxelized_gradient(local_pos: vec3<f32>, obj: GpuObject) -> vec3<f32> {
+    let eps = obj.voxel_size * 1.5;
+    let gx = sample_voxelized(local_pos + vec3<f32>(eps, 0.0, 0.0), obj)
+           - sample_voxelized(local_pos - vec3<f32>(eps, 0.0, 0.0), obj);
+    let gy = sample_voxelized(local_pos + vec3<f32>(0.0, eps, 0.0), obj)
+           - sample_voxelized(local_pos - vec3<f32>(0.0, eps, 0.0), obj);
+    let gz = sample_voxelized(local_pos + vec3<f32>(0.0, 0.0, eps), obj)
+           - sample_voxelized(local_pos - vec3<f32>(0.0, 0.0, eps), obj);
+    return vec3<f32>(gx, gy, gz);
+}
 
-    // ∂f/∂y: normal weights along X, derivative weights along Y, normal along Z.
-    var gy = 0.0;
-    for (var iz = 0; iz < 4; iz++) {
-        var dy_acc = 0.0;
-        for (var iy = 0; iy < 4; iy++) {
-            let x_val = cr_interp(wx, s[iz][iy][0], s[iz][iy][1], s[iz][iy][2], s[iz][iy][3]);
-            dy_acc += dwy[iy] * x_val;
-        }
-        gy += wz[iz] * dy_acc;
-    }
-
-    // ∂f/∂z: normal weights along X and Y, derivative weights along Z.
-    var gz = 0.0;
-    for (var iz = 0; iz < 4; iz++) {
-        var yz_acc = 0.0;
-        for (var iy = 0; iy < 4; iy++) {
-            let x_val = cr_interp(wx, s[iz][iy][0], s[iz][iy][1], s[iz][iy][2], s[iz][iy][3]);
-            yz_acc += wy[iy] * x_val;
-        }
-        gz += dwz[iz] * yz_acc;
-    }
-
-    // Convert from voxel-space gradient to local-space: divide by voxel_size.
-    return vec3<f32>(gx, gy, gz) / vs;
+/// Compute surface normal from the binary density field gradient.
+///
+/// Samples the binary density (solid=1, empty=0) at ±eps offsets and returns
+/// the central-difference gradient.  Because it uses only the SIGN of stored
+/// distances — never the magnitude — it is immune to:
+///   - medial-axis SDF discontinuities between overlapping brush strokes
+///   - EDT magnitude drift / incorrect distances from binary stamp
+///   - EMPTY_SLOT / INTERIOR_SLOT sentinel value artifacts
+///
+/// The density field is 1 inside (solid) and 0 outside (empty).  Its gradient
+/// points inward; negate to obtain the outward surface normal.
+fn sample_density_gradient(local_pos: vec3<f32>, obj: GpuObject) -> vec3<f32> {
+    let eps = obj.voxel_size * 2.0;
+    let gx = sample_density(local_pos + vec3<f32>(eps, 0.0, 0.0), obj)
+           - sample_density(local_pos - vec3<f32>(eps, 0.0, 0.0), obj);
+    let gy = sample_density(local_pos + vec3<f32>(0.0, eps, 0.0), obj)
+           - sample_density(local_pos - vec3<f32>(0.0, eps, 0.0), obj);
+    let gz = sample_density(local_pos + vec3<f32>(0.0, 0.0, eps), obj)
+           - sample_density(local_pos - vec3<f32>(0.0, 0.0, eps), obj);
+    // Density increases toward interior → gradient is inward.  Negate for outward normal.
+    return -vec3<f32>(gx, gy, gz);
 }
 
 /// Get material ID from a voxelized object at a local position (nearest neighbor).
@@ -819,12 +793,10 @@ fn compute_normal_for_object(pos: vec3<f32>, obj_idx: u32) -> vec3<f32> {
         let cam_rel = pos - camera.position.xyz;
         let local_pos = (obj.inverse_world * vec4<f32>(cam_rel, 1.0)).xyz;
 
-        // Analytical gradient in local space from trilinear corner values.
+        // Gradient in local space from trilinear SDF values.
         let local_grad = sample_voxelized_gradient(local_pos, obj);
 
         // Transform gradient from local → world space.
-        // Normal transform = transpose(inverse_world) (since inverse_world = M^-1,
-        // transpose(M^-1) transforms normals from local to world).
         let world_grad = (transpose(obj.inverse_world) * vec4<f32>(local_grad, 0.0)).xyz;
 
         let len = length(world_grad);
