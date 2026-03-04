@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use rinch::prelude::*;
 
-use crate::editor_state::{EditorState, SelectedEntity, UiRevision, UiSignals};
+use crate::editor_state::{EditorState, SelectedEntity, UiSignals};
 
 // ── Style constants ──────────────────────────────────────────────────────────
 
@@ -24,11 +24,10 @@ const VALUE_STYLE: &str = "font-size:12px;color:var(--rinch-color-dimmed);paddin
 /// Properties panel component.
 ///
 /// Displays the name and basic info about the currently selected entity.
-/// Re-renders reactively when the shared `UiRevision` signal changes.
+/// Re-renders reactively when the `UiSignals::selection` signal changes.
 #[component]
 pub fn PropertiesPanel() -> NodeHandle {
     let editor_state = use_context::<Arc<Mutex<EditorState>>>();
-    let revision = use_context::<UiRevision>();
     let ui = use_context::<UiSignals>();
 
     let root = __scope.create_element("div");
@@ -41,8 +40,6 @@ pub fn PropertiesPanel() -> NodeHandle {
     let es = editor_state.clone();
     rinch::core::reactive_component_dom(__scope, &root, move |__scope| {
         let _ = ui.selection.get();
-        // Legacy fallback: also track revision for non-migrated code paths.
-        revision.track();
 
         let container = __scope.create_element("div");
         container.set_attribute("style", "display:flex;flex-direction:column;");
@@ -55,7 +52,10 @@ pub fn PropertiesPanel() -> NodeHandle {
         container.append_child(&header);
 
         // Read selected entity info.
-        let es = es.lock().unwrap();
+        let es = match es.lock().ok() {
+            Some(es) => es,
+            None => return container,
+        };
 
         if let Some(ref sel) = es.selected_entity {
             match sel {

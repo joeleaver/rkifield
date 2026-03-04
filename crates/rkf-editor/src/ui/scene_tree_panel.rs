@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use rinch::prelude::*;
 use rinch_tabler_icons::TablerIcon;
 
-use crate::editor_state::{EditorState, SelectedEntity, UiRevision, UiSignals};
+use crate::editor_state::{EditorState, SelectedEntity, UiSignals};
 use crate::light_editor::EditorLightType;
 
 // ── Style constants ──────────────────────────────────────────────────────────
@@ -126,7 +126,6 @@ fn parse_value(value: &str) -> Option<SelectedEntity> {
 #[component]
 pub fn SceneTreePanel() -> NodeHandle {
     let editor_state = use_context::<Arc<Mutex<EditorState>>>();
-    let revision = use_context::<UiRevision>();
     let ui = use_context::<UiSignals>();
 
     // Persistent tree expand/select state — created once, lives in rinch context.
@@ -143,27 +142,49 @@ pub fn SceneTreePanel() -> NodeHandle {
         "flex:1;overflow-y:auto;display:flex;flex-direction:column;",
     );
 
+    // ── Header with count (updated via Effect, no rebuild) ──
+    let header = __scope.create_element("div");
+    header.set_attribute("style", LABEL_STYLE);
+    let header_text = __scope.create_text("Scene (0)");
+    header.append_child(&header_text);
+    root.append_child(&header);
+
+    // Header count Effect — tracks scene_revision + object_count.
+    {
+        let es = editor_state.clone();
+        let header_text = header_text.clone();
+        Effect::new(move || {
+            let _ = ui.scene_revision.get();
+            let count = es.lock().ok()
+                .map(|es| es.world.scene().objects.len() + es.light_editor.all_lights().len())
+                .unwrap_or(0);
+            header_text.set_text(&format!("Scene ({count})"));
+        });
+    }
+
+    // ── Tree DOM (only rebuilds on scene structure changes) ──
+    let tree_container = __scope.create_element("div");
+    tree_container.set_attribute("style", "display:flex;flex-direction:column;");
+    root.append_child(&tree_container);
+
     let es = editor_state.clone();
-    rinch::core::reactive_component_dom(__scope, &root, move |__scope| {
-        // Track selection + scene structure — only rebuild when these change.
-        let _ = ui.selection.get();
+    rinch::core::reactive_component_dom(__scope, &tree_container, move |__scope| {
+        // Track scene structure — only rebuild when scene changes (spawn/delete/open).
         let _ = ui.scene_revision.get();
-        // Legacy fallback: also track revision for non-migrated code paths.
-        revision.track();
 
-        // Read tree data and selection from editor state, then RELEASE the
-        // lock before syncing tree signals. clear_selected()/select() trigger
-        // reactive cascades (→ RightPanel::render) that also need the lock;
-        // holding it here would deadlock (std::Mutex is not reentrant).
-        let (tree_data, obj_count, sel_entity) = {
-            let es = es.lock().unwrap();
-            let data = build_tree_data(&es);
-            let count = es.world.scene().objects.len() + es.light_editor.all_lights().len();
-            let sel = es.selected_entity;
-            (data, count, sel)
+        let (tree_data, sel_entity) = match es.lock().ok() {
+            Some(es) => {
+                let data = build_tree_data(&es);
+                let sel = es.selected_entity;
+                (data, sel)
+            }
+            None => return __scope.create_element("div"),
         };
+        // es lock released.
 
-        // Sync selection state from EditorState → tree signals (lock released).
+        // Sync selection state → tree highlight signals.
+        // Uses untracked() so clear_selected()/select() don't trigger
+        // nested effect flushes (RefCell reentrant borrow).
         rinch::core::untracked(|| {
             if let Some(ref sel) = sel_entity {
                 let value = selected_to_value(sel);
@@ -180,16 +201,6 @@ pub fn SceneTreePanel() -> NodeHandle {
             }
         });
 
-        let container = __scope.create_element("div");
-        container.set_attribute("style", "display:flex;flex-direction:column;");
-
-        // Header.
-        let header = __scope.create_element("div");
-        header.set_attribute("style", LABEL_STYLE);
-        let header_text = __scope.create_text(&format!("Scene ({obj_count})"));
-        header.append_child(&header_text);
-        container.append_child(&header);
-
         // Selection callback → update EditorState.selected_entity.
         let es_cb = es.clone();
         let onselect = ValueCallback::new(move |value: String| {
@@ -200,7 +211,6 @@ pub fn SceneTreePanel() -> NodeHandle {
                 // Signal update after lock released.
                 ui.selection.set(Some(entity));
             }
-            revision.bump();
         });
 
         // Tree component.
@@ -213,10 +223,7 @@ pub fn SceneTreePanel() -> NodeHandle {
             onselect: Some(onselect),
             ..Default::default()
         };
-        let tree = tree_component.render(__scope, &[]);
-        container.append_child(&tree);
-
-        container
+        tree_component.render(__scope, &[])
     });
 
     root

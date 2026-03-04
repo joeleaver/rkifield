@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use rinch::prelude::*;
 
-use crate::editor_state::{EditorMode, EditorState, SelectedEntity, SliderSignals, UiRevision, UiSignals};
+use crate::editor_state::{EditorMode, EditorState, SelectedEntity, SliderSignals, UiSignals};
 
 use super::slider_helpers::{build_slider_row, build_synced_slider};
 use super::{LABEL_STYLE, SECTION_STYLE, VALUE_STYLE, DIVIDER_STYLE};
@@ -21,7 +21,6 @@ use super::{LABEL_STYLE, SECTION_STYLE, VALUE_STYLE, DIVIDER_STYLE};
 #[component]
 pub fn RightPanel() -> NodeHandle {
     let editor_state = use_context::<Arc<Mutex<EditorState>>>();
-    let revision = use_context::<UiRevision>();
     let ui = use_context::<UiSignals>();
 
     let root = __scope.create_element("div");
@@ -33,6 +32,71 @@ pub fn RightPanel() -> NodeHandle {
     // Centralized slider signals — created once in main.rs, stored in rinch context.
     // A single batch Effect (below) syncs all values to EditorState per frame.
     let sliders = use_context::<SliderSignals>();
+
+    // ── Selection-change Effect: push object/light values into SliderSignals ──
+    // When the selected entity changes, read its transform from EditorState
+    // and push into the persistent slider signals. This runs once per selection
+    // change, not per slider drag.
+    //
+    // CRITICAL: Release the es lock BEFORE calling push_*_values(), because
+    // signal .set() triggers effect flushes → batch sync Effect → es.lock()
+    // → deadlock if we still hold the lock here.
+    {
+        let es = editor_state.clone();
+        Effect::new(move || {
+            let sel = ui.selection.get();
+
+            // Phase 1: Read values from EditorState (lock held briefly).
+            enum PushData {
+                Object(glam::Vec3, glam::Vec3, glam::Vec3), // pos, rot_deg, scale
+                Light(glam::Vec3, f32, f32),                 // pos, intensity, range
+                None,
+            }
+            let (push, oid, lid) = match sel {
+                Some(SelectedEntity::Object(oid)) => {
+                    let data = es.lock().ok().and_then(|es| {
+                        let scene = es.world.scene();
+                        let obj = scene.objects.iter().find(|o| o.id as u64 == oid)?;
+                        let (rx, ry, rz) = obj.rotation.to_euler(glam::EulerRot::XYZ);
+                        Some(PushData::Object(
+                            obj.position,
+                            glam::Vec3::new(rx.to_degrees(), ry.to_degrees(), rz.to_degrees()),
+                            obj.scale,
+                        ))
+                    }).unwrap_or(PushData::None);
+                    (data, Some(oid), None)
+                }
+                Some(SelectedEntity::Light(lid)) => {
+                    let data = es.lock().ok().and_then(|es| {
+                        let light = es.light_editor.get_light(lid)?;
+                        Some(PushData::Light(light.position, light.intensity, light.range))
+                    }).unwrap_or(PushData::None);
+                    (data, None, Some(lid))
+                }
+                _ => (PushData::None, None, None),
+            };
+            // es lock released here.
+
+            // Phase 2: Push values into signals (no lock held).
+            rinch::core::untracked(|| {
+                sliders.bound_object_id.set(oid);
+                sliders.bound_light_id.set(lid);
+            });
+            match push {
+                PushData::Object(pos, rot_deg, scale) => {
+                    rinch::core::untracked(|| {
+                        sliders.push_object_values(pos, rot_deg, scale);
+                    });
+                }
+                PushData::Light(pos, intensity, range) => {
+                    rinch::core::untracked(|| {
+                        sliders.push_light_values(pos, intensity, range);
+                    });
+                }
+                PushData::None => {}
+            }
+        });
+    }
 
     // ── Batch sync Effect: slider signals + toggle signals → EditorState ──
     // This is the ONLY place that locks EditorState for slider/toggle updates.
@@ -77,12 +141,10 @@ pub fn RightPanel() -> NodeHandle {
         let _ = ui.bloom_enabled.get();
         let _ = ui.dof_enabled.get();
         let _ = ui.tone_map_mode.get();
-        // Legacy fallback.
-        revision.track();
 
-        let (mode, selected_entity) = {
-            let es = es.lock().unwrap();
-            (es.mode, es.selected_entity)
+        let (mode, selected_entity) = match es.lock().ok() {
+            Some(es) => (es.mode, es.selected_entity),
+            None => return __scope.create_element("div"),
         };
 
         let container = __scope.create_element("div");
@@ -97,8 +159,7 @@ pub fn RightPanel() -> NodeHandle {
                 container.append_child(&header);
 
                 // Brush type (read-only for now).
-                {
-                    let es_lock = es.lock().unwrap();
+                if let Some(es_lock) = es.lock().ok() {
                     let type_name = match es_lock.sculpt.current_settings.brush_type {
                         crate::sculpt::BrushType::Add => "Add",
                         crate::sculpt::BrushType::Subtract => "Subtract",
@@ -131,12 +192,10 @@ pub fn RightPanel() -> NodeHandle {
                     btn.append_child(&__scope.create_text("Fix SDFs"));
                     let hid = __scope.register_handler({
                         let es = es.clone();
-                        let rev = revision;
                         move || {
                             if let Ok(mut es) = es.lock() {
                                 es.pending_fix_sdfs = Some(eid as u32);
                             }
-                            rev.bump();
                         }
                     });
                     btn.set_attribute("data-rid", &hid.to_string());
@@ -184,10 +243,9 @@ pub fn RightPanel() -> NodeHandle {
 
         // ── Camera-specific property editing with sliders ──
         if let Some(SelectedEntity::Camera) = selected_entity {
-            let pos = {
-                let es = es.lock().unwrap();
-                es.editor_camera.position
-            };
+            let pos = es.lock().ok()
+                .map(|es| es.editor_camera.position)
+                .unwrap_or(glam::Vec3::ZERO);
 
             let name_row = __scope.create_element("div");
             name_row.set_attribute("style", SECTION_STYLE);
@@ -241,8 +299,7 @@ pub fn RightPanel() -> NodeHandle {
                 sliders.sun_intensity, 0.0, 10.0, 0.1, 1);
 
             // Sun color (read-only display).
-            {
-                let es_lock = es.lock().unwrap();
+            if let Some(es_lock) = es.lock().ok() {
                 let sc = es_lock.environment.atmosphere.sun_color;
                 let color_row = __scope.create_element("div");
                 color_row.set_attribute("style", VALUE_STYLE);
@@ -466,15 +523,19 @@ pub fn RightPanel() -> NodeHandle {
 
                     let hid = __scope.register_handler({
                         let es = es.clone();
-                        let rev = revision;
                         move || {
+                            let anim_val = match state {
+                                crate::animation_preview::PlaybackState::Stopped => 0u32,
+                                crate::animation_preview::PlaybackState::Playing => 1,
+                                crate::animation_preview::PlaybackState::Paused => 2,
+                            };
                             if let Ok(mut es) = es.lock() {
                                 es.animation.playback_state = state;
                                 if matches!(state, crate::animation_preview::PlaybackState::Stopped) {
                                     es.animation.current_time = 0.0;
                                 }
                             }
-                            rev.bump();
+                            ui.animation_state.set(anim_val);
                         }
                     });
                     btn.set_attribute("data-rid", &hid.to_string());
@@ -483,7 +544,7 @@ pub fn RightPanel() -> NodeHandle {
                 container.append_child(&btn_row);
 
                 let anim_speed_signal: Signal<f64> = Signal::new(
-                    es.lock().map(|e| e.animation.speed as f64).unwrap_or(1.0),
+                    es.lock().ok().map(|e| e.animation.speed as f64).unwrap_or(1.0),
                 );
 
                 build_slider_row(
@@ -548,7 +609,7 @@ pub fn RightPanel() -> NodeHandle {
                         }
 
                         // Transform sliders (only when scene object found).
-                        if let Some((pos, rot_deg, scale)) = xf {
+                        if xf.is_some() {
                             let div = __scope.create_element("div");
                             div.set_attribute("style", DIVIDER_STYLE);
                             container.append_child(&div);
@@ -558,141 +619,29 @@ pub fn RightPanel() -> NodeHandle {
                             xf_hdr.append_child(&__scope.create_text("Transform"));
                             container.append_child(&xf_hdr);
 
-                            // Position.
-                            let pos_x_sig = Signal::new(pos.x as f64);
-                            let pos_y_sig = Signal::new(pos.y as f64);
-                            let pos_z_sig = Signal::new(pos.z as f64);
-
-                            build_slider_row(
-                                __scope, &container, "Position X", "", pos_x_sig,
-                                -500.0, 500.0, 0.01, 2,
-                                { let es = es.clone(); move |v| {
-                                    if let Ok(mut es) = es.lock() {
-                                        {
-                                            let sc = es.world.scene_mut();
-                                            if let Some(obj) = sc.objects.iter_mut()
-                                                .find(|o| o.id as u64 == eid)
-                                            {
-                                                obj.position.x = v as f32;
-                                            }
-                                        }
-                                    }
-                                }},
-                            );
-                            build_slider_row(
-                                __scope, &container, "Position Y", "", pos_y_sig,
-                                -500.0, 500.0, 0.01, 2,
-                                { let es = es.clone(); move |v| {
-                                    if let Ok(mut es) = es.lock() {
-                                        let sc = es.world.scene_mut();
-                                        if let Some(obj) = sc.objects.iter_mut()
-                                            .find(|o| o.id as u64 == eid)
-                                        {
-                                            obj.position.y = v as f32;
-                                        }
-                                    }
-                                }},
-                            );
-                            build_slider_row(
-                                __scope, &container, "Position Z", "", pos_z_sig,
-                                -500.0, 500.0, 0.01, 2,
-                                { let es = es.clone(); move |v| {
-                                    if let Ok(mut es) = es.lock() {
-                                        let sc = es.world.scene_mut();
-                                        if let Some(obj) = sc.objects.iter_mut()
-                                            .find(|o| o.id as u64 == eid)
-                                        {
-                                            obj.position.z = v as f32;
-                                        }
-                                    }
-                                }},
-                            );
+                            // Position — uses centralized SliderSignals (batch sync).
+                            build_synced_slider(__scope, &container, "Position X", "",
+                                sliders.obj_pos_x, -500.0, 500.0, 0.01, 2);
+                            build_synced_slider(__scope, &container, "Position Y", "",
+                                sliders.obj_pos_y, -500.0, 500.0, 0.01, 2);
+                            build_synced_slider(__scope, &container, "Position Z", "",
+                                sliders.obj_pos_z, -500.0, 500.0, 0.01, 2);
 
                             // Rotation (Euler XYZ degrees).
-                            let rot_x_sig = Signal::new(rot_deg.x as f64);
-                            let rot_y_sig = Signal::new(rot_deg.y as f64);
-                            let rot_z_sig = Signal::new(rot_deg.z as f64);
-
-                            build_slider_row(
-                                __scope, &container, "Rotation X", "\u{00b0}", rot_x_sig,
-                                -180.0, 180.0, 0.5, 1,
-                                { let es = es.clone(); move |v| {
-                                    if let Ok(mut es) = es.lock() {
-                                        let sc = es.world.scene_mut();
-                                        if let Some(obj) = sc.objects.iter_mut()
-                                            .find(|o| o.id as u64 == eid)
-                                        {
-                                            let (_, cy, cz) = obj.rotation
-                                                .to_euler(glam::EulerRot::XYZ);
-                                            obj.rotation = glam::Quat::from_euler(
-                                                glam::EulerRot::XYZ,
-                                                (v as f32).to_radians(), cy, cz,
-                                            );
-                                        }
-                                    }
-                                }},
-                            );
-                            build_slider_row(
-                                __scope, &container, "Rotation Y", "\u{00b0}", rot_y_sig,
-                                -180.0, 180.0, 0.5, 1,
-                                { let es = es.clone(); move |v| {
-                                    if let Ok(mut es) = es.lock() {
-                                        let sc = es.world.scene_mut();
-                                        if let Some(obj) = sc.objects.iter_mut()
-                                            .find(|o| o.id as u64 == eid)
-                                        {
-                                            let (cx, _, cz) = obj.rotation
-                                                .to_euler(glam::EulerRot::XYZ);
-                                            obj.rotation = glam::Quat::from_euler(
-                                                glam::EulerRot::XYZ,
-                                                cx, (v as f32).to_radians(), cz,
-                                            );
-                                        }
-                                    }
-                                }},
-                            );
-                            build_slider_row(
-                                __scope, &container, "Rotation Z", "\u{00b0}", rot_z_sig,
-                                -180.0, 180.0, 0.5, 1,
-                                { let es = es.clone(); move |v| {
-                                    if let Ok(mut es) = es.lock() {
-                                        let sc = es.world.scene_mut();
-                                        if let Some(obj) = sc.objects.iter_mut()
-                                            .find(|o| o.id as u64 == eid)
-                                        {
-                                            let (cx, cy, _) = obj.rotation
-                                                .to_euler(glam::EulerRot::XYZ);
-                                            obj.rotation = glam::Quat::from_euler(
-                                                glam::EulerRot::XYZ,
-                                                cx, cy, (v as f32).to_radians(),
-                                            );
-                                        }
-                                    }
-                                }},
-                            );
+                            build_synced_slider(__scope, &container, "Rotation X", "\u{00b0}",
+                                sliders.obj_rot_x, -180.0, 180.0, 0.5, 1);
+                            build_synced_slider(__scope, &container, "Rotation Y", "\u{00b0}",
+                                sliders.obj_rot_y, -180.0, 180.0, 0.5, 1);
+                            build_synced_slider(__scope, &container, "Rotation Z", "\u{00b0}",
+                                sliders.obj_rot_z, -180.0, 180.0, 0.5, 1);
 
                             // Scale X/Y/Z.
-                            for (label, axis_idx, val) in [
-                                ("Scale X", 0usize, scale.x),
-                                ("Scale Y", 1usize, scale.y),
-                                ("Scale Z", 2usize, scale.z),
-                            ] {
-                                let sig = Signal::new(val as f64);
-                                build_slider_row(
-                                    __scope, &container, label, "", sig,
-                                    0.01, 50.0, 0.01, 2,
-                                    { let es = es.clone(); move |v| {
-                                        if let Ok(mut es) = es.lock() {
-                                            let sc = es.world.scene_mut();
-                                            if let Some(obj) = sc.objects.iter_mut()
-                                                .find(|o| o.id as u64 == eid)
-                                            {
-                                                obj.scale[axis_idx] = v as f32;
-                                            }
-                                        }
-                                    }},
-                                );
-                            }
+                            build_synced_slider(__scope, &container, "Scale X", "",
+                                sliders.obj_scale_x, 0.01, 50.0, 0.01, 2);
+                            build_synced_slider(__scope, &container, "Scale Y", "",
+                                sliders.obj_scale_y, 0.01, 50.0, 0.01, 2);
+                            build_synced_slider(__scope, &container, "Scale Z", "",
+                                sliders.obj_scale_z, 0.01, 50.0, 0.01, 2);
 
                             // Re-voxelize button (only for voxelized objects with non-uniform scale).
                             if show_revoxelize {
@@ -708,12 +657,10 @@ pub fn RightPanel() -> NodeHandle {
                                 );
                                 let hid = __scope.register_handler({
                                     let es = es.clone();
-                                    let rev = revision;
                                     move || {
                                         if let Ok(mut es) = es.lock() {
                                             es.pending_revoxelize = Some(eid as u32);
                                         }
-                                        rev.bump();
                                     }
                                 });
                                 btn.set_attribute("data-rid", &hid.to_string());
@@ -730,7 +677,7 @@ pub fn RightPanel() -> NodeHandle {
                             (light.intensity, light.range, light.light_type, light.position)
                         })
                     });
-                    if let Some((intensity, range, light_type, position)) = light_data {
+                    if let Some((_intensity, _range, light_type, _position)) = light_data {
                         let type_name = match light_type {
                             crate::light_editor::EditorLightType::Point => "Point Light",
                             crate::light_editor::EditorLightType::Spot => "Spot Light",
@@ -740,88 +687,30 @@ pub fn RightPanel() -> NodeHandle {
                         hdr.append_child(&__scope.create_text(type_name));
                         container.append_child(&hdr);
 
-                        // Position sliders.
-                        let lpos_x = Signal::new(position.x as f64);
-                        let lpos_y = Signal::new(position.y as f64);
-                        let lpos_z = Signal::new(position.z as f64);
-
-                        let lid_cap = lid;
-                        build_slider_row(
-                            __scope, &container, "Position X", "", lpos_x,
-                            -500.0, 500.0, 0.01, 2,
-                            { let es = es.clone(); move |v| {
-                                if let Ok(mut es) = es.lock() {
-                                    if let Some(l) = es.light_editor.get_light_mut(lid_cap) {
-                                        l.position.x = v as f32;
-                                    }
-                                    es.light_editor.mark_dirty();
-                                }
-                            }},
-                        );
-                        build_slider_row(
-                            __scope, &container, "Position Y", "", lpos_y,
-                            -500.0, 500.0, 0.01, 2,
-                            { let es = es.clone(); move |v| {
-                                if let Ok(mut es) = es.lock() {
-                                    if let Some(l) = es.light_editor.get_light_mut(lid_cap) {
-                                        l.position.y = v as f32;
-                                    }
-                                    es.light_editor.mark_dirty();
-                                }
-                            }},
-                        );
-                        build_slider_row(
-                            __scope, &container, "Position Z", "", lpos_z,
-                            -500.0, 500.0, 0.01, 2,
-                            { let es = es.clone(); move |v| {
-                                if let Ok(mut es) = es.lock() {
-                                    if let Some(l) = es.light_editor.get_light_mut(lid_cap) {
-                                        l.position.z = v as f32;
-                                    }
-                                    es.light_editor.mark_dirty();
-                                }
-                            }},
-                        );
+                        // Position — uses centralized SliderSignals (batch sync).
+                        build_synced_slider(__scope, &container, "Position X", "",
+                            sliders.light_pos_x, -500.0, 500.0, 0.01, 2);
+                        build_synced_slider(__scope, &container, "Position Y", "",
+                            sliders.light_pos_y, -500.0, 500.0, 0.01, 2);
+                        build_synced_slider(__scope, &container, "Position Z", "",
+                            sliders.light_pos_z, -500.0, 500.0, 0.01, 2);
 
                         let div = __scope.create_element("div");
                         div.set_attribute("style", DIVIDER_STYLE);
                         container.append_child(&div);
 
-                        // Intensity and range sliders.
-                        let light_intensity_signal = Signal::new(intensity as f64);
-                        let light_range_signal = Signal::new(range as f64);
-
-                        build_slider_row(
-                            __scope, &container, "Intensity", "", light_intensity_signal,
-                            0.0, 50.0, 0.1, 1,
-                            { let es = es.clone(); move |v| {
-                                if let Ok(mut es) = es.lock() {
-                                    if let Some(l) = es.light_editor.get_light_mut(lid_cap) {
-                                        l.intensity = v as f32;
-                                    }
-                                    es.light_editor.mark_dirty();
-                                }
-                            }},
-                        );
-                        build_slider_row(
-                            __scope, &container, "Range", "m", light_range_signal,
-                            0.1, 100.0, 0.5, 1,
-                            { let es = es.clone(); move |v| {
-                                if let Ok(mut es) = es.lock() {
-                                    if let Some(l) = es.light_editor.get_light_mut(lid_cap) {
-                                        l.range = v as f32;
-                                    }
-                                    es.light_editor.mark_dirty();
-                                }
-                            }},
-                        );
+                        // Intensity and range — uses centralized SliderSignals.
+                        build_synced_slider(__scope, &container, "Intensity", "",
+                            sliders.light_intensity, 0.0, 50.0, 0.1, 1);
+                        build_synced_slider(__scope, &container, "Range", "m",
+                            sliders.light_range, 0.1, 100.0, 0.5, 1);
                     }
                 }
                 Some(SelectedEntity::Scene) => {
                     let name = es.lock().ok()
                         .map(|e| e.world.scene().name.clone())
                         .unwrap_or_else(|| "Scene".to_string());
-                    let count = es.lock().map(|e| e.world.scene().objects.len()).unwrap_or(0);
+                    let count = es.lock().ok().map(|e| e.world.scene().objects.len()).unwrap_or(0);
 
                     let name_row = __scope.create_element("div");
                     name_row.set_attribute("style", SECTION_STYLE);

@@ -87,6 +87,9 @@ pub struct UiSignals {
 
     // Scene structure — counter because tree data is too complex for a Signal
     pub scene_revision: Signal<u64>,
+
+    // Animation playback state (0=stopped, 1=playing, 2=paused)
+    pub animation_state: Signal<u32>,
 }
 
 impl UiSignals {
@@ -108,6 +111,7 @@ impl UiSignals {
             dof_enabled: Signal::new(false),
             tone_map_mode: Signal::new(0),
             scene_revision: Signal::new(0),
+            animation_state: Signal::new(0),
         }
     }
 
@@ -170,6 +174,26 @@ pub struct SliderSignals {
     pub brush_radius: Signal<f64>,
     pub brush_strength: Signal<f64>,
     pub brush_falloff: Signal<f64>,
+
+    // Object transform (bound to currently selected object)
+    pub obj_pos_x: Signal<f64>,
+    pub obj_pos_y: Signal<f64>,
+    pub obj_pos_z: Signal<f64>,
+    pub obj_rot_x: Signal<f64>,
+    pub obj_rot_y: Signal<f64>,
+    pub obj_rot_z: Signal<f64>,
+    pub obj_scale_x: Signal<f64>,
+    pub obj_scale_y: Signal<f64>,
+    pub obj_scale_z: Signal<f64>,
+    pub bound_object_id: Signal<Option<u64>>,
+
+    // Light properties (bound to currently selected light)
+    pub light_pos_x: Signal<f64>,
+    pub light_pos_y: Signal<f64>,
+    pub light_pos_z: Signal<f64>,
+    pub light_intensity: Signal<f64>,
+    pub light_range: Signal<f64>,
+    pub bound_light_id: Signal<Option<u64>>,
 }
 
 impl SliderSignals {
@@ -212,6 +236,24 @@ impl SliderSignals {
             brush_radius: Signal::new(es.sculpt.current_settings.radius as f64),
             brush_strength: Signal::new(es.sculpt.current_settings.strength as f64),
             brush_falloff: Signal::new(es.sculpt.current_settings.falloff as f64),
+            // Object transform — initialized empty, populated on selection change.
+            obj_pos_x: Signal::new(0.0),
+            obj_pos_y: Signal::new(0.0),
+            obj_pos_z: Signal::new(0.0),
+            obj_rot_x: Signal::new(0.0),
+            obj_rot_y: Signal::new(0.0),
+            obj_rot_z: Signal::new(0.0),
+            obj_scale_x: Signal::new(1.0),
+            obj_scale_y: Signal::new(1.0),
+            obj_scale_z: Signal::new(1.0),
+            bound_object_id: Signal::new(None),
+            // Light properties — initialized empty, populated on selection change.
+            light_pos_x: Signal::new(0.0),
+            light_pos_y: Signal::new(0.0),
+            light_pos_z: Signal::new(0.0),
+            light_intensity: Signal::new(1.0),
+            light_range: Signal::new(10.0),
+            bound_light_id: Signal::new(None),
         }
     }
 
@@ -251,6 +293,22 @@ impl SliderSignals {
         let _ = self.brush_radius.get();
         let _ = self.brush_strength.get();
         let _ = self.brush_falloff.get();
+        // Object transform
+        let _ = self.obj_pos_x.get();
+        let _ = self.obj_pos_y.get();
+        let _ = self.obj_pos_z.get();
+        let _ = self.obj_rot_x.get();
+        let _ = self.obj_rot_y.get();
+        let _ = self.obj_rot_z.get();
+        let _ = self.obj_scale_x.get();
+        let _ = self.obj_scale_y.get();
+        let _ = self.obj_scale_z.get();
+        // Light properties
+        let _ = self.light_pos_x.get();
+        let _ = self.light_pos_y.get();
+        let _ = self.light_pos_z.get();
+        let _ = self.light_intensity.get();
+        let _ = self.light_range.get();
     }
 
     /// Write all signal values back to `EditorState` in one shot.
@@ -315,31 +373,63 @@ impl SliderSignals {
 
         // Mark environment dirty so the engine picks up changes.
         es.environment.mark_dirty();
+
+        // Object transform — write back to scene if bound.
+        // Read bound IDs with untracked() to avoid subscribing to selection changes.
+        let obj_id = rinch::core::untracked(|| self.bound_object_id.get());
+        if let Some(oid) = obj_id {
+            let sc = es.world.scene_mut();
+            if let Some(obj) = sc.objects.iter_mut().find(|o| o.id as u64 == oid) {
+                obj.position.x = self.obj_pos_x.get() as f32;
+                obj.position.y = self.obj_pos_y.get() as f32;
+                obj.position.z = self.obj_pos_z.get() as f32;
+                obj.rotation = glam::Quat::from_euler(
+                    glam::EulerRot::XYZ,
+                    (self.obj_rot_x.get() as f32).to_radians(),
+                    (self.obj_rot_y.get() as f32).to_radians(),
+                    (self.obj_rot_z.get() as f32).to_radians(),
+                );
+                obj.scale.x = self.obj_scale_x.get() as f32;
+                obj.scale.y = self.obj_scale_y.get() as f32;
+                obj.scale.z = self.obj_scale_z.get() as f32;
+            }
+        }
+
+        // Light properties — write back if bound.
+        let light_id = rinch::core::untracked(|| self.bound_light_id.get());
+        if let Some(lid) = light_id {
+            if let Some(light) = es.light_editor.get_light_mut(lid) {
+                light.position.x = self.light_pos_x.get() as f32;
+                light.position.y = self.light_pos_y.get() as f32;
+                light.position.z = self.light_pos_z.get() as f32;
+                light.intensity = self.light_intensity.get() as f32;
+                light.range = self.light_range.get() as f32;
+            }
+            es.light_editor.mark_dirty();
+        }
     }
-}
 
-/// Shared reactive revision counter for triggering UI re-renders.
-///
-/// Stored in rinch context — any component can `use_context::<UiRevision>()`
-/// and track `signal.get()` inside a `reactive_component_dom` Effect.
-/// Bumped by scene tree clicks, viewport picks, and other state mutations.
-#[derive(Clone, Copy)]
-pub struct UiRevision(pub Signal<u64>);
-
-impl UiRevision {
-    /// Create a new revision counter starting at 0.
-    pub fn new() -> Self {
-        Self(Signal::new(0u64))
+    /// Push object transform values into the signals (selection changed).
+    /// Called from an untracked context to avoid triggering the batch sync Effect.
+    pub fn push_object_values(&self, pos: Vec3, rot_deg: Vec3, scale: Vec3) {
+        self.obj_pos_x.set(pos.x as f64);
+        self.obj_pos_y.set(pos.y as f64);
+        self.obj_pos_z.set(pos.z as f64);
+        self.obj_rot_x.set(rot_deg.x as f64);
+        self.obj_rot_y.set(rot_deg.y as f64);
+        self.obj_rot_z.set(rot_deg.z as f64);
+        self.obj_scale_x.set(scale.x as f64);
+        self.obj_scale_y.set(scale.y as f64);
+        self.obj_scale_z.set(scale.z as f64);
     }
 
-    /// Bump the revision to trigger UI re-renders.
-    pub fn bump(&self) {
-        self.0.update(|r| *r += 1);
-    }
-
-    /// Read the revision value (creates a reactive tracking dependency).
-    pub fn track(&self) {
-        let _ = self.0.get();
+    /// Push light property values into the signals (selection changed).
+    pub fn push_light_values(&self, pos: Vec3, intensity: f32, range: f32) {
+        self.light_pos_x.set(pos.x as f64);
+        self.light_pos_y.set(pos.y as f64);
+        self.light_pos_z.set(pos.z as f64);
+        self.light_intensity.set(intensity as f64);
+        self.light_range.set(range as f64);
     }
 }
 

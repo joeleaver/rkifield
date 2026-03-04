@@ -38,7 +38,7 @@ use std::sync::{Arc, Mutex};
 use rinch::prelude::*;
 
 use automation::SharedState;
-use editor_state::{EditorState, SliderSignals, UiRevision, UiSignals};
+use editor_state::{EditorState, SliderSignals, UiSignals};
 use engine_viewport::{DISPLAY_HEIGHT, DISPLAY_WIDTH};
 
 // ---------------------------------------------------------------------------
@@ -160,25 +160,22 @@ fn main() -> anyhow::Result<()> {
     let shared_state_ctx = Arc::clone(&shared_state);
 
     // 7. Call rinch shell — BLOCKING until window close.
-    //    create_context() and UiRevision::new() must be called on the main
+    //    create_context() calls must be on the main
     //    thread inside this closure (both use thread-local rinch state).
     rinch::shell::run_with_window_props_and_menu(
         move |_scope| {
             // Register contexts so components can call use_context().
             // Centralized slider signals — one batch sync Effect replaces 33 lock closures.
             // Must be created before editor_state_ctx is moved into create_context.
-            let slider_signals = SliderSignals::new(&editor_state_ctx.lock().unwrap());
+            let slider_signals = SliderSignals::new(&editor_state_ctx.lock().expect("EditorState lock at init"));
             create_context(editor_state_ctx);
             create_context(shared_state_ctx);
             // Surface handle context — editor_ui uses it to wire SurfaceEvent → editor input.
             create_context(surface_handle);
-            // Per-property UI signals — replaces the single UiRevision counter.
+            // Per-property UI signals for fine-grained reactivity.
             let ui_signals = UiSignals::new();
             create_context(ui_signals);
             create_context(slider_signals);
-            // Legacy: UiRevision and FpsSignal kept during migration.
-            let ui_revision = UiRevision::new();
-            create_context(ui_revision);
             create_context(crate::editor_state::FpsSignal::new());
 
             // Build the editor UI tree.

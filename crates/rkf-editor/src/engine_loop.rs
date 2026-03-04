@@ -120,11 +120,16 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
 
     let mut last_frame = std::time::Instant::now();
     let mut last_fps_push = std::time::Instant::now();
+    let mut last_notify = std::time::Instant::now();
     let mut current_vp = engine.viewport_size();
 
     // Frame pacing: cap the engine thread to ~120 fps so it doesn't
     // monopolise the editor_state mutex and starve the UI thread.
     let target_frame_time = std::time::Duration::from_micros(8333); // ~120 fps
+
+    // Compositor notification throttle: engine renders at 120fps for low-latency
+    // input, but the compositor only needs 60fps repaints.
+    let notify_interval = std::time::Duration::from_millis(16); // ~60 fps
 
     loop {
         let frame_start = std::time::Instant::now();
@@ -738,7 +743,11 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         }
 
         // i. Tell the compositor that new content is ready so it repaints.
-        gpu_registrar.notify_frame_ready();
+        //    Throttled to ~60fps — engine keeps 120fps for low-latency input/sculpt.
+        if last_notify.elapsed() >= notify_interval {
+            gpu_registrar.notify_frame_ready();
+            last_notify = std::time::Instant::now();
+        }
 
         // j. Update shared_state for MCP observation (no editor_state lock).
         if let Ok(mut ss) = shared_state.lock() {

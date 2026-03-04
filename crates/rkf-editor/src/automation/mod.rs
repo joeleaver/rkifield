@@ -69,10 +69,10 @@ pub struct SharedState {
     /// Set by render loop after readback, consumed by engine thread section l.
     pub pick_result: Option<u32>,
     /// Set by the engine thread after processing a pick result.
-    /// Cleared by the UI thread after bumping UiRevision.
+    /// Cleared by the UI thread after updating signals.
     pub pick_completed: bool,
     /// Set by the engine thread when a gizmo drag finishes (transform changed).
-    /// Cleared by the UI thread after bumping UiRevision.
+    /// Cleared by the UI thread after updating signals.
     pub ui_revision_needed: bool,
     /// GPU brush hit request: internal-resolution pixel to sample for position.
     /// Set by mouse handler in Sculpt/Paint modes, consumed by render loop.

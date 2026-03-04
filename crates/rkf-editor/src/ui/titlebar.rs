@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use rinch::prelude::*;
 
-use crate::editor_state::{EditorMode, EditorState, UiRevision, UiSignals};
+use crate::editor_state::{EditorMode, EditorState, UiSignals};
 
 // ── Titlebar ────────────────────────────────────────────────────────────────
 
@@ -19,7 +19,6 @@ pub fn TitleBar() -> NodeHandle {
     use rinch::menu::{Menu, MenuItem, MenuEntryRef};
 
     let editor_state = use_context::<Arc<Mutex<EditorState>>>();
-    let revision = use_context::<UiRevision>();
     let ui = use_context::<UiSignals>();
 
     // -1 = all closed, 0 = File, 1 = Edit, 2 = View.
@@ -103,32 +102,25 @@ pub fn TitleBar() -> NodeHandle {
 
     // ── Build menu data ────────────────────────────────────────────────
     let es = editor_state.clone();
-    let rev = revision;
     let file_menu = Menu::new()
         .item(MenuItem::new("Open").shortcut("Ctrl+O").on_click({
             let es = es.clone();
-            let rev = rev;
             move || {
                 if let Ok(mut s) = es.lock() { s.pending_open = true; }
                 ui.bump_scene();
                 ui.selection.set(None);
-                rev.bump();
             }
         }))
         .item(MenuItem::new("Save").shortcut("Ctrl+S").on_click({
             let es = es.clone();
-            let rev = rev;
             move || {
                 if let Ok(mut s) = es.lock() { s.pending_save = true; }
-                rev.bump();
             }
         }))
         .item(MenuItem::new("Save As").shortcut("Ctrl+Shift+S").on_click({
             let es = es.clone();
-            let rev = rev;
             move || {
                 if let Ok(mut s) = es.lock() { s.pending_save_as = true; }
-                rev.bump();
             }
         }))
         .separator()
@@ -147,14 +139,12 @@ pub fn TitleBar() -> NodeHandle {
     for &(label, prim_name) in spawn_primitives {
         spawn_menu = spawn_menu.item(MenuItem::new(label).on_click({
             let es = es.clone();
-            let rev = rev;
             let name = prim_name.to_string();
             move || {
                 if let Ok(mut s) = es.lock() {
                     s.pending_spawn = Some(name.clone());
                 }
                 ui.bump_scene();
-                rev.bump();
             }
         }));
     }
@@ -175,20 +165,16 @@ pub fn TitleBar() -> NodeHandle {
         .separator()
         .item(MenuItem::new("Delete").shortcut("Del").on_click({
             let es = es.clone();
-            let rev = rev;
             move || {
                 if let Ok(mut s) = es.lock() { s.pending_delete = true; }
                 ui.bump_scene();
-                rev.bump();
             }
         }))
         .item(MenuItem::new("Duplicate").shortcut("Ctrl+D").on_click({
             let es = es.clone();
-            let rev = rev;
             move || {
                 if let Ok(mut s) = es.lock() { s.pending_duplicate = true; }
                 ui.bump_scene();
-                rev.bump();
             }
         }))
         .separator()
@@ -207,14 +193,12 @@ pub fn TitleBar() -> NodeHandle {
     for &(label, mode) in debug_modes {
         view_menu = view_menu.item(MenuItem::new(label).on_click({
             let es = es.clone();
-            let rev = rev;
             move || {
                 if let Ok(mut s) = es.lock() {
                     s.debug_mode = mode;
                     s.pending_debug_mode = Some(mode);
                 }
                 ui.debug_mode.set(mode);
-                rev.bump();
             }
         }));
     }
@@ -232,12 +216,10 @@ pub fn TitleBar() -> NodeHandle {
     for &(label, yaw, pitch) in cam_presets {
         view_menu = view_menu.item(MenuItem::new(label).on_click({
             let es = es.clone();
-            let rev = rev;
             move || {
                 if let Ok(mut s) = es.lock() {
                     s.editor_camera.set_orbit_angles(yaw, pitch);
                 }
-                rev.bump();
             }
         }));
     }
@@ -246,14 +228,12 @@ pub fn TitleBar() -> NodeHandle {
     view_menu = view_menu.separator();
     view_menu = view_menu.item(MenuItem::new("Toggle Grid").shortcut("G").on_click({
         let es = es.clone();
-        let rev = rev;
         move || {
             let new_val = es.lock().ok().map(|mut s| {
                 s.show_grid = !s.show_grid;
                 s.show_grid
             }).unwrap_or(false);
             ui.show_grid.set(new_val);
-            rev.bump();
         }
     }));
 
@@ -384,13 +364,10 @@ pub fn TitleBar() -> NodeHandle {
 
         rinch::core::reactive_component_dom(__scope, &tool_container, move |__scope| {
             let _ = ui.editor_mode.get();
-            // Legacy fallback.
-            revision.track();
 
-            let current_mode = {
-                let es = es.lock().unwrap();
-                es.mode
-            };
+            let current_mode = es.lock().ok()
+                .map(|s| s.mode)
+                .unwrap_or(EditorMode::Default);
 
             let inner = __scope.create_element("div");
             inner.set_attribute("style", "display:flex;align-items:center;gap:2px;");
@@ -430,7 +407,6 @@ pub fn TitleBar() -> NodeHandle {
                         EditorMode::Default
                     };
                     ui.editor_mode.set(new_mode);
-                    revision.bump();
                 });
                 btn.set_attribute("data-rid", &handler_id.to_string());
 

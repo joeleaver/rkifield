@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use rinch::prelude::*;
 
 use crate::automation::SharedState;
-use crate::editor_state::{EditorMode, EditorState, SelectedEntity, SliderSignals, UiRevision, UiSignals};
+use crate::editor_state::{EditorMode, EditorState, SelectedEntity, SliderSignals, UiSignals};
 use crate::gizmo;
 use crate::input::{InputState, KeyCode, Modifiers};
 use right_panel::RightPanel;
@@ -93,8 +93,8 @@ pub fn editor_ui() -> NodeHandle {
         let es = editor_state.clone();
         let ss = shared_state.clone();
         let sh = surface_handle.clone();
-        let rev = use_context::<UiRevision>();
         let ui = use_context::<UiSignals>();
+        let sliders = use_context::<SliderSignals>();
         surface_handle.set_event_handler(move |event| {
             use SurfaceEvent::*;
             use SurfaceMouseButton as Btn;
@@ -107,23 +107,20 @@ pub fn editor_ui() -> NodeHandle {
 
             match event {
                 MouseMove { x, y } => {
-                    // Read mode and left-button state before updating input.
-                    let (mode, left_down) = es.lock().ok()
-                        .map(|s| (s.mode, s.editor_input.mouse_buttons[0]))
-                        .unwrap_or((EditorMode::Default, false));
+                    // SINGLE lock: read mode, update mouse, gizmo hover/drag.
+                    let (mode, left_down) = if let Ok(mut state) = es.lock() {
+                        let mode = state.mode;
+                        let left_down = state.editor_input.mouse_buttons[0];
 
-                    if let Ok(mut state) = es.lock() {
+                        // Update mouse position + delta.
                         let old = state.editor_input.mouse_pos;
                         state.editor_input.mouse_delta += glam::Vec2::new(x - old.x, y - old.y);
                         state.editor_input.mouse_pos = glam::Vec2::new(x, y);
-                    }
 
-                    // Gizmo hover detection + drag continue (main thread).
-                    if mode == EditorMode::Default {
-                        let (vp_w, vp_h) = vp_size();
-                        if let Ok(mut state) = es.lock() {
+                        // Gizmo hover detection + drag continue (Default mode only).
+                        if mode == EditorMode::Default {
+                            let (vp_w, vp_h) = vp_size();
                             if state.gizmo.dragging {
-                                // Drag continue: update object transform.
                                 if let Some(SelectedEntity::Object(eid)) = state.selected_entity {
                                     let (ray_o, ray_d) = crate::camera::screen_to_ray(
                                         &state.editor_camera, x, y, vp_w, vp_h,
@@ -165,6 +162,14 @@ pub fn editor_ui() -> NodeHandle {
                                         let _ = state.world.set_position(entity, wp);
                                         let _ = state.world.set_rotation(entity, new_rot);
                                         let _ = state.world.set_scale(entity, new_scale);
+
+                                        // Push to slider signals so right panel tracks gizmo drag.
+                                        let (rx, ry, rz) = new_rot.to_euler(glam::EulerRot::XYZ);
+                                        sliders.push_object_values(
+                                            new_pos,
+                                            glam::Vec3::new(rx.to_degrees(), ry.to_degrees(), rz.to_degrees()),
+                                            new_scale,
+                                        );
                                     }
                                 }
                             } else {
@@ -197,48 +202,41 @@ pub fn editor_ui() -> NodeHandle {
                                 }
                             }
                         }
-                    }
 
-                    // In Sculpt/Paint mode with left button held, send
-                    // continuous brush hit requests for stroke continuation.
-                    if left_down && matches!(mode, EditorMode::Sculpt | EditorMode::Paint) {
-                        let scale = crate::engine_viewport::RENDER_SCALE;
-                        let bx = (x * scale) as u32;
-                        let by = (y * scale) as u32;
-                        if let Ok(mut state) = ss.lock() {
+                        (mode, left_down)
+                    } else {
+                        (EditorMode::Default, false)
+                    };
+                    // es lock released
+
+                    // SINGLE ss lock: brush hit + pick check.
+                    if let Ok(mut state) = ss.lock() {
+                        // Brush hit request in Sculpt/Paint mode.
+                        if left_down && matches!(mode, EditorMode::Sculpt | EditorMode::Paint) {
+                            let scale = crate::engine_viewport::RENDER_SCALE;
+                            let bx = (x * scale) as u32;
+                            let by = (y * scale) as u32;
                             state.pending_brush_hit = Some((bx, by));
                         }
-                    }
 
-                    // Check if the engine thread completed a GPU pick.
-                    let pick_done = ss.lock().ok()
-                        .map(|mut s| {
-                            let c = s.pick_completed;
-                            if c { s.pick_completed = false; }
-                            c
-                        })
-                        .unwrap_or(false);
-                    if pick_done {
-                        // Read the entity that was set by the render thread's pick handler.
-                        let picked = es.lock().ok().and_then(|s| s.selected_entity);
-                        ui.selection.set(picked);
-                        rev.bump();
+                        // Check if the engine thread completed a GPU pick.
+                        if state.pick_completed {
+                            state.pick_completed = false;
+                            let picked = es.lock().ok().and_then(|s| s.selected_entity);
+                            ui.selection.set(picked);
+                        }
                     }
                 }
                 MouseDown { x, y, button } => {
-                    let mode = es.lock().ok()
-                        .map(|s| s.mode)
-                        .unwrap_or(EditorMode::Default);
-
-                    if let Ok(mut state) = es.lock() {
+                    // SINGLE es lock: read mode, set button, gizmo drag start.
+                    let mode = if let Ok(mut state) = es.lock() {
                         let idx = match button { Btn::Left => 0, Btn::Right => 1, Btn::Middle => 2 };
                         state.editor_input.mouse_buttons[idx] = true;
-                    }
+                        let mode = state.mode;
 
-                    // Gizmo drag start: left-click in Default mode with object selected.
-                    if button == Btn::Left && mode == EditorMode::Default {
-                        let (vp_w, vp_h) = vp_size();
-                        if let Ok(mut state) = es.lock() {
+                        // Gizmo drag start: left-click in Default mode with object selected.
+                        if button == Btn::Left && mode == EditorMode::Default {
+                            let (vp_w, vp_h) = vp_size();
                             let right_down = state.editor_input.mouse_buttons[1];
                             if !right_down && !state.gizmo.dragging {
                                 if let Some(SelectedEntity::Object(eid)) = state.selected_entity {
@@ -297,9 +295,14 @@ pub fn editor_ui() -> NodeHandle {
                                 }
                             }
                         }
-                    }
 
-                    // In Sculpt/Paint mode, left-click starts a brush hit.
+                        mode
+                    } else {
+                        EditorMode::Default
+                    };
+                    // es lock released
+
+                    // SINGLE ss lock: brush hit request in Sculpt/Paint mode.
                     if button == Btn::Left
                         && matches!(mode, EditorMode::Sculpt | EditorMode::Paint)
                     {
@@ -312,57 +315,57 @@ pub fn editor_ui() -> NodeHandle {
                     }
                 }
                 MouseUp { x, y, button } => {
-                    let mode = es.lock().ok()
-                        .map(|s| s.mode)
-                        .unwrap_or(EditorMode::Default);
-
-                    if let Ok(mut state) = es.lock() {
+                    // SINGLE es lock: read mode, clear button, gizmo drag end + undo.
+                    let (mode, gizmo_was_dragging, picked_after_drag) = if let Ok(mut state) = es.lock() {
                         let idx = match button { Btn::Left => 0, Btn::Right => 1, Btn::Middle => 2 };
                         state.editor_input.mouse_buttons[idx] = false;
-                    }
+                        let mode = state.mode;
+                        let was_dragging = state.gizmo.dragging;
+
+                        if button == Btn::Left && was_dragging {
+                            // Gizmo drag end: push undo action.
+                            if let Some(SelectedEntity::Object(eid)) = state.selected_entity {
+                                let final_transform = {
+                                    let scene = state.world.scene();
+                                    scene.objects.iter().find(|o| o.id as u64 == eid)
+                                        .map(|obj| (obj.position, obj.rotation, obj.scale))
+                                };
+
+                                if let Some((new_pos, new_rot, new_scale)) = final_transform {
+                                    let desc = match state.gizmo.mode {
+                                        gizmo::GizmoMode::Translate => "Move object",
+                                        gizmo::GizmoMode::Rotate => "Rotate object",
+                                        gizmo::GizmoMode::Scale => "Scale object",
+                                    };
+                                    let old_pos = state.gizmo.initial_position;
+                                    let old_rot = state.gizmo.initial_rotation;
+                                    let old_scale = state.gizmo.initial_scale;
+                                    state.undo.push(crate::undo::UndoAction {
+                                        kind: crate::undo::UndoActionKind::Transform {
+                                            entity_id: eid,
+                                            old_pos, old_rot, old_scale,
+                                            new_pos, new_rot, new_scale,
+                                        },
+                                        timestamp_ms: 0,
+                                        description: desc.to_string(),
+                                    });
+                                }
+                            }
+                            state.gizmo.end_drag();
+                            let sel = state.selected_entity;
+                            (mode, true, sel)
+                        } else {
+                            (mode, false, None)
+                        }
+                    } else {
+                        (EditorMode::Default, false, None)
+                    };
+                    // es lock released
 
                     if button == Btn::Left {
-                        // Gizmo drag end: push undo action.
-                        let gizmo_was_dragging = es.lock().ok()
-                            .map(|s| s.gizmo.dragging)
-                            .unwrap_or(false);
-
                         if gizmo_was_dragging {
-                            if let Ok(mut state) = es.lock() {
-                                if let Some(SelectedEntity::Object(eid)) = state.selected_entity {
-                                    let final_transform = {
-                                        let scene = state.world.scene();
-                                        scene.objects.iter().find(|o| o.id as u64 == eid)
-                                            .map(|obj| (obj.position, obj.rotation, obj.scale))
-                                    };
-
-                                    if let Some((new_pos, new_rot, new_scale)) = final_transform {
-                                        let desc = match state.gizmo.mode {
-                                            gizmo::GizmoMode::Translate => "Move object",
-                                            gizmo::GizmoMode::Rotate => "Rotate object",
-                                            gizmo::GizmoMode::Scale => "Scale object",
-                                        };
-                                        let old_pos = state.gizmo.initial_position;
-                                        let old_rot = state.gizmo.initial_rotation;
-                                        let old_scale = state.gizmo.initial_scale;
-                                        state.undo.push(crate::undo::UndoAction {
-                                            kind: crate::undo::UndoActionKind::Transform {
-                                                entity_id: eid,
-                                                old_pos, old_rot, old_scale,
-                                                new_pos, new_rot, new_scale,
-                                            },
-                                            timestamp_ms: 0,
-                                            description: desc.to_string(),
-                                        });
-                                    }
-                                }
-                                state.gizmo.end_drag();
-                            }
                             // Signal update after lock released.
-                            ui.selection.set(
-                                es.lock().ok().and_then(|s| s.selected_entity),
-                            );
-                            rev.bump();
+                            ui.selection.set(picked_after_drag);
                         } else if matches!(mode, EditorMode::Sculpt | EditorMode::Paint) {
                             // Stroke ending is handled by the engine thread.
                         } else {
@@ -419,7 +422,6 @@ pub fn editor_ui() -> NodeHandle {
                                 .map(|s| s.gizmo.mode)
                                 .unwrap_or(gizmo::GizmoMode::Translate);
                             ui.gizmo_mode.set(mode);
-                            rev.bump();
                         }
                     }
                 }
