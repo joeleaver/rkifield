@@ -425,6 +425,106 @@ impl EditorState {
             environment_ron,
         }
     }
+
+    /// Build a `UiSnapshot` from the current editor state.
+    ///
+    /// Called by the render thread after processing commands. Published
+    /// via `ArcSwap<UiSnapshot>` for the UI thread to read lock-free.
+    pub fn to_snapshot(&self, scene_revision: u64, fps_ms: f64) -> crate::ui_snapshot::UiSnapshot {
+        use crate::ui_snapshot::{LightSummary, ObjectSummary, UiSnapshot};
+
+        let d = &self.environment.atmosphere.sun_direction;
+        let sun_azimuth = d.x.atan2(d.z).to_degrees().rem_euclid(360.0);
+        let sun_elevation = d.y.asin().to_degrees();
+
+        let objects: Vec<ObjectSummary> = self.world.scene().objects.iter().map(|obj| {
+            let (yaw, pitch, roll) = obj.rotation.to_euler(glam::EulerRot::XYZ);
+            ObjectSummary {
+                id: obj.id as u64,
+                name: obj.name.clone(),
+                position: obj.position,
+                rotation_degrees: Vec3::new(yaw.to_degrees(), pitch.to_degrees(), roll.to_degrees()),
+                scale: obj.scale,
+                parent_id: obj.parent_id,
+            }
+        }).collect();
+
+        let lights: Vec<LightSummary> = self.light_editor.all_lights().iter().map(|l| {
+            LightSummary {
+                id: l.id,
+                light_type: l.light_type,
+                position: l.position,
+                intensity: l.intensity,
+                range: l.range,
+            }
+        }).collect();
+
+        let object_count = objects.len();
+
+        UiSnapshot {
+            camera_position: self.editor_camera.position,
+            camera_yaw: self.editor_camera.fly_yaw,
+            camera_pitch: self.editor_camera.fly_pitch,
+            camera_fov: self.editor_camera.fov_y.to_degrees(),
+            camera_speed: self.editor_camera.fly_speed,
+            camera_near: self.editor_camera.near,
+            camera_far: self.editor_camera.far,
+            selected_entity: self.selected_entity,
+            mode: self.mode,
+            gizmo_mode: self.gizmo.mode,
+            debug_mode: self.debug_mode,
+            show_grid: self.show_grid,
+            show_shortcuts: self.show_shortcuts,
+            scene_name: self.world.scene().name.clone(),
+            objects,
+            lights,
+            scene_revision,
+            brush_radius: self.sculpt.current_settings.radius,
+            brush_strength: self.sculpt.current_settings.strength,
+            brush_falloff: self.sculpt.current_settings.falloff,
+            animation_state: match self.animation.playback_state {
+                crate::animation_preview::PlaybackState::Stopped => 0,
+                crate::animation_preview::PlaybackState::Playing => 1,
+                crate::animation_preview::PlaybackState::Paused => 2,
+            },
+            animation_speed: self.animation.speed,
+            atmo_enabled: self.environment.atmosphere.enabled,
+            sun_azimuth,
+            sun_elevation,
+            sun_intensity: self.environment.atmosphere.sun_intensity,
+            rayleigh_scale: self.environment.atmosphere.rayleigh_scale,
+            mie_scale: self.environment.atmosphere.mie_scale,
+            fog_enabled: self.environment.fog.enabled,
+            fog_density: self.environment.fog.density,
+            fog_height_falloff: self.environment.fog.height_falloff,
+            dust_density: self.environment.fog.ambient_dust_density,
+            dust_asymmetry: self.environment.fog.dust_asymmetry,
+            clouds_enabled: self.environment.clouds.enabled,
+            cloud_coverage: self.environment.clouds.coverage,
+            cloud_density: self.environment.clouds.density,
+            cloud_altitude: self.environment.clouds.altitude,
+            cloud_thickness: self.environment.clouds.thickness,
+            cloud_wind_speed: self.environment.clouds.wind_speed,
+            bloom_enabled: self.environment.post_process.bloom_enabled,
+            bloom_intensity: self.environment.post_process.bloom_intensity,
+            bloom_threshold: self.environment.post_process.bloom_threshold,
+            dof_enabled: self.environment.post_process.dof_enabled,
+            dof_focus_distance: self.environment.post_process.dof_focus_distance,
+            dof_focus_range: self.environment.post_process.dof_focus_range,
+            dof_max_coc: self.environment.post_process.dof_max_coc,
+            exposure: self.environment.post_process.exposure,
+            sharpen: self.environment.post_process.sharpen_strength,
+            motion_blur: self.environment.post_process.motion_blur_intensity,
+            god_rays: self.environment.post_process.god_rays_intensity,
+            vignette: self.environment.post_process.vignette_intensity,
+            grain: self.environment.post_process.grain_intensity,
+            chromatic_aberration: self.environment.post_process.chromatic_aberration,
+            tone_map_mode: self.environment.post_process.tone_map_mode,
+            current_scene_path: self.current_scene_path.clone(),
+            fps_ms,
+            object_count,
+        }
+    }
 }
 
 /// Ray-AABB intersection returning the entry distance along the ray.

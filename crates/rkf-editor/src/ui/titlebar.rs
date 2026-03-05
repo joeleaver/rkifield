@@ -4,7 +4,34 @@ use std::sync::{Arc, Mutex};
 
 use rinch::prelude::*;
 
+use crate::editor_command::EditorCommand;
 use crate::editor_state::{EditorMode, EditorState, UiSignals};
+use crate::{CommandSender, SnapshotReader};
+
+// ── Window control button ───────────────────────────────────────────────────
+
+#[component]
+fn WindowControl(label: String, extra_class: String, onclick: Option<Callback>) -> NodeHandle {
+    let cls = if extra_class.is_empty() {
+        "rinch-borderlesswindow__control".to_string()
+    } else {
+        format!("rinch-borderlesswindow__control {extra_class}")
+    };
+    let el = __scope.create_element("div");
+    el.set_attribute("class", &cls);
+    el.set_attribute(
+        "style",
+        "width:46px;height:36px;display:flex;align-items:center;\
+         justify-content:center;cursor:pointer;\
+         color:var(--rinch-color-dimmed);font-size:14px;",
+    );
+    el.append_child(&__scope.create_text(&label));
+    if let Some(cb) = onclick {
+        let hid = __scope.register_handler(move || cb.invoke());
+        el.set_attribute("data-rid", &hid.to_string());
+    }
+    el
+}
 
 // ── Titlebar ────────────────────────────────────────────────────────────────
 
@@ -20,6 +47,8 @@ pub fn TitleBar() -> NodeHandle {
 
     let editor_state = use_context::<Arc<Mutex<EditorState>>>();
     let ui = use_context::<UiSignals>();
+    let cmd = use_context::<CommandSender>();
+    let snapshot = use_context::<SnapshotReader>();
 
     // -1 = all closed, 0 = File, 1 = Edit, 2 = View.
     let active_menu: Signal<i32> = Signal::new(-1);
@@ -52,8 +81,6 @@ pub fn TitleBar() -> NodeHandle {
     wrapper.append_child(&overlay);
 
     // ── Titlebar row ───────────────────────────────────────────────────
-    // Uses `rinch-app-menu-bar` class which picks up `--rinch-titlebar-bg`
-    // and `--rinch-titlebar-text` from the theme system.
     let bar = __scope.create_element("div");
     bar.set_attribute(
         "style",
@@ -71,8 +98,7 @@ pub fn TitleBar() -> NodeHandle {
         });
     }
 
-    // Titlebar drag — rinch reads `data-drag-window` and emits AppAction::DragWindow
-    // when a mousedown lands on this element (deepest-first: child handlers fire first).
+    // Titlebar drag — rinch reads `data-drag-window` and emits AppAction::DragWindow.
     bar.set_attribute("data-drag-window", "1");
 
     // ── App title "RkiField" ───────────────────────────────────────────
@@ -104,17 +130,17 @@ pub fn TitleBar() -> NodeHandle {
     let es = editor_state.clone();
     let file_menu = Menu::new()
         .item(MenuItem::new("Open").shortcut("Ctrl+O").on_click({
-            let es = es.clone();
+            let cmd = cmd.clone();
             move || {
-                if let Ok(mut s) = es.lock() { s.pending_open = true; }
+                let _ = cmd.0.send(EditorCommand::OpenScene { path: String::new() });
                 ui.bump_scene();
                 ui.selection.set(None);
             }
         }))
         .item(MenuItem::new("Save").shortcut("Ctrl+S").on_click({
-            let es = es.clone();
+            let cmd = cmd.clone();
             move || {
-                if let Ok(mut s) = es.lock() { s.pending_save = true; }
+                let _ = cmd.0.send(EditorCommand::SaveScene { path: None });
             }
         }))
         .item(MenuItem::new("Save As").shortcut("Ctrl+Shift+S").on_click({
@@ -138,12 +164,10 @@ pub fn TitleBar() -> NodeHandle {
     let mut spawn_menu = Menu::new();
     for &(label, prim_name) in spawn_primitives {
         spawn_menu = spawn_menu.item(MenuItem::new(label).on_click({
-            let es = es.clone();
+            let cmd = cmd.clone();
             let name = prim_name.to_string();
             move || {
-                if let Ok(mut s) = es.lock() {
-                    s.pending_spawn = Some(name.clone());
-                }
+                let _ = cmd.0.send(EditorCommand::SpawnPrimitive { name: name.clone() });
                 ui.bump_scene();
             }
         }));
@@ -151,29 +175,29 @@ pub fn TitleBar() -> NodeHandle {
 
     let edit_menu = Menu::new()
         .item(MenuItem::new("Undo").shortcut("Ctrl+Z").on_click({
-            let es = es.clone();
+            let cmd = cmd.clone();
             move || {
-                if let Ok(mut s) = es.lock() { s.pending_undo = true; }
+                let _ = cmd.0.send(EditorCommand::Undo);
             }
         }))
         .item(MenuItem::new("Redo").shortcut("Ctrl+Y").on_click({
-            let es = es.clone();
+            let cmd = cmd.clone();
             move || {
-                if let Ok(mut s) = es.lock() { s.pending_redo = true; }
+                let _ = cmd.0.send(EditorCommand::Redo);
             }
         }))
         .separator()
         .item(MenuItem::new("Delete").shortcut("Del").on_click({
-            let es = es.clone();
+            let cmd = cmd.clone();
             move || {
-                if let Ok(mut s) = es.lock() { s.pending_delete = true; }
+                let _ = cmd.0.send(EditorCommand::DeleteSelected);
                 ui.bump_scene();
             }
         }))
         .item(MenuItem::new("Duplicate").shortcut("Ctrl+D").on_click({
-            let es = es.clone();
+            let cmd = cmd.clone();
             move || {
-                if let Ok(mut s) = es.lock() { s.pending_duplicate = true; }
+                let _ = cmd.0.send(EditorCommand::DuplicateSelected);
                 ui.bump_scene();
             }
         }))
@@ -192,12 +216,9 @@ pub fn TitleBar() -> NodeHandle {
     let mut view_menu = Menu::new();
     for &(label, mode) in debug_modes {
         view_menu = view_menu.item(MenuItem::new(label).on_click({
-            let es = es.clone();
+            let cmd = cmd.clone();
             move || {
-                if let Ok(mut s) = es.lock() {
-                    s.debug_mode = mode;
-                    s.pending_debug_mode = Some(mode);
-                }
+                let _ = cmd.0.send(EditorCommand::SetDebugMode { mode });
                 ui.debug_mode.set(mode);
             }
         }));
@@ -210,7 +231,7 @@ pub fn TitleBar() -> NodeHandle {
         ("Back",        std::f32::consts::PI,   0.0),
         ("Left",        std::f32::consts::FRAC_PI_2, 0.0),
         ("Right",       -std::f32::consts::FRAC_PI_2, 0.0),
-        ("Top",         0.0,                    1.39),  // ~80°
+        ("Top",         0.0,                    1.39),  // ~80 deg
         ("Perspective",  0.0,                    0.3),
     ];
     for &(label, yaw, pitch) in cam_presets {
@@ -227,13 +248,10 @@ pub fn TitleBar() -> NodeHandle {
     // Grid overlay toggle.
     view_menu = view_menu.separator();
     view_menu = view_menu.item(MenuItem::new("Toggle Grid").shortcut("G").on_click({
-        let es = es.clone();
+        let cmd = cmd.clone();
         move || {
-            let new_val = es.lock().ok().map(|mut s| {
-                s.show_grid = !s.show_grid;
-                s.show_grid
-            }).unwrap_or(false);
-            ui.show_grid.set(new_val);
+            let _ = cmd.0.send(EditorCommand::ToggleGrid);
+            ui.show_grid.update(|v| *v = !*v);
         }
     }));
 
@@ -355,7 +373,8 @@ pub fn TitleBar() -> NodeHandle {
 
     // ── Tool buttons (Sculpt/Paint) ────────────────────────────────────
     {
-        let es = editor_state.clone();
+        let snap = snapshot.clone();
+        let cmd2 = cmd.clone();
         let tool_container = __scope.create_element("div");
         tool_container.set_attribute(
             "style",
@@ -365,9 +384,7 @@ pub fn TitleBar() -> NodeHandle {
         rinch::core::reactive_component_dom(__scope, &tool_container, move |__scope| {
             let _ = ui.editor_mode.get();
 
-            let current_mode = es.lock().ok()
-                .map(|s| s.mode)
-                .unwrap_or(EditorMode::Default);
+            let current_mode = snap.0.load().mode;
 
             let inner = __scope.create_element("div");
             inner.set_attribute("style", "display:flex;align-items:center;gap:2px;");
@@ -393,19 +410,16 @@ pub fn TitleBar() -> NodeHandle {
 
                 btn.append_child(&__scope.create_text(mode.name()));
 
-                let es = es.clone();
+                let cmd = cmd2.clone();
+                let snap = snap.clone();
                 let handler_id = __scope.register_handler(move || {
-                    let new_mode = if let Ok(mut state) = es.lock() {
-                        if state.mode == mode {
-                            state.mode = EditorMode::Default;
-                            EditorMode::Default
-                        } else {
-                            state.mode = mode;
-                            mode
-                        }
-                    } else {
+                    let current = snap.0.load().mode;
+                    let new_mode = if current == mode {
                         EditorMode::Default
+                    } else {
+                        mode
                     };
+                    let _ = cmd.0.send(EditorCommand::SetEditorMode { mode: new_mode });
                     ui.editor_mode.set(new_mode);
                 });
                 btn.set_attribute("data-rid", &handler_id.to_string());
@@ -424,68 +438,26 @@ pub fn TitleBar() -> NodeHandle {
     spacer.set_attribute("style", "flex:1;");
     bar.append_child(&spacer);
 
-    // ── Window controls ────────────────────────────────────────────────
-    let controls = __scope.create_element("div");
-    controls.set_attribute(
-        "style",
-        "display:flex;align-items:center;height:100%;",
-    );
-
-    // Minimize [─]
-    let min_btn = __scope.create_element("div");
-    min_btn.set_attribute("class", "rinch-borderlesswindow__control");
-    min_btn.set_attribute(
-        "style",
-        "width:46px;height:36px;display:flex;align-items:center;\
-         justify-content:center;cursor:pointer;\
-         color:var(--rinch-color-dimmed);font-size:14px;",
-    );
-    min_btn.append_child(&__scope.create_text("\u{2500}"));  // ─
-    {
-        let hid = __scope.register_handler(move || {
-            minimize_current_window();
-        });
-        min_btn.set_attribute("data-rid", &hid.to_string());
-    }
-    controls.append_child(&min_btn);
-
-    // Maximize [□]
-    let max_btn = __scope.create_element("div");
-    max_btn.set_attribute("class", "rinch-borderlesswindow__control");
-    max_btn.set_attribute(
-        "style",
-        "width:46px;height:36px;display:flex;align-items:center;\
-         justify-content:center;cursor:pointer;\
-         color:var(--rinch-color-dimmed);font-size:14px;",
-    );
-    max_btn.append_child(&__scope.create_text("\u{25a1}"));  // □
-    {
-        let hid = __scope.register_handler(move || {
-            toggle_maximize_current_window();
-        });
-        max_btn.set_attribute("data-rid", &hid.to_string());
-    }
-    controls.append_child(&max_btn);
-
-    // Close [×]
-    let close_btn = __scope.create_element("div");
-    close_btn.set_attribute("class", "rinch-borderlesswindow__control rinch-borderlesswindow__control--close");
-    close_btn.set_attribute(
-        "style",
-        "width:46px;height:36px;display:flex;align-items:center;\
-         justify-content:center;cursor:pointer;\
-         color:var(--rinch-color-dimmed);font-size:16px;",
-    );
-    close_btn.append_child(&__scope.create_text("\u{00d7}"));  // ×
-    {
-        let hid = __scope.register_handler(move || {
-            close_current_window();
-        });
-        close_btn.set_attribute("data-rid", &hid.to_string());
-    }
-    controls.append_child(&close_btn);
-
-    bar.append_child(&controls);
+    // ── Window controls (rsx!) ──────────────────────────────────────────
+    let controls_node = rsx! {
+        div {
+            style: "display:flex;align-items:center;height:100%;",
+            WindowControl {
+                label: "\u{2500}",
+                onclick: minimize_current_window,
+            }
+            WindowControl {
+                label: "\u{25a1}",
+                onclick: toggle_maximize_current_window,
+            }
+            WindowControl {
+                label: "\u{00d7}",
+                extra_class: "rinch-borderlesswindow__control--close",
+                onclick: close_current_window,
+            }
+        }
+    };
+    bar.append_child(&controls_node);
 
     wrapper.append_child(&bar);
     wrapper

@@ -70,6 +70,61 @@ impl RenderContext {
         }
     }
 
+    /// Create a render context with its own device, without requiring a surface.
+    ///
+    /// Used when the engine needs a dedicated GPU device (e.g., to avoid
+    /// contention with a compositor sharing the same device). The engine
+    /// renders offscreen and reads back pixels to CPU.
+    pub fn new_headless() -> Self {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::VULKAN | wgpu::Backends::METAL | wgpu::Backends::DX12,
+            ..Default::default()
+        });
+
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+            compatible_surface: None,
+        }))
+        .expect("failed to find a compatible GPU adapter (headless)");
+
+        let adapter_info = adapter.get_info();
+        log::info!("GPU adapter (headless): {:?}", adapter_info.name);
+
+        let (device, queue) = pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                label: Some("rkf-render headless device"),
+                required_features: wgpu::Features::FLOAT32_FILTERABLE
+                    | wgpu::Features::TIMESTAMP_QUERY
+                    | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
+                required_limits: wgpu::Limits {
+                    max_bind_groups: 8,
+                    max_storage_buffer_binding_size: 1 << 30, // 1 GB
+                    max_buffer_size: 1 << 31, // 2 GB
+                    ..wgpu::Limits::default()
+                },
+                memory_hints: wgpu::MemoryHints::Performance,
+                trace: wgpu::Trace::Off,
+                experimental_features: wgpu::ExperimentalFeatures::default(),
+            },
+        ))
+        .expect("failed to create headless GPU device");
+
+        device.on_uncaptured_error(std::sync::Arc::new(|error: wgpu::Error| {
+            eprintln!("[GPU ERROR] {error}");
+        }));
+        device.set_device_lost_callback(|reason, msg| {
+            eprintln!("[GPU DEVICE LOST] reason={reason:?} msg={msg}");
+        });
+
+        Self {
+            device,
+            queue,
+            adapter: Some(adapter),
+            adapter_info,
+        }
+    }
+
     /// Create a render context from a shared device and queue.
     ///
     /// Used when the engine shares a wgpu device with an external renderer

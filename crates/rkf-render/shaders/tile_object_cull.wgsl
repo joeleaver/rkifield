@@ -155,8 +155,8 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>,
                 select(aabb_lo.y, aabb_hi.y, (c & 2u) != 0u),
                 select(aabb_lo.z, aabb_hi.z, (c & 4u) != 0u),
             );
-            // AABB is in camera-relative space (set by CPU).
-            let proj = project_to_pixel(corner);
+            // AABB is in world-space; convert to camera-relative for projection.
+            let proj = project_to_pixel(corner - cam_pos);
 
             if proj.z > 0.0 {
                 any_in_front = true;

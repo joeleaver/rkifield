@@ -75,6 +75,8 @@ rayon = "1"
 tobj = "4"
 base64 = "0.22"
 pollster = "0.4"
+crossbeam = "0.8"
+arc-swap = "1"
 
 # Rinch workspace dependencies (vendored)
 rinch = { path = "vendor/rinch/crates/rinch", default-features = false }

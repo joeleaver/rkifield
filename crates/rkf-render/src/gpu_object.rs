@@ -39,14 +39,14 @@ use bytemuck::{Pod, Zeroable};
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Pod, Zeroable)]
 pub struct GpuObject {
-    /// Pre-computed inverse world transform (camera-relative).
-    /// Used to transform rays into object-local space.
+    /// Pre-computed inverse world transform (world-space).
+    /// Used to transform world-space positions into object-local space.
     /// Stored as column-major [col0, col1, col2, col3] = 16 floats.
     pub inverse_world: [[f32; 4]; 4],
 
-    /// Object AABB minimum (camera-relative, xyz + padding).
+    /// Object AABB minimum (world-space, xyz + padding).
     pub aabb_min: [f32; 4],
-    /// Object AABB maximum (camera-relative, xyz + padding).
+    /// Object AABB maximum (world-space, xyz + padding).
     pub aabb_max: [f32; 4],
 
     /// Offset into the packed brick maps storage buffer.

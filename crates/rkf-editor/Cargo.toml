@@ -35,3 +35,5 @@ serde_json = { workspace = true }
 ron = { workspace = true }
 hecs = { workspace = true }
 rfd = "0.15"
+crossbeam = { workspace = true }
+arc-swap = { workspace = true }

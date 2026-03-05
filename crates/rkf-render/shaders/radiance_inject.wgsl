@@ -272,12 +272,13 @@ fn sample_voxelized(local_pos: vec3<f32>, obj: GpuObject) -> f32 {
 }
 
 /// Evaluate object at a world-space position. Returns (distance, material_id).
-fn evaluate_object(world_pos: vec3<f32>, cam_rel: vec3<f32>, obj_idx: u32) -> vec2<f32> {
+fn evaluate_object(world_pos: vec3<f32>, obj_idx: u32) -> vec2<f32> {
     let obj = objects[obj_idx];
     if obj.sdf_type == SDF_TYPE_NONE {
         return vec2<f32>(MAX_FLOAT, 0.0);
     }
-    let local_pos = (obj.inverse_world * vec4<f32>(cam_rel, 1.0)).xyz;
+    // inverse_world is world-space — transform directly.
+    let local_pos = (obj.inverse_world * vec4<f32>(world_pos, 1.0)).xyz;
     var dist: f32;
     if obj.sdf_type == SDF_TYPE_ANALYTICAL {
         dist = evaluate_analytical(local_pos, obj);
@@ -303,7 +304,7 @@ fn sample_coarse_field(cam_rel_pos: vec3<f32>) -> f32 {
 
 // Coordinate space note:
 // - BVH AABBs are in WORLD space (built from Scene object AABBs).
-// - GpuObject.inverse_world expects CAMERA-RELATIVE input.
+// - GpuObject.inverse_world is WORLD-SPACE (transforms world pos to local).
 // - Coarse field expects CAMERA-RELATIVE input.
 // - vol.center.xyz = camera world position, so cam_rel = world_pos - vol.center.xyz.
 
@@ -352,8 +353,7 @@ fn sample_sdf(world_pos: vec3<f32>) -> f32 {
         if node.left == BVH_INVALID {
             let leaf_obj_idx = node.right_or_object;
             if leaf_obj_idx < v2_scene.num_objects {
-                // Object evaluation uses camera-relative for inverse_world transform.
-                let result = evaluate_object(world_pos, cam_rel, leaf_obj_idx);
+                let result = evaluate_object(world_pos, leaf_obj_idx);
                 min_dist = min(min_dist, result.x);
             }
         } else {
@@ -402,7 +402,7 @@ fn sample_sdf_with_material(world_pos: vec3<f32>) -> vec2<f32> {
         if node.left == BVH_INVALID {
             let leaf_obj_idx = node.right_or_object;
             if leaf_obj_idx < v2_scene.num_objects {
-                let result = evaluate_object(world_pos, cam_rel, leaf_obj_idx);
+                let result = evaluate_object(world_pos, leaf_obj_idx);
                 if result.x < min_dist {
                     min_dist = result.x;
                     mat_id = result.y;

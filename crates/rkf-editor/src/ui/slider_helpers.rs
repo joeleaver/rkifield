@@ -9,6 +9,7 @@ use rinch::prelude::*;
 /// Creates a row with label + reactive value display on top and a Slider beneath.
 /// The slider updates `signal` on drag (fine-grained, no revision bump) and
 /// calls `on_update` to write back to editor state.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_slider_row(
     scope: &mut RenderScope,
     container: &NodeHandle,
@@ -80,6 +81,7 @@ pub(super) fn build_slider_row(
 ///
 /// The slider updates `signal` on drag. The batch sync `Effect` in
 /// `RightPanel` writes all signal values to `EditorState` once per frame.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_synced_slider(
     scope: &mut RenderScope,
     container: &NodeHandle,

@@ -102,6 +102,8 @@ pub mod cloud_shadow;
 pub mod brick_clouds;
 /// Wireframe line rendering pass (the only rasterization pass in the engine).
 pub mod wireframe;
+/// GPU timestamp profiler for per-pass timing.
+pub mod gpu_profiler;
 
 pub use camera::{Camera, CameraUniforms};
 pub use context::RenderContext;

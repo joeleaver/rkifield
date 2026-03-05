@@ -2,9 +2,9 @@
 //!
 //! Architecture:
 //! - `rinch::shell::run_with_window_props_and_menu()` owns the window and event loop.
-//! - The engine runs on a background thread, sharing the wgpu Device/Queue from `GpuHandle`.
-//! - Engine output goes to an offscreen texture; `RenderSurfaceHandle::set_texture_source()`
-//!   feeds it to rinch's compositor for zero-copy GPU compositing.
+//! - The engine runs on a background thread with its own wgpu Device (separate from rinch).
+//! - Engine renders to an offscreen texture, reads back pixels to CPU, and submits them
+//!   via `SurfaceWriter::submit_frame()` for compositor integration.
 //! - Input flows through `SurfaceEvent` → `EditorState.editor_input` → engine thread.
 
 #![allow(dead_code)] // Editor modules are WIP — used incrementally
@@ -28,8 +28,10 @@ mod placement;
 mod properties;
 mod scene_io;
 mod sculpt;
+mod editor_command;
 mod engine_loop;
 mod ui;
+mod ui_snapshot;
 mod undo;
 mod wireframe;
 
@@ -38,8 +40,20 @@ use std::sync::{Arc, Mutex};
 use rinch::prelude::*;
 
 use automation::SharedState;
+use editor_command::EditorCommand;
 use editor_state::{EditorState, SliderSignals, UiSignals};
 use engine_viewport::{DISPLAY_HEIGHT, DISPLAY_WIDTH};
+use ui_snapshot::UiSnapshot;
+
+/// Sender half of the UI→engine command channel.
+/// Stored in rinch context for UI components to send commands.
+#[derive(Clone)]
+pub(crate) struct CommandSender(pub crossbeam::channel::Sender<EditorCommand>);
+
+/// Lock-free snapshot of editor state for the UI thread.
+/// Published by the engine thread each frame, read by UI components.
+#[derive(Clone)]
+pub(crate) struct SnapshotReader(pub Arc<arc_swap::ArcSwap<UiSnapshot>>);
 
 // ---------------------------------------------------------------------------
 // IPC server setup
@@ -100,6 +114,10 @@ fn main() -> anyhow::Result<()> {
         DISPLAY_HEIGHT,
     )));
 
+    // 1b. Create UI→engine command channel and lock-free snapshot.
+    let (cmd_tx, cmd_rx) = crossbeam::channel::unbounded::<EditorCommand>();
+    let ui_snapshot = Arc::new(arc_swap::ArcSwap::from_pointee(UiSnapshot::default()));
+
     // 2. Create tokio runtime and start IPC server.
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let api = automation::EditorAutomationApi::new(
@@ -114,19 +132,22 @@ fn main() -> anyhow::Result<()> {
     let surface_handle = create_render_surface();
 
     // 4. Clones for the engine thread.
-    //    GpuTextureRegistrar is Send + Sync (wraps Arc<Mutex<>> fields only).
     let editor_state_for_thread = Arc::clone(&editor_state);
     let shared_state_for_thread = Arc::clone(&shared_state);
+    let ui_snapshot_for_thread = Arc::clone(&ui_snapshot);
+    let surface_writer = surface_handle.writer();
     let gpu_registrar = surface_handle.gpu_registrar();
     let socket_path_for_cleanup = socket_path.clone();
 
     // 5. Spawn engine thread.
-    //    The thread will poll for gpu_handle() until rinch has created the
-    //    wgpu device (happens inside run_with_window_props_and_menu).
+    //    Engine creates its own wgpu device — no dependency on rinch's device.
     std::thread::spawn(move || {
         engine_loop::engine_thread(engine_loop::EngineThreadData {
             editor_state: editor_state_for_thread,
             shared_state: shared_state_for_thread,
+            cmd_rx,
+            ui_snapshot: ui_snapshot_for_thread,
+            surface_writer,
             gpu_registrar,
         });
     });
@@ -158,6 +179,8 @@ fn main() -> anyhow::Result<()> {
     // Context Arc clones for the component closure (main thread).
     let editor_state_ctx = Arc::clone(&editor_state);
     let shared_state_ctx = Arc::clone(&shared_state);
+    let cmd_sender = CommandSender(cmd_tx);
+    let snapshot_reader = SnapshotReader(ui_snapshot);
 
     // 7. Call rinch shell — BLOCKING until window close.
     //    create_context() calls must be on the main
@@ -177,6 +200,9 @@ fn main() -> anyhow::Result<()> {
             create_context(ui_signals);
             create_context(slider_signals);
             create_context(crate::editor_state::FpsSignal::new());
+            // Command channel + snapshot for lock-free UI ↔ engine communication.
+            create_context(cmd_sender);
+            create_context(snapshot_reader);
 
             // Build the editor UI tree.
             ui::editor_ui(_scope)

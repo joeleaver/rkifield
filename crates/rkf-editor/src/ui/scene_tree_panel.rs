@@ -2,64 +2,48 @@
 //!
 //! Uses rinch's `Tree` component with `TreeNodeData` to render the project
 //! hierarchy: Project → Camera + Scene → objects + lights.
-//! Reads directly from `world.scene().objects` — no intermediate SceneTree mirror.
-
-use std::sync::{Arc, Mutex};
+//! Reads from the lock-free `SnapshotReader` — no mutex locks needed.
 
 use rinch::prelude::*;
 use rinch_tabler_icons::TablerIcon;
 
-use crate::editor_state::{EditorState, SelectedEntity, UiSignals};
+use crate::editor_command::EditorCommand;
+use crate::editor_state::{SelectedEntity, UiSignals};
 use crate::light_editor::EditorLightType;
-
-// ── Style constants ──────────────────────────────────────────────────────────
-
-const LABEL_STYLE: &str = "font-size:11px;color:var(--rinch-color-dimmed);\
-    text-transform:uppercase;letter-spacing:1px;padding:8px 12px;";
+use crate::ui_snapshot::UiSnapshot;
+use crate::{CommandSender, SnapshotReader};
 
 // ── Tree data builder ────────────────────────────────────────────────────────
 
-/// Build the full tree data from editor state.
-///
-/// Reads objects from `world.scene().objects` and lights from `light_editor`.
-/// Objects with `parent_id` are nested under their parent; root objects
-/// (parent_id == None) appear directly under the Scene node.
-fn build_tree_data(es: &EditorState) -> Vec<TreeNodeData> {
-    // Camera node.
+/// Build the full tree data from a lock-free snapshot.
+fn build_tree_data_from_snapshot(snap: &UiSnapshot) -> Vec<TreeNodeData> {
     let camera_node = TreeNodeData::new("camera", "Camera")
         .with_icon(TablerIcon::Camera);
 
-    // Scene children: SDF objects (roots only) + lights.
     let mut scene_children: Vec<TreeNodeData> = Vec::new();
 
-    let scene = es.world.scene();
-
-    // Build a map of parent_id → children for hierarchy.
-    // First pass: collect root objects (no parent).
-    for obj in &scene.objects {
+    // Root objects (no parent).
+    for obj in &snap.objects {
         if obj.parent_id.is_none() {
-            scene_children.push(build_object_node(obj, &scene.objects));
+            scene_children.push(build_snapshot_object_node(obj, &snap.objects));
         }
     }
 
-    for light in es.light_editor.all_lights() {
+    for light in &snap.lights {
         let value = format!("light:{}", light.id);
         let label = match light.light_type {
             EditorLightType::Point => format!("Point Light {}", light.id),
             EditorLightType::Spot => format!("Spot Light {}", light.id),
         };
-        let node = TreeNodeData::new(value, label)
-            .with_icon(TablerIcon::Bulb);
+        let node = TreeNodeData::new(value, label).with_icon(TablerIcon::Bulb);
         scene_children.push(node);
     }
 
-    let scene_name = scene.name.clone();
-
-    let scene_node = TreeNodeData::new("scene", scene_name)
+    let scene_node = TreeNodeData::new("scene", snap.scene_name.clone())
         .with_icon(TablerIcon::World)
         .with_children(scene_children);
 
-    let project_name = es.current_scene_path.as_ref()
+    let project_name = snap.current_scene_path.as_ref()
         .and_then(|p| std::path::Path::new(p).file_stem())
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "Untitled Project".to_string());
@@ -71,19 +55,18 @@ fn build_tree_data(es: &EditorState) -> Vec<TreeNodeData> {
     vec![project_node]
 }
 
-/// Build a `TreeNodeData` for a `SceneObject` and recursively attach children.
-fn build_object_node(
-    obj: &rkf_core::scene::SceneObject,
-    all_objects: &[rkf_core::scene::SceneObject],
+/// Build a `TreeNodeData` for a snapshot object, recursively attaching children.
+fn build_snapshot_object_node(
+    obj: &crate::ui_snapshot::ObjectSummary,
+    all_objects: &[crate::ui_snapshot::ObjectSummary],
 ) -> TreeNodeData {
     let value = format!("obj:{}", obj.id);
     let mut tree_node = TreeNodeData::new(value, &obj.name)
         .with_icon(TablerIcon::Cube);
 
-    // Find children (objects whose parent_id == this object's id).
-    for child_obj in all_objects {
-        if child_obj.parent_id == Some(obj.id) {
-            tree_node = tree_node.with_child(build_object_node(child_obj, all_objects));
+    for child in all_objects {
+        if child.parent_id.map(|p| p as u64) == Some(obj.id) {
+            tree_node = tree_node.with_child(build_snapshot_object_node(child, all_objects));
         }
     }
 
@@ -122,10 +105,12 @@ fn parse_value(value: &str) -> Option<SelectedEntity> {
 /// Scene tree panel component.
 ///
 /// Renders the editor's scene hierarchy using rinch's `Tree` component.
-/// Hierarchy: Project → Camera + Scene → objects + lights.
+/// Tree data rebuilds only on scene structure changes (spawn/delete/open).
+/// Selection sync is a separate lightweight Effect — no tree rebuild needed.
 #[component]
 pub fn SceneTreePanel() -> NodeHandle {
-    let editor_state = use_context::<Arc<Mutex<EditorState>>>();
+    let snap = use_context::<SnapshotReader>();
+    let cmd = use_context::<CommandSender>();
     let ui = use_context::<UiSignals>();
 
     // Persistent tree expand/select state — created once, lives in rinch context.
@@ -136,58 +121,25 @@ pub fn SceneTreePanel() -> NodeHandle {
         ..Default::default()
     });
 
-    let root = __scope.create_element("div");
-    root.set_attribute(
-        "style",
-        "flex:1;overflow-y:auto;display:flex;flex-direction:column;",
-    );
-
-    // ── Header with count (updated via Effect, no rebuild) ──
-    let header = __scope.create_element("div");
-    header.set_attribute("style", LABEL_STYLE);
-    let header_text = __scope.create_text("Scene (0)");
-    header.append_child(&header_text);
-    root.append_child(&header);
-
-    // Header count Effect — tracks scene_revision + object_count.
+    // Header count Effect — tracks scene_revision only.
+    let header_label = Signal::new("Scene (0)".to_string());
     {
-        let es = editor_state.clone();
-        let header_text = header_text.clone();
+        let snap = snap.clone();
         Effect::new(move || {
             let _ = ui.scene_revision.get();
-            let count = es.lock().ok()
-                .map(|es| es.world.scene().objects.len() + es.light_editor.all_lights().len())
-                .unwrap_or(0);
-            header_text.set_text(&format!("Scene ({count})"));
+            let guard = snap.0.load();
+            let count = guard.objects.len() + guard.lights.len();
+            header_label.set(format!("Scene ({count})"));
         });
     }
 
-    // ── Tree DOM (only rebuilds on scene structure changes) ──
-    let tree_container = __scope.create_element("div");
-    tree_container.set_attribute("style", "display:flex;flex-direction:column;");
-    root.append_child(&tree_container);
-
-    let es = editor_state.clone();
-    rinch::core::reactive_component_dom(__scope, &tree_container, move |__scope| {
-        // Track scene structure — only rebuild when scene changes (spawn/delete/open).
-        let _ = ui.scene_revision.get();
-
-        let (tree_data, sel_entity) = match es.lock().ok() {
-            Some(es) => {
-                let data = build_tree_data(&es);
-                let sel = es.selected_entity;
-                (data, sel)
-            }
-            None => return __scope.create_element("div"),
-        };
-        // es lock released.
-
-        // Sync selection state → tree highlight signals.
-        // Uses untracked() so clear_selected()/select() don't trigger
-        // nested effect flushes (RefCell reentrant borrow).
+    // Selection sync Effect — tracks ui.selection, updates tree highlight
+    // without rebuilding the tree DOM.
+    Effect::new(move || {
+        let sel = ui.selection.get();
         rinch::core::untracked(|| {
-            if let Some(ref sel) = sel_entity {
-                let value = selected_to_value(sel);
+            if let Some(sel) = sel {
+                let value = selected_to_value(&sel);
                 let current = tree_state.selected.get();
                 if !current.contains(&value) {
                     tree_state.controller.clear_selected();
@@ -200,31 +152,48 @@ pub fn SceneTreePanel() -> NodeHandle {
                 }
             }
         });
-
-        // Selection callback → update EditorState.selected_entity.
-        let es_cb = es.clone();
-        let onselect = ValueCallback::new(move |value: String| {
-            if let Some(entity) = parse_value(&value) {
-                if let Ok(mut state) = es_cb.lock() {
-                    state.selected_entity = Some(entity);
-                }
-                // Signal update after lock released.
-                ui.selection.set(Some(entity));
-            }
-        });
-
-        // Tree component.
-        let tree_component = Tree {
-            data: tree_data,
-            tree: Some(tree_state),
-            select_on_click: true,
-            expand_on_click: true,
-            level_offset: "sm".to_string(),
-            onselect: Some(onselect),
-            ..Default::default()
-        };
-        tree_component.render(__scope, &[])
     });
 
-    root
+    // Selection callback → send command (no lock).
+    let onselect = ValueCallback::new(move |value: String| {
+        if let Some(entity) = parse_value(&value) {
+            let _ = cmd.0.send(EditorCommand::SelectEntity { entity: Some(entity) });
+            ui.selection.set(Some(entity));
+        }
+    });
+
+    // Reactive data source for the Tree — rebuilds only on scene_revision.
+    let snap2 = snap.clone();
+    let data_source: std::rc::Rc<dyn Fn() -> Vec<TreeNodeData>> =
+        std::rc::Rc::new(move || {
+            let _ = ui.scene_revision.get();
+            let guard = snap2.0.load();
+            build_tree_data_from_snapshot(&guard)
+        });
+
+    // Initial data for the Tree (read once, data_source handles updates).
+    let initial_data = {
+        let guard = snap.0.load();
+        build_tree_data_from_snapshot(&guard)
+    };
+
+    rsx! {
+        div {
+            style: "flex:1;overflow-y:auto;display:flex;flex-direction:column;",
+            div {
+                style: "font-size:11px;color:var(--rinch-color-dimmed);\
+                        text-transform:uppercase;letter-spacing:1px;padding:8px 12px;",
+                {|| header_label.get()}
+            }
+            Tree {
+                data: initial_data,
+                tree: Some(tree_state),
+                select_on_click: true,
+                expand_on_click: true,
+                level_offset: "sm",
+                onselect: onselect,
+                data_source: Some(data_source),
+            }
+        }
+    }
 }

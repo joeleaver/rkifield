@@ -194,6 +194,24 @@ impl GpuSceneV2 {
         }
     }
 
+    /// Upload a contiguous sub-range of objects to the GPU without resizing.
+    ///
+    /// Used for incremental updates: only re-upload the GPU objects that changed
+    /// (e.g. after a transform edit or sculpt). The caller must ensure `start_idx + objects.len()`
+    /// does not exceed the current buffer capacity.
+    pub fn upload_object_range(
+        &self,
+        queue: &wgpu::Queue,
+        objects: &[GpuObject],
+        start_idx: usize,
+    ) {
+        if objects.is_empty() {
+            return;
+        }
+        let offset = (start_idx * std::mem::size_of::<GpuObject>()) as u64;
+        queue.write_buffer(&self.object_buffer, offset, bytemuck::cast_slice(objects));
+    }
+
     /// Update camera uniforms.
     pub fn update_camera(&self, queue: &wgpu::Queue, camera: &CameraUniforms) {
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(camera));

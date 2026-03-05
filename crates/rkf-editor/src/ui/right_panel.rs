@@ -4,24 +4,29 @@ use std::sync::{Arc, Mutex};
 
 use rinch::prelude::*;
 
+use crate::editor_command::EditorCommand;
 use crate::editor_state::{EditorMode, EditorState, SelectedEntity, SliderSignals, UiSignals};
+use crate::{CommandSender, SnapshotReader};
 
-use super::slider_helpers::{build_slider_row, build_synced_slider};
-use super::{LABEL_STYLE, SECTION_STYLE, VALUE_STYLE, DIVIDER_STYLE};
+use super::components::{
+    build_synced_slider_row, DragValue, ToggleRow, TransformEditor, Vec3Editor,
+};
+use super::slider_helpers::build_slider_row;
+use super::{DIVIDER_STYLE, LABEL_STYLE, SECTION_STYLE, VALUE_STYLE};
 
 // ── Mode-dependent right panel ──────────────────────────────────────────────
 
 /// Right panel — always shows properties of the selected object + environment.
 ///
 /// When a Sculpt/Paint tool is active, shows brush settings above the
-/// properties section (placeholder for now). Camera selection shows
-/// interactive FOV, fly speed, near/far sliders. Below properties, an
-/// always-visible environment section shows atmosphere, fog, and quick
-/// post-processing controls.
+/// properties section. Camera selection shows interactive FOV, fly speed,
+/// near/far sliders and environment/post-processing sections.
 #[component]
 pub fn RightPanel() -> NodeHandle {
     let editor_state = use_context::<Arc<Mutex<EditorState>>>();
     let ui = use_context::<UiSignals>();
+    let snapshot = use_context::<SnapshotReader>();
+    let cmd = use_context::<CommandSender>();
 
     let root = __scope.create_element("div");
     root.set_attribute(
@@ -29,55 +34,42 @@ pub fn RightPanel() -> NodeHandle {
         "flex:1;overflow-y:scroll;min-height:0;height:0;",
     );
 
-    // Centralized slider signals — created once in main.rs, stored in rinch context.
-    // A single batch Effect (below) syncs all values to EditorState per frame.
     let sliders = use_context::<SliderSignals>();
 
     // ── Selection-change Effect: push object/light values into SliderSignals ──
-    // When the selected entity changes, read its transform from EditorState
-    // and push into the persistent slider signals. This runs once per selection
-    // change, not per slider drag.
-    //
-    // CRITICAL: Release the es lock BEFORE calling push_*_values(), because
-    // signal .set() triggers effect flushes → batch sync Effect → es.lock()
-    // → deadlock if we still hold the lock here.
     {
-        let es = editor_state.clone();
+        let snap = snapshot.clone();
         Effect::new(move || {
             let sel = ui.selection.get();
 
-            // Phase 1: Read values from EditorState (lock held briefly).
             enum PushData {
-                Object(glam::Vec3, glam::Vec3, glam::Vec3), // pos, rot_deg, scale
-                Light(glam::Vec3, f32, f32),                 // pos, intensity, range
+                Object(glam::Vec3, glam::Vec3, glam::Vec3),
+                Light(glam::Vec3, f32, f32),
                 None,
             }
+            let snap_guard = snap.0.load();
             let (push, oid, lid) = match sel {
                 Some(SelectedEntity::Object(oid)) => {
-                    let data = es.lock().ok().and_then(|es| {
-                        let scene = es.world.scene();
-                        let obj = scene.objects.iter().find(|o| o.id as u64 == oid)?;
-                        let (rx, ry, rz) = obj.rotation.to_euler(glam::EulerRot::XYZ);
-                        Some(PushData::Object(
-                            obj.position,
-                            glam::Vec3::new(rx.to_degrees(), ry.to_degrees(), rz.to_degrees()),
-                            obj.scale,
-                        ))
-                    }).unwrap_or(PushData::None);
+                    let data = snap_guard
+                        .objects
+                        .iter()
+                        .find(|o| o.id == oid)
+                        .map(|o| PushData::Object(o.position, o.rotation_degrees, o.scale))
+                        .unwrap_or(PushData::None);
                     (data, Some(oid), None)
                 }
                 Some(SelectedEntity::Light(lid)) => {
-                    let data = es.lock().ok().and_then(|es| {
-                        let light = es.light_editor.get_light(lid)?;
-                        Some(PushData::Light(light.position, light.intensity, light.range))
-                    }).unwrap_or(PushData::None);
+                    let data = snap_guard
+                        .lights
+                        .iter()
+                        .find(|l| l.id == lid)
+                        .map(|l| PushData::Light(l.position, l.intensity, l.range))
+                        .unwrap_or(PushData::None);
                     (data, None, Some(lid))
                 }
                 _ => (PushData::None, None, None),
             };
-            // es lock released here.
 
-            // Phase 2: Push values into signals (no lock held).
             rinch::core::untracked(|| {
                 sliders.bound_object_id.set(oid);
                 sliders.bound_light_id.set(lid);
@@ -98,15 +90,11 @@ pub fn RightPanel() -> NodeHandle {
         });
     }
 
-    // ── Batch sync Effect: slider signals + toggle signals → EditorState ──
-    // This is the ONLY place that locks EditorState for slider/toggle updates.
-    // One lock per frame, regardless of how many sliders changed.
+    // ── Batch sync Effect: slider signals + toggle signals → engine commands ──
     {
-        let es = editor_state.clone();
+        let cmd = cmd.clone();
         Effect::new(move || {
-            // Subscribe to all slider signals.
             sliders.track_all();
-            // Subscribe to toggle signals (from UiSignals).
             let _ = ui.atmo_enabled.get();
             let _ = ui.fog_enabled.get();
             let _ = ui.clouds_enabled.get();
@@ -114,27 +102,157 @@ pub fn RightPanel() -> NodeHandle {
             let _ = ui.dof_enabled.get();
             let _ = ui.tone_map_mode.get();
 
-            // Batch write to EditorState.
-            if let Ok(mut es) = es.lock() {
-                sliders.sync_to_state(&mut es);
-                // Sync toggles.
-                es.environment.atmosphere.enabled = ui.atmo_enabled.get();
-                es.environment.fog.enabled = ui.fog_enabled.get();
-                es.environment.clouds.enabled = ui.clouds_enabled.get();
-                es.environment.post_process.bloom_enabled = ui.bloom_enabled.get();
-                es.environment.post_process.dof_enabled = ui.dof_enabled.get();
-                es.environment.post_process.tone_map_mode = ui.tone_map_mode.get();
-                es.environment.mark_dirty();
+            // Camera.
+            let _ = cmd
+                .0
+                .send(EditorCommand::SetCameraFov {
+                    fov: sliders.fov.get() as f32,
+                });
+            let _ = cmd.0.send(EditorCommand::SetCameraSpeed {
+                speed: sliders.fly_speed.get() as f32,
+            });
+            let _ = cmd.0.send(EditorCommand::SetCameraNearFar {
+                near: sliders.near.get() as f32,
+                far: sliders.far.get() as f32,
+            });
+
+            // Atmosphere.
+            let az = (sliders.sun_azimuth.get() as f32).to_radians();
+            let el = (sliders.sun_elevation.get() as f32).to_radians();
+            let cos_el = el.cos();
+            let sun_dir =
+                glam::Vec3::new(az.sin() * cos_el, el.sin(), az.cos() * cos_el).normalize();
+            let _ = cmd.0.send(EditorCommand::SetAtmosphere {
+                sun_direction: sun_dir,
+                sun_intensity: sliders.sun_intensity.get() as f32,
+                rayleigh_scale: sliders.rayleigh_scale.get() as f32,
+                mie_scale: sliders.mie_scale.get() as f32,
+            });
+
+            // Fog.
+            let _ = cmd.0.send(EditorCommand::SetFog {
+                density: sliders.fog_density.get() as f32,
+                height_falloff: sliders.fog_height_falloff.get() as f32,
+                dust_density: sliders.dust_density.get() as f32,
+                dust_asymmetry: sliders.dust_asymmetry.get() as f32,
+            });
+
+            // Clouds.
+            let _ = cmd.0.send(EditorCommand::SetClouds {
+                coverage: sliders.cloud_coverage.get() as f32,
+                density: sliders.cloud_density.get() as f32,
+                altitude: sliders.cloud_altitude.get() as f32,
+                thickness: sliders.cloud_thickness.get() as f32,
+                wind_speed: sliders.cloud_wind_speed.get() as f32,
+            });
+
+            // Post-process.
+            let _ = cmd.0.send(EditorCommand::SetPostProcess {
+                bloom_intensity: sliders.bloom_intensity.get() as f32,
+                bloom_threshold: sliders.bloom_threshold.get() as f32,
+                exposure: sliders.exposure.get() as f32,
+                sharpen: sliders.sharpen.get() as f32,
+                dof_focus_distance: sliders.dof_focus_dist.get() as f32,
+                dof_focus_range: sliders.dof_focus_range.get() as f32,
+                dof_max_coc: sliders.dof_max_coc.get() as f32,
+                motion_blur: sliders.motion_blur.get() as f32,
+                god_rays: sliders.god_rays.get() as f32,
+                vignette: sliders.vignette.get() as f32,
+                grain: sliders.grain.get() as f32,
+                chromatic_aberration: sliders.chromatic_ab.get() as f32,
+            });
+
+            // Brush.
+            let _ = cmd.0.send(EditorCommand::SetSculptSettings {
+                radius: sliders.brush_radius.get() as f32,
+                strength: sliders.brush_strength.get() as f32,
+                falloff: sliders.brush_falloff.get() as f32,
+            });
+            let _ = cmd.0.send(EditorCommand::SetPaintSettings {
+                radius: sliders.brush_radius.get() as f32,
+                strength: sliders.brush_strength.get() as f32,
+                falloff: sliders.brush_falloff.get() as f32,
+            });
+
+            // Object transform.
+            let obj_id = rinch::core::untracked(|| sliders.bound_object_id.get());
+            if let Some(oid) = obj_id {
+                let _ = cmd.0.send(EditorCommand::SetObjectPosition {
+                    entity_id: oid,
+                    position: glam::Vec3::new(
+                        sliders.obj_pos_x.get() as f32,
+                        sliders.obj_pos_y.get() as f32,
+                        sliders.obj_pos_z.get() as f32,
+                    ),
+                });
+                let _ = cmd.0.send(EditorCommand::SetObjectRotation {
+                    entity_id: oid,
+                    rotation: glam::Vec3::new(
+                        sliders.obj_rot_x.get() as f32,
+                        sliders.obj_rot_y.get() as f32,
+                        sliders.obj_rot_z.get() as f32,
+                    ),
+                });
+                let _ = cmd.0.send(EditorCommand::SetObjectScale {
+                    entity_id: oid,
+                    scale: glam::Vec3::new(
+                        sliders.obj_scale_x.get() as f32,
+                        sliders.obj_scale_y.get() as f32,
+                        sliders.obj_scale_z.get() as f32,
+                    ),
+                });
             }
+
+            // Light properties.
+            let light_id = rinch::core::untracked(|| sliders.bound_light_id.get());
+            if let Some(lid) = light_id {
+                let _ = cmd.0.send(EditorCommand::SetLightPosition {
+                    light_id: lid,
+                    position: glam::Vec3::new(
+                        sliders.light_pos_x.get() as f32,
+                        sliders.light_pos_y.get() as f32,
+                        sliders.light_pos_z.get() as f32,
+                    ),
+                });
+                let _ = cmd.0.send(EditorCommand::SetLightIntensity {
+                    light_id: lid,
+                    intensity: sliders.light_intensity.get() as f32,
+                });
+                let _ = cmd.0.send(EditorCommand::SetLightRange {
+                    light_id: lid,
+                    range: sliders.light_range.get() as f32,
+                });
+            }
+
+            // Toggles.
+            let _ = cmd.0.send(EditorCommand::ToggleAtmosphere {
+                enabled: ui.atmo_enabled.get(),
+            });
+            let _ = cmd.0.send(EditorCommand::ToggleFog {
+                enabled: ui.fog_enabled.get(),
+            });
+            let _ = cmd.0.send(EditorCommand::ToggleClouds {
+                enabled: ui.clouds_enabled.get(),
+            });
+            let _ = cmd.0.send(EditorCommand::ToggleBloom {
+                enabled: ui.bloom_enabled.get(),
+            });
+            let _ = cmd.0.send(EditorCommand::ToggleDof {
+                enabled: ui.dof_enabled.get(),
+            });
+            let _ = cmd.0.send(EditorCommand::SetToneMapMode {
+                mode: ui.tone_map_mode.get(),
+            });
         });
     }
 
     let es = editor_state.clone();
+    let snap = snapshot.clone();
+    let cmd2 = cmd.clone();
     rinch::core::reactive_component_dom(__scope, &root, move |__scope| {
         // Fine-grained signal tracking.
         let _ = ui.selection.get();
         let _ = ui.editor_mode.get();
-        // Env toggle signals — needed because toggle labels are built in this closure.
         let _ = ui.atmo_enabled.get();
         let _ = ui.fog_enabled.get();
         let _ = ui.clouds_enabled.get();
@@ -142,10 +260,10 @@ pub fn RightPanel() -> NodeHandle {
         let _ = ui.dof_enabled.get();
         let _ = ui.tone_map_mode.get();
 
-        let (mode, selected_entity) = match es.lock().ok() {
-            Some(es) => (es.mode, es.selected_entity),
-            None => return __scope.create_element("div"),
-        };
+        let snap_guard = snap.0.load();
+        let mode = snap_guard.mode;
+        // Use signal for selection — snapshot may be stale on the frame of change.
+        let selected_entity = ui.selection.get();
 
         let container = __scope.create_element("div");
         container.set_attribute("style", "display:flex;flex-direction:column;");
@@ -158,8 +276,7 @@ pub fn RightPanel() -> NodeHandle {
                 header.append_child(&__scope.create_text("Sculpt Brush"));
                 container.append_child(&header);
 
-                // Brush type (read-only for now).
-                if let Some(es_lock) = es.lock().ok() {
+                if let Ok(es_lock) = es.lock() {
                     let type_name = match es_lock.sculpt.current_settings.brush_type {
                         crate::sculpt::BrushType::Add => "Add",
                         crate::sculpt::BrushType::Subtract => "Subtract",
@@ -173,29 +290,38 @@ pub fn RightPanel() -> NodeHandle {
                     container.append_child(&row);
                 }
 
-                build_synced_slider(__scope, &container, "Radius", "",
-                    sliders.brush_radius, 0.01, 10.0, 0.01, 2);
-                build_synced_slider(__scope, &container, "Strength", "",
-                    sliders.brush_strength, 0.0, 1.0, 0.01, 2);
-                build_synced_slider(__scope, &container, "Falloff", "",
-                    sliders.brush_falloff, 0.0, 1.0, 0.01, 2);
+                build_synced_slider_row(
+                    __scope, &container, "Radius", "",
+                    sliders.brush_radius, 0.01, 10.0, 0.01, 2,
+                );
+                build_synced_slider_row(
+                    __scope, &container, "Strength", "",
+                    sliders.brush_strength, 0.0, 1.0, 0.01, 2,
+                );
+                build_synced_slider_row(
+                    __scope, &container, "Falloff", "",
+                    sliders.brush_falloff, 0.0, 1.0, 0.01, 2,
+                );
 
-                // Fix SDFs button — recomputes correct SDF magnitudes from zero-crossings.
+                // Fix SDFs button.
                 if let Some(crate::editor_state::SelectedEntity::Object(eid)) = selected_entity {
                     let btn_row = __scope.create_element("div");
                     btn_row.set_attribute("style", "padding: 6px 8px;");
                     let btn = __scope.create_element("button");
-                    btn.set_attribute("style",
+                    btn.set_attribute(
+                        "style",
                         "width:100%; padding:4px 8px; background:#223355; \
                          color:#99ccff; border:1px solid #3355aa; \
-                         border-radius:3px; cursor:pointer; font-size:12px;");
+                         border-radius:3px; cursor:pointer; font-size:12px;",
+                    );
                     btn.append_child(&__scope.create_text("Fix SDFs"));
                     let hid = __scope.register_handler({
-                        let es = es.clone();
+                        let cmd = cmd2.clone();
                         move || {
-                            if let Ok(mut es) = es.lock() {
-                                es.pending_fix_sdfs = Some(eid as u32);
-                            }
+                            let _ =
+                                cmd.0.send(EditorCommand::FixSdfs {
+                                    object_id: eid as u32,
+                                });
                         }
                     });
                     btn.set_attribute("data-rid", &hid.to_string());
@@ -203,13 +329,7 @@ pub fn RightPanel() -> NodeHandle {
                     container.append_child(&btn_row);
                 }
 
-                // Divider.
-                let div = __scope.create_element("div");
-                div.set_attribute(
-                    "style",
-                    DIVIDER_STYLE,
-                );
-                container.append_child(&div);
+                append_divider(__scope, &container);
             }
             EditorMode::Paint => {
                 let header = __scope.create_element("div");
@@ -217,510 +337,56 @@ pub fn RightPanel() -> NodeHandle {
                 header.append_child(&__scope.create_text("Paint Brush"));
                 container.append_child(&header);
 
-                build_synced_slider(__scope, &container, "Radius", "",
-                    sliders.brush_radius, 0.01, 10.0, 0.01, 2);
-                build_synced_slider(__scope, &container, "Strength", "",
-                    sliders.brush_strength, 0.0, 1.0, 0.01, 2);
-                build_synced_slider(__scope, &container, "Falloff", "",
-                    sliders.brush_falloff, 0.0, 1.0, 0.01, 2);
-
-                // Divider.
-                let div = __scope.create_element("div");
-                div.set_attribute(
-                    "style",
-                    DIVIDER_STYLE,
+                build_synced_slider_row(
+                    __scope, &container, "Radius", "",
+                    sliders.brush_radius, 0.01, 10.0, 0.01, 2,
                 );
-                container.append_child(&div);
+                build_synced_slider_row(
+                    __scope, &container, "Strength", "",
+                    sliders.brush_strength, 0.0, 1.0, 0.01, 2,
+                );
+                build_synced_slider_row(
+                    __scope, &container, "Falloff", "",
+                    sliders.brush_falloff, 0.0, 1.0, 0.01, 2,
+                );
+
+                append_divider(__scope, &container);
             }
             EditorMode::Default => {}
         }
 
-        // ── Properties (always shown) ──
+        // ── Properties header ──
         let header = __scope.create_element("div");
         header.set_attribute("style", LABEL_STYLE);
         header.append_child(&__scope.create_text("Properties"));
         container.append_child(&header);
 
-        // ── Camera-specific property editing with sliders ──
+        // ── Camera-specific properties ──
         if let Some(SelectedEntity::Camera) = selected_entity {
-            let pos = es.lock().ok()
-                .map(|es| es.editor_camera.position)
-                .unwrap_or(glam::Vec3::ZERO);
-
-            let name_row = __scope.create_element("div");
-            name_row.set_attribute("style", SECTION_STYLE);
-            name_row.append_child(&__scope.create_text("Camera"));
-            container.append_child(&name_row);
-
-            build_synced_slider(__scope, &container, "FOV", "\u{00b0}",
-                sliders.fov, 30.0, 120.0, 1.0, 0);
-            build_synced_slider(__scope, &container, "Fly Speed", "",
-                sliders.fly_speed, 0.5, 500.0, 0.5, 1);
-            build_synced_slider(__scope, &container, "Near Plane", "",
-                sliders.near, 0.01, 10.0, 0.01, 2);
-            build_synced_slider(__scope, &container, "Far Plane", "",
-                sliders.far, 100.0, 10000.0, 100.0, 0);
-
-            // Divider before position.
-            let div = __scope.create_element("div");
-            div.set_attribute(
-                "style",
-                "height:1px;background:var(--rinch-color-border);margin:6px 12px;",
+            build_camera_properties(
+                __scope, &container, &snap_guard, &sliders, &ui, &cmd2, &es,
             );
-            container.append_child(&div);
-
-            // Position (read-only).
-            let pos_row = __scope.create_element("div");
-            pos_row.set_attribute("style", VALUE_STYLE);
-            pos_row.append_child(&__scope.create_text(
-                &format!("Pos: ({:.1}, {:.1}, {:.1})", pos.x, pos.y, pos.z),
-            ));
-            container.append_child(&pos_row);
-
-            // ── Divider between camera props and environment ──
-            let div = __scope.create_element("div");
-            div.set_attribute(
-                "style",
-                DIVIDER_STYLE,
-            );
-            container.append_child(&div);
-
-            // ── Atmosphere section ──
-            let atmo_header = __scope.create_element("div");
-            atmo_header.set_attribute("style", LABEL_STYLE);
-            atmo_header.append_child(&__scope.create_text("Atmosphere"));
-            container.append_child(&atmo_header);
-
-            build_synced_slider(__scope, &container, "Sun Azimuth", "\u{00b0}",
-                sliders.sun_azimuth, 0.0, 360.0, 1.0, 0);
-            build_synced_slider(__scope, &container, "Sun Elevation", "\u{00b0}",
-                sliders.sun_elevation, -90.0, 90.0, 1.0, 0);
-            build_synced_slider(__scope, &container, "Sun Intensity", "",
-                sliders.sun_intensity, 0.0, 10.0, 0.1, 1);
-
-            // Sun color (read-only display).
-            if let Some(es_lock) = es.lock().ok() {
-                let sc = es_lock.environment.atmosphere.sun_color;
-                let color_row = __scope.create_element("div");
-                color_row.set_attribute("style", VALUE_STYLE);
-                color_row.append_child(&__scope.create_text(
-                    &format!("Sun Color: ({:.2}, {:.2}, {:.2})", sc.x, sc.y, sc.z),
-                ));
-                container.append_child(&color_row);
-            }
-
-            // Atmosphere enable toggle.
-            {
-                let atmo_on = ui.atmo_enabled.get();
-                let toggle_row = __scope.create_element("div");
-                toggle_row.set_attribute(
-                    "style",
-                    "padding:3px 12px;font-size:11px;color:var(--rinch-color-dimmed);\
-                     cursor:pointer;user-select:none;",
-                );
-                let label = if atmo_on { "Atmosphere: ON" } else { "Atmosphere: OFF" };
-                toggle_row.append_child(&__scope.create_text(label));
-                let hid = __scope.register_handler(move || {
-                    ui.atmo_enabled.update(|v| *v = !*v);
-                });
-                toggle_row.set_attribute("data-rid", &hid.to_string());
-                container.append_child(&toggle_row);
-            }
-
-            build_synced_slider(__scope, &container, "Rayleigh Scale", "",
-                sliders.rayleigh_scale, 0.0, 5.0, 0.1, 1);
-            build_synced_slider(__scope, &container, "Mie Scale", "",
-                sliders.mie_scale, 0.0, 5.0, 0.1, 1);
-
-            // ── Fog section ──
-            let fog_header = __scope.create_element("div");
-            fog_header.set_attribute("style", LABEL_STYLE);
-            fog_header.append_child(&__scope.create_text("Fog"));
-            container.append_child(&fog_header);
-
-            // Fog enable toggle.
-            {
-                let fog_on = ui.fog_enabled.get();
-                let toggle_row = __scope.create_element("div");
-                toggle_row.set_attribute(
-                    "style",
-                    "padding:3px 12px;font-size:11px;color:var(--rinch-color-dimmed);\
-                     cursor:pointer;user-select:none;",
-                );
-                let label = if fog_on { "Fog: ON" } else { "Fog: OFF" };
-                toggle_row.append_child(&__scope.create_text(label));
-                let hid = __scope.register_handler(move || {
-                    ui.fog_enabled.update(|v| *v = !*v);
-                });
-                toggle_row.set_attribute("data-rid", &hid.to_string());
-                container.append_child(&toggle_row);
-            }
-
-            build_synced_slider(__scope, &container, "Fog Density", "",
-                sliders.fog_density, 0.0, 0.5, 0.001, 3);
-            build_synced_slider(__scope, &container, "Height Falloff", "",
-                sliders.fog_height_falloff, 0.0, 1.0, 0.01, 2);
-            build_synced_slider(__scope, &container, "Dust Density", "",
-                sliders.dust_density, 0.0, 0.1, 0.001, 3);
-            build_synced_slider(__scope, &container, "Dust Asymmetry", "",
-                sliders.dust_asymmetry, 0.0, 0.95, 0.05, 2);
-
-            // ── Clouds section ──
-            let cloud_header = __scope.create_element("div");
-            cloud_header.set_attribute("style", LABEL_STYLE);
-            cloud_header.append_child(&__scope.create_text("Clouds"));
-            container.append_child(&cloud_header);
-
-            // Cloud enable toggle.
-            {
-                let cloud_on = ui.clouds_enabled.get();
-                let toggle_row = __scope.create_element("div");
-                toggle_row.set_attribute(
-                    "style",
-                    "padding:3px 12px;font-size:11px;color:var(--rinch-color-dimmed);\
-                     cursor:pointer;user-select:none;",
-                );
-                let label = if cloud_on { "Clouds: ON" } else { "Clouds: OFF" };
-                toggle_row.append_child(&__scope.create_text(label));
-                let hid = __scope.register_handler(move || {
-                    ui.clouds_enabled.update(|v| *v = !*v);
-                });
-                toggle_row.set_attribute("data-rid", &hid.to_string());
-                container.append_child(&toggle_row);
-            }
-
-            build_synced_slider(__scope, &container, "Coverage", "",
-                sliders.cloud_coverage, 0.0, 1.0, 0.01, 2);
-            build_synced_slider(__scope, &container, "Cloud Density", "",
-                sliders.cloud_density, 0.0, 5.0, 0.1, 1);
-            build_synced_slider(__scope, &container, "Altitude", "m",
-                sliders.cloud_altitude, 0.0, 5000.0, 50.0, 0);
-            build_synced_slider(__scope, &container, "Thickness", "m",
-                sliders.cloud_thickness, 10.0, 10000.0, 50.0, 0);
-            build_synced_slider(__scope, &container, "Wind Speed", "",
-                sliders.cloud_wind_speed, 0.0, 50.0, 0.5, 1);
-
-            // ── Post-Processing section ──
-            let pp_header = __scope.create_element("div");
-            pp_header.set_attribute("style", LABEL_STYLE);
-            pp_header.append_child(&__scope.create_text("Post-Processing"));
-            container.append_child(&pp_header);
-
-            // Bloom enable toggle.
-            {
-                let bloom_on = ui.bloom_enabled.get();
-                let toggle_row = __scope.create_element("div");
-                toggle_row.set_attribute(
-                    "style",
-                    "padding:3px 12px;font-size:11px;color:var(--rinch-color-dimmed);\
-                     cursor:pointer;user-select:none;",
-                );
-                let label = if bloom_on { "Bloom: ON" } else { "Bloom: OFF" };
-                toggle_row.append_child(&__scope.create_text(label));
-                let hid = __scope.register_handler(move || {
-                    ui.bloom_enabled.update(|v| *v = !*v);
-                });
-                toggle_row.set_attribute("data-rid", &hid.to_string());
-                container.append_child(&toggle_row);
-            }
-
-            build_synced_slider(__scope, &container, "Bloom Intensity", "",
-                sliders.bloom_intensity, 0.0, 2.0, 0.01, 2);
-            build_synced_slider(__scope, &container, "Bloom Threshold", "",
-                sliders.bloom_threshold, 0.0, 5.0, 0.1, 1);
-            build_synced_slider(__scope, &container, "Exposure", "",
-                sliders.exposure, 0.1, 10.0, 0.1, 1);
-
-            // Tone map mode toggle (ACES / AgX).
-            {
-                let tm_mode = ui.tone_map_mode.get();
-                let toggle_row = __scope.create_element("div");
-                toggle_row.set_attribute(
-                    "style",
-                    "padding:3px 12px;font-size:11px;color:var(--rinch-color-dimmed);\
-                     cursor:pointer;user-select:none;",
-                );
-                let label = if tm_mode == 0 { "Tone Map: ACES" } else { "Tone Map: AgX" };
-                toggle_row.append_child(&__scope.create_text(label));
-                let hid = __scope.register_handler(move || {
-                    ui.tone_map_mode.update(|v| *v = if *v == 0 { 1 } else { 0 });
-                });
-                toggle_row.set_attribute("data-rid", &hid.to_string());
-                container.append_child(&toggle_row);
-            }
-
-            build_synced_slider(__scope, &container, "Sharpen", "",
-                sliders.sharpen, 0.0, 2.0, 0.05, 2);
-
-            // DoF enable toggle.
-            {
-                let dof_on = ui.dof_enabled.get();
-                let toggle_row = __scope.create_element("div");
-                toggle_row.set_attribute(
-                    "style",
-                    "padding:3px 12px;font-size:11px;color:var(--rinch-color-dimmed);\
-                     cursor:pointer;user-select:none;",
-                );
-                let label = if dof_on { "DoF: ON" } else { "DoF: OFF" };
-                toggle_row.append_child(&__scope.create_text(label));
-                let hid = __scope.register_handler(move || {
-                    ui.dof_enabled.update(|v| *v = !*v);
-                });
-                toggle_row.set_attribute("data-rid", &hid.to_string());
-                container.append_child(&toggle_row);
-            }
-
-            build_synced_slider(__scope, &container, "Focus Distance", "",
-                sliders.dof_focus_dist, 0.1, 50.0, 0.1, 1);
-            build_synced_slider(__scope, &container, "Focus Range", "",
-                sliders.dof_focus_range, 0.1, 20.0, 0.1, 1);
-            build_synced_slider(__scope, &container, "Max CoC", "px",
-                sliders.dof_max_coc, 1.0, 32.0, 1.0, 0);
-            build_synced_slider(__scope, &container, "Motion Blur", "",
-                sliders.motion_blur, 0.0, 3.0, 0.1, 1);
-            build_synced_slider(__scope, &container, "God Rays", "",
-                sliders.god_rays, 0.0, 2.0, 0.05, 2);
-            build_synced_slider(__scope, &container, "Vignette", "",
-                sliders.vignette, 0.0, 1.0, 0.01, 2);
-            build_synced_slider(__scope, &container, "Grain", "",
-                sliders.grain, 0.0, 1.0, 0.01, 2);
-            build_synced_slider(__scope, &container, "Chromatic Ab.", "",
-                sliders.chromatic_ab, 0.0, 1.0, 0.01, 2);
-
-            // ── Animation controls ──
-            {
-                let div = __scope.create_element("div");
-                div.set_attribute(
-                    "style",
-                    DIVIDER_STYLE,
-                );
-                container.append_child(&div);
-
-                let hdr = __scope.create_element("div");
-                hdr.set_attribute("style", SECTION_STYLE);
-                hdr.append_child(&__scope.create_text("Animation"));
-                container.append_child(&hdr);
-
-                // Play / Pause / Stop buttons.
-                let btn_row = __scope.create_element("div");
-                btn_row.set_attribute("style", "display:flex;gap:6px;padding:2px 12px;");
-
-                for (label, state) in [
-                    ("Play", crate::animation_preview::PlaybackState::Playing),
-                    ("Pause", crate::animation_preview::PlaybackState::Paused),
-                    ("Stop", crate::animation_preview::PlaybackState::Stopped),
-                ] {
-                    let btn = __scope.create_element("div");
-                    let is_active = es.lock()
-                        .map(|e| e.animation.playback_state == state)
-                        .unwrap_or(false);
-                    let bg = if is_active { "var(--rinch-primary-color)" } else { "var(--rinch-color-dark-7)" };
-                    btn.set_attribute("style", &format!(
-                        "padding:2px 8px;border-radius:3px;cursor:pointer;\
-                         background:{bg};font-size:11px;color:var(--rinch-color-text);",
-                    ));
-                    btn.append_child(&__scope.create_text(label));
-
-                    let hid = __scope.register_handler({
-                        let es = es.clone();
-                        move || {
-                            let anim_val = match state {
-                                crate::animation_preview::PlaybackState::Stopped => 0u32,
-                                crate::animation_preview::PlaybackState::Playing => 1,
-                                crate::animation_preview::PlaybackState::Paused => 2,
-                            };
-                            if let Ok(mut es) = es.lock() {
-                                es.animation.playback_state = state;
-                                if matches!(state, crate::animation_preview::PlaybackState::Stopped) {
-                                    es.animation.current_time = 0.0;
-                                }
-                            }
-                            ui.animation_state.set(anim_val);
-                        }
-                    });
-                    btn.set_attribute("data-rid", &hid.to_string());
-                    btn_row.append_child(&btn);
-                }
-                container.append_child(&btn_row);
-
-                let anim_speed_signal: Signal<f64> = Signal::new(
-                    es.lock().ok().map(|e| e.animation.speed as f64).unwrap_or(1.0),
-                );
-
-                build_slider_row(
-                    __scope, &container, "Speed", "x", anim_speed_signal,
-                    0.0, 4.0, 0.1, 1,
-                    { let es = es.clone(); move |v| {
-                        if let Ok(mut es) = es.lock() {
-                            es.animation.speed = v as f32;
-                        }
-                    }},
-                );
-            }
         } else {
             // ── Non-camera entity properties ──
             match selected_entity {
                 Some(SelectedEntity::Object(eid)) => {
-                    // Read object info + transform from world scene.
-                    let obj_info = es.lock().ok().and_then(|es_lock| {
-                        let scene = es_lock.world.scene();
-                        let obj = scene.objects.iter().find(|o| o.id as u64 == eid)?;
-                        let name = obj.name.clone();
-                        let child_count = scene.objects.iter()
-                            .filter(|o| o.parent_id == Some(obj.id))
-                            .count();
-                        let (x, y, z) = obj.rotation.to_euler(glam::EulerRot::XYZ);
-                        let is_vox = matches!(
-                            obj.root_node.sdf_source,
-                            rkf_core::scene_node::SdfSource::Voxelized { .. }
-                        );
-                        let non_uniform = (obj.scale - glam::Vec3::ONE).length() > 1e-4;
-                        let xf = Some((
-                            obj.position,
-                            glam::Vec3::new(x.to_degrees(), y.to_degrees(), z.to_degrees()),
-                            obj.scale,
-                        ));
-                        let show_revoxelize = is_vox && non_uniform;
-                        Some((name, child_count, xf, show_revoxelize))
-                    });
-
-                    if let Some((name, child_count, xf, show_revoxelize)) = obj_info {
-                        // Name.
-                        let name_row = __scope.create_element("div");
-                        name_row.set_attribute("style", SECTION_STYLE);
-                        name_row.append_child(&__scope.create_text(&name));
-                        container.append_child(&name_row);
-
-                        // Entity ID.
-                        let id_row = __scope.create_element("div");
-                        id_row.set_attribute("style", VALUE_STYLE);
-                        id_row.append_child(
-                            &__scope.create_text(&format!("Entity ID: {eid}")),
-                        );
-                        container.append_child(&id_row);
-
-                        if child_count > 0 {
-                            let cr = __scope.create_element("div");
-                            cr.set_attribute("style", VALUE_STYLE);
-                            cr.append_child(
-                                &__scope.create_text(&format!("Children: {child_count}")),
-                            );
-                            container.append_child(&cr);
-                        }
-
-                        // Transform sliders (only when scene object found).
-                        if xf.is_some() {
-                            let div = __scope.create_element("div");
-                            div.set_attribute("style", DIVIDER_STYLE);
-                            container.append_child(&div);
-
-                            let xf_hdr = __scope.create_element("div");
-                            xf_hdr.set_attribute("style", LABEL_STYLE);
-                            xf_hdr.append_child(&__scope.create_text("Transform"));
-                            container.append_child(&xf_hdr);
-
-                            // Position — uses centralized SliderSignals (batch sync).
-                            build_synced_slider(__scope, &container, "Position X", "",
-                                sliders.obj_pos_x, -500.0, 500.0, 0.01, 2);
-                            build_synced_slider(__scope, &container, "Position Y", "",
-                                sliders.obj_pos_y, -500.0, 500.0, 0.01, 2);
-                            build_synced_slider(__scope, &container, "Position Z", "",
-                                sliders.obj_pos_z, -500.0, 500.0, 0.01, 2);
-
-                            // Rotation (Euler XYZ degrees).
-                            build_synced_slider(__scope, &container, "Rotation X", "\u{00b0}",
-                                sliders.obj_rot_x, -180.0, 180.0, 0.5, 1);
-                            build_synced_slider(__scope, &container, "Rotation Y", "\u{00b0}",
-                                sliders.obj_rot_y, -180.0, 180.0, 0.5, 1);
-                            build_synced_slider(__scope, &container, "Rotation Z", "\u{00b0}",
-                                sliders.obj_rot_z, -180.0, 180.0, 0.5, 1);
-
-                            // Scale X/Y/Z.
-                            build_synced_slider(__scope, &container, "Scale X", "",
-                                sliders.obj_scale_x, 0.01, 50.0, 0.01, 2);
-                            build_synced_slider(__scope, &container, "Scale Y", "",
-                                sliders.obj_scale_y, 0.01, 50.0, 0.01, 2);
-                            build_synced_slider(__scope, &container, "Scale Z", "",
-                                sliders.obj_scale_z, 0.01, 50.0, 0.01, 2);
-
-                            // Re-voxelize button (only for voxelized objects with non-uniform scale).
-                            if show_revoxelize {
-                                let btn_row = __scope.create_element("div");
-                                btn_row.set_attribute("style", "padding: 6px 8px;");
-                                let btn = __scope.create_element("button");
-                                btn.set_attribute("style",
-                                    "width:100%; padding:4px 8px; background:#553322; \
-                                     color:#ffcc99; border:1px solid #774433; \
-                                     border-radius:3px; cursor:pointer; font-size:12px;");
-                                btn.append_child(
-                                    &__scope.create_text("Re-voxelize (bake scale)"),
-                                );
-                                let hid = __scope.register_handler({
-                                    let es = es.clone();
-                                    move || {
-                                        if let Ok(mut es) = es.lock() {
-                                            es.pending_revoxelize = Some(eid as u32);
-                                        }
-                                    }
-                                });
-                                btn.set_attribute("data-rid", &hid.to_string());
-                                btn_row.append_child(&btn);
-                                container.append_child(&btn_row);
-                            }
-                        }
-                    }
+                    build_object_properties(
+                        __scope, &container, eid, &snap_guard, &sliders, &cmd2, &es,
+                    );
                 }
                 Some(SelectedEntity::Light(lid)) => {
-                    // Read light data.
-                    let light_data = es.lock().ok().and_then(|es_lock| {
-                        es_lock.light_editor.get_light(lid).map(|light| {
-                            (light.intensity, light.range, light.light_type, light.position)
-                        })
-                    });
-                    if let Some((_intensity, _range, light_type, _position)) = light_data {
-                        let type_name = match light_type {
-                            crate::light_editor::EditorLightType::Point => "Point Light",
-                            crate::light_editor::EditorLightType::Spot => "Spot Light",
-                        };
-                        let hdr = __scope.create_element("div");
-                        hdr.set_attribute("style", SECTION_STYLE);
-                        hdr.append_child(&__scope.create_text(type_name));
-                        container.append_child(&hdr);
-
-                        // Position — uses centralized SliderSignals (batch sync).
-                        build_synced_slider(__scope, &container, "Position X", "",
-                            sliders.light_pos_x, -500.0, 500.0, 0.01, 2);
-                        build_synced_slider(__scope, &container, "Position Y", "",
-                            sliders.light_pos_y, -500.0, 500.0, 0.01, 2);
-                        build_synced_slider(__scope, &container, "Position Z", "",
-                            sliders.light_pos_z, -500.0, 500.0, 0.01, 2);
-
-                        let div = __scope.create_element("div");
-                        div.set_attribute("style", DIVIDER_STYLE);
-                        container.append_child(&div);
-
-                        // Intensity and range — uses centralized SliderSignals.
-                        build_synced_slider(__scope, &container, "Intensity", "",
-                            sliders.light_intensity, 0.0, 50.0, 0.1, 1);
-                        build_synced_slider(__scope, &container, "Range", "m",
-                            sliders.light_range, 0.1, 100.0, 0.5, 1);
-                    }
+                    build_light_properties(__scope, &container, lid, &snap_guard, &sliders);
                 }
                 Some(SelectedEntity::Scene) => {
-                    let name = es.lock().ok()
-                        .map(|e| e.world.scene().name.clone())
-                        .unwrap_or_else(|| "Scene".to_string());
-                    let count = es.lock().ok().map(|e| e.world.scene().objects.len()).unwrap_or(0);
-
                     let name_row = __scope.create_element("div");
                     name_row.set_attribute("style", SECTION_STYLE);
-                    name_row.append_child(&__scope.create_text(&name));
+                    name_row.append_child(&__scope.create_text(&snap_guard.scene_name));
                     container.append_child(&name_row);
 
                     let detail = __scope.create_element("div");
                     detail.set_attribute("style", VALUE_STYLE);
                     detail.append_child(
-                        &__scope.create_text(&format!("{count} objects")),
+                        &__scope.create_text(&format!("{} objects", snap_guard.object_count)),
                     );
                     container.append_child(&detail);
                 }
@@ -746,4 +412,456 @@ pub fn RightPanel() -> NodeHandle {
     });
 
     root
+}
+
+// ── Helper: divider ──────────────────────────────────────────────────────────
+
+fn append_divider(scope: &mut RenderScope, container: &NodeHandle) {
+    let div = scope.create_element("div");
+    div.set_attribute("style", DIVIDER_STYLE);
+    container.append_child(&div);
+}
+
+// ── Camera properties ────────────────────────────────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+fn build_camera_properties(
+    scope: &mut RenderScope,
+    container: &NodeHandle,
+    snap_guard: &crate::ui_snapshot::UiSnapshot,
+    sliders: &SliderSignals,
+    ui: &UiSignals,
+    cmd: &CommandSender,
+    _es: &Arc<Mutex<EditorState>>,
+) {
+    let pos = snap_guard.camera_position;
+
+    let name_row = scope.create_element("div");
+    name_row.set_attribute("style", SECTION_STYLE);
+    name_row.append_child(&scope.create_text("Camera"));
+    container.append_child(&name_row);
+
+    build_synced_slider_row(scope, container, "FOV", "\u{00b0}", sliders.fov, 30.0, 120.0, 1.0, 0);
+    build_synced_slider_row(scope, container, "Fly Speed", "", sliders.fly_speed, 0.5, 500.0, 0.5, 1);
+    build_synced_slider_row(scope, container, "Near Plane", "", sliders.near, 0.01, 10.0, 0.01, 2);
+    build_synced_slider_row(scope, container, "Far Plane", "", sliders.far, 100.0, 10000.0, 100.0, 0);
+
+    append_divider(scope, container);
+
+    // Position (read-only).
+    let pos_row = scope.create_element("div");
+    pos_row.set_attribute("style", VALUE_STYLE);
+    pos_row.append_child(
+        &scope.create_text(&format!("Pos: ({:.1}, {:.1}, {:.1})", pos.x, pos.y, pos.z)),
+    );
+    container.append_child(&pos_row);
+
+    append_divider(scope, container);
+
+    // ── Atmosphere ──
+    let atmo_header = scope.create_element("div");
+    atmo_header.set_attribute("style", LABEL_STYLE);
+    atmo_header.append_child(&scope.create_text("Atmosphere"));
+    container.append_child(&atmo_header);
+
+    build_synced_slider_row(scope, container, "Sun Azimuth", "\u{00b0}", sliders.sun_azimuth, 0.0, 360.0, 1.0, 0);
+    build_synced_slider_row(scope, container, "Sun Elevation", "\u{00b0}", sliders.sun_elevation, -90.0, 90.0, 1.0, 0);
+    build_synced_slider_row(scope, container, "Sun Intensity", "", sliders.sun_intensity, 0.0, 10.0, 0.1, 1);
+
+    // Atmosphere toggle.
+    let toggle = ToggleRow {
+        label: "Atmosphere".to_string(),
+        enabled: Some(ui.atmo_enabled),
+    };
+    container.append_child(&toggle.render(scope, &[]));
+
+    build_synced_slider_row(scope, container, "Rayleigh Scale", "", sliders.rayleigh_scale, 0.0, 5.0, 0.1, 1);
+    build_synced_slider_row(scope, container, "Mie Scale", "", sliders.mie_scale, 0.0, 5.0, 0.1, 1);
+
+    // ── Fog ──
+    let fog_header = scope.create_element("div");
+    fog_header.set_attribute("style", LABEL_STYLE);
+    fog_header.append_child(&scope.create_text("Fog"));
+    container.append_child(&fog_header);
+
+    let fog_toggle = ToggleRow {
+        label: "Fog".to_string(),
+        enabled: Some(ui.fog_enabled),
+    };
+    container.append_child(&fog_toggle.render(scope, &[]));
+
+    build_synced_slider_row(scope, container, "Fog Density", "", sliders.fog_density, 0.0, 0.5, 0.001, 3);
+    build_synced_slider_row(scope, container, "Height Falloff", "", sliders.fog_height_falloff, 0.0, 1.0, 0.01, 2);
+    build_synced_slider_row(scope, container, "Dust Density", "", sliders.dust_density, 0.0, 0.1, 0.001, 3);
+    build_synced_slider_row(scope, container, "Dust Asymmetry", "", sliders.dust_asymmetry, 0.0, 0.95, 0.05, 2);
+
+    // ── Clouds ──
+    let cloud_header = scope.create_element("div");
+    cloud_header.set_attribute("style", LABEL_STYLE);
+    cloud_header.append_child(&scope.create_text("Clouds"));
+    container.append_child(&cloud_header);
+
+    let cloud_toggle = ToggleRow {
+        label: "Clouds".to_string(),
+        enabled: Some(ui.clouds_enabled),
+    };
+    container.append_child(&cloud_toggle.render(scope, &[]));
+
+    build_synced_slider_row(scope, container, "Coverage", "", sliders.cloud_coverage, 0.0, 1.0, 0.01, 2);
+    build_synced_slider_row(scope, container, "Cloud Density", "", sliders.cloud_density, 0.0, 5.0, 0.1, 1);
+    build_synced_slider_row(scope, container, "Altitude", "m", sliders.cloud_altitude, 0.0, 5000.0, 50.0, 0);
+    build_synced_slider_row(scope, container, "Thickness", "m", sliders.cloud_thickness, 10.0, 10000.0, 50.0, 0);
+    build_synced_slider_row(scope, container, "Wind Speed", "", sliders.cloud_wind_speed, 0.0, 50.0, 0.5, 1);
+
+    // ── Post-Processing ──
+    let pp_header = scope.create_element("div");
+    pp_header.set_attribute("style", LABEL_STYLE);
+    pp_header.append_child(&scope.create_text("Post-Processing"));
+    container.append_child(&pp_header);
+
+    let bloom_toggle = ToggleRow {
+        label: "Bloom".to_string(),
+        enabled: Some(ui.bloom_enabled),
+    };
+    container.append_child(&bloom_toggle.render(scope, &[]));
+
+    build_synced_slider_row(scope, container, "Bloom Intensity", "", sliders.bloom_intensity, 0.0, 2.0, 0.01, 2);
+    build_synced_slider_row(scope, container, "Bloom Threshold", "", sliders.bloom_threshold, 0.0, 5.0, 0.1, 1);
+    build_synced_slider_row(scope, container, "Exposure", "", sliders.exposure, 0.1, 10.0, 0.1, 1);
+
+    // Tone map mode toggle (ACES / AgX).
+    {
+        let tm_mode = ui.tone_map_mode.get();
+        let tm_signal = ui.tone_map_mode;
+        let toggle_row = scope.create_element("div");
+        toggle_row.set_attribute(
+            "style",
+            "padding:3px 12px;font-size:11px;color:var(--rinch-color-dimmed);\
+             cursor:pointer;user-select:none;",
+        );
+        let label = if tm_mode == 0 {
+            "Tone Map: ACES"
+        } else {
+            "Tone Map: AgX"
+        };
+        toggle_row.append_child(&scope.create_text(label));
+        let hid = scope.register_handler(move || {
+            tm_signal.update(|v| *v = if *v == 0 { 1 } else { 0 });
+        });
+        toggle_row.set_attribute("data-rid", &hid.to_string());
+        container.append_child(&toggle_row);
+    }
+
+    build_synced_slider_row(scope, container, "Sharpen", "", sliders.sharpen, 0.0, 2.0, 0.05, 2);
+
+    let dof_toggle = ToggleRow {
+        label: "DoF".to_string(),
+        enabled: Some(ui.dof_enabled),
+    };
+    container.append_child(&dof_toggle.render(scope, &[]));
+
+    build_synced_slider_row(scope, container, "Focus Distance", "", sliders.dof_focus_dist, 0.1, 50.0, 0.1, 1);
+    build_synced_slider_row(scope, container, "Focus Range", "", sliders.dof_focus_range, 0.1, 20.0, 0.1, 1);
+    build_synced_slider_row(scope, container, "Max CoC", "px", sliders.dof_max_coc, 1.0, 32.0, 1.0, 0);
+    build_synced_slider_row(scope, container, "Motion Blur", "", sliders.motion_blur, 0.0, 3.0, 0.1, 1);
+    build_synced_slider_row(scope, container, "God Rays", "", sliders.god_rays, 0.0, 2.0, 0.05, 2);
+    build_synced_slider_row(scope, container, "Vignette", "", sliders.vignette, 0.0, 1.0, 0.01, 2);
+    build_synced_slider_row(scope, container, "Grain", "", sliders.grain, 0.0, 1.0, 0.01, 2);
+    build_synced_slider_row(scope, container, "Chromatic Ab.", "", sliders.chromatic_ab, 0.0, 1.0, 0.01, 2);
+
+    // ── Animation controls ──
+    append_divider(scope, container);
+
+    let anim_hdr = scope.create_element("div");
+    anim_hdr.set_attribute("style", SECTION_STYLE);
+    anim_hdr.append_child(&scope.create_text("Animation"));
+    container.append_child(&anim_hdr);
+
+    // Play / Pause / Stop buttons.
+    let btn_row = scope.create_element("div");
+    btn_row.set_attribute("style", "display:flex;gap:6px;padding:2px 12px;");
+    let anim_state_signal = ui.animation_state;
+
+    for (label, state) in [
+        (
+            "Play",
+            crate::animation_preview::PlaybackState::Playing,
+        ),
+        (
+            "Pause",
+            crate::animation_preview::PlaybackState::Paused,
+        ),
+        (
+            "Stop",
+            crate::animation_preview::PlaybackState::Stopped,
+        ),
+    ] {
+        let btn = scope.create_element("div");
+        let state_val = match state {
+            crate::animation_preview::PlaybackState::Stopped => 0u32,
+            crate::animation_preview::PlaybackState::Playing => 1,
+            crate::animation_preview::PlaybackState::Paused => 2,
+        };
+        let is_active = snap_guard.animation_state == state_val;
+        let bg = if is_active {
+            "var(--rinch-primary-color)"
+        } else {
+            "var(--rinch-color-dark-7)"
+        };
+        btn.set_attribute(
+            "style",
+            &format!(
+                "padding:2px 8px;border-radius:3px;cursor:pointer;\
+                 background:{bg};font-size:11px;color:var(--rinch-color-text);",
+            ),
+        );
+        btn.append_child(&scope.create_text(label));
+
+        let hid = scope.register_handler({
+            let cmd = cmd.clone();
+            move || {
+                let anim_val = match state {
+                    crate::animation_preview::PlaybackState::Stopped => 0u32,
+                    crate::animation_preview::PlaybackState::Playing => 1,
+                    crate::animation_preview::PlaybackState::Paused => 2,
+                };
+                let _ = cmd.0.send(EditorCommand::SetAnimationState { state: anim_val });
+                anim_state_signal.set(anim_val);
+            }
+        });
+        btn.set_attribute("data-rid", &hid.to_string());
+        btn_row.append_child(&btn);
+    }
+    container.append_child(&btn_row);
+
+    let anim_speed_signal: Signal<f64> = Signal::new(snap_guard.animation_speed as f64);
+
+    build_slider_row(
+        scope,
+        container,
+        "Speed",
+        "x",
+        anim_speed_signal,
+        0.0,
+        4.0,
+        0.1,
+        1,
+        {
+            let cmd = cmd.clone();
+            move |v| {
+                let _ = cmd.0.send(EditorCommand::SetAnimationSpeed { speed: v as f32 });
+            }
+        },
+    );
+}
+
+// ── Object properties ────────────────────────────────────────────────────────
+
+fn build_object_properties(
+    scope: &mut RenderScope,
+    container: &NodeHandle,
+    eid: u64,
+    snap_guard: &crate::ui_snapshot::UiSnapshot,
+    sliders: &SliderSignals,
+    cmd: &CommandSender,
+    es: &Arc<Mutex<EditorState>>,
+) {
+    let obj_info = snap_guard.objects.iter().find(|o| o.id == eid).map(|o| {
+        let name = o.name.clone();
+        let child_count = snap_guard
+            .objects
+            .iter()
+            .filter(|c| c.parent_id.map(|p| p as u64) == Some(eid))
+            .count();
+        let has_xf = true;
+        let show_revoxelize = es
+            .lock()
+            .ok()
+            .map(|es_lock| {
+                es_lock
+                    .world
+                    .scene()
+                    .objects
+                    .iter()
+                    .find(|obj| obj.id as u64 == eid)
+                    .map(|obj| {
+                        let is_vox = matches!(
+                            obj.root_node.sdf_source,
+                            rkf_core::scene_node::SdfSource::Voxelized { .. }
+                        );
+                        let non_uniform = (obj.scale - glam::Vec3::ONE).length() > 1e-4;
+                        is_vox && non_uniform
+                    })
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        (name, child_count, has_xf, show_revoxelize)
+    });
+
+    if let Some((name, child_count, _has_xf, show_revoxelize)) = obj_info {
+        // Name.
+        let name_row = scope.create_element("div");
+        name_row.set_attribute("style", SECTION_STYLE);
+        name_row.append_child(&scope.create_text(&name));
+        container.append_child(&name_row);
+
+        // Entity ID.
+        let id_row = scope.create_element("div");
+        id_row.set_attribute("style", VALUE_STYLE);
+        id_row.append_child(&scope.create_text(&format!("Entity ID: {eid}")));
+        container.append_child(&id_row);
+
+        if child_count > 0 {
+            let cr = scope.create_element("div");
+            cr.set_attribute("style", VALUE_STYLE);
+            cr.append_child(&scope.create_text(&format!("Children: {child_count}")));
+            container.append_child(&cr);
+        }
+
+        // Transform editor.
+        append_divider(scope, container);
+
+        let xf_hdr = scope.create_element("div");
+        xf_hdr.set_attribute("style", LABEL_STYLE);
+        xf_hdr.append_child(&scope.create_text("Transform"));
+        container.append_child(&xf_hdr);
+
+        let transform = TransformEditor {
+            pos_x: sliders.obj_pos_x,
+            pos_y: sliders.obj_pos_y,
+            pos_z: sliders.obj_pos_z,
+            rot_x: sliders.obj_rot_x,
+            rot_y: sliders.obj_rot_y,
+            rot_z: sliders.obj_rot_z,
+            scale_x: sliders.obj_scale_x,
+            scale_y: sliders.obj_scale_y,
+            scale_z: sliders.obj_scale_z,
+        };
+        let xf_node = rinch::core::untracked(|| transform.render(scope, &[]));
+        container.append_child(&xf_node);
+
+        // Re-voxelize button.
+        if show_revoxelize {
+            let btn_row = scope.create_element("div");
+            btn_row.set_attribute("style", "padding: 6px 8px;");
+            let btn = scope.create_element("button");
+            btn.set_attribute(
+                "style",
+                "width:100%; padding:4px 8px; background:#553322; \
+                 color:#ffcc99; border:1px solid #774433; \
+                 border-radius:3px; cursor:pointer; font-size:12px;",
+            );
+            btn.append_child(&scope.create_text("Re-voxelize (bake scale)"));
+            let hid = scope.register_handler({
+                let cmd = cmd.clone();
+                move || {
+                    let _ = cmd.0.send(EditorCommand::Revoxelize {
+                        object_id: eid as u32,
+                    });
+                }
+            });
+            btn.set_attribute("data-rid", &hid.to_string());
+            btn_row.append_child(&btn);
+            container.append_child(&btn_row);
+        }
+    }
+}
+
+// ── Light properties ─────────────────────────────────────────────────────────
+
+fn build_light_properties(
+    scope: &mut RenderScope,
+    container: &NodeHandle,
+    lid: u64,
+    snap_guard: &crate::ui_snapshot::UiSnapshot,
+    sliders: &SliderSignals,
+) {
+    let light_data = snap_guard.lights.iter().find(|l| l.id == lid);
+    if let Some(light) = light_data {
+        let type_name = match light.light_type {
+            crate::light_editor::EditorLightType::Point => "Point Light",
+            crate::light_editor::EditorLightType::Spot => "Spot Light",
+        };
+        let hdr = scope.create_element("div");
+        hdr.set_attribute("style", SECTION_STYLE);
+        hdr.append_child(&scope.create_text(type_name));
+        container.append_child(&hdr);
+
+        // Position — Vec3Editor with colored axis labels.
+        let pos_label = scope.create_element("div");
+        pos_label.set_attribute("style", LABEL_STYLE);
+        pos_label.append_child(&scope.create_text("Position"));
+        container.append_child(&pos_label);
+
+        let pos_editor = Vec3Editor {
+            x: sliders.light_pos_x,
+            y: sliders.light_pos_y,
+            z: sliders.light_pos_z,
+            step: 0.01,
+            min: -500.0,
+            max: 500.0,
+            decimals: 2,
+            suffix: String::new(),
+        };
+        let pos_row = scope.create_element("div");
+        pos_row.set_attribute("style", "padding: 2px 12px;");
+        let pos_node = rinch::core::untracked(|| pos_editor.render(scope, &[]));
+        pos_row.append_child(&pos_node);
+        container.append_child(&pos_row);
+
+        append_divider(scope, container);
+
+        // Intensity — DragValue.
+        let int_label_row = scope.create_element("div");
+        int_label_row.set_attribute(
+            "style",
+            "display:flex;align-items:center;padding:2px 12px;gap:8px;",
+        );
+        let int_label = scope.create_element("span");
+        int_label.set_attribute(
+            "style",
+            "font-size:11px;color:var(--rinch-color-dimmed);min-width:56px;",
+        );
+        int_label.append_child(&scope.create_text("Intensity"));
+        int_label_row.append_child(&int_label);
+
+        let int_dv = DragValue {
+            value: sliders.light_intensity,
+            step: 0.1,
+            min: 0.0,
+            max: 50.0,
+            decimals: 1,
+            ..Default::default()
+        };
+        let int_node = rinch::core::untracked(|| int_dv.render(scope, &[]));
+        int_label_row.append_child(&int_node);
+        container.append_child(&int_label_row);
+
+        // Range — DragValue.
+        let range_label_row = scope.create_element("div");
+        range_label_row.set_attribute(
+            "style",
+            "display:flex;align-items:center;padding:2px 12px;gap:8px;",
+        );
+        let range_label = scope.create_element("span");
+        range_label.set_attribute(
+            "style",
+            "font-size:11px;color:var(--rinch-color-dimmed);min-width:56px;",
+        );
+        range_label.append_child(&scope.create_text("Range"));
+        range_label_row.append_child(&range_label);
+
+        let range_dv = DragValue {
+            value: sliders.light_range,
+            step: 0.5,
+            min: 0.1,
+            max: 100.0,
+            decimals: 1,
+            suffix: "m".to_string(),
+            ..Default::default()
+        };
+        let range_node = rinch::core::untracked(|| range_dv.render(scope, &[]));
+        range_label_row.append_child(&range_node);
+        container.append_child(&range_label_row);
+    }
 }

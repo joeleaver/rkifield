@@ -2,18 +2,26 @@
 
 use std::sync::{Arc, Mutex};
 
-use rinch::prelude::*;
+use rinch::render_surface::{GpuTextureRegistrar, SurfaceWriter};
 
 use crate::automation::SharedState;
+use crate::editor_command::EditorCommand;
 use crate::editor_state::{EditorState, UiSignals};
 use crate::engine::EditorEngine;
 use crate::engine_viewport::{DISPLAY_HEIGHT, DISPLAY_WIDTH};
+use crate::ui_snapshot::UiSnapshot;
 
 /// Data bundle passed to the engine thread.
 pub(crate) struct EngineThreadData {
     pub(crate) editor_state: Arc<Mutex<EditorState>>,
     pub(crate) shared_state: Arc<Mutex<SharedState>>,
-    /// Send-able handle for registering the engine's GPU texture with the compositor.
+    /// Receiver for UI→engine commands (replaces many direct EditorState locks).
+    pub(crate) cmd_rx: crossbeam::channel::Receiver<EditorCommand>,
+    /// Lock-free snapshot published each frame for the UI thread to read.
+    pub(crate) ui_snapshot: Arc<arc_swap::ArcSwap<UiSnapshot>>,
+    /// CPU pixel writer for submitting rendered frames to the compositor.
+    pub(crate) surface_writer: SurfaceWriter,
+    /// GPU texture registrar — provides layout size and texture submission.
     pub(crate) gpu_registrar: GpuTextureRegistrar,
 }
 
@@ -45,41 +53,20 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
     let EngineThreadData {
         editor_state,
         shared_state,
+        cmd_rx,
+        ui_snapshot,
+        surface_writer,
         gpu_registrar,
     } = data;
 
-    // 1. Wait for GpuHandle — rinch initialises it during window creation.
-    //    Poll every 10 ms; typically resolves in < 100 ms.
-    let gpu = loop {
-        if let Some(h) = gpu_handle() {
-            break h.clone();
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    };
+    log::info!("Engine thread: creating dedicated GPU device");
 
-    log::info!("Engine thread: got GpuHandle, initialising engine");
-
-    // Cloning Arc<Device> / Arc<Queue> is cheap.
-    let device = (*gpu.device).clone();
-    let queue  = (*gpu.queue).clone();
-
-    // 2. Create engine via new_with_device.
-    let (mut engine, demo_scene) = EditorEngine::new_with_device(
-        device,
-        queue,
+    // Create engine with its own wgpu device (no sharing with compositor).
+    let (mut engine, demo_scene) = EditorEngine::new_headless(
         DISPLAY_WIDTH,
         DISPLAY_HEIGHT,
         Arc::clone(&shared_state),
     );
-
-    // 3. Register offscreen texture with the RenderSurface.
-    //    TextureView implements Clone, so we can clone the initial view directly.
-    {
-        let (w, h) = engine.viewport_size();
-        if let Some(view) = engine.offscreen_texture_view().cloned() {
-            gpu_registrar.set_texture_source(view, w, h);
-        }
-    }
 
     // 4. Store demo scene in editor_state (set world's scene directly).
     if let Ok(mut es) = editor_state.lock() {
@@ -120,32 +107,27 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
 
     let mut last_frame = std::time::Instant::now();
     let mut last_fps_push = std::time::Instant::now();
-    let mut last_notify = std::time::Instant::now();
     let mut current_vp = engine.viewport_size();
-
-    // Frame pacing: cap the engine thread to ~120 fps so it doesn't
-    // monopolise the editor_state mutex and starve the UI thread.
-    let target_frame_time = std::time::Duration::from_micros(8333); // ~120 fps
-
-    // Compositor notification throttle: engine renders at 120fps for low-latency
-    // input, but the compositor only needs 60fps repaints.
-    let notify_interval = std::time::Duration::from_millis(16); // ~60 fps
 
     loop {
         let frame_start = std::time::Instant::now();
         let dt = frame_start.duration_since(last_frame).as_secs_f32();
         last_frame = frame_start;
 
+        // Track whether scene topology or individual objects changed this frame.
+        // Used to drive incremental GPU updates (skip re-flatten on static frames).
+        let mut frame_topology_changed = false;
+        let mut frame_dirty_objects: Vec<u32> = Vec::new();
+
         // a. Check viewport size from layout — the compositor updates
-        //    gpu_registrar.layout_size() each frame with the physical pixel
-        //    dimensions of the RenderSurface element in the DOM.
+        //    layout_size each frame with the physical pixel dimensions of
+        //    the RenderSurface element in the DOM.
         let desired_vp = {
             let (w, h) = gpu_registrar.layout_size();
             (w.max(64), h.max(64))
         };
         if desired_vp != current_vp {
-            if let Some(view) = engine.resize_viewport(desired_vp.0, desired_vp.1) {
-                gpu_registrar.set_texture_source(view, desired_vp.0, desired_vp.1);
+            if let Some(_view) = engine.resize_viewport(desired_vp.0, desired_vp.1) {
                 current_vp = desired_vp;
                 log::debug!("Engine: resized to {}x{}", desired_vp.0, desired_vp.1);
 
@@ -185,6 +167,34 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                 pending_mcp_sculpt = None;
                 pending_object_shape = None;
                 pending_mcp_fix_sdfs = None;
+            }
+        }
+
+        // b2. Drain UI commands and apply to EditorState (brief lock).
+        //
+        // Process KeyDown AFTER KeyUp so that X11/Wayland synthetic
+        // key-repeat pairs (Release+Press) don't flicker keys_pressed.
+        {
+            if let Ok(mut es) = editor_state.lock() {
+                let mut key_downs = Vec::new();
+                while let Ok(cmd) = cmd_rx.try_recv() {
+                    // Track transform commands that need GPU dirty marking.
+                    match &cmd {
+                        EditorCommand::SetObjectPosition { entity_id, .. }
+                        | EditorCommand::SetObjectRotation { entity_id, .. }
+                        | EditorCommand::SetObjectScale { entity_id, .. } => {
+                            frame_dirty_objects.push(*entity_id as u32);
+                        }
+                        _ => {}
+                    }
+                    match cmd {
+                        EditorCommand::KeyDown { .. } => key_downs.push(cmd),
+                        _ => apply_editor_command(&mut es, cmd),
+                    }
+                }
+                for cmd in key_downs {
+                    apply_editor_command(&mut es, cmd);
+                }
             }
         }
 
@@ -235,12 +245,14 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                 es.pending_undo = false;
                 if let Some(action) = es.undo.undo() {
                     es.apply_undo_action(&action, true);
+                    frame_topology_changed = true; // Conservative — undo can be spawn/despawn/transform
                 }
             }
             if es.pending_redo {
                 es.pending_redo = false;
                 if let Some(action) = es.undo.redo() {
                     es.apply_undo_action(&action, false);
+                    frame_topology_changed = true;
                 }
             }
 
@@ -261,6 +273,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                     timestamp_ms: 0,
                     description: format!("Spawn {prim_name}"),
                 });
+                frame_topology_changed = true;
             }
 
             // Consume pending delete.
@@ -277,6 +290,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                         });
                         let _ = es.world.despawn(entity);
                         es.selected_entity = None;
+                        frame_topology_changed = true;
                     }
                 }
             }
@@ -313,9 +327,18 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                                     timestamp_ms: 0,
                                     description: "Duplicate object".into(),
                                 });
+                                frame_topology_changed = true;
                             }
                         }
                     }
+                }
+            }
+
+            // Detect gizmo-driven transform changes: if gizmo is dragging,
+            // the selected object's transform is being modified by the UI thread.
+            if es.gizmo.dragging {
+                if let Some(crate::editor_state::SelectedEntity::Object(eid)) = es.selected_entity {
+                    frame_dirty_objects.push(eid as u32);
                 }
             }
 
@@ -410,9 +433,11 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         }
         if let Some(ref env) = f_environment {
             engine.apply_environment_snapshot(env);
+            engine.lights_dirty = true; // sun direction/color changed
         }
         if let Some(lights) = f_lights {
             engine.world_lights = lights;
+            engine.lights_dirty = true;
         }
 
         // e. Process pending re-voxelize (needs brief lock for scene mutation).
@@ -420,6 +445,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             if let Ok(mut es) = editor_state.lock() {
                 engine.process_revoxelize(es.world.scene_mut(), obj_id);
             }
+            frame_dirty_objects.push(obj_id);
         }
 
         // e1. Process pending Fix SDFs (BFS SDF re-initialization).
@@ -427,11 +453,14 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             if let Ok(mut es) = editor_state.lock() {
                 engine.process_fix_sdfs(es.world.scene_mut(), obj_id);
             }
+            frame_dirty_objects.push(obj_id);
         }
 
         // e2. Process sculpt undo (restore brick snapshots to CPU pool + GPU).
         if let Some(snapshots) = f_sculpt_undo {
             engine.apply_sculpt_undo(&snapshots);
+            // Sculpt undo changes brick data — mark topology changed to rebake AABBs.
+            frame_topology_changed = true;
         }
 
         // e3. Process sculpt edits (CPU-side CSG, targeted GPU upload).
@@ -467,6 +496,10 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                     }
                     merged
                 };
+            }
+            // Mark sculpted objects dirty for incremental GPU update.
+            for edit in &f_sculpt_edits {
+                frame_dirty_objects.push(edit.object_id);
             }
         }
 
@@ -504,6 +537,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
 
         // e6. Process pending MCP sculpt request (one-shot brush hit + undo).
         if let Some(req) = pending_mcp_sculpt {
+            let mcp_sculpt_obj_id = req.object_id;
             let sculpt_result = (|| -> Result<(), String> {
                 let brush_type = match req.mode.as_str() {
                     "add" => crate::sculpt::BrushType::Add,
@@ -569,6 +603,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             if let Ok(mut ss) = shared_state.lock() {
                 ss.mcp_sculpt_result = Some(sculpt_result);
             }
+            frame_dirty_objects.push(mcp_sculpt_obj_id);
         }
 
         // e7. Process pending object_shape request (CPU-side brick map lookup).
@@ -609,20 +644,24 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                     )));
                 }
             }
+            frame_dirty_objects.push(obj_id);
         }
 
-        // f. Advance character animation on the render clone.
-        engine.advance_character(&mut scene_clone);
+        // f. Apply incremental dirty tracking to the engine.
+        if frame_topology_changed {
+            engine.topology_changed = true;
+        }
+        for obj_id in &frame_dirty_objects {
+            engine.dirty_objects.insert(*obj_id);
+        }
 
-        // g. Render frame to offscreen texture.
-        engine.render_frame_offscreen(&scene_clone);
-
-        // h. Build and draw wireframe overlays (selection, gizmos, grid).
+        // g. Build wireframe overlays (selection, gizmos, grid) — staged
+        //    so they are drawn in the same GPU submit as the main render.
         {
             let mut wf_verts: Vec<crate::wireframe::LineVertex> = Vec::new();
             let cam_pos = camera.position;
 
-            // Light gizmo for selected light.
+            // Light wireframe + translate gizmo for selected light.
             if let Some(crate::editor_state::SelectedEntity::Light(lid)) = f_selected {
                 if let Ok(es) = editor_state.lock() {
                     if let Some(light) = es.light_editor.get_light(lid) {
@@ -640,6 +679,13 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                                 ));
                             }
                         }
+                        // Translate gizmo at light position.
+                        let gc = light.position;
+                        let cam_dist = (gc - cam_pos).length();
+                        let gizmo_size = cam_dist * 0.12;
+                        wf_verts.extend(crate::wireframe::translate_gizmo_wireframe(
+                            gc, gizmo_size, f_gizmo_axis, cam_pos,
+                        ));
                     }
                 }
             }
@@ -739,14 +785,46 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                 }
             }
 
-            engine.draw_wireframe(&wf_verts);
+            engine.set_wireframe_vertices(wf_verts);
         }
 
-        // i. Tell the compositor that new content is ready so it repaints.
-        //    Throttled to ~60fps — engine keeps 120fps for low-latency input/sculpt.
-        if last_notify.elapsed() >= notify_interval {
-            gpu_registrar.notify_frame_ready();
-            last_notify = std::time::Instant::now();
+        // h. Render frame to offscreen texture (wireframe drawn in same encoder).
+        //    The readback copy is appended to the same encoder — one GPU submit.
+        let t_render_start = std::time::Instant::now();
+        engine.render_frame_offscreen(&scene_clone);
+        let t_render_end = std::time::Instant::now();
+
+        // i. Synchronous readback — wait for GPU, read pixels, submit to compositor.
+        let (pixels, px_w, px_h) = engine.map_readback();
+        let t_submit_start = std::time::Instant::now();
+        surface_writer.submit_frame(&pixels, px_w, px_h);
+        let t_submit_end = std::time::Instant::now();
+
+        // Log frame breakdown every 60 frames.
+        static FRAME_N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let fn_ = FRAME_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if fn_ % 60 == 0 {
+            eprintln!(
+                "[FRAME] cpu_submit: {:.2}ms  submit_frame: {:.2}ms  dt: {:.2}ms",
+                (t_render_end - t_render_start).as_secs_f64() * 1000.0,
+                (t_submit_end - t_submit_start).as_secs_f64() * 1000.0,
+                dt as f64 * 1000.0,
+            );
+        }
+
+        // i2. If screenshot was requested, store the pixels in shared_state.
+        {
+            let do_screenshot = shared_state.lock()
+                .map(|s| s.screenshot_requested)
+                .unwrap_or(false);
+            if do_screenshot {
+                if let Ok(mut ss) = shared_state.lock() {
+                    ss.frame_pixels = pixels;
+                    ss.frame_width = px_w;
+                    ss.frame_height = px_h;
+                    ss.screenshot_requested = false;
+                }
+            }
         }
 
         // j. Update shared_state for MCP observation (no editor_state lock).
@@ -760,9 +838,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             ss.frame_height = current_vp.1;
         }
 
-        // k. Screenshot readback and GPU pick are handled inside render_frame_offscreen,
-        //    which reads shared_state.screenshot_requested and shared_state.pending_pick
-        //    directly, writing results back to shared_state before returning.
+        // k. GPU pick is handled inside render_frame_offscreen.
 
         // l. Process GPU pick result — sets selected_entity, signals main thread.
         //    Suppressed while actively sculpting to prevent accidental selection changes.
@@ -877,8 +953,16 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             }
         }
 
+        // n0. Publish UiSnapshot for lock-free UI reads.
+        {
+            if let Ok(es) = editor_state.lock() {
+                let snapshot = es.to_snapshot(0, dt as f64 * 1000.0);
+                ui_snapshot.store(Arc::new(snapshot));
+            }
+        }
+
         // n. Periodically push the FPS value to the main thread (~4/sec).
-        if last_fps_push.elapsed() >= std::time::Duration::from_millis(250) {
+        if last_fps_push.elapsed() >= std::time::Duration::from_millis(500) {
             last_fps_push = std::time::Instant::now();
             let fps_ms = dt as f64 * 1000.0;
             rinch::shell::rinch_runtime::run_on_main_thread(move || {
@@ -888,11 +972,272 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             });
         }
 
-        // o. Frame pacing — sleep if we finished early so the engine thread
-        //    doesn't spin-lock the editor_state mutex and starve the UI thread.
-        let elapsed = frame_start.elapsed();
-        if elapsed < target_frame_time {
-            std::thread::sleep(target_frame_time - elapsed);
+        // o. Yield to let OS schedule other threads between frames.
+        std::thread::yield_now();
+    }
+}
+
+/// Apply a single UI command to the editor state.
+///
+/// Called by the engine thread while holding the EditorState lock.
+/// This is the command consumer for the UI→engine channel.
+fn apply_editor_command(es: &mut EditorState, cmd: EditorCommand) {
+    use crate::editor_command::EditorCommand::*;
+    match cmd {
+        // ── Input ────────────────────────────────────────────────
+        MouseMove { x, y, dx, dy } => {
+            es.editor_input.mouse_pos = glam::Vec2::new(x, y);
+            es.editor_input.mouse_delta += glam::Vec2::new(dx, dy);
+        }
+        MouseDown { button, x, y } => {
+            if button < 3 {
+                es.editor_input.mouse_buttons[button] = true;
+            }
+            es.editor_input.mouse_pos = glam::Vec2::new(x, y);
+        }
+        MouseUp { button, .. } => {
+            if button < 3 {
+                es.editor_input.mouse_buttons[button] = false;
+            }
+        }
+        Scroll { delta } => {
+            es.editor_input.scroll_delta += delta;
+        }
+        KeyDown { key, modifiers } => {
+            es.editor_input.keys_pressed.insert(key);
+            es.editor_input.keys_just_pressed.insert(key);
+            es.editor_input.modifiers = modifiers;
+            // Gizmo mode switching: G/R/L keys.
+            if es.mode == crate::editor_state::EditorMode::Default {
+                use crate::input::KeyCode as KC;
+                match key {
+                    KC::G => es.gizmo.mode = crate::gizmo::GizmoMode::Translate,
+                    KC::R => es.gizmo.mode = crate::gizmo::GizmoMode::Rotate,
+                    KC::L => es.gizmo.mode = crate::gizmo::GizmoMode::Scale,
+                    _ => {}
+                }
+            }
+        }
+        KeyUp { key, modifiers } => {
+            es.editor_input.keys_pressed.remove(&key);
+            es.editor_input.modifiers = modifiers;
+        }
+
+        // ── Scene mutations ──────────────────────────────────────
+        SpawnPrimitive { name } => {
+            es.pending_spawn = Some(name);
+        }
+        DeleteSelected => {
+            es.pending_delete = true;
+        }
+        DuplicateSelected => {
+            es.pending_duplicate = true;
+        }
+        Undo => {
+            es.pending_undo = true;
+        }
+        Redo => {
+            es.pending_redo = true;
+        }
+        SelectEntity { entity } => {
+            es.selected_entity = entity;
+        }
+
+        // ── Gizmo ────────────────────────────────────────────────
+        SetGizmoMode { mode } => {
+            es.gizmo.mode = mode;
+        }
+
+        // ── Tool settings ────────────────────────────────────────
+        SetEditorMode { mode } => {
+            es.mode = mode;
+        }
+        SetSculptSettings { radius, strength, falloff } => {
+            es.sculpt.set_radius(radius);
+            es.sculpt.set_strength(strength);
+            es.sculpt.current_settings.falloff = falloff;
+        }
+        SetPaintSettings { radius, strength, falloff } => {
+            es.paint.current_settings.radius = radius;
+            es.paint.current_settings.strength = strength;
+            es.paint.current_settings.falloff = falloff;
+        }
+
+        // ── Camera settings ──────────────────────────────────────
+        SetCameraFov { fov } => {
+            es.editor_camera.fov_y = fov.to_radians();
+        }
+        SetCameraSpeed { speed } => {
+            es.editor_camera.fly_speed = speed;
+        }
+        SetCameraNearFar { near, far } => {
+            es.editor_camera.near = near;
+            es.editor_camera.far = far;
+        }
+
+        // ── Environment ──────────────────────────────────────────
+        SetAtmosphere { sun_direction, sun_intensity, rayleigh_scale, mie_scale } => {
+            es.environment.atmosphere.sun_direction = sun_direction;
+            es.environment.atmosphere.sun_intensity = sun_intensity;
+            es.environment.atmosphere.rayleigh_scale = rayleigh_scale;
+            es.environment.atmosphere.mie_scale = mie_scale;
+            es.environment.mark_dirty();
+        }
+        SetFog { density, height_falloff, dust_density, dust_asymmetry } => {
+            es.environment.fog.density = density;
+            es.environment.fog.height_falloff = height_falloff;
+            es.environment.fog.ambient_dust_density = dust_density;
+            es.environment.fog.dust_asymmetry = dust_asymmetry;
+            es.environment.mark_dirty();
+        }
+        SetClouds { coverage, density, altitude, thickness, wind_speed } => {
+            es.environment.clouds.coverage = coverage;
+            es.environment.clouds.density = density;
+            es.environment.clouds.altitude = altitude;
+            es.environment.clouds.thickness = thickness;
+            es.environment.clouds.wind_speed = wind_speed;
+            es.environment.mark_dirty();
+        }
+        SetPostProcess {
+            bloom_intensity, bloom_threshold, exposure, sharpen,
+            dof_focus_distance, dof_focus_range, dof_max_coc,
+            motion_blur, god_rays, vignette, grain, chromatic_aberration,
+        } => {
+            es.environment.post_process.bloom_intensity = bloom_intensity;
+            es.environment.post_process.bloom_threshold = bloom_threshold;
+            es.environment.post_process.exposure = exposure;
+            es.environment.post_process.sharpen_strength = sharpen;
+            es.environment.post_process.dof_focus_distance = dof_focus_distance;
+            es.environment.post_process.dof_focus_range = dof_focus_range;
+            es.environment.post_process.dof_max_coc = dof_max_coc;
+            es.environment.post_process.motion_blur_intensity = motion_blur;
+            es.environment.post_process.god_rays_intensity = god_rays;
+            es.environment.post_process.vignette_intensity = vignette;
+            es.environment.post_process.grain_intensity = grain;
+            es.environment.post_process.chromatic_aberration = chromatic_aberration;
+            es.environment.mark_dirty();
+        }
+        ToggleAtmosphere { enabled } => {
+            es.environment.atmosphere.enabled = enabled;
+            es.environment.mark_dirty();
+        }
+        ToggleFog { enabled } => {
+            es.environment.fog.enabled = enabled;
+            es.environment.mark_dirty();
+        }
+        ToggleClouds { enabled } => {
+            es.environment.clouds.enabled = enabled;
+            es.environment.mark_dirty();
+        }
+        ToggleBloom { enabled } => {
+            es.environment.post_process.bloom_enabled = enabled;
+            es.environment.mark_dirty();
+        }
+        ToggleDof { enabled } => {
+            es.environment.post_process.dof_enabled = enabled;
+            es.environment.mark_dirty();
+        }
+        SetToneMapMode { mode } => {
+            es.environment.post_process.tone_map_mode = mode;
+            es.environment.mark_dirty();
+        }
+
+        // ── Lights ───────────────────────────────────────────────
+        SetLightPosition { light_id, position } => {
+            if let Some(light) = es.light_editor.get_light_mut(light_id) {
+                light.position = position;
+            }
+            es.light_editor.mark_dirty();
+        }
+        SetLightIntensity { light_id, intensity } => {
+            if let Some(light) = es.light_editor.get_light_mut(light_id) {
+                light.intensity = intensity;
+            }
+            es.light_editor.mark_dirty();
+        }
+        SetLightRange { light_id, range } => {
+            if let Some(light) = es.light_editor.get_light_mut(light_id) {
+                light.range = range;
+            }
+            es.light_editor.mark_dirty();
+        }
+
+        // ── Debug / view ─────────────────────────────────────────
+        SetDebugMode { mode } => {
+            es.pending_debug_mode = Some(mode);
+        }
+        ToggleGrid => {
+            es.show_grid = !es.show_grid;
+        }
+        ToggleShortcuts => {
+            es.show_shortcuts = !es.show_shortcuts;
+        }
+
+        // ── Object properties ────────────────────────────────────
+        SetObjectPosition { entity_id, position } => {
+            let sc = es.world.scene_mut();
+            if let Some(obj) = sc.objects.iter_mut().find(|o| o.id as u64 == entity_id) {
+                obj.position = position;
+            }
+        }
+        SetObjectRotation { entity_id, rotation } => {
+            let sc = es.world.scene_mut();
+            if let Some(obj) = sc.objects.iter_mut().find(|o| o.id as u64 == entity_id) {
+                obj.rotation = glam::Quat::from_euler(
+                    glam::EulerRot::XYZ,
+                    rotation.x.to_radians(),
+                    rotation.y.to_radians(),
+                    rotation.z.to_radians(),
+                );
+            }
+        }
+        SetObjectScale { entity_id, scale } => {
+            let sc = es.world.scene_mut();
+            if let Some(obj) = sc.objects.iter_mut().find(|o| o.id as u64 == entity_id) {
+                obj.scale = scale;
+            }
+        }
+
+        // ── Scene I/O ────────────────────────────────────────────
+        OpenScene { path: _ } => {
+            es.pending_open = true;
+        }
+        SaveScene { path: _ } => {
+            es.pending_save = true;
+        }
+
+        // ── Voxel ops ────────────────────────────────────────────
+        Revoxelize { object_id } => {
+            es.pending_revoxelize = Some(object_id);
+        }
+        FixSdfs { object_id } => {
+            es.pending_fix_sdfs = Some(object_id);
+        }
+
+        // ── Animation ────────────────────────────────────────────
+        SetAnimationState { state } => {
+            es.animation.playback_state = match state {
+                1 => crate::animation_preview::PlaybackState::Playing,
+                2 => crate::animation_preview::PlaybackState::Paused,
+                _ => crate::animation_preview::PlaybackState::Stopped,
+            };
+        }
+        SetAnimationSpeed { speed } => {
+            es.animation.speed = speed;
+        }
+
+        // ── Window management ────────────────────────────────────
+        WindowDrag => {
+            es.pending_drag = true;
+        }
+        WindowMinimize => {
+            es.pending_minimize = true;
+        }
+        WindowMaximize => {
+            es.pending_maximize = true;
+        }
+        RequestExit => {
+            es.wants_exit = true;
         }
     }
 }

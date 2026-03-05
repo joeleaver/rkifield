@@ -49,6 +49,10 @@ pub struct WireframePass {
     #[allow(dead_code)]
     bind_group_layout: wgpu::BindGroupLayout,
     bind_group: wgpu::BindGroup,
+    /// Persistent vertex buffer — reused across frames, grown when needed.
+    vertex_buffer: wgpu::Buffer,
+    /// Current capacity of the vertex buffer in vertices.
+    vertex_buffer_capacity: usize,
 }
 
 impl WireframePass {
@@ -142,11 +146,22 @@ impl WireframePass {
             cache: None,
         });
 
+        // Initial vertex buffer — 1024 vertices, grown on demand.
+        let initial_cap = 1024;
+        let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("wireframe vertices"),
+            size: (initial_cap * std::mem::size_of::<LineVertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         Self {
             pipeline,
             uniform_buffer,
             bind_group_layout,
             bind_group,
+            vertex_buffer,
+            vertex_buffer_capacity: initial_cap,
         }
     }
 
@@ -156,7 +171,7 @@ impl WireframePass {
     /// `viewport` is `(x, y, width, height)` in physical pixels.
     /// `vertices` contains pairs of `LineVertex` (two per line segment).
     pub fn draw(
-        &self,
+        &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
@@ -175,11 +190,23 @@ impl WireframePass {
             bytemuck::cast_slice(&vp_matrix.to_cols_array()),
         );
 
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("wireframe vertices"),
-            contents: bytemuck::cast_slice(vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
+        // Grow vertex buffer if needed.
+        if vertices.len() > self.vertex_buffer_capacity {
+            let new_cap = vertices.len().next_power_of_two();
+            self.vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("wireframe vertices"),
+                size: (new_cap * std::mem::size_of::<LineVertex>()) as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.vertex_buffer_capacity = new_cap;
+        }
+
+        queue.write_buffer(
+            &self.vertex_buffer,
+            0,
+            bytemuck::cast_slice(vertices),
+        );
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("wireframe pass"),
@@ -199,7 +226,7 @@ impl WireframePass {
         pass.set_pipeline(&self.pipeline);
         pass.set_viewport(viewport.0, viewport.1, viewport.2, viewport.3, 0.0, 1.0);
         pass.set_bind_group(0, &self.bind_group, &[]);
-        pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+        pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         pass.draw(0..vertices.len() as u32, 0..1);
     }
 }

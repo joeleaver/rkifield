@@ -486,17 +486,17 @@ fn sample_voxelized_material(local_pos: vec3<f32>, obj: GpuObject) -> u32 {
     return extract_material_id(brick_pool[idx].word0);
 }
 
-/// Evaluate a single object at a camera-relative position.
+/// Evaluate a single object at a world-space position.
 /// Returns (distance_in_world_space, material_id).
-fn evaluate_object(cam_rel_pos: vec3<f32>, obj_idx: u32) -> vec2<f32> {
+fn evaluate_object(world_pos: vec3<f32>, obj_idx: u32) -> vec2<f32> {
     let obj = objects[obj_idx];
 
     if obj.sdf_type == SDF_TYPE_NONE {
         return vec2<f32>(MAX_FLOAT, 0.0);
     }
 
-    // Transform to object-local space.
-    let local_pos = (obj.inverse_world * vec4<f32>(cam_rel_pos, 1.0)).xyz;
+    // Transform world-space position to object-local space.
+    let local_pos = (obj.inverse_world * vec4<f32>(world_pos, 1.0)).xyz;
 
     var dist: f32;
     var mat_id: u32;
@@ -544,7 +544,6 @@ fn ray_march_bvh(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
 
     let safe_dir = select(dir, vec3<f32>(1e-10), abs(dir) < vec3<f32>(1e-10));
     let inv_dir = 1.0 / safe_dir;
-    let cam_pos = camera.position.xyz;
 
     var t = 0.0;
 
@@ -553,12 +552,11 @@ fn ray_march_bvh(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
             break;
         }
 
+        // pos is in world-space (ray_origin is camera world position).
         let pos = origin + safe_dir * t;
-        // Camera-relative position for object evaluation.
-        // inverse_world matrices are built in camera-relative space by flatten_object().
-        let cam_rel = pos - cam_pos;
 
         // Find minimum distance across all objects using BVH.
+        // BVH AABBs and object inverse_world are both in world space.
         var min_dist = MAX_FLOAT;
         var best_mat = 0u;
         var best_obj_id = 0u;
@@ -587,10 +585,10 @@ fn ray_march_bvh(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
             }
 
             if node.left == BVH_INVALID {
-                // Leaf node — evaluate the object.
+                // Leaf node — evaluate the object (world-space position).
                 let leaf_obj_idx = node.right_or_object;
                 if leaf_obj_idx < scene.num_objects {
-                    let eval = evaluate_object(cam_rel, leaf_obj_idx);
+                    let eval = evaluate_object(pos, leaf_obj_idx);
                     if eval.x < min_dist {
                         min_dist = eval.x;
                         best_mat = u32(eval.y);
@@ -636,7 +634,6 @@ fn ray_march_brute(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
     result.normal = vec3<f32>(0.0, 1.0, 0.0);
 
     let safe_dir = select(dir, vec3<f32>(1e-10), abs(dir) < vec3<f32>(1e-10));
-    let cam_pos = camera.position.xyz;
 
     var t = 0.0;
 
@@ -646,7 +643,6 @@ fn ray_march_brute(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
         }
 
         let pos = origin + safe_dir * t;
-        let cam_rel = pos - cam_pos;
 
         var min_dist = MAX_FLOAT;
         var best_mat = 0u;
@@ -654,7 +650,7 @@ fn ray_march_brute(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
         var best_obj_idx = 0u;
 
         for (var i = 0u; i < scene.num_objects; i++) {
-            let eval = evaluate_object(cam_rel, i);
+            let eval = evaluate_object(pos, i);
             if eval.x < min_dist {
                 min_dist = eval.x;
                 best_mat = u32(eval.y);
@@ -725,18 +721,17 @@ fn ray_march_tiled(origin: vec3<f32>, dir: vec3<f32>, pixel: vec2<u32>) -> March
         }
 
         let pos = origin + safe_dir * t;
-        let cam_rel = pos - cam_pos;
 
-        // Phase 1: coarse field empty-space skipping.
-        // If the coarse field reports a large distance, we can skip ahead without
-        // evaluating any objects.
+        // Phase 1: coarse field empty-space skipping (camera-relative).
+        // The coarse field is centered on the camera — convert to cam-rel.
+        let cam_rel = pos - cam_pos;
         let coarse_dist = sample_coarse_field(cam_rel);
         if coarse_dist > COARSE_NEAR_THRESHOLD {
             t += coarse_dist;
             continue;
         }
 
-        // Phase 2: near surfaces — evaluate per-tile objects for precise distance.
+        // Phase 2: near surfaces — evaluate per-tile objects (world-space).
         var min_dist = MAX_FLOAT;
         var best_mat = 0u;
         var best_obj_id = 0u;
@@ -744,7 +739,7 @@ fn ray_march_tiled(origin: vec3<f32>, dir: vec3<f32>, pixel: vec2<u32>) -> March
 
         for (var i = 0u; i < count; i++) {
             let obj_idx = tile_object_indices[base + i];
-            let eval = evaluate_object(cam_rel, obj_idx);
+            let eval = evaluate_object(pos, obj_idx);
             if eval.x < min_dist {
                 min_dist = eval.x;
                 best_mat = u32(eval.y);
@@ -773,8 +768,7 @@ fn ray_march_tiled(origin: vec3<f32>, dir: vec3<f32>, pixel: vec2<u32>) -> March
 /// Evaluate a single object's SDF at a world-space position.
 /// Used for per-object normal computation.
 fn sample_object(pos: vec3<f32>, obj_idx: u32) -> f32 {
-    let cam_rel = pos - camera.position.xyz;
-    return evaluate_object(cam_rel, obj_idx).x;
+    return evaluate_object(pos, obj_idx).x;
 }
 
 /// Compute surface normal for a specific object at a world-space hit position.
@@ -789,9 +783,8 @@ fn compute_normal_for_object(pos: vec3<f32>, obj_idx: u32) -> vec3<f32> {
     let obj = objects[obj_idx];
 
     if obj.sdf_type == SDF_TYPE_VOXELIZED {
-        // Transform hit position to object-local space.
-        let cam_rel = pos - camera.position.xyz;
-        let local_pos = (obj.inverse_world * vec4<f32>(cam_rel, 1.0)).xyz;
+        // Transform hit position (world-space) to object-local space.
+        let local_pos = (obj.inverse_world * vec4<f32>(pos, 1.0)).xyz;
 
         // Gradient in local space from trilinear SDF values.
         let local_grad = sample_voxelized_gradient(local_pos, obj);
@@ -861,7 +854,7 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
         var sdf_at_hit = 0.0;
         let hit_obj = objects[result.obj_idx];
         if hit_obj.sdf_type == SDF_TYPE_VOXELIZED {
-            let local_hit = (hit_obj.inverse_world * vec4<f32>(hit_pos - camera.position.xyz, 1.0)).xyz;
+            let local_hit = (hit_obj.inverse_world * vec4<f32>(hit_pos, 1.0)).xyz;
             sdf_at_hit = sample_voxelized(local_hit, hit_obj);
         }
 

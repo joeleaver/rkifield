@@ -5,11 +5,11 @@
 //! for GPU upload. Each node carries a pre-computed inverse world matrix
 //! and accumulated scale.
 //!
-//! # Camera-relative precision
+//! # World-space transforms
 //!
-//! The caller provides a camera-relative `Vec3` for the object's baked world
-//! position (computed from the parent chain). The GPU never sees absolute
-//! world positions — only camera-relative offsets.
+//! The caller provides the object's baked world-space position. The resulting
+//! `inverse_world` matrices are in world space — shaders convert ray positions
+//! from camera-relative to world-space before applying `inverse_world`.
 
 use glam::{Mat4, Vec3};
 
@@ -21,8 +21,8 @@ use crate::scene_node::{BlendMode, SceneNode, SdfSource};
 /// Produced by [`flatten_object`] via depth-first traversal.
 #[derive(Debug, Clone)]
 pub struct FlatNode {
-    /// Pre-computed inverse world transform (camera-relative).
-    /// Used in ray marching to transform ray into local space.
+    /// Pre-computed inverse world transform (world-space).
+    /// Used in ray marching to transform world-space positions into local space.
     pub inverse_world: Mat4,
     /// Product of all per-axis scales from root to this node.
     pub accumulated_scale: Vec3,
@@ -41,27 +41,26 @@ pub struct FlatNode {
 /// Flatten an object's node tree into a GPU-ready array.
 ///
 /// Performs a depth-first traversal, accumulating transforms from root to leaf.
-/// The caller provides a pre-computed camera-relative world position for the
-/// object (baked from the parent chain using `f64` arithmetic for precision).
+/// The caller provides the object's baked world-space position.
 ///
 /// # Arguments
 ///
 /// - `object` — the scene object whose tree to flatten
-/// - `camera_rel_position` — object's baked world position, camera-relative (f32)
+/// - `world_position` — object's baked world-space position (f32)
 ///
 /// # Returns
 ///
 /// A flat array of nodes in depth-first order. Only nodes with non-None
 /// `sdf_source` contribute to rendering, but all nodes are included for
 /// correct transform propagation.
-pub fn flatten_object(object: &SceneObject, camera_rel_position: Vec3) -> Vec<FlatNode> {
+pub fn flatten_object(object: &SceneObject, world_position: Vec3) -> Vec<FlatNode> {
     let mut result = Vec::new();
 
-    // Build root's camera-relative world transform.
+    // Build root's world-space transform.
     let root_world = Mat4::from_scale_rotation_translation(
         object.scale,
         object.rotation,
-        camera_rel_position,
+        world_position,
     );
     let root_accumulated_scale = object.scale;
 

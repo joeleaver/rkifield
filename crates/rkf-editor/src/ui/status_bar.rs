@@ -1,10 +1,9 @@
 //! Status bar component — object count, FPS, selection info, mode display.
 
-use std::sync::{Arc, Mutex};
-
 use rinch::prelude::*;
 
-use crate::editor_state::{EditorState, SelectedEntity, UiSignals};
+use crate::editor_state::{SelectedEntity, UiSignals};
+use crate::SnapshotReader;
 
 // ── Status bar ──────────────────────────────────────────────────────────────
 
@@ -15,7 +14,7 @@ use crate::editor_state::{EditorState, SelectedEntity, UiSignals};
 /// avoid rebuilding on every frame time update.
 #[component]
 pub fn StatusBar() -> NodeHandle {
-    let editor_state = use_context::<Arc<Mutex<EditorState>>>();
+    let snap = use_context::<SnapshotReader>();
     let ui = use_context::<UiSignals>();
 
     let root = __scope.create_element("div");
@@ -27,7 +26,6 @@ pub fn StatusBar() -> NodeHandle {
         font-size:11px;color:var(--rinch-color-dimmed);",
     );
 
-    let es = editor_state.clone();
     rinch::core::reactive_component_dom(__scope, &root, move |__scope| {
         // Fine-grained signal tracking — only rebuild when these specific values change.
         let _ = ui.selection.get();
@@ -37,49 +35,41 @@ pub fn StatusBar() -> NodeHandle {
         let _ = ui.show_grid.get();
         let _ = ui.scene_revision.get();
 
+        // Read from lock-free snapshot — no mutex.
+        let guard = snap.0.load();
+
+        let obj_count = guard.objects.len();
+        let mode_name = guard.mode.name().to_string();
+        let selected_name = guard.selected_entity.as_ref().map(|sel| match sel {
+            SelectedEntity::Object(eid) => {
+                guard.objects.iter()
+                    .find(|o| o.id == *eid)
+                    .map(|o| o.name.clone())
+                    .unwrap_or_else(|| format!("Object {eid}"))
+            }
+            SelectedEntity::Light(lid) => {
+                guard.lights.iter()
+                    .find(|l| l.id == *lid)
+                    .map(|l| match l.light_type {
+                        crate::light_editor::EditorLightType::Point => format!("Point Light {lid}"),
+                        crate::light_editor::EditorLightType::Spot => format!("Spot Light {lid}"),
+                    })
+                    .unwrap_or_else(|| format!("Light {lid}"))
+            }
+            SelectedEntity::Camera => "Camera".to_string(),
+            SelectedEntity::Scene => "Scene".to_string(),
+            SelectedEntity::Project => "Project".to_string(),
+        });
+        let debug_name = guard.debug_mode_name().to_string();
+        let gizmo_mode_name = guard.gizmo_mode_name().to_string();
+
         let container = __scope.create_element("div");
         container.set_attribute(
             "style",
             "display:flex;align-items:center;width:100%;gap:16px;",
         );
 
-        let (obj_count, mode_name, selected_name, debug_name, gizmo_mode_name) = match es.lock().ok() {
-            Some(es) => {
-                let sel_name = es.selected_entity.as_ref().map(|sel| match sel {
-                    SelectedEntity::Object(eid) => {
-                        es.world.scene().objects.iter()
-                            .find(|o| o.id as u64 == *eid)
-                            .map(|o| o.name.clone())
-                            .unwrap_or_else(|| format!("Object {eid}"))
-                    }
-                    SelectedEntity::Light(lid) => {
-                        es.light_editor.get_light(*lid)
-                            .map(|l| match l.light_type {
-                                crate::light_editor::EditorLightType::Point => format!("Point Light {lid}"),
-                                crate::light_editor::EditorLightType::Spot => format!("Spot Light {lid}"),
-                            })
-                            .unwrap_or_else(|| format!("Light {lid}"))
-                    }
-                    SelectedEntity::Camera => "Camera".to_string(),
-                    SelectedEntity::Scene => "Scene".to_string(),
-                    SelectedEntity::Project => "Project".to_string(),
-                });
-                let gizmo_name = match es.gizmo.mode {
-                    crate::gizmo::GizmoMode::Translate => "Translate (W)",
-                    crate::gizmo::GizmoMode::Rotate => "Rotate (E)",
-                    crate::gizmo::GizmoMode::Scale => "Scale (R)",
-                };
-                (
-                    es.world.scene().objects.len(),
-                    es.mode.name().to_string(),
-                    sel_name,
-                    es.debug_mode_name().to_string(),
-                    gizmo_name.to_string(),
-                )
-            }
-            None => (0, String::new(), None, String::new(), "Translate (W)".to_string()),
-        };
-
+        // Object count.
         let obj_div = __scope.create_element("div");
         obj_div.append_child(&__scope.create_text(&format!("{obj_count} objects")));
         container.append_child(&obj_div);
@@ -139,45 +129,39 @@ pub fn StatusBar() -> NodeHandle {
         }
 
         // Grid indicator.
-        {
-            let show_grid = es.lock().ok().map(|e| e.show_grid).unwrap_or(false);
-            if show_grid {
-                let grid_div = __scope.create_element("div");
-                grid_div.set_attribute("style", "color:var(--rinch-color-dimmed);");
-                grid_div.append_child(&__scope.create_text("Grid"));
-                container.append_child(&grid_div);
-            }
+        if guard.show_grid {
+            let grid_div = __scope.create_element("div");
+            grid_div.set_attribute("style", "color:var(--rinch-color-dimmed);");
+            grid_div.append_child(&__scope.create_text("Grid"));
+            container.append_child(&grid_div);
         }
 
         // F1 shortcut reference overlay.
-        {
-            let show_shortcuts = es.lock().ok().map(|e| e.show_shortcuts).unwrap_or(false);
-            if show_shortcuts {
-                let overlay = __scope.create_element("div");
-                overlay.set_attribute("style",
-                    "position:fixed;bottom:30px;right:310px;z-index:100;\
-                     background:var(--rinch-color-dark-9);border:1px solid var(--rinch-color-border);\
-                     border-radius:6px;padding:12px 16px;font-size:11px;\
-                     color:var(--rinch-color-text);line-height:1.8;white-space:pre;",
-                );
-                overlay.append_child(&__scope.create_text(
-                    "Keyboard Shortcuts  (F1 to close)\n\
-                     ─────────────────────────────────\n\
-                     G/R/L      Grab / Rotate / scaLe\n\
-                     B / N      Sculpt / Paint mode\n\
-                     G          Toggle grid\n\
-                     F3         Cycle debug mode\n\
-                     Delete     Delete selected\n\
-                     Ctrl+D     Duplicate selected\n\
-                     Ctrl+S     Save scene\n\
-                     Ctrl+O     Open scene\n\
-                     RMB+WASD   Fly camera\n\
-                     Scroll     Zoom (orbit)\n\
-                     MMB        Pan\n\
-                     F1         This reference",
-                ));
-                container.append_child(&overlay);
-            }
+        if guard.show_shortcuts {
+            let overlay = __scope.create_element("div");
+            overlay.set_attribute("style",
+                "position:fixed;bottom:30px;right:310px;z-index:100;\
+                 background:var(--rinch-color-dark-9);border:1px solid var(--rinch-color-border);\
+                 border-radius:6px;padding:12px 16px;font-size:11px;\
+                 color:var(--rinch-color-text);line-height:1.8;white-space:pre;",
+            );
+            overlay.append_child(&__scope.create_text(
+                "Keyboard Shortcuts  (F1 to close)\n\
+                 \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n\
+                 G/R/L      Grab / Rotate / scaLe\n\
+                 B / N      Sculpt / Paint mode\n\
+                 G          Toggle grid\n\
+                 F3         Cycle debug mode\n\
+                 Delete     Delete selected\n\
+                 Ctrl+D     Duplicate selected\n\
+                 Ctrl+S     Save scene\n\
+                 Ctrl+O     Open scene\n\
+                 RMB+WASD   Fly camera\n\
+                 Scroll     Zoom (orbit)\n\
+                 MMB        Pan\n\
+                 F1         This reference",
+            ));
+            container.append_child(&overlay);
         }
 
         container

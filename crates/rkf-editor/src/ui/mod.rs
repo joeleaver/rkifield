@@ -3,6 +3,7 @@
 //! Layout: titlebar → (left panel | viewport | right panel) → status bar.
 //! EditorState is shared via rinch context (create_context in main.rs).
 
+pub mod components;
 pub mod properties_panel;
 pub mod scene_tree_panel;
 mod slider_helpers;
@@ -15,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use rinch::prelude::*;
 
 use crate::automation::SharedState;
+use crate::editor_command::EditorCommand;
 use crate::editor_state::{EditorMode, EditorState, SelectedEntity, SliderSignals, UiSignals};
 use crate::gizmo;
 use crate::input::{InputState, KeyCode, Modifiers};
@@ -95,6 +97,10 @@ pub fn editor_ui() -> NodeHandle {
         let sh = surface_handle.clone();
         let ui = use_context::<UiSignals>();
         let sliders = use_context::<SliderSignals>();
+        let cmd_tx = use_context::<crate::CommandSender>().0.clone();
+        // Track last mouse position for delta computation (lock-free).
+        let last_mx = std::cell::Cell::new(0.0f32);
+        let last_my = std::cell::Cell::new(0.0f32);
         surface_handle.set_event_handler(move |event| {
             use SurfaceEvent::*;
             use SurfaceMouseButton as Btn;
@@ -107,24 +113,28 @@ pub fn editor_ui() -> NodeHandle {
 
             match event {
                 MouseMove { x, y } => {
-                    // SINGLE lock: read mode, update mouse, gizmo hover/drag.
+                    // Send mouse delta through lock-free channel for camera.
+                    let dx = x - last_mx.get();
+                    let dy = y - last_my.get();
+                    last_mx.set(x);
+                    last_my.set(y);
+                    let _ = cmd_tx.send(EditorCommand::MouseMove { x, y, dx, dy });
+
+                    // Brief lock for gizmo hover/drag (needs camera + scene state).
+                    // Also update mouse_pos for gizmo ray casting.
                     let (mode, left_down) = if let Ok(mut state) = es.lock() {
+                        state.editor_input.mouse_pos = glam::Vec2::new(x, y);
                         let mode = state.mode;
                         let left_down = state.editor_input.mouse_buttons[0];
-
-                        // Update mouse position + delta.
-                        let old = state.editor_input.mouse_pos;
-                        state.editor_input.mouse_delta += glam::Vec2::new(x - old.x, y - old.y);
-                        state.editor_input.mouse_pos = glam::Vec2::new(x, y);
 
                         // Gizmo hover detection + drag continue (Default mode only).
                         if mode == EditorMode::Default {
                             let (vp_w, vp_h) = vp_size();
                             if state.gizmo.dragging {
+                                let (ray_o, ray_d) = crate::camera::screen_to_ray(
+                                    &state.editor_camera, x, y, vp_w, vp_h,
+                                );
                                 if let Some(SelectedEntity::Object(eid)) = state.selected_entity {
-                                    let (ray_o, ray_d) = crate::camera::screen_to_ray(
-                                        &state.editor_camera, x, y, vp_w, vp_h,
-                                    );
                                     let gizmo_mode = state.gizmo.mode;
                                     let pivot = state.gizmo.pivot;
                                     let initial_pos = state.gizmo.initial_position;
@@ -171,11 +181,23 @@ pub fn editor_ui() -> NodeHandle {
                                             new_scale,
                                         );
                                     }
+                                } else if let Some(SelectedEntity::Light(lid)) = state.selected_entity {
+                                    // Light gizmo drag — translate only.
+                                    let delta = gizmo::compute_translate_delta(
+                                        &state.gizmo, ray_o, ray_d,
+                                    );
+                                    let new_pos = state.gizmo.initial_position + delta;
+                                    state.light_editor.set_position(lid, new_pos);
+                                    sliders.push_light_values(
+                                        new_pos,
+                                        state.light_editor.get_light(lid).map(|l| l.intensity).unwrap_or(1.0),
+                                        state.light_editor.get_light(lid).map(|l| l.range).unwrap_or(10.0),
+                                    );
                                 }
                             } else {
                                 // Hover detection: update hovered_axis.
-                                if let Some(SelectedEntity::Object(eid)) = state.selected_entity {
-                                    let gc = {
+                                let gc = match state.selected_entity {
+                                    Some(SelectedEntity::Object(eid)) => {
                                         let scene = state.world.scene();
                                         scene.objects.iter().find(|o| o.id as u64 == eid)
                                             .and_then(|obj| {
@@ -184,19 +206,21 @@ pub fn editor_ui() -> NodeHandle {
                                                 )?;
                                                 Some(obj.position + obj.rotation * ((lmin + lmax) * 0.5 * obj.scale))
                                             })
-                                    };
-                                    if let Some(gc) = gc {
-                                        let cam_dist = (gc - state.editor_camera.position).length();
-                                        let gizmo_size = cam_dist * 0.12;
-                                        let (ray_o, ray_d) = crate::camera::screen_to_ray(
-                                            &state.editor_camera, x, y, vp_w, vp_h,
-                                        );
-                                        state.gizmo.hovered_axis = gizmo::pick_gizmo_axis_for_mode(
-                                            ray_o, ray_d, gc, gizmo_size, state.gizmo.mode,
-                                        );
-                                    } else {
-                                        state.gizmo.hovered_axis = gizmo::GizmoAxis::None;
                                     }
+                                    Some(SelectedEntity::Light(lid)) => {
+                                        state.light_editor.get_light(lid).map(|l| l.position)
+                                    }
+                                    _ => None,
+                                };
+                                if let Some(gc) = gc {
+                                    let cam_dist = (gc - state.editor_camera.position).length();
+                                    let gizmo_size = cam_dist * 0.12;
+                                    let (ray_o, ray_d) = crate::camera::screen_to_ray(
+                                        &state.editor_camera, x, y, vp_w, vp_h,
+                                    );
+                                    state.gizmo.hovered_axis = gizmo::pick_gizmo_axis_for_mode(
+                                        ray_o, ray_d, gc, gizmo_size, state.gizmo.mode,
+                                    );
                                 } else {
                                     state.gizmo.hovered_axis = gizmo::GizmoAxis::None;
                                 }
@@ -228,69 +252,80 @@ pub fn editor_ui() -> NodeHandle {
                     }
                 }
                 MouseDown { x, y, button } => {
-                    // SINGLE es lock: read mode, set button, gizmo drag start.
+                    // Send button state through lock-free channel for camera input.
+                    let idx = match button { Btn::Left => 0, Btn::Right => 1, Btn::Middle => 2 };
+                    let _ = cmd_tx.send(EditorCommand::MouseDown { button: idx, x, y });
+
+                    // Brief lock for gizmo drag start (needs camera + scene state).
                     let mode = if let Ok(mut state) = es.lock() {
-                        let idx = match button { Btn::Left => 0, Btn::Right => 1, Btn::Middle => 2 };
                         state.editor_input.mouse_buttons[idx] = true;
                         let mode = state.mode;
 
-                        // Gizmo drag start: left-click in Default mode with object selected.
+                        // Gizmo drag start: left-click in Default mode with object or light selected.
                         if button == Btn::Left && mode == EditorMode::Default {
                             let (vp_w, vp_h) = vp_size();
                             let right_down = state.editor_input.mouse_buttons[1];
                             if !right_down && !state.gizmo.dragging {
-                                if let Some(SelectedEntity::Object(eid)) = state.selected_entity {
-                                    let gc = {
-                                        let scene = state.world.scene();
-                                        scene.objects.iter().find(|o| o.id as u64 == eid)
-                                            .and_then(|obj| {
-                                                let (lmin, lmax) = wireframe::compute_node_tree_aabb(
-                                                    &obj.root_node, glam::Mat4::IDENTITY,
-                                                )?;
-                                                let center = obj.position
-                                                    + obj.rotation * ((lmin + lmax) * 0.5 * obj.scale);
-                                                Some((center, obj.position, obj.rotation, obj.scale))
+                                // Get gizmo center + initial transform for the selected entity.
+                                let gizmo_info: Option<(glam::Vec3, glam::Vec3, glam::Quat, glam::Vec3)> =
+                                    match state.selected_entity {
+                                        Some(SelectedEntity::Object(eid)) => {
+                                            let scene = state.world.scene();
+                                            scene.objects.iter().find(|o| o.id as u64 == eid)
+                                                .and_then(|obj| {
+                                                    let (lmin, lmax) = wireframe::compute_node_tree_aabb(
+                                                        &obj.root_node, glam::Mat4::IDENTITY,
+                                                    )?;
+                                                    let center = obj.position
+                                                        + obj.rotation * ((lmin + lmax) * 0.5 * obj.scale);
+                                                    Some((center, obj.position, obj.rotation, obj.scale))
+                                                })
+                                        }
+                                        Some(SelectedEntity::Light(lid)) => {
+                                            state.light_editor.get_light(lid).map(|l| {
+                                                (l.position, l.position, glam::Quat::IDENTITY, glam::Vec3::ONE)
                                             })
+                                        }
+                                        _ => None,
                                     };
 
-                                    if let Some((gc, obj_pos, obj_rot, obj_scale)) = gc {
-                                        let cam_dist = (gc - state.editor_camera.position).length();
-                                        let gizmo_size = cam_dist * 0.12;
-                                        let (ray_o, ray_d) = crate::camera::screen_to_ray(
-                                            &state.editor_camera, x, y, vp_w, vp_h,
-                                        );
-                                        let axis = gizmo::pick_gizmo_axis_for_mode(
-                                            ray_o, ray_d, gc, gizmo_size, state.gizmo.mode,
-                                        );
-                                        if axis != gizmo::GizmoAxis::None {
-                                            let start_point = match state.gizmo.mode {
-                                                gizmo::GizmoMode::Translate | gizmo::GizmoMode::Scale => {
-                                                    if axis == gizmo::GizmoAxis::View {
-                                                        let vn = (state.editor_camera.position - gc).normalize();
-                                                        gizmo::project_to_plane(ray_o, ray_d, gc, vn)
-                                                            .unwrap_or(gc)
-                                                    } else {
-                                                        let t = gizmo::ray_axis_closest_point(
-                                                            ray_o, ray_d, gc, axis.direction(),
-                                                        );
-                                                        gc + axis.direction() * t
-                                                    }
+                                if let Some((gc, entity_pos, entity_rot, entity_scale)) = gizmo_info {
+                                    let cam_dist = (gc - state.editor_camera.position).length();
+                                    let gizmo_size = cam_dist * 0.12;
+                                    let (ray_o, ray_d) = crate::camera::screen_to_ray(
+                                        &state.editor_camera, x, y, vp_w, vp_h,
+                                    );
+                                    let axis = gizmo::pick_gizmo_axis_for_mode(
+                                        ray_o, ray_d, gc, gizmo_size, state.gizmo.mode,
+                                    );
+                                    if axis != gizmo::GizmoAxis::None {
+                                        let start_point = match state.gizmo.mode {
+                                            gizmo::GizmoMode::Translate | gizmo::GizmoMode::Scale => {
+                                                if axis == gizmo::GizmoAxis::View {
+                                                    let vn = (state.editor_camera.position - gc).normalize();
+                                                    gizmo::project_to_plane(ray_o, ray_d, gc, vn)
+                                                        .unwrap_or(gc)
+                                                } else {
+                                                    let t = gizmo::ray_axis_closest_point(
+                                                        ray_o, ray_d, gc, axis.direction(),
+                                                    );
+                                                    gc + axis.direction() * t
                                                 }
-                                                gizmo::GizmoMode::Rotate => {
-                                                    gizmo::project_to_plane(
-                                                        ray_o, ray_d, gc, axis.plane_normal(),
-                                                    )
-                                                    .unwrap_or(gc)
-                                                }
-                                            };
-                                            let view_normal =
-                                                (state.editor_camera.position - gc).normalize();
-                                            state.gizmo.begin_drag(
-                                                axis, start_point, obj_pos, obj_rot, obj_scale,
-                                                view_normal,
-                                            );
-                                            state.gizmo.pivot = gc;
-                                        }
+                                            }
+                                            gizmo::GizmoMode::Rotate => {
+                                                gizmo::project_to_plane(
+                                                    ray_o, ray_d, gc, axis.plane_normal(),
+                                                )
+                                                .unwrap_or(gc)
+                                            }
+                                        };
+                                        let view_normal =
+                                            (state.editor_camera.position - gc).normalize();
+                                        state.gizmo.begin_drag(
+                                            axis, start_point, entity_pos, entity_rot, entity_scale,
+                                            view_normal,
+                                        );
+                                        state.gizmo.pivot = gc;
                                     }
                                 }
                             }
@@ -315,9 +350,12 @@ pub fn editor_ui() -> NodeHandle {
                     }
                 }
                 MouseUp { x, y, button } => {
-                    // SINGLE es lock: read mode, clear button, gizmo drag end + undo.
+                    // Send button state through lock-free channel for camera input.
+                    let idx = match button { Btn::Left => 0, Btn::Right => 1, Btn::Middle => 2 };
+                    let _ = cmd_tx.send(EditorCommand::MouseUp { button: idx, x, y });
+
+                    // Brief lock for gizmo drag end + undo.
                     let (mode, gizmo_was_dragging, picked_after_drag) = if let Ok(mut state) = es.lock() {
-                        let idx = match button { Btn::Left => 0, Btn::Right => 1, Btn::Middle => 2 };
                         state.editor_input.mouse_buttons[idx] = false;
                         let mode = state.mode;
                         let was_dragging = state.gizmo.dragging;
@@ -348,6 +386,24 @@ pub fn editor_ui() -> NodeHandle {
                                         },
                                         timestamp_ms: 0,
                                         description: desc.to_string(),
+                                    });
+                                }
+                            } else if let Some(SelectedEntity::Light(lid)) = state.selected_entity {
+                                if let Some(light) = state.light_editor.get_light(lid) {
+                                    let old_pos = state.gizmo.initial_position;
+                                    let new_pos = light.position;
+                                    state.undo.push(crate::undo::UndoAction {
+                                        kind: crate::undo::UndoActionKind::Transform {
+                                            entity_id: lid,
+                                            old_pos,
+                                            old_rot: glam::Quat::IDENTITY,
+                                            old_scale: glam::Vec3::ONE,
+                                            new_pos,
+                                            new_rot: glam::Quat::IDENTITY,
+                                            new_scale: glam::Vec3::ONE,
+                                        },
+                                        timestamp_ms: 0,
+                                        description: "Move light".to_string(),
                                     });
                                 }
                             }
@@ -383,58 +439,26 @@ pub fn editor_ui() -> NodeHandle {
                     }
                 }
                 MouseWheel { delta_y, .. } => {
-                    if let Ok(mut state) = es.lock() {
-                        state.editor_input.scroll_delta += delta_y;
-                    }
+                    let _ = cmd_tx.send(EditorCommand::Scroll { delta: delta_y });
                 }
                 KeyDown(key_data) => {
                     if let Some(kc) = translate_surface_key(&key_data.code) {
-                        // Gizmo mode switching: G/R/L keys.
-                        let mut gizmo_mode_changed = false;
-                        if let Ok(mut state) = es.lock() {
-                            state.editor_input.keys_pressed.insert(kc);
-                            state.editor_input.keys_just_pressed.insert(kc);
-                            state.editor_input.modifiers = Modifiers {
-                                shift: key_data.shift,
-                                ctrl: key_data.ctrl,
-                                alt: key_data.alt,
-                            };
-                            if state.mode == EditorMode::Default {
-                                match kc {
-                                    KeyCode::G => {
-                                        state.gizmo.mode = gizmo::GizmoMode::Translate;
-                                        gizmo_mode_changed = true;
-                                    }
-                                    KeyCode::R => {
-                                        state.gizmo.mode = gizmo::GizmoMode::Rotate;
-                                        gizmo_mode_changed = true;
-                                    }
-                                    KeyCode::L => {
-                                        state.gizmo.mode = gizmo::GizmoMode::Scale;
-                                        gizmo_mode_changed = true;
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                        if gizmo_mode_changed {
-                            let mode = es.lock().ok()
-                                .map(|s| s.gizmo.mode)
-                                .unwrap_or(gizmo::GizmoMode::Translate);
-                            ui.gizmo_mode.set(mode);
-                        }
+                        let mods = Modifiers {
+                            shift: key_data.shift,
+                            ctrl: key_data.ctrl,
+                            alt: key_data.alt,
+                        };
+                        let _ = cmd_tx.send(EditorCommand::KeyDown { key: kc, modifiers: mods });
                     }
                 }
                 KeyUp(key_data) => {
                     if let Some(kc) = translate_surface_key(&key_data.code) {
-                        if let Ok(mut state) = es.lock() {
-                            state.editor_input.keys_pressed.remove(&kc);
-                            state.editor_input.modifiers = Modifiers {
-                                shift: key_data.shift,
-                                ctrl: key_data.ctrl,
-                                alt: key_data.alt,
-                            };
-                        }
+                        let mods = Modifiers {
+                            shift: key_data.shift,
+                            ctrl: key_data.ctrl,
+                            alt: key_data.alt,
+                        };
+                        let _ = cmd_tx.send(EditorCommand::KeyUp { key: kc, modifiers: mods });
                     }
                 }
                 FocusLost => {
