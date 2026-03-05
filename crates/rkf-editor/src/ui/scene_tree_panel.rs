@@ -9,7 +9,7 @@ use rinch_tabler_icons::TablerIcon;
 
 use crate::editor_command::EditorCommand;
 use crate::editor_state::{SelectedEntity, UiSignals};
-use crate::light_editor::EditorLightType;
+use crate::light_editor::SceneLightType;
 use crate::ui_snapshot::UiSnapshot;
 use crate::{CommandSender, SnapshotReader};
 
@@ -32,8 +32,8 @@ fn build_tree_data_from_snapshot(snap: &UiSnapshot) -> Vec<TreeNodeData> {
     for light in &snap.lights {
         let value = format!("light:{}", light.id);
         let label = match light.light_type {
-            EditorLightType::Point => format!("Point Light {}", light.id),
-            EditorLightType::Spot => format!("Spot Light {}", light.id),
+            SceneLightType::Point => format!("Point Light {}", light.id),
+            SceneLightType::Spot => format!("Spot Light {}", light.id),
         };
         let node = TreeNodeData::new(value, label).with_icon(TablerIcon::Bulb);
         scene_children.push(node);

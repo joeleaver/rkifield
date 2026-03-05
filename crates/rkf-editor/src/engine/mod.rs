@@ -24,7 +24,7 @@ use rkf_render::radiance_inject::RadianceInjectPass;
 use rkf_render::radiance_mip::RadianceMipPass;
 
 use crate::automation::SharedState;
-use crate::camera::EditorCamera;
+use crate::camera::SceneCamera;
 
 mod init;
 mod environment;
@@ -79,7 +79,7 @@ pub(super) struct DemoScene {
 /// Try to load a voxelized object from a .rkf file into the brick pool.
 ///
 /// Returns `(BrickMapHandle, voxel_size, grid_aabb, brick_count)` on success.
-pub(super) fn load_rkf_into_pool(
+pub(crate) fn load_rkf_into_pool(
     path: &str,
     pool: &mut rkf_core::brick_pool::Pool<rkf_core::brick::Brick>,
     alloc: &mut BrickMapAllocator,
@@ -427,7 +427,7 @@ impl EditorEngine {
     }
 
     /// Sync the render camera from the editor camera state.
-    pub fn sync_camera(&mut self, editor_cam: &EditorCamera) {
+    pub fn sync_camera(&mut self, editor_cam: &SceneCamera) {
         self.camera.position = editor_cam.position;
         self.camera.yaw = editor_cam.fly_yaw;
         self.camera.pitch = editor_cam.fly_pitch;
@@ -490,5 +490,28 @@ impl EditorEngine {
     /// Returns true if a brick map slot is unallocated (no pool data).
     pub(super) fn is_unallocated(slot: u32) -> bool {
         slot == rkf_core::brick_map::EMPTY_SLOT || slot == rkf_core::brick_map::INTERIOR_SLOT
+    }
+
+    /// Clear all scene data from the engine, preparing for a fresh scene load.
+    ///
+    /// Frees all allocated brick pool slots, resets the brick map allocator,
+    /// clears the coarse field, and marks topology as changed.
+    pub fn clear_scene(&mut self) {
+        // Deallocate all used brick pool slots by resetting to a fresh pool
+        // with the same capacity.
+        let capacity = self.cpu_brick_pool.capacity();
+        self.cpu_brick_pool = BrickPool::new(capacity);
+        self.cpu_brick_map_alloc = BrickMapAllocator::new();
+
+        // Clear cached GPU state.
+        self.cached_gpu_objects.clear();
+        self.cached_bvh = None;
+        self.cached_bvh_pairs.clear();
+        self.cached_world_aabbs.clear();
+        self.object_gpu_ranges.clear();
+        self.dirty_objects.clear();
+
+        // Force full rebuild on next frame.
+        self.topology_changed = true;
     }
 }

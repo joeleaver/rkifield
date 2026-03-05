@@ -8,12 +8,12 @@ mod impl_state;
 mod tests;
 
 use crate::animation_preview::AnimationPreview;
-use crate::camera::{CameraMode, EditorCamera};
+use crate::camera::{CameraMode, SceneCamera};
 use crate::debug_viz::{DebugOverlay, FrameTimeHistory};
 use crate::environment::EnvironmentState;
 use crate::gizmo::{GizmoMode, GizmoState};
 use crate::input::InputState;
-use crate::light_editor::LightEditor;
+use crate::light_editor::LightManager;
 use crate::overlay::OverlayConfig;
 use crate::paint::PaintState;
 use crate::placement::{AssetBrowser, GridSnap, PlacementQueue};
@@ -507,7 +507,7 @@ pub struct EditorState {
     pub mode: EditorMode,
 
     // ── Camera & Input ───────────────────────────────────────
-    pub editor_camera: EditorCamera,
+    pub editor_camera: SceneCamera,
     pub editor_input: InputState,
 
     // ── Scene ────────────────────────────────────────────────
@@ -525,7 +525,7 @@ pub struct EditorState {
     pub grid_snap: GridSnap,
 
     // ── Lights & Environment ─────────────────────────────────
-    pub light_editor: LightEditor,
+    pub light_editor: LightManager,
     pub environment: EnvironmentState,
 
     // ── Animation ────────────────────────────────────────────
@@ -563,12 +563,16 @@ pub struct EditorState {
     pub debug_mode: u32,
     /// Set by File > Quit, consumed by the event loop.
     pub wants_exit: bool,
-    /// Set by File > Open, consumed by the event loop.
+    /// Set by File > Open, consumed by the engine loop.
     pub pending_open: bool,
-    /// Set by File > Save, consumed by the event loop.
+    /// Pre-supplied path for File > Open (skips file dialog). Set by MCP/commands.
+    pub pending_open_path: Option<String>,
+    /// Set by File > Save, consumed by the engine loop.
     pub pending_save: bool,
-    /// Set by File > Save As, consumed by the event loop.
+    /// Set by File > Save As, consumed by the engine loop.
     pub pending_save_as: bool,
+    /// Pre-supplied path for Save (skips file dialog). Set by MCP/commands.
+    pub pending_save_path: Option<String>,
     /// Set by Edit > Spawn, consumed by the event loop. Value is the primitive name.
     pub pending_spawn: Option<String>,
     /// Set by Delete key, consumed by the event loop.

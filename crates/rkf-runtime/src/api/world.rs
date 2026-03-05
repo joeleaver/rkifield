@@ -885,6 +885,7 @@ impl World {
             cameras: Vec::new(),
             lights: Vec::new(),
             environment: None,
+            properties: std::collections::HashMap::new(),
         };
 
         let path_str = path.as_ref().to_str().unwrap_or("");
@@ -1005,6 +1006,7 @@ impl World {
             cameras: Vec::new(),
             lights: Vec::new(),
             environment: None,
+            properties: std::collections::HashMap::new(),
         };
 
         let path_str = path.as_ref().to_str().unwrap_or("");

@@ -212,7 +212,7 @@ impl EditorEngine {
         // Blit to swapchain.
         let blit = BlitPass::new(&ctx.device, &cosmetics.output_view, surface_format);
 
-        // Render camera (synced from EditorCamera each frame).
+        // Render camera (synced from SceneCamera each frame).
         let mut camera = Camera::new(Vec3::new(0.0, 2.5, 5.0));
         camera.pitch = -0.15;
         camera.move_speed = 5.0;

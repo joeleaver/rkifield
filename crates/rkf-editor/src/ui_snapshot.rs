@@ -7,7 +7,7 @@ use glam::Vec3;
 
 use crate::editor_state::{EditorMode, SelectedEntity};
 use crate::gizmo::GizmoMode;
-use crate::light_editor::EditorLightType;
+use crate::light_editor::SceneLightType;
 
 /// Lightweight summary of a scene object for UI display.
 #[derive(Debug, Clone)]
@@ -24,7 +24,7 @@ pub struct ObjectSummary {
 #[derive(Debug, Clone)]
 pub struct LightSummary {
     pub id: u64,
-    pub light_type: EditorLightType,
+    pub light_type: SceneLightType,
     pub position: Vec3,
     pub intensity: f32,
     pub range: f32,

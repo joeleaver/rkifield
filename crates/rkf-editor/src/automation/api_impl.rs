@@ -242,12 +242,24 @@ impl AutomationApi for EditorAutomationApi {
         Err(AutomationError::NotImplemented("brush_apply"))
     }
 
-    fn scene_load(&self, _path: &str) -> AutomationResult<()> {
-        Err(AutomationError::NotImplemented("scene_load"))
+    fn scene_load(&self, path: &str) -> AutomationResult<()> {
+        let mut es = self
+            .editor_state
+            .lock()
+            .map_err(|e| AutomationError::EngineError(format!("lock poisoned: {e}")))?;
+        es.pending_open = true;
+        es.pending_open_path = Some(path.to_string());
+        Ok(())
     }
 
-    fn scene_save(&self, _path: &str) -> AutomationResult<()> {
-        Err(AutomationError::NotImplemented("scene_save"))
+    fn scene_save(&self, path: &str) -> AutomationResult<()> {
+        let mut es = self
+            .editor_state
+            .lock()
+            .map_err(|e| AutomationError::EngineError(format!("lock poisoned: {e}")))?;
+        es.pending_save = true;
+        es.pending_save_path = Some(path.to_string());
+        Ok(())
     }
 
     fn camera_set(

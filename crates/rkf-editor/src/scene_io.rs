@@ -167,6 +167,229 @@ pub fn save_v2_scene(scene: &rkf_core::scene::Scene, path: &str) -> anyhow::Resu
     Ok(())
 }
 
+/// Save a v2 scene with full voxelized object persistence.
+///
+/// For each voxelized `SceneObject`, extracts brick data from the CPU pool
+/// and writes it to a `.rkf` file alongside the `.rkscene`. Analytical objects
+/// are serialized inline as before.
+///
+/// The `.rkf` files are named `{object_name}_{object_id}.rkf` and placed in
+/// the same directory as the `.rkscene` file. The `asset_path` field in the
+/// scene file stores the relative filename.
+/// Camera snapshot for scene save/load.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct CameraSnapshot {
+    pub position: glam::Vec3,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub fov_y: f32,
+}
+
+/// Subsystem state to persist alongside the scene geometry.
+pub struct SceneProperties<'a> {
+    pub camera: Option<&'a CameraSnapshot>,
+    pub environment: Option<&'a crate::environment::EnvironmentState>,
+    pub lights: Option<&'a [crate::light_editor::SceneLight]>,
+}
+
+pub fn save_v2_scene_full(
+    scene: &rkf_core::scene::Scene,
+    path: &str,
+    pool: &rkf_core::brick_pool::Pool<rkf_core::brick::Brick>,
+    alloc: &rkf_core::BrickMapAllocator,
+    props: &SceneProperties<'_>,
+) -> anyhow::Result<()> {
+    use rkf_core::scene_node::SdfSource;
+    use rkf_runtime::scene_file::{ObjectEntry, SceneFile};
+
+    let scene_dir = std::path::Path::new(path)
+        .parent()
+        .unwrap_or(std::path::Path::new("."));
+
+    let mut sf = SceneFile::new(&scene.name);
+
+    // Serialize subsystem state into the property bag.
+    if let Some(cam) = props.camera {
+        if let Ok(s) = ron::to_string(cam) {
+            sf.properties.insert("camera".into(), s);
+        }
+    }
+    if let Some(env) = props.environment {
+        if let Ok(s) = ron::to_string(env) {
+            sf.properties.insert("environment".into(), s);
+        }
+    }
+    if let Some(lights) = props.lights {
+        if let Ok(s) = ron::to_string(lights) {
+            sf.properties.insert("lights".into(), s);
+        }
+    }
+
+    for obj in &scene.objects {
+        let pos = obj.position;
+        let rot = obj.rotation;
+
+        let (analytical, analytical_params, asset_path, material_id) =
+            match &obj.root_node.sdf_source {
+                SdfSource::Analytical {
+                    primitive,
+                    material_id,
+                } => {
+                    use rkf_core::scene_node::SdfPrimitive;
+                    let (name, params) = match primitive {
+                        SdfPrimitive::Sphere { radius } => ("sphere", vec![*radius]),
+                        SdfPrimitive::Box { half_extents } => {
+                            ("box", vec![half_extents.x, half_extents.y, half_extents.z])
+                        }
+                        SdfPrimitive::Capsule {
+                            radius,
+                            half_height,
+                        } => ("capsule", vec![*radius, *half_height]),
+                        SdfPrimitive::Torus {
+                            major_radius,
+                            minor_radius,
+                        } => ("torus", vec![*major_radius, *minor_radius]),
+                        SdfPrimitive::Cylinder {
+                            radius,
+                            half_height,
+                        } => ("cylinder", vec![*radius, *half_height]),
+                        SdfPrimitive::Plane { normal, distance } => {
+                            ("plane", vec![normal.x, normal.y, normal.z, *distance])
+                        }
+                    };
+                    (
+                        Some(name.to_string()),
+                        Some(params),
+                        None,
+                        Some(*material_id),
+                    )
+                }
+                SdfSource::Voxelized {
+                    brick_map_handle,
+                    voxel_size,
+                    aabb,
+                } => {
+                    // Export brick data to .rkf file.
+                    let filename = format!(
+                        "{}_{}.rkf",
+                        sanitize_filename(&obj.name),
+                        obj.id
+                    );
+                    let rkf_path = scene_dir.join(&filename);
+
+                    if let Err(e) = export_voxelized_to_rkf(
+                        &rkf_path,
+                        brick_map_handle,
+                        *voxel_size,
+                        aabb,
+                        pool,
+                        alloc,
+                    ) {
+                        log::error!(
+                            "Failed to save .rkf for '{}': {e}",
+                            obj.name
+                        );
+                        // Still add the entry but without asset_path
+                        (None, None, None, None)
+                    } else {
+                        (None, None, Some(filename), None)
+                    }
+                }
+                SdfSource::None => (None, None, None, None),
+            };
+
+        sf.objects.push(ObjectEntry {
+            name: obj.name.clone(),
+            asset_path,
+            position: [pos.x as f64, pos.y as f64, pos.z as f64],
+            rotation: [rot.x, rot.y, rot.z, rot.w],
+            scale: obj.scale.into(),
+            material_id,
+            analytical,
+            analytical_params,
+            importance_bias: 1.0,
+        });
+    }
+
+    rkf_runtime::scene_file::save_scene_file(path, &sf)?;
+    Ok(())
+}
+
+/// Export a voxelized object's brick data to a .rkf file.
+fn export_voxelized_to_rkf(
+    path: &std::path::Path,
+    handle: &rkf_core::scene_node::BrickMapHandle,
+    voxel_size: f32,
+    aabb: &rkf_core::Aabb,
+    pool: &rkf_core::brick_pool::Pool<rkf_core::brick::Brick>,
+    alloc: &rkf_core::BrickMapAllocator,
+) -> anyhow::Result<()> {
+    use rkf_core::asset_file::{save_object, SaveLodLevel};
+    use rkf_core::brick_map::{BrickMap, EMPTY_SLOT, INTERIOR_SLOT};
+    use std::io::BufWriter;
+
+    let dims = handle.dims;
+
+    // Reconstruct a BrickMap and collect brick data.
+    let mut brick_map = BrickMap::new(dims);
+    let mut brick_data: Vec<[rkf_core::voxel::VoxelSample; 512]> = Vec::new();
+    let mut material_ids: Vec<u16> = Vec::new();
+
+    for bz in 0..dims.z {
+        for by in 0..dims.y {
+            for bx in 0..dims.x {
+                let slot = alloc
+                    .get_entry(handle, bx, by, bz)
+                    .unwrap_or(EMPTY_SLOT);
+                if slot == EMPTY_SLOT || slot == INTERIOR_SLOT {
+                    // Leave as EMPTY_SLOT in the output map
+                    continue;
+                }
+
+                let local_idx = brick_data.len() as u32;
+                brick_map.set(bx, by, bz, local_idx);
+
+                // Copy voxel data from pool.
+                let brick = pool.get(slot);
+                brick_data.push(brick.voxels);
+
+                // Collect material IDs from voxels.
+                for sample in &brick.voxels {
+                    let mat_id = sample.material_id();
+                    if mat_id != 0 && !material_ids.contains(&mat_id) {
+                        material_ids.push(mat_id);
+                    }
+                }
+            }
+        }
+    }
+
+    let lod = SaveLodLevel {
+        voxel_size,
+        brick_map,
+        brick_data,
+    };
+
+    let file = std::fs::File::create(path)?;
+    let mut writer = BufWriter::new(file);
+    save_object(&mut writer, aabb, None, &material_ids, &[lod])?;
+
+    Ok(())
+}
+
+/// Sanitize an object name for use as a filename.
+fn sanitize_filename(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 /// Load a v2 `.rkscene` file and return the parsed `rkf_runtime::scene_file::SceneFile`.
 ///
 /// The caller is responsible for converting the `ObjectEntry` list back into

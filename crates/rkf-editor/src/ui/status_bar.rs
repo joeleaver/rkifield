@@ -51,8 +51,8 @@ pub fn StatusBar() -> NodeHandle {
                 guard.lights.iter()
                     .find(|l| l.id == *lid)
                     .map(|l| match l.light_type {
-                        crate::light_editor::EditorLightType::Point => format!("Point Light {lid}"),
-                        crate::light_editor::EditorLightType::Spot => format!("Spot Light {lid}"),
+                        crate::light_editor::SceneLightType::Point => format!("Point Light {lid}"),
+                        crate::light_editor::SceneLightType::Spot => format!("Spot Light {lid}"),
                     })
                     .unwrap_or_else(|| format!("Light {lid}"))
             }

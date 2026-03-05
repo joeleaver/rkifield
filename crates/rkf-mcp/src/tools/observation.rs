@@ -1837,7 +1837,7 @@ mod tests {
     fn register_all_observation_tools() {
         let mut registry = ToolRegistry::new();
         register_observation_tools(&mut registry);
-        assert_eq!(registry.len(), 27);
+        assert_eq!(registry.len(), 28);
     }
 
     #[test]
@@ -1854,7 +1854,7 @@ mod tests {
         let mut registry = ToolRegistry::new();
         register_observation_tools(&mut registry);
         let tools = registry.list_tools(ToolMode::Editor);
-        assert_eq!(tools.len(), 27);
+        assert_eq!(tools.len(), 28);
     }
 
     #[test]

@@ -317,11 +317,11 @@ impl EditorAutomationApi {
         }
 
         // Include light entities from light editor.
-        use crate::light_editor::EditorLightType;
+        use crate::light_editor::SceneLightType;
         for (idx, light) in es.light_editor.all_lights().iter().enumerate() {
             let (light_type, type_name) = match light.light_type {
-                EditorLightType::Point => ("point_light", "Point"),
-                EditorLightType::Spot => ("spot_light", "Spot"),
+                SceneLightType::Point => ("point_light", "Point"),
+                SceneLightType::Spot => ("spot_light", "Spot"),
             };
             let p = light.position;
             entities.push(EntityNode {

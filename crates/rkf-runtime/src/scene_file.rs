@@ -5,6 +5,8 @@
 //! and a reference to the environment profile.  It is intentionally
 //! human-readable and diff-friendly so scenes can live under version control.
 
+use std::collections::HashMap;
+
 use anyhow::Result;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -26,6 +28,13 @@ pub struct SceneFile {
     /// seed) to load alongside this scene.
     #[serde(default)]
     pub environment: Option<String>,
+    /// Generic property bag for subsystem state.
+    ///
+    /// Each subsystem serializes its state to a RON string under a key.
+    /// This is the preferred way to persist editor/runtime state — avoids
+    /// adding new typed fields for every subsystem.
+    #[serde(default)]
+    pub properties: HashMap<String, String>,
 }
 
 /// Serde helper: deserialize scale as either a single `f32` (uniform →
@@ -189,6 +198,7 @@ impl SceneFile {
             cameras: Vec::new(),
             lights: Vec::new(),
             environment: None,
+            properties: HashMap::new(),
         }
     }
 }

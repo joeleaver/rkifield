@@ -26,7 +26,7 @@ pub enum CameraMode {
 /// Supports orbit mode (rotate/pan/zoom around a target), fly mode (WASD + mouse-look),
 /// and follow mode (track an entity). All angles are in radians.
 #[derive(Clone, Copy)]
-pub struct EditorCamera {
+pub struct SceneCamera {
     /// Current world-space position.
     pub position: Vec3,
     /// Look-at target point (orbit center in orbit mode).
@@ -75,13 +75,13 @@ pub struct EditorCamera {
     pub max_pitch: f32,
 }
 
-impl Default for EditorCamera {
+impl Default for SceneCamera {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl EditorCamera {
+impl SceneCamera {
     /// Create a new editor camera with sensible defaults.
     ///
     /// Default position: (0, 5, 10) looking at the origin.
@@ -310,7 +310,7 @@ impl EditorCamera {
 ///
 /// Returns `(ray_origin, ray_direction)` where `ray_direction` is normalized.
 pub fn screen_to_ray(
-    cam: &EditorCamera,
+    cam: &SceneCamera,
     pixel_x: f32,
     pixel_y: f32,
     vp_width: f32,
@@ -364,7 +364,7 @@ mod tests {
 
     #[test]
     fn test_default_camera() {
-        let cam = EditorCamera::new();
+        let cam = SceneCamera::new();
 
         // Should be in orbit mode
         assert_eq!(cam.mode, CameraMode::Orbit);
@@ -390,7 +390,7 @@ mod tests {
 
     #[test]
     fn test_orbit_rotate_yaw() {
-        let mut cam = EditorCamera::new();
+        let mut cam = SceneCamera::new();
         let initial_yaw = cam.orbit_yaw;
         let initial_z = cam.position.z;
 
@@ -421,7 +421,7 @@ mod tests {
 
     #[test]
     fn test_orbit_rotate_pitch_clamp() {
-        let mut cam = EditorCamera::new();
+        let mut cam = SceneCamera::new();
 
         // Try to rotate pitch far past the maximum
         cam.orbit_rotate(0.0, 100_000.0);
@@ -444,7 +444,7 @@ mod tests {
 
     #[test]
     fn test_orbit_zoom() {
-        let mut cam = EditorCamera::new();
+        let mut cam = SceneCamera::new();
         let initial_dist = cam.orbit_distance;
 
         // Scroll in (positive delta = closer)
@@ -461,7 +461,7 @@ mod tests {
 
     #[test]
     fn test_orbit_zoom_clamp() {
-        let mut cam = EditorCamera::new();
+        let mut cam = SceneCamera::new();
 
         // Zoom way in
         cam.orbit_zoom(10_000.0);
@@ -480,7 +480,7 @@ mod tests {
 
     #[test]
     fn test_orbit_pan() {
-        let mut cam = EditorCamera::new();
+        let mut cam = SceneCamera::new();
         let initial_target = cam.target;
 
         // Pan to the right
@@ -500,7 +500,7 @@ mod tests {
 
     #[test]
     fn test_orbit_pan_vertical() {
-        let mut cam = EditorCamera::new();
+        let mut cam = SceneCamera::new();
         let initial_y = cam.target.y;
 
         // Pan upward (positive dy)
@@ -513,7 +513,7 @@ mod tests {
 
     #[test]
     fn test_fly_move_forward() {
-        let mut cam = EditorCamera::new();
+        let mut cam = SceneCamera::new();
         cam.mode = CameraMode::Fly;
         cam.fly_yaw = 0.0;
         cam.fly_pitch = 0.0;
@@ -532,7 +532,7 @@ mod tests {
 
     #[test]
     fn test_fly_move_right() {
-        let mut cam = EditorCamera::new();
+        let mut cam = SceneCamera::new();
         cam.mode = CameraMode::Fly;
         cam.fly_yaw = 0.0;
         cam.fly_pitch = 0.0;
@@ -552,7 +552,7 @@ mod tests {
 
     #[test]
     fn test_fly_move_up() {
-        let mut cam = EditorCamera::new();
+        let mut cam = SceneCamera::new();
         cam.mode = CameraMode::Fly;
 
         let initial_y = cam.position.y;
@@ -566,7 +566,7 @@ mod tests {
 
     #[test]
     fn test_fly_rotate() {
-        let mut cam = EditorCamera::new();
+        let mut cam = SceneCamera::new();
         cam.mode = CameraMode::Fly;
         cam.fly_yaw = 0.0;
         cam.fly_pitch = 0.0;
@@ -586,7 +586,7 @@ mod tests {
 
     #[test]
     fn test_fly_rotate_pitch_clamp() {
-        let mut cam = EditorCamera::new();
+        let mut cam = SceneCamera::new();
         cam.mode = CameraMode::Fly;
 
         cam.fly_rotate(0.0, -1_000_000.0);
@@ -596,7 +596,7 @@ mod tests {
 
     #[test]
     fn test_view_matrix() {
-        let cam = EditorCamera::new();
+        let cam = SceneCamera::new();
         let view = cam.view_matrix();
 
         // View matrix should be invertible (non-zero determinant)
@@ -615,7 +615,7 @@ mod tests {
 
     #[test]
     fn test_projection_matrix() {
-        let cam = EditorCamera::new();
+        let cam = SceneCamera::new();
         let proj = cam.projection_matrix(16.0 / 9.0);
 
         // Projection matrix should be invertible
@@ -636,7 +636,7 @@ mod tests {
 
     #[test]
     fn test_focus_on() {
-        let mut cam = EditorCamera::new();
+        let mut cam = SceneCamera::new();
         let focus_point = Vec3::new(10.0, 5.0, -3.0);
         let focus_dist = 8.0;
 
@@ -657,7 +657,7 @@ mod tests {
 
     #[test]
     fn test_focus_on_clamps_distance() {
-        let mut cam = EditorCamera::new();
+        let mut cam = SceneCamera::new();
 
         // Focus with distance below minimum
         cam.focus_on(Vec3::ZERO, 0.01);
@@ -676,7 +676,7 @@ mod tests {
 
     #[test]
     fn test_update_orbit_mode_right_drag() {
-        let mut cam = EditorCamera::new();
+        let mut cam = SceneCamera::new();
         let initial_yaw = cam.orbit_yaw;
 
         let mut input = InputState::new();
@@ -693,7 +693,7 @@ mod tests {
 
     #[test]
     fn test_update_orbit_mode_scroll() {
-        let mut cam = EditorCamera::new();
+        let mut cam = SceneCamera::new();
         let initial_dist = cam.orbit_distance;
 
         let mut input = InputState::new();
@@ -709,7 +709,7 @@ mod tests {
 
     #[test]
     fn test_update_fly_mode_wasd() {
-        let mut cam = EditorCamera::new();
+        let mut cam = SceneCamera::new();
         cam.mode = CameraMode::Fly;
         cam.fly_yaw = 0.0;
         cam.fly_pitch = 0.0;
@@ -729,7 +729,7 @@ mod tests {
 
     #[test]
     fn test_orbit_preserves_distance_after_rotation() {
-        let mut cam = EditorCamera::new();
+        let mut cam = SceneCamera::new();
 
         // Multiple rotations should preserve distance
         for i in 0..100 {
@@ -761,7 +761,7 @@ mod tests {
 
     #[test]
     fn test_fly_speed_scaling() {
-        let mut cam = EditorCamera::new();
+        let mut cam = SceneCamera::new();
         cam.mode = CameraMode::Fly;
         cam.fly_yaw = FRAC_PI_4;
         cam.fly_pitch = 0.0;

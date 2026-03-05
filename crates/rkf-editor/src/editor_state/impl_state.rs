@@ -10,7 +10,7 @@ impl EditorState {
     /// Create a new editor state with default values and fly-mode camera
     /// positioned to match the engine's initial viewpoint.
     pub fn new() -> Self {
-        let mut cam = EditorCamera::new();
+        let mut cam = SceneCamera::new();
         cam.mode = CameraMode::Fly;
         cam.position = Vec3::new(0.0, 2.5, 5.0);
         cam.fly_yaw = 0.0;
@@ -30,7 +30,7 @@ impl EditorState {
             placement_queue: PlacementQueue::new(),
             asset_browser: AssetBrowser::new(),
             grid_snap: GridSnap::default(),
-            light_editor: LightEditor::new(),
+            light_editor: LightManager::new(),
             environment: {
                 let mut env = EnvironmentState::new();
                 env.mark_dirty(); // Ensure first frame applies defaults to engine
@@ -53,8 +53,10 @@ impl EditorState {
             debug_mode: 0,
             wants_exit: false,
             pending_open: false,
+            pending_open_path: None,
             pending_save: false,
             pending_save_as: false,
+            pending_save_path: None,
             pending_spawn: None,
             pending_delete: false,
             pending_duplicate: false,
@@ -105,7 +107,7 @@ impl EditorState {
 
     /// Sync editor camera state to an engine `Camera`.
     ///
-    /// Copies position, orientation, and FOV from the `EditorCamera` to
+    /// Copies position, orientation, and FOV from the `SceneCamera` to
     /// the render engine's `Camera` struct.
     pub fn sync_to_engine_camera(&self, engine_cam: &mut rkf_render::camera::Camera) {
         engine_cam.position = self.editor_camera.position;
@@ -291,7 +293,7 @@ impl EditorState {
         }
 
         // Populate light editor from Light components.
-        self.light_editor = crate::light_editor::LightEditor::new();
+        self.light_editor = crate::light_editor::LightManager::new();
         for entity in &scene_file.entities {
             for comp in &entity.components {
                 if let ComponentData::Light {
@@ -301,10 +303,10 @@ impl EditorState {
                     range,
                 } = comp
                 {
-                    use crate::light_editor::EditorLightType;
+                    use crate::light_editor::SceneLightType;
                     let lt = match light_type.as_str() {
-                        "spot" => EditorLightType::Spot,
-                        _ => EditorLightType::Point,
+                        "spot" => SceneLightType::Spot,
+                        _ => SceneLightType::Point,
                     };
                     let id = self.light_editor.add_light(lt);
                     self.light_editor.set_position(id, entity.position);
@@ -347,7 +349,7 @@ impl EditorState {
     /// The resulting `SceneFile` can be passed to
     /// [`crate::scene_io::save_scene_to_path`].
     pub fn save_current_scene(&self) -> crate::scene_io::SceneFile {
-        use crate::light_editor::EditorLightType;
+        use crate::light_editor::SceneLightType;
         use crate::scene_io::{ComponentData, SceneEntity, SceneFile};
         use glam::Quat;
 
@@ -377,14 +379,14 @@ impl EditorState {
         // Append light entities from the light editor.
         for (idx, light) in self.light_editor.all_lights().iter().enumerate() {
             let light_type_str = match light.light_type {
-                EditorLightType::Point => "point",
-                EditorLightType::Spot => "spot",
+                SceneLightType::Point => "point",
+                SceneLightType::Spot => "spot",
             };
             let name = format!(
                 "{} Light {}",
                 match light.light_type {
-                    EditorLightType::Point => "Point",
-                    EditorLightType::Spot => "Spot",
+                    SceneLightType::Point => "Point",
+                    SceneLightType::Spot => "Spot",
                 },
                 idx + 1
             );

@@ -12,8 +12,8 @@ use glam::Vec3;
 ///
 /// Directional/sun light is driven by `EnvironmentState` (under Camera),
 /// not the light editor. Only point and spot lights are editor-managed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EditorLightType {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SceneLightType {
     /// Omnidirectional light with position and range.
     Point,
     /// Cone-shaped light with inner/outer angles.
@@ -21,12 +21,12 @@ pub enum EditorLightType {
 }
 
 /// An individual light in the editor scene.
-#[derive(Debug, Clone)]
-pub struct EditorLight {
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SceneLight {
     /// Unique identifier for this light.
     pub id: u64,
     /// The type of light (point, spot, directional).
-    pub light_type: EditorLightType,
+    pub light_type: SceneLightType,
     /// World-space position (ignored for directional lights in shading, but
     /// kept for gizmo placement in the editor).
     pub position: Vec3,
@@ -50,9 +50,9 @@ pub struct EditorLight {
 
 /// Manages the set of lights in the editor scene.
 #[derive(Debug, Clone)]
-pub struct LightEditor {
+pub struct LightManager {
     /// All lights in the scene.
-    lights: Vec<EditorLight>,
+    lights: Vec<SceneLight>,
     /// Currently selected light id, if any.
     selected_id: Option<u64>,
     /// Monotonically increasing id counter.
@@ -61,7 +61,7 @@ pub struct LightEditor {
     dirty: bool,
 }
 
-impl Default for LightEditor {
+impl Default for LightManager {
     fn default() -> Self {
         Self {
             lights: Vec::new(),
@@ -72,7 +72,7 @@ impl Default for LightEditor {
     }
 }
 
-impl LightEditor {
+impl LightManager {
     /// Create a new empty light editor.
     pub fn new() -> Self {
         Self::default()
@@ -94,12 +94,12 @@ impl LightEditor {
     }
 
     /// Add a light of the given type with sensible defaults. Returns its id.
-    pub fn add_light(&mut self, light_type: EditorLightType) -> u64 {
+    pub fn add_light(&mut self, light_type: SceneLightType) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
 
         let light = match light_type {
-            EditorLightType::Point => EditorLight {
+            SceneLightType::Point => SceneLight {
                 id,
                 light_type,
                 position: Vec3::ZERO,
@@ -112,7 +112,7 @@ impl LightEditor {
                 cast_shadows: true,
                 cookie_path: None,
             },
-            EditorLightType::Spot => EditorLight {
+            SceneLightType::Spot => SceneLight {
                 id,
                 light_type,
                 position: Vec3::ZERO,
@@ -133,7 +133,7 @@ impl LightEditor {
     }
 
     /// Add a fully specified light. Returns its id.
-    pub fn add_light_full(&mut self, light: EditorLight) -> u64 {
+    pub fn add_light_full(&mut self, light: SceneLight) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         let mut light = light;
@@ -161,12 +161,12 @@ impl LightEditor {
     }
 
     /// Get an immutable reference to a light by id.
-    pub fn get_light(&self, id: u64) -> Option<&EditorLight> {
+    pub fn get_light(&self, id: u64) -> Option<&SceneLight> {
         self.lights.iter().find(|l| l.id == id)
     }
 
     /// Get a mutable reference to a light by id.
-    pub fn get_light_mut(&mut self, id: u64) -> Option<&mut EditorLight> {
+    pub fn get_light_mut(&mut self, id: u64) -> Option<&mut SceneLight> {
         self.lights.iter_mut().find(|l| l.id == id)
     }
 
@@ -181,13 +181,21 @@ impl LightEditor {
     }
 
     /// Return a reference to the currently selected light, if any.
-    pub fn selected(&self) -> Option<&EditorLight> {
+    pub fn selected(&self) -> Option<&SceneLight> {
         self.selected_id.and_then(|id| self.get_light(id))
     }
 
     /// Return a slice of all lights.
-    pub fn all_lights(&self) -> &[EditorLight] {
+    pub fn all_lights(&self) -> &[SceneLight] {
         &self.lights
+    }
+
+    /// Replace all lights with the given list (used for scene load).
+    pub fn replace_lights(&mut self, lights: Vec<SceneLight>) {
+        self.lights = lights;
+        self.next_id = self.lights.iter().map(|l| l.id).max().unwrap_or(0) + 1;
+        self.selected_id = None;
+        self.dirty = true;
     }
 
     /// Set the position of a light by id.
@@ -250,21 +258,21 @@ mod tests {
 
     #[test]
     fn test_add_point_light() {
-        let mut editor = LightEditor::new();
-        let id = editor.add_light(EditorLightType::Point);
+        let mut editor = LightManager::new();
+        let id = editor.add_light(SceneLightType::Point);
         assert_eq!(editor.all_lights().len(), 1);
         let light = editor.get_light(id).unwrap();
-        assert_eq!(light.light_type, EditorLightType::Point);
+        assert_eq!(light.light_type, SceneLightType::Point);
         assert!(approx_eq(light.range, 10.0));
         assert!(approx_eq(light.intensity, 1.0));
     }
 
     #[test]
     fn test_add_spot_light() {
-        let mut editor = LightEditor::new();
-        let id = editor.add_light(EditorLightType::Spot);
+        let mut editor = LightManager::new();
+        let id = editor.add_light(SceneLightType::Spot);
         let light = editor.get_light(id).unwrap();
-        assert_eq!(light.light_type, EditorLightType::Spot);
+        assert_eq!(light.light_type, SceneLightType::Spot);
         assert!(approx_eq(light.range, 15.0));
         assert!(approx_eq(light.spot_inner_angle, 0.3));
         assert!(approx_eq(light.spot_outer_angle, 0.5));
@@ -273,10 +281,10 @@ mod tests {
 
     #[test]
     fn test_unique_ids() {
-        let mut editor = LightEditor::new();
-        let id1 = editor.add_light(EditorLightType::Point);
-        let id2 = editor.add_light(EditorLightType::Spot);
-        let id3 = editor.add_light(EditorLightType::Point);
+        let mut editor = LightManager::new();
+        let id1 = editor.add_light(SceneLightType::Point);
+        let id2 = editor.add_light(SceneLightType::Spot);
+        let id3 = editor.add_light(SceneLightType::Point);
         assert_ne!(id1, id2);
         assert_ne!(id2, id3);
         assert_ne!(id1, id3);
@@ -284,8 +292,8 @@ mod tests {
 
     #[test]
     fn test_remove_light() {
-        let mut editor = LightEditor::new();
-        let id = editor.add_light(EditorLightType::Point);
+        let mut editor = LightManager::new();
+        let id = editor.add_light(SceneLightType::Point);
         assert!(editor.remove_light(id));
         assert!(editor.all_lights().is_empty());
         assert!(editor.get_light(id).is_none());
@@ -293,14 +301,14 @@ mod tests {
 
     #[test]
     fn test_remove_nonexistent_light() {
-        let mut editor = LightEditor::new();
+        let mut editor = LightManager::new();
         assert!(!editor.remove_light(999));
     }
 
     #[test]
     fn test_remove_clears_selection() {
-        let mut editor = LightEditor::new();
-        let id = editor.add_light(EditorLightType::Point);
+        let mut editor = LightManager::new();
+        let id = editor.add_light(SceneLightType::Point);
         editor.select(id);
         assert!(editor.selected().is_some());
         editor.remove_light(id);
@@ -311,8 +319,8 @@ mod tests {
 
     #[test]
     fn test_select_light() {
-        let mut editor = LightEditor::new();
-        let id = editor.add_light(EditorLightType::Point);
+        let mut editor = LightManager::new();
+        let id = editor.add_light(SceneLightType::Point);
         editor.select(id);
         let selected = editor.selected().unwrap();
         assert_eq!(selected.id, id);
@@ -320,8 +328,8 @@ mod tests {
 
     #[test]
     fn test_deselect() {
-        let mut editor = LightEditor::new();
-        let id = editor.add_light(EditorLightType::Point);
+        let mut editor = LightManager::new();
+        let id = editor.add_light(SceneLightType::Point);
         editor.select(id);
         editor.deselect();
         assert!(editor.selected().is_none());
@@ -329,7 +337,7 @@ mod tests {
 
     #[test]
     fn test_select_nonexistent_returns_none() {
-        let mut editor = LightEditor::new();
+        let mut editor = LightManager::new();
         editor.select(999);
         // selected_id is set, but selected() resolves to None
         assert!(editor.selected().is_none());
@@ -339,8 +347,8 @@ mod tests {
 
     #[test]
     fn test_set_position() {
-        let mut editor = LightEditor::new();
-        let id = editor.add_light(EditorLightType::Point);
+        let mut editor = LightManager::new();
+        let id = editor.add_light(SceneLightType::Point);
         editor.set_position(id, Vec3::new(1.0, 2.0, 3.0));
         let light = editor.get_light(id).unwrap();
         assert!(approx_eq(light.position.x, 1.0));
@@ -350,8 +358,8 @@ mod tests {
 
     #[test]
     fn test_set_color() {
-        let mut editor = LightEditor::new();
-        let id = editor.add_light(EditorLightType::Point);
+        let mut editor = LightManager::new();
+        let id = editor.add_light(SceneLightType::Point);
         editor.set_color(id, Vec3::new(1.0, 0.5, 0.0));
         let light = editor.get_light(id).unwrap();
         assert!(approx_eq(light.color.x, 1.0));
@@ -361,8 +369,8 @@ mod tests {
 
     #[test]
     fn test_set_intensity() {
-        let mut editor = LightEditor::new();
-        let id = editor.add_light(EditorLightType::Point);
+        let mut editor = LightManager::new();
+        let id = editor.add_light(SceneLightType::Point);
         editor.set_intensity(id, 5.0);
         let light = editor.get_light(id).unwrap();
         assert!(approx_eq(light.intensity, 5.0));
@@ -370,8 +378,8 @@ mod tests {
 
     #[test]
     fn test_set_range() {
-        let mut editor = LightEditor::new();
-        let id = editor.add_light(EditorLightType::Point);
+        let mut editor = LightManager::new();
+        let id = editor.add_light(SceneLightType::Point);
         editor.set_range(id, 25.0);
         let light = editor.get_light(id).unwrap();
         assert!(approx_eq(light.range, 25.0));
@@ -379,8 +387,8 @@ mod tests {
 
     #[test]
     fn test_set_spot_angles_valid() {
-        let mut editor = LightEditor::new();
-        let id = editor.add_light(EditorLightType::Spot);
+        let mut editor = LightManager::new();
+        let id = editor.add_light(SceneLightType::Spot);
         editor.set_spot_angles(id, 0.2, 0.6);
         let light = editor.get_light(id).unwrap();
         assert!(approx_eq(light.spot_inner_angle, 0.2));
@@ -389,8 +397,8 @@ mod tests {
 
     #[test]
     fn test_set_spot_angles_inner_greater_than_outer() {
-        let mut editor = LightEditor::new();
-        let id = editor.add_light(EditorLightType::Spot);
+        let mut editor = LightManager::new();
+        let id = editor.add_light(SceneLightType::Spot);
         editor.set_spot_angles(id, 0.8, 0.4);
         let light = editor.get_light(id).unwrap();
         // inner should be clamped to outer
@@ -400,8 +408,8 @@ mod tests {
 
     #[test]
     fn test_set_spot_angles_equal() {
-        let mut editor = LightEditor::new();
-        let id = editor.add_light(EditorLightType::Spot);
+        let mut editor = LightManager::new();
+        let id = editor.add_light(SceneLightType::Spot);
         editor.set_spot_angles(id, 0.5, 0.5);
         let light = editor.get_light(id).unwrap();
         assert!(approx_eq(light.spot_inner_angle, 0.5));
@@ -412,8 +420,8 @@ mod tests {
 
     #[test]
     fn test_get_light_mut() {
-        let mut editor = LightEditor::new();
-        let id = editor.add_light(EditorLightType::Point);
+        let mut editor = LightManager::new();
+        let id = editor.add_light(SceneLightType::Point);
         {
             let light = editor.get_light_mut(id).unwrap();
             light.cast_shadows = false;
@@ -426,7 +434,7 @@ mod tests {
 
     #[test]
     fn test_get_light_nonexistent() {
-        let editor = LightEditor::new();
+        let editor = LightManager::new();
         assert!(editor.get_light(42).is_none());
     }
 
@@ -434,16 +442,16 @@ mod tests {
 
     #[test]
     fn test_all_lights_empty() {
-        let editor = LightEditor::new();
+        let editor = LightManager::new();
         assert!(editor.all_lights().is_empty());
     }
 
     #[test]
     fn test_all_lights_multiple() {
-        let mut editor = LightEditor::new();
-        editor.add_light(EditorLightType::Point);
-        editor.add_light(EditorLightType::Spot);
-        editor.add_light(EditorLightType::Point);
+        let mut editor = LightManager::new();
+        editor.add_light(SceneLightType::Point);
+        editor.add_light(SceneLightType::Spot);
+        editor.add_light(SceneLightType::Point);
         assert_eq!(editor.all_lights().len(), 3);
     }
 
@@ -451,8 +459,8 @@ mod tests {
 
     #[test]
     fn test_point_default_color_white() {
-        let mut editor = LightEditor::new();
-        let id = editor.add_light(EditorLightType::Point);
+        let mut editor = LightManager::new();
+        let id = editor.add_light(SceneLightType::Point);
         let light = editor.get_light(id).unwrap();
         assert!(approx_eq(light.color.x, 1.0));
         assert!(approx_eq(light.color.y, 1.0));
@@ -461,15 +469,15 @@ mod tests {
 
     #[test]
     fn test_default_cast_shadows() {
-        let mut editor = LightEditor::new();
-        let id = editor.add_light(EditorLightType::Point);
+        let mut editor = LightManager::new();
+        let id = editor.add_light(SceneLightType::Point);
         let light = editor.get_light(id).unwrap();
         assert!(light.cast_shadows);
     }
 
     #[test]
     fn test_set_property_nonexistent_id_is_noop() {
-        let mut editor = LightEditor::new();
+        let mut editor = LightManager::new();
         // None of these should panic.
         editor.set_position(999, Vec3::ONE);
         editor.set_color(999, Vec3::ONE);

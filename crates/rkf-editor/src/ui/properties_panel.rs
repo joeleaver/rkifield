@@ -92,8 +92,8 @@ pub fn PropertiesPanel() -> NodeHandle {
                         let name_row = __scope.create_element("div");
                         name_row.set_attribute("style", SECTION_STYLE);
                         let type_name = match light.light_type {
-                            crate::light_editor::EditorLightType::Point => "Point Light",
-                            crate::light_editor::EditorLightType::Spot => "Spot Light",
+                            crate::light_editor::SceneLightType::Point => "Point Light",
+                            crate::light_editor::SceneLightType::Spot => "Spot Light",
                         };
                         name_row.append_child(&__scope.create_text(type_name));
                         container.append_child(&name_row);

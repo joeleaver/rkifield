@@ -779,8 +779,8 @@ fn build_light_properties(
     let light_data = snap_guard.lights.iter().find(|l| l.id == lid);
     if let Some(light) = light_data {
         let type_name = match light.light_type {
-            crate::light_editor::EditorLightType::Point => "Point Light",
-            crate::light_editor::EditorLightType::Spot => "Spot Light",
+            crate::light_editor::SceneLightType::Point => "Point Light",
+            crate::light_editor::SceneLightType::Spot => "Spot Light",
         };
         let hdr = scope.create_element("div");
         hdr.set_attribute("style", SECTION_STYLE);

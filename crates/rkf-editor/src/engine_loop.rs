@@ -78,15 +78,15 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
 
         // Seed editor light list from render lights (point/spot only).
         for rl in &engine.world_lights {
-            use crate::light_editor::{EditorLight, EditorLightType};
+            use crate::light_editor::{SceneLight, SceneLightType};
             if rl.light_type == 0 {
                 continue; // Skip directional — driven by environment
             }
             let light_type = match rl.light_type {
-                2 => EditorLightType::Spot,
-                _ => EditorLightType::Point,
+                2 => SceneLightType::Spot,
+                _ => SceneLightType::Point,
             };
-            es.light_editor.add_light_full(EditorLight {
+            es.light_editor.add_light_full(SceneLight {
                 id: 0, // overwritten by add_light_full
                 light_type,
                 position: glam::Vec3::new(rl.pos_x, rl.pos_y, rl.pos_z),
@@ -334,6 +334,192 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                 }
             }
 
+            // ── Scene Save ────────────────────────────────────────
+            if es.pending_save {
+                es.pending_save = false;
+                let save_path = es.pending_save_path.take().or_else(|| {
+                    es.current_scene_path.clone()
+                });
+                if let Some(path) = save_path {
+                    let scene = es.world.scene().clone();
+                    let cam_snap = crate::scene_io::CameraSnapshot {
+                        position: es.editor_camera.position,
+                        yaw: es.editor_camera.fly_yaw,
+                        pitch: es.editor_camera.fly_pitch,
+                        fov_y: es.editor_camera.fov_y,
+                    };
+                    let props = crate::scene_io::SceneProperties {
+                        camera: Some(&cam_snap),
+                        environment: Some(&es.environment),
+                        lights: Some(es.light_editor.all_lights()),
+                    };
+                    match crate::scene_io::save_v2_scene_full(
+                        &scene, &path,
+                        &engine.cpu_brick_pool, &engine.cpu_brick_map_alloc,
+                        &props,
+                    ) {
+                        Ok(()) => {
+                            es.current_scene_path = Some(path.clone());
+                            es.unsaved_changes.mark_saved();
+                            log::info!("Scene saved to {path}");
+                        }
+                        Err(e) => log::error!("Failed to save scene: {e}"),
+                    }
+                } else {
+                    // No path known — fall through to Save As.
+                    es.pending_save_as = true;
+                }
+            }
+            if es.pending_save_as {
+                es.pending_save_as = false;
+                let scene = es.world.scene().clone();
+                let cam_snap = crate::scene_io::CameraSnapshot {
+                    position: es.editor_camera.position,
+                    yaw: es.editor_camera.fly_yaw,
+                    pitch: es.editor_camera.fly_pitch,
+                    fov_y: es.editor_camera.fov_y,
+                };
+                let env_clone = es.environment.clone();
+                let lights_clone: Vec<_> = es.light_editor.all_lights().to_vec();
+                drop(es);
+
+                let dialog_result = rfd::FileDialog::new()
+                    .add_filter("Scene", &["rkscene"])
+                    .set_file_name("scene.rkscene")
+                    .save_file();
+
+                if let Some(file_path) = dialog_result {
+                    let path = file_path.to_string_lossy().to_string();
+                    let props = crate::scene_io::SceneProperties {
+                        camera: Some(&cam_snap),
+                        environment: Some(&env_clone),
+                        lights: Some(&lights_clone),
+                    };
+                    match crate::scene_io::save_v2_scene_full(
+                        &scene, &path,
+                        &engine.cpu_brick_pool, &engine.cpu_brick_map_alloc,
+                        &props,
+                    ) {
+                        Ok(()) => {
+                            let mut es = editor_state.lock().unwrap();
+                            es.current_scene_path = Some(path.clone());
+                            es.unsaved_changes.mark_saved();
+                            log::info!("Scene saved to {path}");
+                        }
+                        Err(e) => log::error!("Failed to save scene: {e}"),
+                    }
+                }
+                continue;
+            }
+
+            // ── Scene Open ───────────────────────────────────────
+            if es.pending_open {
+                es.pending_open = false;
+                let open_path = es.pending_open_path.take();
+
+                let file_path = if let Some(p) = open_path {
+                    Some(std::path::PathBuf::from(p))
+                } else {
+                    // Drop the lock before blocking on file dialog.
+                    drop(es);
+                    let result = rfd::FileDialog::new()
+                        .add_filter("Scene", &["rkscene"])
+                        .pick_file();
+                    if result.is_none() {
+                        continue; // User cancelled — skip rest of frame.
+                    }
+                    result
+                };
+
+                if let Some(file_path) = file_path {
+                    let path_str = file_path.to_string_lossy().to_string();
+                    match crate::scene_io::load_v2_scene(&path_str) {
+                        Ok(sf) => {
+                            // Reconstruct the base scene (analytical objects).
+                            let mut new_scene = crate::scene_io::reconstruct_v2_scene(&sf);
+
+                            // Clear old scene data from the engine.
+                            engine.clear_scene();
+
+                            // Load voxelized objects from .rkf files.
+                            let scene_dir = file_path.parent()
+                                .unwrap_or(std::path::Path::new("."));
+                            for (i, entry) in sf.objects.iter().enumerate() {
+                                if let Some(asset_path) = &entry.asset_path {
+                                    let rkf_path = scene_dir.join(asset_path);
+                                    let rkf_str = rkf_path.to_string_lossy().to_string();
+                                    match crate::engine::load_rkf_into_pool(
+                                        &rkf_str,
+                                        &mut engine.cpu_brick_pool,
+                                        &mut engine.cpu_brick_map_alloc,
+                                    ) {
+                                        Ok((handle, voxel_size, grid_aabb, _count)) => {
+                                            if let Some(obj) = new_scene.objects.get_mut(i) {
+                                                obj.root_node.sdf_source =
+                                                    rkf_core::SdfSource::Voxelized {
+                                                        brick_map_handle: handle,
+                                                        voxel_size,
+                                                        aabb: grid_aabb,
+                                                    };
+                                                obj.aabb = grid_aabb;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            log::error!(
+                                                "Failed to load .rkf '{}': {e}",
+                                                asset_path
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Replace the scene in EditorState.
+                            let mut es = editor_state.lock().unwrap();
+                            *es.world.scene_mut() = new_scene;
+                            es.current_scene_path = Some(path_str.clone());
+                            es.unsaved_changes.mark_saved();
+                            es.selected_entity = None;
+                            es.undo.clear();
+
+                            // Restore subsystem state from property bag.
+                            if let Some(s) = sf.properties.get("camera") {
+                                if let Ok(cam) = ron::from_str::<crate::scene_io::CameraSnapshot>(s) {
+                                    es.editor_camera.position = cam.position;
+                                    es.editor_camera.fly_yaw = cam.yaw;
+                                    es.editor_camera.fly_pitch = cam.pitch;
+                                    es.editor_camera.fov_y = cam.fov_y;
+                                    let dir = glam::Vec3::new(
+                                        -cam.yaw.sin() * cam.pitch.cos(),
+                                        cam.pitch.sin(),
+                                        -cam.yaw.cos() * cam.pitch.cos(),
+                                    );
+                                    es.editor_camera.target = es.editor_camera.position
+                                        + dir * es.editor_camera.orbit_distance;
+                                }
+                            }
+                            if let Some(s) = sf.properties.get("environment") {
+                                if let Ok(env) = ron::from_str::<crate::environment::EnvironmentState>(s) {
+                                    es.environment = env;
+                                    es.environment.mark_dirty();
+                                }
+                            }
+                            if let Some(s) = sf.properties.get("lights") {
+                                if let Ok(lights) = ron::from_str::<Vec<crate::light_editor::SceneLight>>(s) {
+                                    es.light_editor.replace_lights(lights);
+                                }
+                            }
+
+                            log::info!("Scene loaded from {path_str}");
+                        }
+                        Err(e) => {
+                            log::error!("Failed to load scene '{}': {e}", path_str);
+                        }
+                    }
+                }
+                continue; // Skip rest of frame processing after load.
+            }
+
             // Detect gizmo-driven transform changes: if gizmo is dragging,
             // the selected object's transform is being modified by the UI thread.
             if es.gizmo.dragging {
@@ -354,11 +540,11 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             // Lights: convert only when dirty.
             let lights = if es.light_editor.is_dirty() {
                 let converted = es.light_editor.all_lights().iter().map(|el| {
-                    use crate::light_editor::EditorLightType;
+                    use crate::light_editor::SceneLightType;
                     rkf_render::Light {
                         light_type: match el.light_type {
-                            EditorLightType::Point => 1,
-                            EditorLightType::Spot => 2,
+                            SceneLightType::Point => 1,
+                            SceneLightType::Spot => 2,
                         },
                         pos_x: el.position.x,
                         pos_y: el.position.y,
@@ -667,12 +853,12 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                     if let Some(light) = es.light_editor.get_light(lid) {
                         let lc = [1.0, 0.9, 0.5, 1.0];
                         match light.light_type {
-                            crate::light_editor::EditorLightType::Point => {
+                            crate::light_editor::SceneLightType::Point => {
                                 wf_verts.extend(crate::wireframe::point_light_wireframe(
                                     light.position, light.range, lc,
                                 ));
                             }
-                            crate::light_editor::EditorLightType::Spot => {
+                            crate::light_editor::SceneLightType::Spot => {
                                 wf_verts.extend(crate::wireframe::spot_light_wireframe(
                                     light.position, light.direction,
                                     light.range, light.spot_outer_angle, lc,
@@ -1199,11 +1385,19 @@ fn apply_editor_command(es: &mut EditorState, cmd: EditorCommand) {
         }
 
         // ── Scene I/O ────────────────────────────────────────────
-        OpenScene { path: _ } => {
+        OpenScene { path } => {
             es.pending_open = true;
+            if !path.is_empty() {
+                es.pending_open_path = Some(path);
+            }
         }
-        SaveScene { path: _ } => {
-            es.pending_save = true;
+        SaveScene { path } => {
+            if let Some(p) = path {
+                es.pending_save = true;
+                es.pending_save_path = Some(p);
+            } else {
+                es.pending_save = true;
+            }
         }
 
         // ── Voxel ops ────────────────────────────────────────────
