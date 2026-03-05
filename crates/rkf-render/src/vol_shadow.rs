@@ -13,14 +13,14 @@ use wgpu::util::DeviceExt;
 // ---------- Public constants ----------
 
 /// X dimension of the volumetric shadow map texture (voxels).
-pub const VOL_SHADOW_DIM_X: u32 = 256;
+pub const VOL_SHADOW_DIM_X: u32 = 64;
 
 /// Y dimension of the volumetric shadow map texture (voxels).
 /// Smaller than X/Z because less vertical extent is needed.
-pub const VOL_SHADOW_DIM_Y: u32 = 128;
+pub const VOL_SHADOW_DIM_Y: u32 = 32;
 
 /// Z dimension of the volumetric shadow map texture (voxels).
-pub const VOL_SHADOW_DIM_Z: u32 = 256;
+pub const VOL_SHADOW_DIM_Z: u32 = 64;
 
 /// Texture format for the shadow map (single-channel half-float).
 pub const VOL_SHADOW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
@@ -34,10 +34,10 @@ pub const DEFAULT_VOL_SHADOW_RANGE: f32 = 80.0;
 pub const DEFAULT_VOL_SHADOW_HEIGHT: f32 = 20.0;
 
 /// Default maximum march steps per texel toward the sun.
-pub const DEFAULT_MAX_SHADOW_STEPS: u32 = 96;
+pub const DEFAULT_MAX_SHADOW_STEPS: u32 = 32;
 
 /// Default world-space step size along the sun direction (metres).
-pub const DEFAULT_SHADOW_STEP_SIZE: f32 = 0.15;
+pub const DEFAULT_SHADOW_STEP_SIZE: f32 = 0.5;
 
 /// Default extinction coefficient (controls opacity per unit density).
 pub const DEFAULT_EXTINCTION_COEFF: f32 = 10.0;
@@ -406,9 +406,9 @@ mod tests {
 
     #[test]
     fn default_constants() {
-        assert_eq!(VOL_SHADOW_DIM_X, 256);
-        assert_eq!(VOL_SHADOW_DIM_Y, 128);
-        assert_eq!(VOL_SHADOW_DIM_Z, 256);
+        assert_eq!(VOL_SHADOW_DIM_X, 64);
+        assert_eq!(VOL_SHADOW_DIM_Y, 32);
+        assert_eq!(VOL_SHADOW_DIM_Z, 64);
         assert!(DEFAULT_VOL_SHADOW_RANGE > 0.0);
         assert!(DEFAULT_VOL_SHADOW_HEIGHT > 0.0);
         assert!(DEFAULT_MAX_SHADOW_STEPS > 0);

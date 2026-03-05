@@ -5,34 +5,26 @@
 //! reusable struct that the editor's event loop drives each frame.
 
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 use glam::{Quat, Vec3};
-use winit::window::Window;
 
 use rkf_core::{
     Aabb, BrickMapAllocator, BrickPool, Scene, SceneNode, SceneObject,
     SdfPrimitive, SdfSource, voxelize_sdf,
-    transform_flatten::flatten_object,
 };
 use rkf_render::{
     AutoExposurePass, BlitPass, BloomCompositePass, BloomPass, Camera, CloudShadowPass,
-    CoarseField, ColorGradePass, CosmeticsPass, DebugMode, DebugViewPass, DofPass,
+    CoarseField, ColorGradePass, CosmeticsPass, DebugViewPass, DofPass,
     GBuffer, GodRaysBlurPass, GpuObject, GpuSceneV2, Light, LightBuffer, MotionBlurPass,
-    RadianceVolume, RayMarchPass, RenderContext, SceneUniforms, ShadeUniforms, ShadingPass,
+    RadianceVolume, RayMarchPass, RenderContext, ShadingPass,
     SharpenPass, TileObjectCullPass, ToneMapPass, VolCompositePass, VolMarchPass,
-    VolShadowPass, VolUpscalePass, COARSE_VOXEL_SIZE,
+    VolShadowPass, VolUpscalePass,
 };
-use rkf_render::radiance_inject::{RadianceInjectPass, InjectUniforms};
+use rkf_render::radiance_inject::RadianceInjectPass;
 use rkf_render::radiance_mip::RadianceMipPass;
-use rkf_render::material_table::{MaterialTable, create_test_materials};
-use rkf_animation::character::{
-    AnimatedCharacter, build_humanoid_skeleton, build_humanoid_visuals, build_walk_clip,
-};
 
 use crate::automation::SharedState;
 use crate::camera::EditorCamera;
-use crate::engine_viewport::RENDER_SCALE;
 
 mod init;
 mod environment;
@@ -82,8 +74,6 @@ pub(super) struct DemoScene {
     pub(super) scene: Scene,
     pub(super) brick_pool: BrickPool,
     pub(super) brick_map_alloc: BrickMapAllocator,
-    pub(super) character: AnimatedCharacter,
-    pub(super) character_obj_index: usize,
 }
 
 /// Try to load a voxelized object from a .rkf file into the brick pool.
@@ -261,19 +251,10 @@ pub(super) fn build_demo_scene() -> DemoScene {
         }
     }
 
-    // Humanoid temporarily removed for SDF normals debugging.
-    let skeleton = build_humanoid_skeleton();
-    let visuals = build_humanoid_visuals(5);
-    let walk_clip = build_walk_clip();
-    let character = AnimatedCharacter::new(skeleton, visuals, walk_clip, 0.08);
-    let character_obj_index = 0;
-
     DemoScene {
         scene,
         brick_pool,
         brick_map_alloc,
-        character,
-        character_obj_index,
     }
 }
 
@@ -380,15 +361,19 @@ pub struct EditorEngine {
     pub(super) pick_readback_buffer: wgpu::Buffer,
     // GPU brush hit readback (single-pixel from position G-buffer, Rgba32Float = 16 bytes)
     pub(super) brush_readback_buffer: wgpu::Buffer,
-    // Screenshot readback (window-resolution, captures composited output with UI)
-    pub(super) readback_buffer: wgpu::Buffer,
+    // Double-buffered frame readback (window-resolution).
+    // While one buffer is mapped for CPU read, the other receives the GPU copy.
+    pub(super) readback_buffers: [wgpu::Buffer; 2],
+    pub(super) readback_parity: usize, // alternates 0/1 each frame
+    /// Pending async map from the previous frame's readback buffer.
+    /// Contains (buffer_index, receiver). Checked non-blocking at frame start.
+    pub(super) readback_pending: Option<(usize, std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>)>,
+    /// Latest available pixels for the compositor.
+    pub(super) prev_frame_pixels: Option<(Vec<u8>, u32, u32)>,
     pub(super) window_width: u32,
     pub(super) window_height: u32,
     pub(super) shared_state: Arc<Mutex<SharedState>>,
     pub(super) wireframe_pass: Option<crate::wireframe::WireframePass>,
-    pub(super) character: Option<AnimatedCharacter>,
-    pub(super) character_obj_index: Option<usize>,
-    pub(super) last_frame_time: Instant,
     // CPU-side brick data retained for re-voxelize operations.
     pub(super) cpu_brick_pool: BrickPool,
     pub(super) cpu_brick_map_alloc: BrickMapAllocator,
@@ -396,6 +381,33 @@ pub struct EditorEngine {
     pub(super) jfa_sdf: crate::jfa_sdf::JfaSdfPass,
     // GPU eikonal PDE pipeline for per-stroke SDF repair.
     pub(super) eikonal_repair: crate::eikonal_repair::EikonalRepairPass,
+    // ── Cached GPU state for incremental updates ──
+    /// Cached GPU objects from last full rebuild. Used for partial updates.
+    pub(super) cached_gpu_objects: Vec<GpuObject>,
+    /// Cached BVH from last full rebuild.
+    pub(super) cached_bvh: Option<rkf_core::Bvh>,
+    /// Cached BVH pairs (gpu_idx, world_aabb) for BVH refit.
+    pub(super) cached_bvh_pairs: Vec<(u32, Aabb)>,
+    /// Cached world-space AABBs for coarse field population.
+    pub(super) cached_world_aabbs: Vec<(Vec3, Vec3)>,
+    /// Map from object_id → (start_index, count) in cached_gpu_objects.
+    pub(super) object_gpu_ranges: std::collections::HashMap<u32, (usize, usize)>,
+    /// Object IDs that need re-flattening this frame (transform changes, sculpt edits).
+    pub(super) dirty_objects: std::collections::HashSet<u32>,
+    /// Full scene topology changed (spawn/delete/open) — triggers complete rebuild.
+    pub(super) topology_changed: bool,
+    /// Lights changed this frame (light editor dirty or world_lights replaced).
+    pub(super) lights_dirty: bool,
+    /// Last camera position used for light upload (detect camera movement).
+    pub(super) last_light_cam_pos: Vec3,
+    /// Wireframe vertices staged for the current frame (drawn in same encoder).
+    pub(super) pending_wireframe: Vec<crate::wireframe::LineVertex>,
+    /// GPU timestamp profiler for per-pass timing.
+    pub(super) gpu_profiler: rkf_render::gpu_profiler::GpuProfiler,
+    /// Last camera position used for vol_shadow dispatch (skip when static).
+    pub(super) last_vol_shadow_cam_pos: Vec3,
+    /// Last sun direction used for vol_shadow dispatch (skip when static).
+    pub(super) last_vol_shadow_sun_dir: [f32; 3],
 }
 
 impl EditorEngine {
@@ -437,41 +449,11 @@ impl EditorEngine {
         self.camera.position
     }
 
-    /// Draw wireframe lines onto the offscreen render target.
-    ///
-    /// Called after `render_frame_offscreen()`. Uses a separate encoder + submit
-    /// so the wireframe composites on top of the final post-processed image.
-    pub fn draw_wireframe(&mut self, vertices: &[crate::wireframe::LineVertex]) {
-        if vertices.is_empty() {
-            return;
-        }
-        let Some(ref wireframe) = self.wireframe_pass else { return };
-        let Some(ref offscreen_view) = self.offscreen_view else { return };
-
-        let vp_matrix = self.view_projection();
-        let viewport = (
-            0.0,
-            0.0,
-            self.viewport_width as f32,
-            self.viewport_height as f32,
-        );
-
-        let mut encoder =
-            self.ctx
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("wireframe"),
-                });
-        wireframe.draw(
-            &self.ctx.device,
-            &self.ctx.queue,
-            &mut encoder,
-            offscreen_view,
-            vp_matrix,
-            viewport,
-            vertices,
-        );
-        self.ctx.queue.submit(std::iter::once(encoder.finish()));
+    /// Stage wireframe vertices for the next frame. The wireframe will be
+    /// drawn into the same command encoder as the main render pass (no extra
+    /// GPU submit).
+    pub fn set_wireframe_vertices(&mut self, vertices: Vec<crate::wireframe::LineVertex>) {
+        self.pending_wireframe = vertices;
     }
 
     /// Current render resolution width.
@@ -484,20 +466,6 @@ impl EditorEngine {
         self.render_height
     }
 
-    /// Advance character animation on the given scene (mutates bone transforms).
-    ///
-    /// Call this on a cloned scene before rendering so animation doesn't
-    /// pollute the authoritative scene in EditorState.
-    pub fn advance_character(&mut self, scene: &mut Scene) {
-        let now = Instant::now();
-        let dt = (now - self.last_frame_time).as_secs_f32().min(0.1);
-        self.last_frame_time = now;
-        if let (Some(character), Some(idx)) = (&mut self.character, self.character_obj_index) {
-            if idx < scene.objects.len() {
-                character.advance_and_update(dt, &mut scene.objects[idx].root_node);
-            }
-        }
-    }
 
     /// Restore brick pool data from undo snapshots.
     ///

@@ -22,7 +22,6 @@ use super::{
     EditorEngine, INTERNAL_WIDTH, INTERNAL_HEIGHT, build_demo_scene,
 };
 use crate::automation::SharedState;
-use crate::engine_viewport::RENDER_SCALE;
 
 impl EditorEngine {
     /// Initialize the render engine with wgpu, all passes, and a demo scene.
@@ -240,12 +239,13 @@ impl EditorEngine {
         // capture the composited output (engine viewport + rinch UI panels).
         let window_width = size.width.max(1);
         let window_height = size.height.max(1);
-        let readback_buffer = Self::create_readback_buffer(
+        let readback_buffers = Self::create_readback_buffers(
             &ctx.device, window_width, window_height,
         );
 
         let jfa_sdf = crate::jfa_sdf::JfaSdfPass::new(&ctx.device);
         let eikonal_repair = crate::eikonal_repair::EikonalRepairPass::new(&ctx.device);
+        let gpu_profiler = rkf_render::gpu_profiler::GpuProfiler::new(&ctx.device, &ctx.queue);
 
         let engine = Self {
             ctx,
@@ -312,18 +312,32 @@ impl EditorEngine {
             render_height: INTERNAL_HEIGHT,
             pick_readback_buffer,
             brush_readback_buffer,
-            readback_buffer,
+            readback_buffers,
+            readback_parity: 0,
+            readback_pending: None,
+            prev_frame_pixels: None,
             window_width,
             window_height,
             shared_state,
             wireframe_pass: None,
-            character: Some(demo.character),
-            character_obj_index: Some(demo.character_obj_index),
-            last_frame_time: std::time::Instant::now(),
             cpu_brick_pool: demo.brick_pool,
             cpu_brick_map_alloc: demo.brick_map_alloc,
             jfa_sdf,
             eikonal_repair,
+            // Incremental update cache — first frame triggers full rebuild.
+            cached_gpu_objects: Vec::new(),
+            cached_bvh: None,
+            cached_bvh_pairs: Vec::new(),
+            cached_world_aabbs: Vec::new(),
+            object_gpu_ranges: std::collections::HashMap::new(),
+            dirty_objects: std::collections::HashSet::new(),
+            topology_changed: true,
+            lights_dirty: true,
+            last_light_cam_pos: Vec3::new(f32::NAN, f32::NAN, f32::NAN),
+            pending_wireframe: Vec::new(),
+            gpu_profiler,
+            last_vol_shadow_cam_pos: Vec3::new(f32::NAN, f32::NAN, f32::NAN),
+            last_vol_shadow_sun_dir: [f32::NAN; 3],
         };
         (engine, scene)
     }
@@ -361,17 +375,26 @@ impl EditorEngine {
         format
     }
 
-    /// Create a readback buffer sized for the given window dimensions.
-    pub(super) fn create_readback_buffer(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Buffer {
+    /// Create a pair of readback buffers for double-buffered async readback.
+    pub(super) fn create_readback_buffers(device: &wgpu::Device, width: u32, height: u32) -> [wgpu::Buffer; 2] {
         let bytes_per_pixel = 4u32;
         let unpadded_row = width * bytes_per_pixel;
         let padded_row = (unpadded_row + 255) & !255;
-        device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("readback"),
-            size: (padded_row * height) as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        })
+        let size = (padded_row * height) as u64;
+        [
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("readback_0"),
+                size,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            }),
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("readback_1"),
+                size,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            }),
+        ]
     }
 
     /// Reconfigure the surface for a new window size (surface-based path only).
@@ -382,9 +405,11 @@ impl EditorEngine {
             }
             self.window_width = width;
             self.window_height = height;
-            self.readback_buffer = Self::create_readback_buffer(
+            self.readback_buffers = Self::create_readback_buffers(
                 &self.ctx.device, width, height,
             );
+            self.readback_pending = None;
+            self.prev_frame_pixels = None;
             // Update SharedState dimensions for MCP screenshot encoding.
             if let Ok(mut state) = self.shared_state.lock() {
                 state.frame_width = width;

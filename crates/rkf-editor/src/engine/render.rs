@@ -11,6 +11,168 @@ use rkf_core::transform_flatten::flatten_object;
 use super::EditorEngine;
 
 impl EditorEngine {
+    /// Update GPU scene data incrementally based on dirty state.
+    ///
+    /// Three paths:
+    /// 1. `topology_changed` (spawn/delete/open) → full rebuild
+    /// 2. `dirty_objects` non-empty (transform/sculpt) → partial re-flatten + upload + BVH refit
+    /// 3. Static frame → only camera uniform + coarse field uniform update
+    ///
+    /// Returns the number of active GPU objects (for SceneUniforms).
+    pub(super) fn update_scene_gpu(&mut self, scene: &Scene) -> u32 {
+        // Static frame — skip everything (no allocations, no transforms).
+        if !self.topology_changed && self.dirty_objects.is_empty() {
+            return self.cached_gpu_objects.len() as u32;
+        }
+
+        let world_transforms = rkf_core::transform_bake::bake_world_transforms(&scene.objects);
+        let default_wt = rkf_core::transform_bake::WorldTransform::default();
+
+        if self.topology_changed {
+            // --- Full rebuild ---
+            self.cached_gpu_objects.clear();
+            self.cached_bvh_pairs.clear();
+            self.cached_world_aabbs.clear();
+            self.object_gpu_ranges.clear();
+
+            for obj in &scene.objects {
+                let wt = world_transforms.get(&obj.id).unwrap_or(&default_wt);
+                let world_aabb = Self::compute_world_aabb(obj, wt);
+                self.cached_world_aabbs.push((world_aabb.min, world_aabb.max));
+
+                let start_idx = self.cached_gpu_objects.len();
+                let flat_nodes = flatten_object(obj, wt.position);
+                for flat in &flat_nodes {
+                    let gpu_idx = self.cached_gpu_objects.len() as u32;
+                    let (geom_min, geom_max) = self.compute_geometry_aabb_for_flat_node(flat);
+                    self.cached_gpu_objects.push(GpuObject::from_flat_node(
+                        flat, obj.id,
+                        [world_aabb.min.x, world_aabb.min.y, world_aabb.min.z, 0.0],
+                        [world_aabb.max.x, world_aabb.max.y, world_aabb.max.z, 0.0],
+                        geom_min, geom_max,
+                    ));
+                    self.cached_bvh_pairs.push((gpu_idx, world_aabb));
+                }
+                let count = self.cached_gpu_objects.len() - start_idx;
+                self.object_gpu_ranges.insert(obj.id, (start_idx, count));
+            }
+
+            self.gpu_scene.upload_objects(
+                &self.ctx.device, &self.ctx.queue, &self.cached_gpu_objects,
+            );
+
+            let bvh = rkf_core::Bvh::build(&self.cached_bvh_pairs);
+            self.gpu_scene.upload_bvh(&self.ctx.device, &self.ctx.queue, &bvh);
+            self.cached_bvh = Some(bvh);
+
+            self.coarse_field.populate(&self.cached_world_aabbs);
+            self.coarse_field.upload(&self.ctx.queue, Vec3::ZERO);
+
+            self.topology_changed = false;
+            self.dirty_objects.clear();
+        } else if !self.dirty_objects.is_empty() {
+            // --- Partial update: only dirty objects ---
+            let dirty_ids: Vec<u32> = self.dirty_objects.drain().collect();
+            let mut coarse_changed = false;
+
+            for &obj_id in &dirty_ids {
+                let Some(obj) = scene.objects.iter().find(|o| o.id == obj_id) else {
+                    continue;
+                };
+                let Some(&(start_idx, count)) = self.object_gpu_ranges.get(&obj_id) else {
+                    // Object not in cache (shouldn't happen) — mark topology changed for next frame.
+                    self.topology_changed = true;
+                    continue;
+                };
+                let wt = world_transforms.get(&obj.id).unwrap_or(&default_wt);
+                let world_aabb = Self::compute_world_aabb(obj, wt);
+
+                // Re-flatten this object.
+                let flat_nodes = flatten_object(obj, wt.position);
+
+                if flat_nodes.len() != count {
+                    // Node count changed (e.g. animation bone added) — need full rebuild.
+                    self.topology_changed = true;
+                    continue;
+                }
+
+                // Patch cached GPU objects in-place.
+                for (i, flat) in flat_nodes.iter().enumerate() {
+                    let idx = start_idx + i;
+                    let (geom_min, geom_max) = self.compute_geometry_aabb_for_flat_node(flat);
+                    self.cached_gpu_objects[idx] = GpuObject::from_flat_node(
+                        flat, obj.id,
+                        [world_aabb.min.x, world_aabb.min.y, world_aabb.min.z, 0.0],
+                        [world_aabb.max.x, world_aabb.max.y, world_aabb.max.z, 0.0],
+                        geom_min, geom_max,
+                    );
+                    // Update BVH pair AABB.
+                    self.cached_bvh_pairs[idx].1 = world_aabb;
+                }
+
+                // Partial GPU upload for this object's range.
+                self.gpu_scene.upload_object_range(
+                    &self.ctx.queue,
+                    &self.cached_gpu_objects[start_idx..start_idx + count],
+                    start_idx,
+                );
+
+                // Update cached world AABB for coarse field.
+                // Find which scene index this object is at.
+                if let Some(scene_idx) = scene.objects.iter().position(|o| o.id == obj_id) {
+                    if scene_idx < self.cached_world_aabbs.len() {
+                        self.cached_world_aabbs[scene_idx] = (world_aabb.min, world_aabb.max);
+                        coarse_changed = true;
+                    }
+                }
+            }
+
+            if self.topology_changed {
+                // A dirty object triggered topology change — recurse to full rebuild.
+                return self.update_scene_gpu(scene);
+            }
+
+            // BVH refit with updated AABBs.
+            if let Some(ref mut bvh) = self.cached_bvh {
+                bvh.refit(&self.cached_bvh_pairs);
+                self.gpu_scene.upload_bvh(&self.ctx.device, &self.ctx.queue, bvh);
+            }
+
+            // Repopulate coarse field if any AABBs changed.
+            if coarse_changed {
+                self.coarse_field.populate(&self.cached_world_aabbs);
+                self.coarse_field.upload(&self.ctx.queue, Vec3::ZERO);
+            }
+        }
+        // else: static frame — skip flatten/upload/BVH entirely.
+
+        self.cached_gpu_objects.len() as u32
+    }
+
+    /// Compute world-space AABB from a scene object and its baked world transform.
+    fn compute_world_aabb(
+        obj: &rkf_core::SceneObject,
+        wt: &rkf_core::transform_bake::WorldTransform,
+    ) -> rkf_core::Aabb {
+        let local_aabb = obj.aabb;
+        let smin = local_aabb.min * wt.scale;
+        let smax = local_aabb.max * wt.scale;
+        let corners = [
+            Vec3::new(smin.x, smin.y, smin.z), Vec3::new(smax.x, smin.y, smin.z),
+            Vec3::new(smin.x, smax.y, smin.z), Vec3::new(smax.x, smax.y, smin.z),
+            Vec3::new(smin.x, smin.y, smax.z), Vec3::new(smax.x, smin.y, smax.z),
+            Vec3::new(smin.x, smax.y, smax.z), Vec3::new(smax.x, smax.y, smax.z),
+        ];
+        let mut wmin = Vec3::splat(f32::MAX);
+        let mut wmax = Vec3::splat(f32::MIN);
+        for c in &corners {
+            let r = wt.rotation * *c + wt.position;
+            wmin = wmin.min(r);
+            wmax = wmax.max(r);
+        }
+        rkf_core::Aabb::new(wmin, wmax)
+    }
+
     /// Render one frame without UI overlay (full-screen engine blit).
     pub fn render_frame(&mut self, scene: &Scene) {
         self.render_frame_composited(scene, |_, _, _| {});
@@ -60,68 +222,9 @@ impl EditorEngine {
     {
         let camera_pos_vec = self.camera.position;
 
-        // Bake world transforms for parent-child hierarchy.
-        let world_transforms = rkf_core::transform_bake::bake_world_transforms(&scene.objects);
-        let default_wt = rkf_core::transform_bake::WorldTransform::default();
-
-        // Flatten all objects → GPU object list + BVH.
-        let mut gpu_objects = Vec::new();
-        let mut bvh_pairs = Vec::new();
-        let mut world_aabbs_for_coarse: Vec<(Vec3, Vec3)> = Vec::new();
-        for obj in &scene.objects {
-            let wt = world_transforms.get(&obj.id).unwrap_or(&default_wt);
-            let camera_rel = wt.position - camera_pos_vec;
-            // Transform local AABB to world space via baked transform.
-            let local_aabb = obj.aabb;
-            let world_aabb = {
-                let smin = local_aabb.min * wt.scale;
-                let smax = local_aabb.max * wt.scale;
-                let corners = [
-                    Vec3::new(smin.x, smin.y, smin.z),
-                    Vec3::new(smax.x, smin.y, smin.z),
-                    Vec3::new(smin.x, smax.y, smin.z),
-                    Vec3::new(smax.x, smax.y, smin.z),
-                    Vec3::new(smin.x, smin.y, smax.z),
-                    Vec3::new(smax.x, smin.y, smax.z),
-                    Vec3::new(smin.x, smax.y, smax.z),
-                    Vec3::new(smax.x, smax.y, smax.z),
-                ];
-                let mut wmin = Vec3::splat(f32::MAX);
-                let mut wmax = Vec3::splat(f32::MIN);
-                for c in &corners {
-                    let r = wt.rotation * *c + wt.position;
-                    wmin = wmin.min(r);
-                    wmax = wmax.max(r);
-                }
-                rkf_core::Aabb::new(wmin, wmax)
-            };
-            world_aabbs_for_coarse.push((world_aabb.min, world_aabb.max));
-            let flat_nodes = flatten_object(obj, camera_rel);
-            for flat in &flat_nodes {
-                let gpu_idx = gpu_objects.len() as u32;
-                let cam_rel_min = world_aabb.min - self.camera.position;
-                let cam_rel_max = world_aabb.max - self.camera.position;
-                let (geom_min, geom_max) = self.compute_geometry_aabb_for_flat_node(flat);
-                gpu_objects.push(GpuObject::from_flat_node(
-                    flat,
-                    obj.id,
-                    [cam_rel_min.x, cam_rel_min.y, cam_rel_min.z, 0.0],
-                    [cam_rel_max.x, cam_rel_max.y, cam_rel_max.z, 0.0],
-                    geom_min,
-                    geom_max,
-                ));
-                bvh_pairs.push((gpu_idx, world_aabb));
-            }
-        }
-
-        self.gpu_scene.upload_objects(&self.ctx.device, &self.ctx.queue, &gpu_objects);
-
-        let bvh = rkf_core::Bvh::build(&bvh_pairs);
-        self.gpu_scene.upload_bvh(&self.ctx.device, &self.ctx.queue, &bvh);
-
-        // Repopulate coarse field every frame so moved objects stay visible.
-        self.coarse_field.populate(&world_aabbs_for_coarse);
-        self.coarse_field.upload(&self.ctx.queue, Vec3::ZERO);
+        // Incremental scene-to-GPU update: only re-flatten dirty objects,
+        // skip entirely on static frames (camera-only movement).
+        let num_objects = self.update_scene_gpu(scene);
 
         // Update camera uniforms.
         let cam_uniforms = self.camera.uniforms(
@@ -131,48 +234,49 @@ impl EditorEngine {
 
         // Scene uniforms.
         let scene_uniforms = SceneUniforms {
-            num_objects: gpu_objects.len() as u32,
+            num_objects,
             max_steps: 128,
             max_distance: 100.0,
             hit_threshold: 0.001,
         };
         self.gpu_scene.update_scene_uniforms(&self.ctx.queue, &scene_uniforms);
 
-        // Synthesize directional light from environment sun settings.
-        let sun_light = Light {
-            light_type: 0, // directional
-            pos_x: 0.0, pos_y: 0.0, pos_z: 0.0,
-            dir_x: self.env_sun_dir[0],
-            dir_y: self.env_sun_dir[1],
-            dir_z: self.env_sun_dir[2],
-            color_r: self.env_sun_color[0],
-            color_g: self.env_sun_color[1],
-            color_b: self.env_sun_color[2],
-            intensity: 1.0, // already baked into env_sun_color (sun_color * sun_intensity)
-            range: 0.0,
-            inner_angle: 0.0,
-            outer_angle: 0.0,
-            cookie_index: -1,
-            shadow_caster: 1,
-        };
-
-        // Camera-relative point/spot lights.
+        // Light buffer: only re-upload when lights or camera position changed.
+        let total_lights = 1 + self.world_lights.len() as u32;
         let cam = self.camera.position;
-        let cam_rel_lights: Vec<Light> = self.world_lights.iter().map(|l| {
-            let mut cl = *l;
-            if cl.light_type != 0 {
-                cl.pos_x -= cam.x;
-                cl.pos_y -= cam.y;
-                cl.pos_z -= cam.z;
-            }
-            cl
-        }).collect();
-
-        // Sun (directional) + point/spot lights.
-        let total_lights = 1 + cam_rel_lights.len() as u32;
-        let mut all_lights = vec![sun_light];
-        all_lights.extend(cam_rel_lights);
-        self.light_buffer.update(&self.ctx.queue, &all_lights);
+        let cam_moved = cam != self.last_light_cam_pos;
+        if self.lights_dirty || cam_moved {
+            let sun_light = Light {
+                light_type: 0, // directional
+                pos_x: 0.0, pos_y: 0.0, pos_z: 0.0,
+                dir_x: self.env_sun_dir[0],
+                dir_y: self.env_sun_dir[1],
+                dir_z: self.env_sun_dir[2],
+                color_r: self.env_sun_color[0],
+                color_g: self.env_sun_color[1],
+                color_b: self.env_sun_color[2],
+                intensity: 1.0,
+                range: 0.0,
+                inner_angle: 0.0,
+                outer_angle: 0.0,
+                cookie_index: -1,
+                shadow_caster: 1,
+            };
+            let cam_rel_lights: Vec<Light> = self.world_lights.iter().map(|l| {
+                let mut cl = *l;
+                if cl.light_type != 0 {
+                    cl.pos_x -= cam.x;
+                    cl.pos_y -= cam.y;
+                    cl.pos_z -= cam.z;
+                }
+                cl
+            }).collect();
+            let mut all_lights = vec![sun_light];
+            all_lights.extend(cam_rel_lights);
+            self.light_buffer.update(&self.ctx.queue, &all_lights);
+            self.lights_dirty = false;
+            self.last_light_cam_pos = cam;
+        }
 
         // Shade uniforms — includes atmosphere + camera basis for sky rendering.
         let fov_rad = self.camera.fov_degrees.to_radians();
@@ -284,10 +388,21 @@ impl EditorEngine {
         self.cloud_shadow.set_cloud_params(&self.ctx.queue, &cloud_params);
 
         let sun_dir = self.env_sun_dir;
-        self.vol_shadow.dispatch(
-            &mut encoder, &self.ctx.queue,
-            [cam.x, cam.y, cam.z], sun_dir, &self.coarse_field.bind_group,
+        // Skip vol_shadow dispatch when camera and sun haven't changed.
+        let vs_cam_delta = Vec3::new(
+            cam.x - self.last_vol_shadow_cam_pos.x,
+            cam.y - self.last_vol_shadow_cam_pos.y,
+            cam.z - self.last_vol_shadow_cam_pos.z,
         );
+        let vs_sun_changed = sun_dir != self.last_vol_shadow_sun_dir;
+        if vs_cam_delta.length_squared() > 0.01 || vs_sun_changed {
+            self.vol_shadow.dispatch(
+                &mut encoder, &self.ctx.queue,
+                [cam.x, cam.y, cam.z], sun_dir, &self.coarse_field.bind_group,
+            );
+            self.last_vol_shadow_cam_pos = cam;
+            self.last_vol_shadow_sun_dir = sun_dir;
+        }
         // Use the actual cloud altitude from cloud_params, not the defaults
         // (DEFAULT_CLOUD_MIN=1000, DEFAULT_CLOUD_MAX=3000).  The shadow map must
         // march through the same altitude band as the visible clouds.
@@ -550,7 +665,7 @@ impl EditorEngine {
                     aspect: wgpu::TextureAspect::All,
                 },
                 wgpu::TexelCopyBufferInfo {
-                    buffer: &self.readback_buffer,
+                    buffer: &self.readback_buffers[0],
                     layout: wgpu::TexelCopyBufferLayout {
                         offset: 0,
                         bytes_per_row: Some(padded_row),
@@ -566,7 +681,7 @@ impl EditorEngine {
             self.ctx.queue.submit(std::iter::once(readback_enc.finish()));
 
             // Map and read back the pixels.
-            let buffer_slice = self.readback_buffer.slice(..);
+            let buffer_slice = self.readback_buffers[0].slice(..);
             let (tx, rx) = std::sync::mpsc::channel();
             buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
                 let _ = tx.send(result);
@@ -598,7 +713,7 @@ impl EditorEngine {
                 }
 
                 drop(data);
-                self.readback_buffer.unmap();
+                self.readback_buffers[0].unmap();
 
                 if let Ok(mut state) = self.shared_state.lock() {
                     state.frame_pixels = rgba8;
@@ -607,7 +722,7 @@ impl EditorEngine {
                     state.screenshot_requested = false;
                 }
             } else {
-                self.readback_buffer.unmap();
+                self.readback_buffers[0].unmap();
                 if let Ok(mut state) = self.shared_state.lock() {
                     state.screenshot_requested = false;
                 }

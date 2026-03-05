@@ -98,6 +98,15 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let uv = (vec3<f32>(id) + vec3<f32>(0.5)) / dim;
     let world_pos = params.volume_min + uv * (params.volume_max - params.volume_min);
 
+    // Early-out: if nearest geometry is beyond the total march distance,
+    // the texel is fully lit — skip the march loop entirely.
+    let initial_dist = sample_coarse_at_world(world_pos);
+    let march_range = params.step_size * f32(params.max_steps);
+    if initial_dist > march_range {
+        textureStore(shadow_map, vec3<i32>(id), vec4<f32>(1.0, 0.0, 0.0, 0.0));
+        return;
+    }
+
     var transmittance: f32 = 1.0;
     var pos: vec3<f32> = world_pos;
 

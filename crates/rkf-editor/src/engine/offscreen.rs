@@ -2,12 +2,11 @@
 
 use std::sync::{Arc, Mutex};
 use glam::Vec3;
-use rkf_core::{Aabb, Scene};
-use rkf_core::transform_flatten::flatten_object;
+use rkf_core::Scene;
 use rkf_render::{
     AutoExposurePass, BlitPass, BloomCompositePass, BloomPass, Camera, CloudShadowPass,
     CoarseField, ColorGradePass, CosmeticsPass, DebugMode, DebugViewPass, DofPass,
-    GBuffer, GodRaysBlurPass, GpuObject, GpuSceneV2, Light, LightBuffer, MotionBlurPass,
+    GBuffer, GodRaysBlurPass, GpuSceneV2, Light, LightBuffer, MotionBlurPass,
     RadianceVolume, RayMarchPass, RenderContext, SceneUniforms, ShadeUniforms, ShadingPass,
     SharpenPass, TileObjectCullPass, ToneMapPass, VolCompositePass, VolMarchPass,
     VolShadowPass, VolUpscalePass, COARSE_VOXEL_SIZE,
@@ -16,25 +15,25 @@ use rkf_render::radiance_inject::{RadianceInjectPass, InjectUniforms};
 use rkf_render::radiance_mip::RadianceMipPass;
 use rkf_render::material_table::{MaterialTable, create_test_materials};
 use super::EditorEngine;
-use super::{RENDER_SCALE, OFFSCREEN_FORMAT, build_demo_scene};
+use super::{OFFSCREEN_FORMAT, build_demo_scene};
+use crate::engine_viewport::RENDER_SCALE;
 use crate::automation::SharedState;
 
 impl EditorEngine {
-    /// Create an engine using a shared wgpu device (from rinch's `GpuHandle`).
+    /// Create an engine with its own dedicated wgpu device.
     ///
-    /// Renders to an offscreen texture instead of a swapchain surface. The
-    /// compositor reads the offscreen texture directly via `TextureView` —
-    /// zero-copy GPU compositing.
+    /// Renders to an offscreen texture. The caller reads back pixels via
+    /// [`readback_frame`] and submits them to the compositor's CPU pixel
+    /// path (`SurfaceWriter::submit_frame`). This eliminates GPU contention
+    /// between the engine and the compositor.
     ///
     /// Returns `(engine, scene)` — the caller stores the scene in EditorState.
-    pub fn new_with_device(
-        device: wgpu::Device,
-        queue: wgpu::Queue,
+    pub fn new_headless(
         viewport_width: u32,
         viewport_height: u32,
         shared_state: Arc<Mutex<SharedState>>,
     ) -> (Self, Scene) {
-        let ctx = RenderContext::from_shared(device, queue);
+        let ctx = RenderContext::new_headless();
 
         // Compute internal render resolution from viewport size.
         let vp_w = viewport_width.max(64);
@@ -236,13 +235,16 @@ impl EditorEngine {
             mapped_at_creation: false,
         });
 
-        // Screenshot readback at viewport resolution.
-        let readback_buffer = Self::create_readback_buffer(
+        // Double-buffered readback at viewport resolution.
+        let readback_buffers = Self::create_readback_buffers(
             &ctx.device, vp_w, vp_h,
         );
 
         let jfa_sdf = crate::jfa_sdf::JfaSdfPass::new(&ctx.device);
         let eikonal_repair = crate::eikonal_repair::EikonalRepairPass::new(&ctx.device);
+        let gpu_profiler = rkf_render::gpu_profiler::GpuProfiler::new(
+            &ctx.device, &ctx.queue,
+        );
 
         let engine = Self {
             ctx,
@@ -307,18 +309,32 @@ impl EditorEngine {
             render_height: internal_h,
             pick_readback_buffer,
             brush_readback_buffer,
-            readback_buffer,
+            readback_buffers,
+            readback_parity: 0,
+            readback_pending: None,
+            prev_frame_pixels: None,
             window_width: vp_w,
             window_height: vp_h,
             shared_state,
             wireframe_pass: Some(wireframe_pass),
-            character: Some(demo.character),
-            character_obj_index: Some(demo.character_obj_index),
-            last_frame_time: std::time::Instant::now(),
             cpu_brick_pool: demo.brick_pool,
             cpu_brick_map_alloc: demo.brick_map_alloc,
             jfa_sdf,
             eikonal_repair,
+            // Incremental update cache — first frame triggers full rebuild.
+            cached_gpu_objects: Vec::new(),
+            cached_bvh: None,
+            cached_bvh_pairs: Vec::new(),
+            cached_world_aabbs: Vec::new(),
+            object_gpu_ranges: std::collections::HashMap::new(),
+            dirty_objects: std::collections::HashSet::new(),
+            topology_changed: true,
+            lights_dirty: true,
+            last_light_cam_pos: Vec3::new(f32::NAN, f32::NAN, f32::NAN),
+            pending_wireframe: Vec::new(),
+            gpu_profiler,
+            last_vol_shadow_cam_pos: Vec3::new(f32::NAN, f32::NAN, f32::NAN),
+            last_vol_shadow_sun_dir: [f32::NAN; 3],
         };
         (engine, scene)
     }
@@ -384,8 +400,10 @@ impl EditorEngine {
         self.offscreen_texture = Some(tex);
         self.offscreen_view = Some(view);
 
-        // Recreate readback buffer at new viewport resolution.
-        self.readback_buffer = Self::create_readback_buffer(&self.ctx.device, vp_w, vp_h);
+        // Recreate readback buffers at new viewport resolution.
+        self.readback_buffers = Self::create_readback_buffers(&self.ctx.device, vp_w, vp_h);
+        self.readback_pending = None;
+        self.prev_frame_pixels = None;
         self.window_width = vp_w;
         self.window_height = vp_h;
 
@@ -420,60 +438,9 @@ impl EditorEngine {
     pub fn render_frame_offscreen(&mut self, scene: &Scene) {
         let camera_pos_vec = self.camera.position;
 
-        // Bake world transforms for parent-child hierarchy.
-        let world_transforms = rkf_core::transform_bake::bake_world_transforms(&scene.objects);
-        let default_wt = rkf_core::transform_bake::WorldTransform::default();
-
-        // Flatten all objects → GPU object list + BVH.
-        let mut gpu_objects = Vec::new();
-        let mut bvh_pairs = Vec::new();
-        let mut world_aabbs_for_coarse: Vec<(Vec3, Vec3)> = Vec::new();
-        for obj in &scene.objects {
-            let wt = world_transforms.get(&obj.id).unwrap_or(&default_wt);
-            let camera_rel = wt.position - camera_pos_vec;
-            let local_aabb = obj.aabb;
-            let world_aabb = {
-                let smin = local_aabb.min * wt.scale;
-                let smax = local_aabb.max * wt.scale;
-                let corners = [
-                    Vec3::new(smin.x, smin.y, smin.z), Vec3::new(smax.x, smin.y, smin.z),
-                    Vec3::new(smin.x, smax.y, smin.z), Vec3::new(smax.x, smax.y, smin.z),
-                    Vec3::new(smin.x, smin.y, smax.z), Vec3::new(smax.x, smin.y, smax.z),
-                    Vec3::new(smin.x, smax.y, smax.z), Vec3::new(smax.x, smax.y, smax.z),
-                ];
-                let mut wmin = Vec3::splat(f32::MAX);
-                let mut wmax = Vec3::splat(f32::MIN);
-                for c in &corners {
-                    let r = wt.rotation * *c + wt.position;
-                    wmin = wmin.min(r);
-                    wmax = wmax.max(r);
-                }
-                Aabb::new(wmin, wmax)
-            };
-            world_aabbs_for_coarse.push((world_aabb.min, world_aabb.max));
-            let flat_nodes = flatten_object(obj, camera_rel);
-            for flat in &flat_nodes {
-                let gpu_idx = gpu_objects.len() as u32;
-                let cam_rel_min = world_aabb.min - self.camera.position;
-                let cam_rel_max = world_aabb.max - self.camera.position;
-                let (geom_min, geom_max) = self.compute_geometry_aabb_for_flat_node(flat);
-                gpu_objects.push(GpuObject::from_flat_node(
-                    flat, obj.id,
-                    [cam_rel_min.x, cam_rel_min.y, cam_rel_min.z, 0.0],
-                    [cam_rel_max.x, cam_rel_max.y, cam_rel_max.z, 0.0],
-                    geom_min,
-                    geom_max,
-                ));
-                bvh_pairs.push((gpu_idx, world_aabb));
-            }
-        }
-
-        self.gpu_scene.upload_objects(&self.ctx.device, &self.ctx.queue, &gpu_objects);
-        let bvh = rkf_core::Bvh::build(&bvh_pairs);
-        self.gpu_scene.upload_bvh(&self.ctx.device, &self.ctx.queue, &bvh);
-
-        self.coarse_field.populate(&world_aabbs_for_coarse);
-        self.coarse_field.upload(&self.ctx.queue, Vec3::ZERO);
+        // Incremental scene-to-GPU update: only re-flatten dirty objects,
+        // skip entirely on static frames (camera-only movement).
+        let num_objects = self.update_scene_gpu(scene);
 
         // Camera uniforms.
         let cam_uniforms = self.camera.uniforms(
@@ -482,33 +449,36 @@ impl EditorEngine {
         self.gpu_scene.update_camera(&self.ctx.queue, &cam_uniforms);
 
         let scene_uniforms = SceneUniforms {
-            num_objects: gpu_objects.len() as u32,
+            num_objects,
             max_steps: 128,
             max_distance: 100.0,
             hit_threshold: 0.001,
         };
         self.gpu_scene.update_scene_uniforms(&self.ctx.queue, &scene_uniforms);
 
-        // Synthesize directional light from environment sun.
-        let sun_light = Light {
-            light_type: 0, pos_x: 0.0, pos_y: 0.0, pos_z: 0.0,
-            dir_x: self.env_sun_dir[0], dir_y: self.env_sun_dir[1], dir_z: self.env_sun_dir[2],
-            color_r: self.env_sun_color[0], color_g: self.env_sun_color[1], color_b: self.env_sun_color[2],
-            intensity: 1.0, range: 0.0, inner_angle: 0.0, outer_angle: 0.0,
-            cookie_index: -1, shadow_caster: 1,
-        };
-
+        // Light buffer: only re-upload when lights or camera position changed.
+        let total_lights = 1 + self.world_lights.len() as u32;
         let cam = self.camera.position;
-        let cam_rel_lights: Vec<Light> = self.world_lights.iter().map(|l| {
-            let mut cl = *l;
-            if cl.light_type != 0 { cl.pos_x -= cam.x; cl.pos_y -= cam.y; cl.pos_z -= cam.z; }
-            cl
-        }).collect();
-
-        let total_lights = 1 + cam_rel_lights.len() as u32;
-        let mut all_lights = vec![sun_light];
-        all_lights.extend(cam_rel_lights);
-        self.light_buffer.update(&self.ctx.queue, &all_lights);
+        let cam_moved = cam != self.last_light_cam_pos;
+        if self.lights_dirty || cam_moved {
+            let sun_light = Light {
+                light_type: 0, pos_x: 0.0, pos_y: 0.0, pos_z: 0.0,
+                dir_x: self.env_sun_dir[0], dir_y: self.env_sun_dir[1], dir_z: self.env_sun_dir[2],
+                color_r: self.env_sun_color[0], color_g: self.env_sun_color[1], color_b: self.env_sun_color[2],
+                intensity: 1.0, range: 0.0, inner_angle: 0.0, outer_angle: 0.0,
+                cookie_index: -1, shadow_caster: 1,
+            };
+            let cam_rel_lights: Vec<Light> = self.world_lights.iter().map(|l| {
+                let mut cl = *l;
+                if cl.light_type != 0 { cl.pos_x -= cam.x; cl.pos_y -= cam.y; cl.pos_z -= cam.z; }
+                cl
+            }).collect();
+            let mut all_lights = vec![sun_light];
+            all_lights.extend(cam_rel_lights);
+            self.light_buffer.update(&self.ctx.queue, &all_lights);
+            self.lights_dirty = false;
+            self.last_light_cam_pos = cam;
+        }
 
         // Shade uniforms.
         let fov_rad = self.camera.fov_degrees.to_radians();
@@ -544,12 +514,11 @@ impl EditorEngine {
         self.prev_vp = self.camera.view_projection(self.render_width, self.render_height)
             .to_cols_array_2d();
 
-        // Poll GPU to prevent command buffer buildup.
-        let _ = self.ctx.device.poll(wgpu::PollType::Poll);
-
         let mut encoder = self.ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("offscreen_frame"),
         });
+
+        self.gpu_profiler.begin_frame();
 
         // Per-frame uniforms.
         self.coarse_field.update_uniforms(&self.ctx.queue, self.camera.position);
@@ -564,17 +533,31 @@ impl EditorEngine {
         });
 
         // --- Core rendering ---
+        self.gpu_profiler.begin_pass(&mut encoder, "tile_cull");
         self.tile_cull.dispatch(&mut encoder, &self.gpu_scene);
+        self.gpu_profiler.end_pass(&mut encoder);
+
+        self.gpu_profiler.begin_pass(&mut encoder, "ray_march");
         self.ray_march.dispatch(
             &mut encoder, &self.gpu_scene, &self.gbuffer,
             &self.tile_cull, &self.coarse_field,
         );
+        self.gpu_profiler.end_pass(&mut encoder);
+
+        self.gpu_profiler.begin_pass(&mut encoder, "radiance_inject");
         self.radiance_inject.dispatch(&mut encoder, &self.gpu_scene, &self.coarse_field);
+        self.gpu_profiler.end_pass(&mut encoder);
+
+        self.gpu_profiler.begin_pass(&mut encoder, "radiance_mip");
         self.radiance_mip.dispatch(&mut encoder);
+        self.gpu_profiler.end_pass(&mut encoder);
+
+        self.gpu_profiler.begin_pass(&mut encoder, "shading");
         self.shading_pass.dispatch(
             &mut encoder, &self.gbuffer, &self.gpu_scene,
             &self.coarse_field, &self.radiance_volume,
         );
+        self.gpu_profiler.end_pass(&mut encoder);
 
         // --- Volumetric pipeline ---
         self.accumulated_time += 1.0 / 60.0;
@@ -586,10 +569,24 @@ impl EditorEngine {
         self.cloud_shadow.set_cloud_params(&self.ctx.queue, &cloud_params);
 
         let sun_dir = self.env_sun_dir;
-        self.vol_shadow.dispatch(
-            &mut encoder, &self.ctx.queue,
-            [cam.x, cam.y, cam.z], sun_dir, &self.coarse_field.bind_group,
+        // Skip vol_shadow dispatch when camera and sun haven't changed.
+        let vs_cam_delta = Vec3::new(
+            cam.x - self.last_vol_shadow_cam_pos.x,
+            cam.y - self.last_vol_shadow_cam_pos.y,
+            cam.z - self.last_vol_shadow_cam_pos.z,
         );
+        let vs_sun_changed = sun_dir != self.last_vol_shadow_sun_dir;
+        if vs_cam_delta.length_squared() > 0.01 || vs_sun_changed {
+            self.gpu_profiler.begin_pass(&mut encoder, "vol_shadow");
+            self.vol_shadow.dispatch(
+                &mut encoder, &self.ctx.queue,
+                [cam.x, cam.y, cam.z], sun_dir, &self.coarse_field.bind_group,
+            );
+            self.gpu_profiler.end_pass(&mut encoder);
+            self.last_vol_shadow_cam_pos = cam;
+            self.last_vol_shadow_sun_dir = sun_dir;
+        }
+
         self.cloud_shadow.update_params_ex(
             &self.ctx.queue,
             [cam.x, cam.y, cam.z],
@@ -599,7 +596,9 @@ impl EditorEngine {
             rkf_render::cloud_shadow::DEFAULT_CLOUD_SHADOW_COVERAGE,
             rkf_render::cloud_shadow::DEFAULT_CLOUD_SHADOW_EXTINCTION,
         );
+        self.gpu_profiler.begin_pass(&mut encoder, "cloud_shadow");
         self.cloud_shadow.dispatch_only(&mut encoder);
+        self.gpu_profiler.end_pass(&mut encoder);
 
         let sc = self.env_sun_color;
         let fc = self.env_fog_color;
@@ -627,9 +626,17 @@ impl EditorEngine {
             vol_shadow_min: [cam.x - 40.0, cam.y - 10.0, cam.z - 40.0, 0.0],
             vol_shadow_max: [cam.x + 40.0, cam.y + 10.0, cam.z + 40.0, 0.0],
         };
+        self.gpu_profiler.begin_pass(&mut encoder, "vol_march");
         self.vol_march.dispatch(&mut encoder, &self.ctx.queue, &vol_params);
+        self.gpu_profiler.end_pass(&mut encoder);
+
+        self.gpu_profiler.begin_pass(&mut encoder, "vol_upscale");
         self.vol_upscale.dispatch(&mut encoder);
+        self.gpu_profiler.end_pass(&mut encoder);
+
+        self.gpu_profiler.begin_pass(&mut encoder, "vol_composite");
         self.vol_composite.dispatch(&mut encoder);
+        self.gpu_profiler.end_pass(&mut encoder);
 
         // --- Post-processing pipeline ---
         {
@@ -645,25 +652,101 @@ impl EditorEngine {
             };
             self.god_rays_blur.update_sun(&self.ctx.queue, sun_uv_x, sun_uv_y, sun_dot);
         }
+        self.gpu_profiler.begin_pass(&mut encoder, "god_rays");
         self.god_rays_blur.dispatch(&mut encoder);
+        self.gpu_profiler.end_pass(&mut encoder);
+
+        self.gpu_profiler.begin_pass(&mut encoder, "bloom");
         self.bloom.dispatch(&mut encoder);
+        self.gpu_profiler.end_pass(&mut encoder);
+
+        self.gpu_profiler.begin_pass(&mut encoder, "auto_exposure");
         self.auto_exposure.dispatch(&mut encoder, &self.ctx.queue, 1.0 / 60.0);
+        self.gpu_profiler.end_pass(&mut encoder);
+
+        self.gpu_profiler.begin_pass(&mut encoder, "dof");
         self.dof.dispatch(&mut encoder);
+        self.gpu_profiler.end_pass(&mut encoder);
+
+        self.gpu_profiler.begin_pass(&mut encoder, "motion_blur");
         self.motion_blur.dispatch(&mut encoder);
+        self.gpu_profiler.end_pass(&mut encoder);
+
+        self.gpu_profiler.begin_pass(&mut encoder, "bloom_composite");
         self.bloom_composite.dispatch(&mut encoder);
+        self.gpu_profiler.end_pass(&mut encoder);
+
+        self.gpu_profiler.begin_pass(&mut encoder, "tone_map");
         self.tone_map.dispatch(&mut encoder);
+        self.gpu_profiler.end_pass(&mut encoder);
+
+        self.gpu_profiler.begin_pass(&mut encoder, "color_grade");
         self.color_grade.dispatch(&mut encoder);
+        self.gpu_profiler.end_pass(&mut encoder);
+
+        self.gpu_profiler.begin_pass(&mut encoder, "cosmetics");
         self.cosmetics.dispatch(&mut encoder, &self.ctx.queue, self.frame_index);
+        self.gpu_profiler.end_pass(&mut encoder);
 
         // --- Blit to offscreen render target ---
         let offscreen_view = self.offscreen_view.as_ref()
             .expect("offscreen_view must exist in offscreen mode");
+        self.gpu_profiler.begin_pass(&mut encoder, "blit");
         if let Some(ref offscreen_blit) = self.offscreen_blit {
             offscreen_blit.draw(&mut encoder, offscreen_view);
         }
+        self.gpu_profiler.end_pass(&mut encoder);
 
-        // Submit all GPU work. The compositor reads the offscreen texture
-        // on the next paint — no readback needed per frame.
+        // --- Wireframe overlays (same encoder — no extra GPU submit) ---
+        if !self.pending_wireframe.is_empty() {
+            let vp_matrix = self.camera.view_projection(
+                self.viewport_width, self.viewport_height,
+            );
+            let viewport = (
+                0.0f32, 0.0f32,
+                self.viewport_width as f32, self.viewport_height as f32,
+            );
+            if let Some(ref mut wf) = self.wireframe_pass {
+                wf.draw(
+                    &self.ctx.device, &self.ctx.queue, &mut encoder,
+                    offscreen_view, vp_matrix, viewport, &self.pending_wireframe,
+                );
+            }
+            self.pending_wireframe.clear();
+        }
+
+        // --- Frame readback (double-buffered CPU pixel path) ---
+        // Copy to the CURRENT parity buffer. The previous parity buffer
+        // holds last frame's data and can be mapped without waiting.
+        {
+            let w = self.viewport_width;
+            let h = self.viewport_height;
+            let padded_row = (w * 4 + 255) & !255;
+            let offscreen_tex = self.offscreen_texture.as_ref()
+                .expect("offscreen_texture must exist");
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: offscreen_tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &self.readback_buffers[self.readback_parity],
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(padded_row),
+                        rows_per_image: Some(h),
+                    },
+                },
+                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            );
+        }
+
+        // Resolve GPU timestamps before submit.
+        self.gpu_profiler.resolve(&mut encoder);
+
+        // Single submit for render + wireframe + readback copy.
         self.ctx.queue.submit(std::iter::once(encoder.finish()));
 
         // --- GPU pick readback (same as surface path) ---
@@ -822,80 +905,81 @@ impl EditorEngine {
             }
         }
 
-        // --- Screenshot readback (on demand only) ---
-        let do_readback = self.shared_state.lock()
-            .map(|s| s.screenshot_requested)
-            .unwrap_or(false);
+        // Screenshot readback is now handled by the caller via map_readback(),
+        // which reads the readback_buffer populated by the copy above.
 
-        if do_readback {
-            let w = self.viewport_width;
-            let h = self.viewport_height;
-            let bytes_per_pixel = 4u32;
-            let unpadded_row = w * bytes_per_pixel;
-            let padded_row = (unpadded_row + 255) & !255;
+        self.frame_index += 1;
+    }
 
-            let offscreen_tex = self.offscreen_texture.as_ref()
-                .expect("offscreen_texture must exist");
-            let mut readback_enc = self.ctx.device.create_command_encoder(
-                &wgpu::CommandEncoderDescriptor { label: Some("screenshot_readback") },
+    /// Synchronous readback: wait for GPU to finish, map buffer, read pixels.
+    ///
+    /// Called after `render_frame_offscreen()` which submitted render + copy
+    /// to `readback_buffers[0]`. This waits for the GPU, reads the pixels,
+    /// and returns them. The engine loop runs at GPU frame rate.
+    pub fn map_readback(&mut self) -> (Vec<u8>, u32, u32) {
+        let w = self.viewport_width;
+        let h = self.viewport_height;
+        let padded_row = (w * 4 + 255) & !255;
+
+        let t0 = std::time::Instant::now();
+
+        let buffer_slice = self.readback_buffers[0].slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        let _ = self.ctx.device.poll(wgpu::PollType::wait_indefinitely());
+
+        let t1 = std::time::Instant::now();
+
+        let mut rgba8 = vec![0u8; (w * h * 4) as usize];
+        if let Ok(Ok(())) = rx.recv() {
+            let data = buffer_slice.get_mapped_range();
+            for y in 0..h as usize {
+                let src_offset = y * padded_row as usize;
+                let dst_offset = y * w as usize * 4;
+                let row_bytes = w as usize * 4;
+                if src_offset + row_bytes <= data.len()
+                    && dst_offset + row_bytes <= rgba8.len()
+                {
+                    rgba8[dst_offset..dst_offset + row_bytes]
+                        .copy_from_slice(&data[src_offset..src_offset + row_bytes]);
+                }
+            }
+            drop(data);
+            self.readback_buffers[0].unmap();
+        } else {
+            self.readback_buffers[0].unmap();
+        }
+
+        let t2 = std::time::Instant::now();
+
+        // GPU timestamps are ready after poll — read them.
+        self.gpu_profiler.read_results(&self.ctx.device);
+
+        // Log timing every 60 frames.
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if n % 60 == 0 {
+            eprintln!(
+                "[READBACK] poll_wait: {:.2}ms  memcpy: {:.2}ms  total: {:.2}ms  ({}x{})",
+                (t1 - t0).as_secs_f64() * 1000.0,
+                (t2 - t1).as_secs_f64() * 1000.0,
+                (t2 - t0).as_secs_f64() * 1000.0,
+                w, h,
             );
-            readback_enc.copy_texture_to_buffer(
-                wgpu::TexelCopyTextureInfo {
-                    texture: offscreen_tex,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                wgpu::TexelCopyBufferInfo {
-                    buffer: &self.readback_buffer,
-                    layout: wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(padded_row),
-                        rows_per_image: Some(h),
-                    },
-                },
-                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-            );
-            self.ctx.queue.submit(std::iter::once(readback_enc.finish()));
-
-            let buffer_slice = self.readback_buffer.slice(..);
-            let (tx, rx) = std::sync::mpsc::channel();
-            buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-                let _ = tx.send(result);
-            });
-            let _ = self.ctx.device.poll(wgpu::PollType::wait_indefinitely());
-
-            if let Ok(Ok(())) = rx.recv() {
-                let data = buffer_slice.get_mapped_range();
-                let pixel_count = (w * h) as usize;
-                let mut rgba8 = vec![0u8; pixel_count * 4];
-
-                for y in 0..h as usize {
-                    let src_row_offset = y * padded_row as usize;
-                    let dst_row_offset = y * w as usize * 4;
-                    let row_bytes = w as usize * 4;
-                    rgba8[dst_row_offset..dst_row_offset + row_bytes]
-                        .copy_from_slice(&data[src_row_offset..src_row_offset + row_bytes]);
+            // Per-pass GPU timing.
+            if !self.gpu_profiler.results.is_empty() {
+                let mut total_gpu = 0.0;
+                eprint!("[GPU PASSES]");
+                for (name, ms) in &self.gpu_profiler.results {
+                    eprint!("  {}:{:.2}ms", name, ms);
+                    total_gpu += ms;
                 }
-
-                // Offscreen format is RGBA — no BGRA swap needed.
-                drop(data);
-                self.readback_buffer.unmap();
-
-                if let Ok(mut state) = self.shared_state.lock() {
-                    state.frame_pixels = rgba8;
-                    state.frame_width = w;
-                    state.frame_height = h;
-                    state.screenshot_requested = false;
-                }
-            } else {
-                self.readback_buffer.unmap();
-                if let Ok(mut state) = self.shared_state.lock() {
-                    state.screenshot_requested = false;
-                }
+                eprintln!("  TOTAL:{:.2}ms", total_gpu);
             }
         }
 
-        self.frame_index += 1;
+        (rgba8, w, h)
     }
 }

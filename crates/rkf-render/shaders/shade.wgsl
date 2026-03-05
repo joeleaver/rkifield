@@ -224,16 +224,16 @@ const SKY_HORIZON: vec3<f32> = vec3<f32>(0.95, 0.6, 0.3);
 const SKY_REFLECT_STRENGTH: f32 = 0.15;
 
 // Shadow parameters
-const MAX_SHADOW_STEPS: u32 = 64u;
+const MAX_SHADOW_STEPS: u32 = 32u;
 const SHADOW_EPSILON: f32 = 0.005;
 const SHADOW_K: f32 = 16.0;
-const SHADOW_MAX_DIST: f32 = 50.0;
+const SHADOW_MAX_DIST: f32 = 25.0;
 const SHADOW_BIAS: f32 = 0.08;
 const SHADOW_ATMO_DENSITY: f32 = 0.04;
 const SHADOW_ATMO_MAX_FILL: f32 = 0.65;
 
 // AO parameters
-const AO_STEP_SIZE: f32 = 0.08;
+const AO_STEP_SIZE: f32 = 0.12;
 const AO_STRENGTH: f32 = 0.7;
 
 // SSS parameters
@@ -245,7 +245,7 @@ const SSS_WRAP: f32 = 0.3;
 const COARSE_NEAR_THRESHOLD: f32 = 0.5;
 
 // GI cone tracing parameters
-const GI_CONE_STEPS: u32 = 48u;
+const GI_CONE_STEPS: u32 = 24u;
 const GI_MAX_STEP: f32 = 0.16;
 const GI_STRENGTH: f32 = 2.0;
 const GI_DIFFUSE_MAX_DIST: f32 = 5.0;
@@ -362,13 +362,13 @@ fn sample_voxelized(local_pos: vec3<f32>, obj: GpuObject) -> f32 {
     return mix(c0, c1, t.z) + outside_dist;
 }
 
-/// Evaluate a single object at a camera-relative position. Returns world-space distance.
-fn evaluate_object_dist(cam_rel_pos: vec3<f32>, obj_idx: u32) -> f32 {
+/// Evaluate a single object at a world-space position. Returns world-space distance.
+fn evaluate_object_dist(world_pos: vec3<f32>, obj_idx: u32) -> f32 {
     let obj = objects[obj_idx];
     if obj.sdf_type == SDF_TYPE_NONE {
         return MAX_FLOAT;
     }
-    let local_pos = (obj.inverse_world * vec4<f32>(cam_rel_pos, 1.0)).xyz;
+    let local_pos = (obj.inverse_world * vec4<f32>(world_pos, 1.0)).xyz;
     var dist: f32;
     if obj.sdf_type == SDF_TYPE_ANALYTICAL {
         dist = evaluate_analytical(local_pos, obj);
@@ -395,20 +395,18 @@ fn sample_coarse_field(cam_rel_pos: vec3<f32>) -> f32 {
 /// Sample the SDF at a world-space position using the v2 coarse field + BVH.
 /// Returns the minimum signed distance to any object surface.
 ///
-/// Internally converts from world-space to camera-relative for the coarse field
-/// and object evaluation (inverse_world matrices are camera-relative), while
+/// Coarse field uses camera-relative coordinates (centered on camera).
+/// Object evaluation uses world-space (inverse_world is world-space).
 /// BVH traversal uses world-space positions against world-space AABBs.
 fn sample_sdf(pos: vec3<f32>) -> f32 {
-    let cam_pos = shade_uniforms.camera_pos.xyz;
-    let cam_rel = pos - cam_pos;
-
-    // Phase 1: coarse field check — if far from all surfaces, use conservative estimate.
+    // Coarse field is camera-relative (centered on camera).
+    let cam_rel = pos - shade_uniforms.camera_pos.xyz;
     let coarse_dist = sample_coarse_field(cam_rel);
     if coarse_dist > COARSE_NEAR_THRESHOLD {
         return coarse_dist;
     }
 
-    // Phase 2: BVH traversal for precise per-object distance.
+    // BVH traversal for precise per-object distance (world-space).
     if v2_scene.num_objects == 0u {
         return MAX_FLOAT;
     }
@@ -428,7 +426,6 @@ fn sample_sdf(pos: vec3<f32>) -> f32 {
         let node_min = vec3<f32>(node.aabb_min_x, node.aabb_min_y, node.aabb_min_z);
         let node_max = vec3<f32>(node.aabb_max_x, node.aabb_max_y, node.aabb_max_z);
 
-        // Skip nodes whose AABB is far from the query point.
         let closest = clamp(pos, node_min, node_max);
         let box_dist = length(closest - pos);
         if box_dist > min_dist {
@@ -436,14 +433,12 @@ fn sample_sdf(pos: vec3<f32>) -> f32 {
         }
 
         if node.left == BVH_INVALID {
-            // Leaf node — evaluate the object.
             let leaf_obj_idx = node.right_or_object;
             if leaf_obj_idx < v2_scene.num_objects {
-                let d = evaluate_object_dist(cam_rel, leaf_obj_idx);
+                let d = evaluate_object_dist(pos, leaf_obj_idx);
                 min_dist = min(min_dist, d);
             }
         } else {
-            // Internal node — push children.
             if stack_ptr < BVH_STACK_SIZE - 1u {
                 stack[stack_ptr] = node.left;
                 stack_ptr += 1u;
@@ -480,7 +475,7 @@ fn soft_shadow(origin: vec3<f32>, light_dir: vec3<f32>, max_dist: f32, k: f32) -
 fn sdf_ao(pos: vec3<f32>, normal: vec3<f32>) -> f32 {
     var ao = 0.0;
     var scale = 1.0;
-    for (var i = 1u; i <= 6u; i++) {
+    for (var i = 1u; i <= 4u; i++) {
         let dist = AO_STEP_SIZE * f32(i);
         let d = sample_sdf(pos + normal * dist);
         ao += scale * (dist - d);
@@ -1139,7 +1134,7 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
             let obj_id = (packed_mat >> 24u) & 0xFFu;
             if obj_id > 0u {
                 let obj = objects[obj_id - 1u];
-                let local_pos = (obj.inverse_world * vec4<f32>(world_pos - shade_uniforms.camera_pos.xyz, 1.0)).xyz;
+                let local_pos = (obj.inverse_world * vec4<f32>(world_pos, 1.0)).xyz;
                 let vs = obj.voxel_size;
                 let grid_size = vec3<f32>(f32(obj.brick_map_dims_x), f32(obj.brick_map_dims_y), f32(obj.brick_map_dims_z)) * vs * 8.0;
                 let grid_pos = local_pos + grid_size * 0.5;
