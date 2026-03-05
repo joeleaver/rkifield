@@ -103,6 +103,113 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         es.light_editor.clear_dirty();
     }
 
+    // Auto-open last project if configured.
+    {
+        let config = crate::editor_config::load_editor_config();
+        if let Some(ref project_path_str) = config.last_project_path {
+            if std::path::Path::new(project_path_str).exists() {
+                log::info!("Auto-opening last project: {project_path_str}");
+                match rkf_runtime::load_project(project_path_str) {
+                    Ok(pf) => {
+                        let project_path = std::path::Path::new(project_path_str);
+                        let project_root = rkf_runtime::project::project_root(project_path);
+                        let default_scene_path = if let Some(ref ds) = pf.default_scene {
+                            pf.scenes.iter()
+                                .find(|s| &s.name == ds)
+                                .map(|s| project_root.join(&s.path))
+                        } else {
+                            pf.scenes.first()
+                                .map(|s| project_root.join(&s.path))
+                        };
+
+                        if let Some(scene_path) = default_scene_path {
+                            let sp = scene_path.to_string_lossy().to_string();
+                            match crate::scene_io::load_v2_scene(&sp) {
+                                Ok(sf) => {
+                                    let mut new_scene = crate::scene_io::reconstruct_v2_scene(&sf);
+
+                                    // Load voxelized objects from .rkf files.
+                                    engine.clear_scene();
+                                    let scene_dir = scene_path.parent()
+                                        .unwrap_or(std::path::Path::new("."));
+                                    for (i, entry) in sf.objects.iter().enumerate() {
+                                        if let Some(asset_path) = &entry.asset_path {
+                                            let rkf_path = scene_dir.join(asset_path);
+                                            let rkf_str = rkf_path.to_string_lossy().to_string();
+                                            match crate::engine::load_rkf_into_pool(
+                                                &rkf_str,
+                                                &mut engine.cpu_brick_pool,
+                                                &mut engine.cpu_brick_map_alloc,
+                                            ) {
+                                                Ok((handle, voxel_size, grid_aabb, _count)) => {
+                                                    if let Some(obj) = new_scene.objects.get_mut(i) {
+                                                        obj.root_node.sdf_source =
+                                                            rkf_core::SdfSource::Voxelized {
+                                                                brick_map_handle: handle,
+                                                                voxel_size,
+                                                                aabb: grid_aabb,
+                                                            };
+                                                        obj.aabb = grid_aabb;
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    log::error!("Failed to load .rkf '{}': {e}", asset_path);
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    if let Ok(mut es) = editor_state.lock() {
+                                        *es.world.scene_mut() = new_scene;
+                                        es.current_scene_path = Some(sp);
+                                        es.current_project = Some(pf);
+                                        es.current_project_path = Some(project_path_str.clone());
+                                        es.world.resync_entity_tracking();
+
+                                        // Restore subsystem state from property bag.
+                                        if let Some(s) = sf.properties.get("camera") {
+                                            if let Ok(cam) = ron::from_str::<crate::scene_io::CameraSnapshot>(s) {
+                                                es.editor_camera.position = cam.position;
+                                                es.editor_camera.fly_yaw = cam.yaw;
+                                                es.editor_camera.fly_pitch = cam.pitch;
+                                                es.editor_camera.fov_y = cam.fov_y;
+                                                let dir = glam::Vec3::new(
+                                                    -cam.yaw.sin() * cam.pitch.cos(),
+                                                    cam.pitch.sin(),
+                                                    -cam.yaw.cos() * cam.pitch.cos(),
+                                                );
+                                                es.editor_camera.target = es.editor_camera.position
+                                                    + dir * es.editor_camera.orbit_distance;
+                                            }
+                                        }
+                                        if let Some(s) = sf.properties.get("environment") {
+                                            if let Ok(env) = ron::from_str::<crate::environment::EnvironmentState>(s) {
+                                                es.environment = env;
+                                                es.environment.mark_dirty();
+                                            }
+                                        }
+                                        if let Some(s) = sf.properties.get("lights") {
+                                            if let Ok(lights) = ron::from_str::<Vec<crate::light_editor::SceneLight>>(s) {
+                                                es.light_editor.replace_lights(lights);
+                                            }
+                                        }
+
+                                        engine.init_sdf_padding(es.world.scene_mut());
+                                    }
+                                    log::info!("Last project restored: {project_path_str}");
+                                }
+                                Err(e) => log::error!("Failed to load last project's scene: {e}"),
+                            }
+                        }
+                    }
+                    Err(e) => log::warn!("Failed to load last project '{}': {e}", project_path_str),
+                }
+            } else {
+                log::info!("Last project path no longer exists: {project_path_str}");
+            }
+        }
+    }
+
     log::info!("Engine thread: engine ready, entering render loop");
 
     let mut last_frame = std::time::Instant::now();
@@ -553,6 +660,259 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                     }
                 }
                 continue; // Skip rest of frame processing after load.
+            }
+
+            // ── New Project ──────────────────────────────────────
+            if es.pending_new_project {
+                es.pending_new_project = false;
+                drop(es);
+
+                let dialog_result = rfd::FileDialog::new()
+                    .set_title("Choose parent folder for new project")
+                    .pick_folder();
+
+                if let Some(parent_dir) = dialog_result {
+                    // Ask for project name via a simple default.
+                    let project_name = parent_dir
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "NewProject".to_string());
+
+                    match rkf_runtime::project::create_project(&parent_dir, &project_name) {
+                        Ok(project_path) => {
+                            let project_path_str = project_path.to_string_lossy().to_string();
+                            match rkf_runtime::load_project(&project_path_str) {
+                                Ok(pf) => {
+                                    // Load the default scene from the new project.
+                                    let project_root = rkf_runtime::project::project_root(&project_path);
+                                    let default_scene_path = if let Some(ref ds) = pf.default_scene {
+                                        pf.scenes.iter()
+                                            .find(|s| &s.name == ds)
+                                            .map(|s| project_root.join(&s.path))
+                                    } else {
+                                        pf.scenes.first()
+                                            .map(|s| project_root.join(&s.path))
+                                    };
+
+                                    // Clear old scene and load default.
+                                    engine.clear_scene();
+                                    let mut es = editor_state.lock().unwrap();
+                                    if let Some(scene_path) = default_scene_path {
+                                        let sp = scene_path.to_string_lossy().to_string();
+                                        match crate::scene_io::load_v2_scene(&sp) {
+                                            Ok(sf) => {
+                                                let new_scene = crate::scene_io::reconstruct_v2_scene(&sf);
+                                                *es.world.scene_mut() = new_scene;
+                                                es.current_scene_path = Some(sp);
+
+                                                // Restore camera from scene properties.
+                                                if let Some(s) = sf.properties.get("camera") {
+                                                    if let Ok(cam) = ron::from_str::<crate::scene_io::CameraSnapshot>(s) {
+                                                        es.editor_camera.position = cam.position;
+                                                        es.editor_camera.fly_yaw = cam.yaw;
+                                                        es.editor_camera.fly_pitch = cam.pitch;
+                                                        es.editor_camera.fov_y = cam.fov_y;
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => log::error!("Failed to load default scene: {e}"),
+                                        }
+                                    } else {
+                                        // No scene — just clear.
+                                        *es.world.scene_mut() = rkf_core::scene::Scene::new("default");
+                                        es.current_scene_path = None;
+                                    }
+                                    es.current_project = Some(pf);
+                                    es.current_project_path = Some(project_path_str.clone());
+                                    es.selected_entity = None;
+                                    es.undo.clear();
+                                    es.unsaved_changes.mark_saved();
+                                    es.world.resync_entity_tracking();
+                                    frame_topology_changed = true;
+                                    crate::editor_config::set_last_project(Some(&project_path_str));
+                                    log::info!("New project created at {project_path_str}");
+                                }
+                                Err(e) => log::error!("Failed to load new project file: {e}"),
+                            }
+                        }
+                        Err(e) => log::error!("Failed to create project: {e}"),
+                    }
+                }
+                continue;
+            }
+
+            // ── Open Project ─────────────────────────────────────
+            if es.pending_open_project {
+                es.pending_open_project = false;
+                let open_path = es.pending_open_project_path.take();
+                drop(es);
+
+                let file_path = if let Some(p) = open_path {
+                    Some(std::path::PathBuf::from(p))
+                } else {
+                    rfd::FileDialog::new()
+                        .add_filter("Project", &["rkproject"])
+                        .pick_file()
+                };
+
+                if let Some(file_path) = file_path {
+                    let path_str = file_path.to_string_lossy().to_string();
+                    match rkf_runtime::load_project(&path_str) {
+                        Ok(pf) => {
+                            let project_root = rkf_runtime::project::project_root(&file_path);
+                            let default_scene_path = if let Some(ref ds) = pf.default_scene {
+                                pf.scenes.iter()
+                                    .find(|s| &s.name == ds)
+                                    .map(|s| project_root.join(&s.path))
+                            } else {
+                                pf.scenes.first()
+                                    .map(|s| project_root.join(&s.path))
+                            };
+
+                            engine.clear_scene();
+                            let mut es = editor_state.lock().unwrap();
+
+                            if let Some(scene_path) = default_scene_path {
+                                let sp = scene_path.to_string_lossy().to_string();
+                                match crate::scene_io::load_v2_scene(&sp) {
+                                    Ok(sf) => {
+                                        let mut new_scene = crate::scene_io::reconstruct_v2_scene(&sf);
+
+                                        // Load voxelized objects from .rkf files.
+                                        let scene_dir = scene_path.parent()
+                                            .unwrap_or(std::path::Path::new("."));
+                                        for (i, entry) in sf.objects.iter().enumerate() {
+                                            if let Some(asset_path) = &entry.asset_path {
+                                                let rkf_path = scene_dir.join(asset_path);
+                                                let rkf_str = rkf_path.to_string_lossy().to_string();
+                                                match crate::engine::load_rkf_into_pool(
+                                                    &rkf_str,
+                                                    &mut engine.cpu_brick_pool,
+                                                    &mut engine.cpu_brick_map_alloc,
+                                                ) {
+                                                    Ok((handle, voxel_size, grid_aabb, _count)) => {
+                                                        if let Some(obj) = new_scene.objects.get_mut(i) {
+                                                            obj.root_node.sdf_source =
+                                                                rkf_core::SdfSource::Voxelized {
+                                                                    brick_map_handle: handle,
+                                                                    voxel_size,
+                                                                    aabb: grid_aabb,
+                                                                };
+                                                            obj.aabb = grid_aabb;
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        log::error!("Failed to load .rkf '{}': {e}", asset_path);
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        *es.world.scene_mut() = new_scene;
+                                        es.current_scene_path = Some(sp);
+
+                                        // Restore subsystem state from property bag.
+                                        if let Some(s) = sf.properties.get("camera") {
+                                            if let Ok(cam) = ron::from_str::<crate::scene_io::CameraSnapshot>(s) {
+                                                es.editor_camera.position = cam.position;
+                                                es.editor_camera.fly_yaw = cam.yaw;
+                                                es.editor_camera.fly_pitch = cam.pitch;
+                                                es.editor_camera.fov_y = cam.fov_y;
+                                                let dir = glam::Vec3::new(
+                                                    -cam.yaw.sin() * cam.pitch.cos(),
+                                                    cam.pitch.sin(),
+                                                    -cam.yaw.cos() * cam.pitch.cos(),
+                                                );
+                                                es.editor_camera.target = es.editor_camera.position
+                                                    + dir * es.editor_camera.orbit_distance;
+                                            }
+                                        }
+                                        if let Some(s) = sf.properties.get("environment") {
+                                            if let Ok(env) = ron::from_str::<crate::environment::EnvironmentState>(s) {
+                                                es.environment = env;
+                                                es.environment.mark_dirty();
+                                            }
+                                        }
+                                        if let Some(s) = sf.properties.get("lights") {
+                                            if let Ok(lights) = ron::from_str::<Vec<crate::light_editor::SceneLight>>(s) {
+                                                es.light_editor.replace_lights(lights);
+                                            }
+                                        }
+                                    }
+                                    Err(e) => log::error!("Failed to load scene: {e}"),
+                                }
+                            } else {
+                                *es.world.scene_mut() = rkf_core::scene::Scene::new("default");
+                                es.current_scene_path = None;
+                            }
+
+                            es.current_project = Some(pf);
+                            es.current_project_path = Some(path_str.clone());
+                            es.selected_entity = None;
+                            es.undo.clear();
+                            es.unsaved_changes.mark_saved();
+                            es.world.resync_entity_tracking();
+                            frame_topology_changed = true;
+                            crate::editor_config::set_last_project(Some(&path_str));
+                            log::info!("Project opened from {path_str}");
+                        }
+                        Err(e) => log::error!("Failed to load project '{}': {e}", path_str),
+                    }
+                }
+                continue;
+            }
+
+            // ── Save Project ─────────────────────────────────────
+            if es.pending_save_project {
+                es.pending_save_project = false;
+
+                // Save the scene first (reuse existing save logic).
+                if es.current_project.is_some() {
+                    // Save scene.
+                    let save_path = es.current_scene_path.clone();
+                    if let Some(path) = save_path {
+                        let scene = es.world.scene().clone();
+                        let cam_snap = crate::scene_io::CameraSnapshot {
+                            position: es.editor_camera.position,
+                            yaw: es.editor_camera.fly_yaw,
+                            pitch: es.editor_camera.fly_pitch,
+                            fov_y: es.editor_camera.fov_y,
+                        };
+                        let props = crate::scene_io::SceneProperties {
+                            camera: Some(&cam_snap),
+                            environment: Some(&es.environment),
+                            lights: Some(es.light_editor.all_lights()),
+                        };
+                        match crate::scene_io::save_v2_scene_full(
+                            &scene, &path,
+                            &engine.cpu_brick_pool, &engine.cpu_brick_map_alloc,
+                            &props,
+                        ) {
+                            Ok(()) => {
+                                es.unsaved_changes.mark_saved();
+                                log::info!("Scene saved to {path}");
+                            }
+                            Err(e) => log::error!("Failed to save scene: {e}"),
+                        }
+                    } else {
+                        // No scene path — trigger Save As.
+                        es.pending_save_as = true;
+                    }
+
+                    // Save .rkproject file.
+                    if let Some(pp) = es.current_project_path.clone() {
+                        if let Some(ref mut pf) = es.current_project {
+                            pf.engine_version = env!("CARGO_PKG_VERSION").to_string();
+                            match rkf_runtime::save_project(&pp, pf) {
+                                Ok(()) => log::info!("Project saved to {pp}"),
+                                Err(e) => log::error!("Failed to save project: {e}"),
+                            }
+                        }
+                    }
+                } else {
+                    // No project loaded — just save the scene.
+                    es.pending_save = true;
+                }
             }
 
             // Detect gizmo-driven transform changes: if gizmo is dragging,
@@ -1585,6 +1945,20 @@ fn apply_editor_command(es: &mut EditorState, cmd: EditorCommand) {
             } else {
                 es.pending_save = true;
             }
+        }
+
+        // ── Project I/O ──────────────────────────────────────────
+        NewProject => {
+            es.pending_new_project = true;
+        }
+        OpenProject { path } => {
+            es.pending_open_project = true;
+            if !path.is_empty() {
+                es.pending_open_project_path = Some(path);
+            }
+        }
+        SaveProject => {
+            es.pending_save_project = true;
         }
 
         // ── Voxel ops ────────────────────────────────────────────

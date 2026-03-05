@@ -388,6 +388,13 @@ pub trait AutomationApi: Send + Sync {
     /// The engine will render an off-screen frame at the requested resolution.
     fn screenshot(&self, width: u32, height: u32) -> AutomationResult<Vec<u8>>;
 
+    /// Capture the full editor window (UI + viewport composited) as a PNG-encoded byte vector.
+    ///
+    /// Uses the rinch debug protocol to read the composited window texture.
+    fn screenshot_window(&self) -> AutomationResult<Vec<u8>> {
+        Err(AutomationError::NotImplemented("screenshot_window"))
+    }
+
     /// Return the full scene entity hierarchy.
     fn scene_graph(&self) -> AutomationResult<SceneGraphSnapshot>;
 

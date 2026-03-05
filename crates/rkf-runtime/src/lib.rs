@@ -121,7 +121,10 @@ pub use object_streaming::{
 pub use scene_manager::{
     LoadMode, ManagedScene, SceneHandle, SceneManager, SceneStatus,
 };
-pub use project::{ProjectFile, SceneRef, load_project, save_project};
+pub use project::{
+    ProjectFile, SceneRef, load_project, save_project,
+    create_project, project_root, resolve_scene_path, ENGINE_SHADERS,
+};
 pub use scene_file::{
     CameraEntry, LightEntry, LightType, ObjectEntry, SceneFile,
     load_scene_file, save_scene_file,

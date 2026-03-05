@@ -23,7 +23,7 @@ glam = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 anyhow = { workspace = true }
-rinch = { workspace = true, features = ["desktop", "components", "theme"] }
+rinch = { workspace = true, features = ["desktop", "components", "theme", "debug"] }
 rinch-platform = { workspace = true }
 rinch-tabler-icons = { workspace = true }
 pollster = { workspace = true }
@@ -37,3 +37,4 @@ hecs = { workspace = true }
 rfd = "0.15"
 crossbeam = { workspace = true }
 arc-swap = { workspace = true }
+base64 = { workspace = true }

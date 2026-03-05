@@ -6,6 +6,7 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 /// Top-level project descriptor serialized to `.rkproject` (RON).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +79,220 @@ pub fn save_project(path: &str, project: &ProjectFile) -> Result<()> {
     let text = ron::ser::to_string_pretty(project, config)?;
     std::fs::write(path, text)?;
     Ok(())
+}
+
+/// Mapping of engine source directories (relative to workspace root) to their shader files.
+const SHADER_SOURCE_DIRS: &[(&str, &[&str])] = &[
+    (
+        "crates/rkf-render/shaders",
+        &[
+            "blit.wgsl",
+            "tile_cull.wgsl",
+            "sharpen.wgsl",
+            "bloom.wgsl",
+            "motion_blur.wgsl",
+            "bloom_composite.wgsl",
+            "auto_exposure.wgsl",
+            "color_grade.wgsl",
+            "cosmetics.wgsl",
+            "vol_temporal.wgsl",
+            "vol_upscale.wgsl",
+            "vol_composite.wgsl",
+            "clouds.wgsl",
+            "dof.wgsl",
+            "temporal_upscale.wgsl",
+            "radiance_mip.wgsl",
+            "tone_map.wgsl",
+            "cloud_shadow.wgsl",
+            "debug_view.wgsl",
+            "god_rays_blur.wgsl",
+            "vol_march.wgsl",
+            "terrain_eval.wgsl",
+            "sdf_common.wgsl",
+            "ray_march.wgsl",
+            "tile_object_cull.wgsl",
+            "vol_shadow.wgsl",
+            "shade_pbr.wgsl",
+            "shade_unlit.wgsl",
+            "shade_toon.wgsl",
+            "shade_emissive.wgsl",
+            "shade_common.wgsl",
+            "radiance_inject.wgsl",
+            "shade.wgsl",
+            "shade_main.wgsl",
+        ],
+    ),
+    (
+        "crates/rkf-particles/shaders",
+        &[
+            "particle_simulate.wgsl",
+            "particle_bin.wgsl",
+            "particle_volumetric.wgsl",
+            "particle_micro_sdf.wgsl",
+            "particle_screen.wgsl",
+        ],
+    ),
+    ("crates/rkf-edit/shaders", &["csg_edit.wgsl"]),
+    (
+        "crates/rkf-editor/src",
+        &["line.wgsl", "jfa_sdf.wgsl", "eikonal_repair.wgsl"],
+    ),
+];
+
+/// Flat list of all engine WGSL shader filenames (no directory prefix).
+pub const ENGINE_SHADERS: &[&str] = &[
+    // rkf-render
+    "blit.wgsl",
+    "tile_cull.wgsl",
+    "sharpen.wgsl",
+    "bloom.wgsl",
+    "motion_blur.wgsl",
+    "bloom_composite.wgsl",
+    "auto_exposure.wgsl",
+    "color_grade.wgsl",
+    "cosmetics.wgsl",
+    "vol_temporal.wgsl",
+    "vol_upscale.wgsl",
+    "vol_composite.wgsl",
+    "clouds.wgsl",
+    "dof.wgsl",
+    "temporal_upscale.wgsl",
+    "radiance_mip.wgsl",
+    "tone_map.wgsl",
+    "cloud_shadow.wgsl",
+    "debug_view.wgsl",
+    "god_rays_blur.wgsl",
+    "vol_march.wgsl",
+    "terrain_eval.wgsl",
+    "sdf_common.wgsl",
+    "ray_march.wgsl",
+    "tile_object_cull.wgsl",
+    "vol_shadow.wgsl",
+    "shade_pbr.wgsl",
+    "shade_unlit.wgsl",
+    "shade_toon.wgsl",
+    "shade_emissive.wgsl",
+    "shade_common.wgsl",
+    "radiance_inject.wgsl",
+    "shade.wgsl",
+    "shade_main.wgsl",
+    // rkf-particles
+    "particle_simulate.wgsl",
+    "particle_bin.wgsl",
+    "particle_volumetric.wgsl",
+    "particle_micro_sdf.wgsl",
+    "particle_screen.wgsl",
+    // rkf-edit
+    "csg_edit.wgsl",
+    // rkf-editor
+    "line.wgsl",
+    "jfa_sdf.wgsl",
+    "eikonal_repair.wgsl",
+];
+
+/// Create a new project directory structure with default files.
+///
+/// Creates `parent_dir/name/` with subdirectories, default scene, default environment,
+/// engine shader copies, and a `.rkproject` file.
+///
+/// Returns the path to the `.rkproject` file.
+pub fn create_project(parent_dir: &Path, name: &str) -> Result<PathBuf> {
+    let project_root = parent_dir.join(name);
+    std::fs::create_dir_all(&project_root)?;
+
+    // Create subdirectories.
+    let scenes_dir = project_root.join("scenes");
+    let shaders_dir = project_root.join("assets").join("shaders");
+    let materials_dir = project_root.join("assets").join("materials");
+    let objects_dir = project_root.join("assets").join("objects");
+    let envs_dir = project_root.join("environments");
+    let scripts_dir = project_root.join("scripts");
+
+    for dir in [
+        &scenes_dir,
+        &shaders_dir,
+        &materials_dir,
+        &objects_dir,
+        &envs_dir,
+        &scripts_dir,
+    ] {
+        std::fs::create_dir_all(dir)?;
+    }
+
+    // Copy engine WGSL shaders from the source tree.
+    // CARGO_MANIFEST_DIR points to crates/rkf-runtime/ — go up 2 levels for workspace root.
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = manifest_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .unwrap_or(manifest_dir);
+
+    for &(src_dir, files) in SHADER_SOURCE_DIRS {
+        let src_path = workspace_root.join(src_dir);
+        for &filename in files {
+            let src_file = src_path.join(filename);
+            let dst_file = shaders_dir.join(filename);
+            if let Err(e) = std::fs::copy(&src_file, &dst_file) {
+                log::warn!(
+                    "Could not copy shader {}: {} (source: {})",
+                    filename,
+                    e,
+                    src_file.display()
+                );
+            }
+        }
+    }
+
+    // Create default scene.
+    {
+        use crate::scene_file::{CameraEntry, SceneFile as V2SceneFile};
+        let mut sf = V2SceneFile::new("default");
+        sf.cameras.push(CameraEntry {
+            name: "Main Camera".to_string(),
+            position: [0.0, 2.5, 5.0],
+            yaw: 0.0,
+            pitch: -0.15,
+            fov: 70.0,
+        });
+        crate::scene_file::save_scene_file(
+            &scenes_dir.join("default.rkscene").to_string_lossy(),
+            &sf,
+        )?;
+    }
+
+    // Create default environment.
+    {
+        use crate::environment::EnvironmentProfile;
+        let env = EnvironmentProfile::default();
+        crate::save_environment(&envs_dir.join("default.rkenv").to_string_lossy(), &env)?;
+    }
+
+    // Write .rkproject file.
+    let mut project = ProjectFile::new(name);
+    project.scenes.push(SceneRef {
+        name: "default".to_string(),
+        path: "scenes/default.rkscene".to_string(),
+        persistent: false,
+    });
+    project.default_scene = Some("default".to_string());
+
+    let project_file_path = project_root.join(format!("{}.rkproject", name));
+    save_project(&project_file_path.to_string_lossy(), &project)?;
+
+    Ok(project_file_path)
+}
+
+/// Get the project root directory (parent of the `.rkproject` file).
+pub fn project_root(project_path: &Path) -> PathBuf {
+    project_path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .to_path_buf()
+}
+
+/// Resolve a scene's relative path against the project root directory.
+pub fn resolve_scene_path(project_path: &Path, scene_ref: &SceneRef) -> PathBuf {
+    project_root(project_path).join(&scene_ref.path)
 }
 
 #[cfg(test)]
@@ -381,5 +596,113 @@ mod tests {
 
         let decoded: ProjectFile = ron::from_str(minimal_ron).expect("deserialize");
         assert_eq!(decoded.default_quality, "medium");
+    }
+
+    #[test]
+    fn create_project_creates_structure() {
+        let tmp = std::env::temp_dir().join("rkf_test_create_project");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+
+        let project_path = create_project(&tmp, "TestGame").expect("create_project");
+
+        // Returns path to .rkproject file.
+        assert_eq!(
+            project_path,
+            tmp.join("TestGame").join("TestGame.rkproject")
+        );
+        assert!(project_path.exists());
+
+        // Subdirectories exist.
+        let root = tmp.join("TestGame");
+        assert!(root.join("scenes").is_dir());
+        assert!(root.join("assets/shaders").is_dir());
+        assert!(root.join("assets/materials").is_dir());
+        assert!(root.join("assets/objects").is_dir());
+        assert!(root.join("environments").is_dir());
+        assert!(root.join("scripts").is_dir());
+
+        // Default scene file exists.
+        assert!(root.join("scenes/default.rkscene").exists());
+
+        // Default environment file exists.
+        assert!(root.join("environments/default.rkenv").exists());
+
+        // Shaders were copied (at least some should exist when running from workspace).
+        let shader_count = std::fs::read_dir(root.join("assets/shaders"))
+            .expect("read shaders dir")
+            .count();
+        assert!(shader_count > 0, "expected shaders to be copied");
+
+        // Load the project file and verify contents.
+        let loaded =
+            load_project(&project_path.to_string_lossy()).expect("load created project");
+        assert_eq!(loaded.name, "TestGame");
+        assert_eq!(loaded.scenes.len(), 1);
+        assert_eq!(loaded.scenes[0].name, "default");
+        assert_eq!(loaded.scenes[0].path, "scenes/default.rkscene");
+        assert_eq!(loaded.default_scene, Some("default".to_string()));
+
+        // Clean up.
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn project_root_returns_parent() {
+        let p = Path::new("/home/user/projects/MyGame/MyGame.rkproject");
+        assert_eq!(
+            project_root(p),
+            PathBuf::from("/home/user/projects/MyGame")
+        );
+    }
+
+    #[test]
+    fn project_root_bare_file() {
+        let p = Path::new("MyGame.rkproject");
+        // No parent directory component — falls back to ".".
+        assert_eq!(project_root(p), PathBuf::from(""));
+    }
+
+    #[test]
+    fn resolve_scene_path_basic() {
+        let project_path = Path::new("/projects/MyGame/MyGame.rkproject");
+        let scene_ref = SceneRef {
+            name: "Level1".to_string(),
+            path: "scenes/level1.rkscene".to_string(),
+            persistent: false,
+        };
+        assert_eq!(
+            resolve_scene_path(project_path, &scene_ref),
+            PathBuf::from("/projects/MyGame/scenes/level1.rkscene")
+        );
+    }
+
+    #[test]
+    fn resolve_scene_path_nested() {
+        let project_path = Path::new("/a/b/c/game.rkproject");
+        let scene_ref = SceneRef {
+            name: "Deep".to_string(),
+            path: "scenes/sub/deep.rkscene".to_string(),
+            persistent: true,
+        };
+        assert_eq!(
+            resolve_scene_path(project_path, &scene_ref),
+            PathBuf::from("/a/b/c/scenes/sub/deep.rkscene")
+        );
+    }
+
+    #[test]
+    fn engine_shaders_list_is_complete() {
+        // Verify the flat list matches the structured source dirs.
+        let mut from_dirs: Vec<&str> = Vec::new();
+        for &(_dir, files) in SHADER_SOURCE_DIRS {
+            for &f in files {
+                from_dirs.push(f);
+            }
+        }
+        assert_eq!(ENGINE_SHADERS.len(), from_dirs.len());
+        for (i, &shader) in ENGINE_SHADERS.iter().enumerate() {
+            assert_eq!(shader, from_dirs[i], "mismatch at index {}", i);
+        }
     }
 }

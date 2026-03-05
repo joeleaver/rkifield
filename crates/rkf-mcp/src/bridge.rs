@@ -142,6 +142,24 @@ impl AutomationApi for BridgeAutomationApi {
             .map_err(|e| AutomationError::EngineError(format!("base64 decode: {e}")))
     }
 
+    fn screenshot_window(&self) -> AutomationResult<Vec<u8>> {
+        let result = self.call_tool_raw(
+            "screenshot_window",
+            serde_json::json!({}),
+        )?;
+
+        // Same image content block format as screenshot
+        let content = &result["content"][0];
+        let b64 = content["data"]
+            .as_str()
+            .ok_or_else(|| AutomationError::EngineError("missing screenshot_window image data".into()))?;
+
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .map_err(|e| AutomationError::EngineError(format!("base64 decode: {e}")))
+    }
+
     fn scene_graph(&self) -> AutomationResult<SceneGraphSnapshot> {
         let result = self.call_tool("scene_graph", serde_json::json!({}))?;
         serde_json::from_value(result).map_err(|e| AutomationError::EngineError(e.to_string()))

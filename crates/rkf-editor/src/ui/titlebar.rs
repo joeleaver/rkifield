@@ -129,7 +129,22 @@ pub fn TitleBar() -> NodeHandle {
     // ── Build menu data ────────────────────────────────────────────────
     let es = editor_state.clone();
     let file_menu = Menu::new()
-        .item(MenuItem::new("Open").shortcut("Ctrl+O").on_click({
+        .item(MenuItem::new("New Project").on_click({
+            let cmd = cmd.clone();
+            move || {
+                let _ = cmd.0.send(EditorCommand::NewProject);
+            }
+        }))
+        .item(MenuItem::new("Open Project").on_click({
+            let cmd = cmd.clone();
+            move || {
+                let _ = cmd.0.send(EditorCommand::OpenProject { path: String::new() });
+                ui.bump_scene();
+                ui.selection.set(None);
+            }
+        }))
+        .separator()
+        .item(MenuItem::new("Open Scene").shortcut("Ctrl+O").on_click({
             let cmd = cmd.clone();
             move || {
                 let _ = cmd.0.send(EditorCommand::OpenScene { path: String::new() });
@@ -140,10 +155,10 @@ pub fn TitleBar() -> NodeHandle {
         .item(MenuItem::new("Save").shortcut("Ctrl+S").on_click({
             let cmd = cmd.clone();
             move || {
-                let _ = cmd.0.send(EditorCommand::SaveScene { path: None });
+                let _ = cmd.0.send(EditorCommand::SaveProject);
             }
         }))
-        .item(MenuItem::new("Save As").shortcut("Ctrl+Shift+S").on_click({
+        .item(MenuItem::new("Save Scene As").shortcut("Ctrl+Shift+S").on_click({
             let es = es.clone();
             move || {
                 if let Ok(mut s) = es.lock() { s.pending_save_as = true; }

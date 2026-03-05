@@ -45,6 +45,12 @@ impl EditorState {
             unsaved_changes: UnsavedChangesState::new(),
             recent_files: RecentFiles::new(),
             current_scene_path: None,
+            current_project: None,
+            current_project_path: None,
+            pending_new_project: false,
+            pending_open_project: false,
+            pending_open_project_path: None,
+            pending_save_project: false,
             viewport: ViewportRect::default(),
             left_panel_width: 251,  // 250px content + 1px border-right
             right_panel_width: 301, // 300px content + 1px border-left

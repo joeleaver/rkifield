@@ -13,6 +13,7 @@ mod animation_preview;
 mod automation;
 mod camera;
 mod debug_viz;
+mod editor_config;
 mod editor_state;
 mod engine;
 mod engine_viewport;

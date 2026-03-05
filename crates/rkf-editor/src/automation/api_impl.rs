@@ -63,6 +63,10 @@ impl AutomationApi for EditorAutomationApi {
         ))
     }
 
+    fn screenshot_window(&self) -> AutomationResult<Vec<u8>> {
+        super::rinch_debug_client::capture_window_screenshot()
+    }
+
     fn camera_state(&self) -> AutomationResult<CameraSnapshot> {
         let state = self
             .state

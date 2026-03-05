@@ -5,6 +5,7 @@
 
 mod api_helpers;
 mod api_impl;
+pub(crate) mod rinch_debug_client;
 #[cfg(test)]
 mod tests;
 

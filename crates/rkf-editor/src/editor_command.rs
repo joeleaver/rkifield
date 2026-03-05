@@ -106,6 +106,11 @@ pub enum EditorCommand {
     OpenScene { path: String },
     SaveScene { path: Option<String> },
 
+    // ── Project I/O ──────────────────────────────────────────────────────
+    NewProject,
+    OpenProject { path: String },
+    SaveProject,
+
     // ── Voxel ops ────────────────────────────────────────────────────────
     Revoxelize { object_id: u32 },
     FixSdfs { object_id: u32 },

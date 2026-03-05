@@ -29,6 +29,22 @@ impl ToolHandler for ScreenshotHandler {
     }
 }
 
+// --- Screenshot Window tool (full editor UI + viewport) ---
+
+struct ScreenshotWindowHandler;
+
+impl ToolHandler for ScreenshotWindowHandler {
+    fn call(&self, api: &dyn AutomationApi, _params: serde_json::Value) -> Result<ToolResponse, ToolError> {
+        match api.screenshot_window() {
+            Ok(data) => Ok(ToolResponse::Image {
+                data,
+                mime_type: "image/png".to_string(),
+            }),
+            Err(e) => Err(ToolError::EngineError(e.to_string())),
+        }
+    }
+}
+
 // --- Scene Graph tool ---
 
 struct SceneGraphHandler;
@@ -601,6 +617,21 @@ pub fn register_observation_tools(registry: &mut ToolRegistry) {
             mode: ToolMode::Both,
         },
         Arc::new(ScreenshotHandler),
+    );
+
+    registry.register(
+        ToolDefinition {
+            name: "screenshot_window".to_string(),
+            description: "Capture full editor window (UI + viewport composited) as PNG image".to_string(),
+            category: ToolCategory::Observation,
+            parameters: vec![],
+            return_type: ReturnTypeDef {
+                description: "Base64-encoded PNG image of the full editor window".to_string(),
+                return_type: ParamType::Object,
+            },
+            mode: ToolMode::Both,
+        },
+        Arc::new(ScreenshotWindowHandler),
     );
 
     registry.register(
@@ -1312,6 +1343,11 @@ pub fn standard_tool_definitions() -> Value {
             }
         },
         {
+            "name": "screenshot_window",
+            "description": "Capture full editor window (UI + viewport composited) as PNG image",
+            "inputSchema": { "type": "object", "properties": {}, "required": [] }
+        },
+        {
             "name": "scene_graph",
             "description": "List all entities with hierarchy, types, and transforms",
             "inputSchema": { "type": "object", "properties": {}, "required": [] }
@@ -1625,6 +1661,10 @@ pub fn dispatch_tool_call(
                 Err(e) => Ok(tool_err_json(&e.to_string())),
             }
         }
+        "screenshot_window" => match api.screenshot_window() {
+            Ok(data) => Ok(tool_image_json(data)),
+            Err(e) => Ok(tool_err_json(&e.to_string())),
+        },
         "scene_graph" => match api.scene_graph() {
             Ok(snap) => Ok(tool_ok_json(serde_json::to_value(snap).unwrap())),
             Err(e) => Ok(tool_err_json(&e.to_string())),
@@ -1973,7 +2013,7 @@ mod tests {
     fn register_all_observation_tools() {
         let mut registry = ToolRegistry::new();
         register_observation_tools(&mut registry);
-        assert_eq!(registry.len(), 31);
+        assert_eq!(registry.len(), 32);
     }
 
     #[test]
@@ -1982,7 +2022,7 @@ mod tests {
         register_observation_tools(&mut registry);
         let tools = registry.list_tools(ToolMode::Debug);
         // Debug mode sees "Both" tools only (+object_shape, +material_list, +material_get, +shader_list)
-        assert_eq!(tools.len(), 21);
+        assert_eq!(tools.len(), 22);
     }
 
     #[test]
@@ -1990,7 +2030,7 @@ mod tests {
         let mut registry = ToolRegistry::new();
         register_observation_tools(&mut registry);
         let tools = registry.list_tools(ToolMode::Editor);
-        assert_eq!(tools.len(), 31);
+        assert_eq!(tools.len(), 32);
     }
 
     #[test]
@@ -2027,9 +2067,9 @@ mod tests {
         let mut registry = ToolRegistry::new();
         register_observation_tools(&mut registry);
         let expected = [
-            "screenshot", "scene_graph", "entity_inspect", "render_stats",
-            "log_read", "camera_get", "brick_pool_stats", "spatial_query",
-            "asset_status", "debug_mode", "camera_set",
+            "screenshot", "screenshot_window", "scene_graph", "entity_inspect",
+            "render_stats", "log_read", "camera_get", "brick_pool_stats",
+            "spatial_query", "asset_status", "debug_mode", "camera_set",
         ];
         for name in &expected {
             assert!(registry.get_tool(name).is_some(), "missing tool: {name}");

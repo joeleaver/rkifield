@@ -608,6 +608,20 @@ pub struct EditorState {
     pub recent_files: RecentFiles,
     pub current_scene_path: Option<String>,
 
+    // ── Project I/O ──────────────────────────────────────────
+    /// Currently loaded project descriptor.
+    pub current_project: Option<rkf_runtime::ProjectFile>,
+    /// Path to the current `.rkproject` file.
+    pub current_project_path: Option<String>,
+    /// Set by File > New Project, consumed by the engine loop.
+    pub pending_new_project: bool,
+    /// Set by File > Open Project, consumed by the engine loop.
+    pub pending_open_project: bool,
+    /// Pre-supplied path for Open Project (skips file dialog).
+    pub pending_open_project_path: Option<String>,
+    /// Set by Save — saves both scene and project when a project is loaded.
+    pub pending_save_project: bool,
+
     // ── Viewport layout ──────────────────────────────────────
     /// Current viewport area (engine output region).
     pub viewport: ViewportRect,
