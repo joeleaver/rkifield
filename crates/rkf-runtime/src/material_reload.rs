@@ -79,6 +79,7 @@ pub struct MaterialFile {
 
 // ── Registry ────────────────────────────────────────────────────────────────
 
+#[deprecated(note = "Use rkf_core::MaterialLibrary instead — file-driven material management with hot-reload")]
 /// Central mutable registry of material definitions.
 #[derive(Debug, Clone)]
 pub struct MaterialRegistry {

@@ -25,7 +25,7 @@ use crate::undo::UndoStack;
 use std::collections::HashSet;
 
 use glam::Vec3;
-use rinch::prelude::Signal;
+use rinch::prelude::{Signal, DragContext};
 use rkf_core::brick::Brick;
 use rkf_runtime::api::World;
 
@@ -90,6 +90,36 @@ pub struct UiSignals {
 
     // Animation playback state (0=stopped, 1=playing, 2=paused)
     pub animation_state: Signal<u32>,
+
+    // Material browser
+    pub selected_material: Signal<Option<u16>>,
+    pub material_revision: Signal<u64>,
+
+    // Properties panel tab (0 = Object, 1 = Asset)
+    pub properties_tab: Signal<u32>,
+
+    // Asset browser tab (0 = Materials, 1 = Shaders)
+    pub asset_browser_tab: Signal<u32>,
+
+    // Selected shader name (for properties display)
+    pub selected_shader: Signal<Option<String>>,
+
+    // Shader drag-and-drop context (from shader card to material shader slot)
+    pub shader_drag: DragContext<String>,
+
+    // Whether the shader drop target is being hovered during a drag
+    pub shader_drop_highlight: Signal<bool>,
+
+    // Material drag-and-drop context (from asset browser material card to object material row)
+    pub material_drag: DragContext<u16>,
+
+    // Which material row is highlighted during drag (stores from_material_id)
+    pub material_drop_highlight: Signal<Option<u16>>,
+
+    /// Counter incremented on drag-drop completion. The viewport's MouseUp
+    /// handler compares against its own snapshot to suppress the spurious
+    /// MouseUp that rinch dispatches after ondrop+ondragend.
+    pub drag_drop_generation: Signal<u64>,
 }
 
 impl UiSignals {
@@ -112,6 +142,16 @@ impl UiSignals {
             tone_map_mode: Signal::new(0),
             scene_revision: Signal::new(0),
             animation_state: Signal::new(0),
+            selected_material: Signal::new(None),
+            material_revision: Signal::new(0),
+            properties_tab: Signal::new(0),
+            asset_browser_tab: Signal::new(0),
+            selected_shader: Signal::new(None),
+            shader_drag: DragContext::new(),
+            shader_drop_highlight: Signal::new(false),
+            material_drag: DragContext::new(),
+            material_drop_highlight: Signal::new(None),
+            drag_drop_generation: Signal::new(0),
         }
     }
 
@@ -501,6 +541,27 @@ pub struct SculptUndoAccumulator {
     pub snapshots: Vec<(u32, Brick)>,
 }
 
+/// State for the material browser panel.
+#[derive(Debug, Clone)]
+pub struct MaterialBrowserState {
+    /// Currently selected material slot in the browser.
+    pub selected_slot: Option<u16>,
+    /// Filter text for material search.
+    pub filter_text: String,
+    /// Filter by category (empty = show all).
+    pub filter_category: String,
+}
+
+impl Default for MaterialBrowserState {
+    fn default() -> Self {
+        Self {
+            selected_slot: None,
+            filter_text: String::new(),
+            filter_category: String::new(),
+        }
+    }
+}
+
 /// Aggregated editor state, shared between the event loop and the UI.
 pub struct EditorState {
     // ── Mode ─────────────────────────────────────────────────
@@ -538,6 +599,9 @@ pub struct EditorState {
 
     // ── Undo/Redo ────────────────────────────────────────────
     pub undo: UndoStack,
+
+    // ── Material Browser ──────────────────────────────────────
+    pub material_browser: MaterialBrowserState,
 
     // ── Scene I/O ────────────────────────────────────────────
     pub unsaved_changes: UnsavedChangesState,
@@ -600,6 +664,9 @@ pub struct EditorState {
     /// Set by "Fix SDFs" button in sculpt panel. Contains the object ID whose
     /// SDF magnitudes should be recomputed from zero-crossings via BFS.
     pub pending_fix_sdfs: Option<u32>,
+    /// Set by material drag-and-drop in object properties panel.
+    /// Contains (object_id, from_material, to_material).
+    pub pending_remap_material: Option<(u64, u16, u16)>,
 
     // ── Sculpt pipeline (UI → render loop) ──────────────────
     /// Queued sculpt edit requests — one per brush-hit point during a stroke.

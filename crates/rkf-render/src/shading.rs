@@ -62,6 +62,8 @@ pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 pub struct ShadingPass {
     /// The compute pipeline.
     pipeline: wgpu::ComputePipeline,
+    /// Pipeline layout (stored for shader hot-reload).
+    pipeline_layout: wgpu::PipelineLayout,
 
     /// HDR output texture (Rgba16Float at internal resolution).
     pub hdr_texture: wgpu::Texture,
@@ -101,6 +103,10 @@ pub struct ShadingPass {
 
 impl ShadingPass {
     /// Create the shading pass.
+    ///
+    /// `shader_source` is the composed uber-shader WGSL string produced by
+    /// [`ShaderComposer::compose()`]. If `None`, falls back to the built-in
+    /// default (PBR-only) composition.
     pub fn new(
         device: &wgpu::Device,
         gbuffer: &GBuffer,
@@ -111,6 +117,7 @@ impl ShadingPass {
         material_buffer: &wgpu::Buffer,
         width: u32,
         height: u32,
+        shader_source: Option<&str>,
     ) -> Self {
         // HDR output texture
         let hdr_texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -231,10 +238,20 @@ impl ShadingPass {
             }],
         });
 
-        // Compile shader and create pipeline
+        // Compile shader and create pipeline.
+        // Use the composed uber-shader source if provided, otherwise compose a default.
+        let default_source;
+        let source = match shader_source {
+            Some(s) => s,
+            None => {
+                let mut composer = crate::shader_composer::ShaderComposer::new();
+                default_source = composer.compose().to_string();
+                &default_source
+            }
+        };
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("shade.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/shade.wgsl").into()),
+            label: Some("shade_composed"),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(source)),
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -263,6 +280,7 @@ impl ShadingPass {
 
         Self {
             pipeline,
+            pipeline_layout,
             hdr_texture,
             hdr_view,
             material_bind_group_layout,
@@ -293,6 +311,30 @@ impl ShadingPass {
                 binding: 0,
                 resource: lights.buffer.as_entire_binding(),
             }],
+        });
+    }
+
+    /// Recompile the shading pipeline from composed WGSL source.
+    ///
+    /// Creates a new shader module and pipeline from the given source string.
+    /// Used by the shader composer hot-reload path.
+    pub fn recompile(&mut self, device: &wgpu::Device, source: &str) {
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("shade_composed"),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(source)),
+        });
+        self.recreate_pipeline(device, &module);
+    }
+
+    /// Recreate the compute pipeline with a new shader module (hot-reload).
+    pub fn recreate_pipeline(&mut self, device: &wgpu::Device, module: &wgpu::ShaderModule) {
+        self.pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("shade_pipeline"),
+            layout: Some(&self.pipeline_layout),
+            module,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
         });
     }
 

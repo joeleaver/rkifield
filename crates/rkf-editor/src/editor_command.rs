@@ -110,6 +110,13 @@ pub enum EditorCommand {
     Revoxelize { object_id: u32 },
     FixSdfs { object_id: u32 },
 
+    // ── Materials ────────────────────────────────────────────────────────
+    SelectMaterial { slot: u16 },
+    SetMaterial { slot: u16, material: rkf_core::material::Material },
+    SetMaterialShader { slot: u16, shader_name: String },
+    /// Remap all voxels using `from_material` to `to_material` on a specific object.
+    RemapMaterial { object_id: u64, from_material: u16, to_material: u16 },
+
     // ── Animation ────────────────────────────────────────────────────────
     SetAnimationState { state: u32 },
     SetAnimationSpeed { speed: f32 },

@@ -885,6 +885,7 @@ impl World {
             cameras: Vec::new(),
             lights: Vec::new(),
             environment: None,
+            material_palette: None,
             properties: std::collections::HashMap::new(),
         };
 
@@ -1006,6 +1007,7 @@ impl World {
             cameras: Vec::new(),
             lights: Vec::new(),
             environment: None,
+            material_palette: None,
             properties: std::collections::HashMap::new(),
         };
 

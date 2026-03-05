@@ -72,7 +72,7 @@ struct Material {
     subsurface: f32, subsurface_r: f32, subsurface_g: f32, subsurface_b: f32,
     opacity: f32, ior: f32,
     noise_scale: f32, noise_strength: f32, noise_channels: u32,
-    _pad0: f32, _pad1: f32, _pad2: f32, _pad3: f32, _pad4: f32, _pad5: f32,
+    shader_id: u32, _pad1: f32, _pad2: f32, _pad3: f32, _pad4: f32, _pad5: f32,
 }
 
 struct Light {

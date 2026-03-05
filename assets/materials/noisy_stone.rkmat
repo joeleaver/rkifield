@@ -1,0 +1,20 @@
+MaterialEntry(
+    name: "Noisy Stone",
+    description: "Stone with albedo and roughness noise",
+    category: "Stone",
+    properties: (
+        albedo: (0.45, 0.43, 0.40),
+        roughness: 0.85,
+        metallic: 0.0,
+        emission_color: (0.0, 0.0, 0.0),
+        emission_strength: 0.0,
+        subsurface: 0.0,
+        subsurface_color: (1.0, 0.8, 0.6),
+        opacity: 1.0,
+        ior: 1.5,
+        noise_scale: 5.0,
+        noise_strength: 0.3,
+        noise_channels: 3,
+        shader: "pbr",
+    ),
+)

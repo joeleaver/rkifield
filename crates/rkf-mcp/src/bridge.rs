@@ -620,6 +620,23 @@ impl AutomationApi for BridgeAutomationApi {
         self.call_tool("fix_sdfs", serde_json::json!({"object_id": object_id}))?;
         Ok(())
     }
+
+    // --- Material library methods (forwarded over IPC) -----------------------
+
+    fn material_list(&self) -> AutomationResult<Vec<MaterialInfo>> {
+        let result = self.call_tool("material_list", serde_json::json!({}))?;
+        serde_json::from_value(result).map_err(|e| AutomationError::EngineError(e.to_string()))
+    }
+
+    fn material_get(&self, slot: u16) -> AutomationResult<MaterialSnapshot> {
+        let result = self.call_tool("material_get", serde_json::json!({"slot": slot}))?;
+        serde_json::from_value(result).map_err(|e| AutomationError::EngineError(e.to_string()))
+    }
+
+    fn shader_list(&self) -> AutomationResult<Vec<ShaderInfo>> {
+        let result = self.call_tool("shader_list", serde_json::json!({}))?;
+        serde_json::from_value(result).map_err(|e| AutomationError::EngineError(e.to_string()))
+    }
 }
 
 #[cfg(test)]

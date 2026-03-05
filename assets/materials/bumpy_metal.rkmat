@@ -1,0 +1,20 @@
+MaterialEntry(
+    name: "Bumpy Metal",
+    description: "Metal with normal perturbation noise",
+    category: "Metal",
+    properties: (
+        albedo: (0.8, 0.75, 0.7),
+        roughness: 0.3,
+        metallic: 1.0,
+        emission_color: (0.0, 0.0, 0.0),
+        emission_strength: 0.0,
+        subsurface: 0.0,
+        subsurface_color: (1.0, 0.8, 0.6),
+        opacity: 1.0,
+        ior: 1.5,
+        noise_scale: 10.0,
+        noise_strength: 0.15,
+        noise_channels: 4,
+        shader: "pbr",
+    ),
+)

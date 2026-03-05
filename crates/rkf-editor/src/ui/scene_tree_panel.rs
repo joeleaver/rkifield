@@ -159,6 +159,7 @@ pub fn SceneTreePanel() -> NodeHandle {
         if let Some(entity) = parse_value(&value) {
             let _ = cmd.0.send(EditorCommand::SelectEntity { entity: Some(entity) });
             ui.selection.set(Some(entity));
+            ui.properties_tab.set(0); // switch to Object tab
         }
     });
 

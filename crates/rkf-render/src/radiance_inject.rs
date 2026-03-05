@@ -38,6 +38,8 @@ pub struct InjectUniforms {
 pub struct RadianceInjectPass {
     /// The compute pipeline.
     pipeline: wgpu::ComputePipeline,
+    /// Pipeline layout (stored for shader hot-reload).
+    pipeline_layout: wgpu::PipelineLayout,
 
     /// Material table bind group layout (group 1).
     material_bind_group_layout: wgpu::BindGroupLayout,
@@ -211,6 +213,7 @@ impl RadianceInjectPass {
 
         Self {
             pipeline,
+            pipeline_layout,
             material_bind_group_layout,
             material_bind_group,
             lights_inject_bind_group_layout,
@@ -219,6 +222,18 @@ impl RadianceInjectPass {
             radiance_write_bind_group_layout,
             radiance_write_bind_group,
         }
+    }
+
+    /// Recreate the compute pipeline with a new shader module (hot-reload).
+    pub fn recreate_pipeline(&mut self, device: &wgpu::Device, module: &wgpu::ShaderModule) {
+        self.pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("inject_pipeline"),
+            layout: Some(&self.pipeline_layout),
+            module,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
     }
 
     /// Update inject uniforms.

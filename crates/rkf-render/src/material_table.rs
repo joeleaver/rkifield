@@ -25,7 +25,7 @@ impl MaterialTable {
         let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("material table"),
             contents: bytes,
-            usage: wgpu::BufferUsages::STORAGE,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
         let bind_group_layout =
@@ -59,8 +59,43 @@ impl MaterialTable {
             count: materials.len() as u32,
         }
     }
+
+    /// Update the GPU material table from a new slice of materials.
+    ///
+    /// If the material count hasn't changed, this uses `queue.write_buffer()` (fast path).
+    /// If the count has changed, it recreates the buffer and bind group.
+    ///
+    /// Returns `true` if the buffer was recreated (callers must rebind affected passes).
+    pub fn update(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, materials: &[Material]) -> bool {
+        let new_count = materials.len() as u32;
+        let bytes: &[u8] = bytemuck::cast_slice(materials);
+
+        if new_count == self.count {
+            // Fast path: same size, just write data.
+            queue.write_buffer(&self.buffer, 0, bytes);
+            false
+        } else {
+            // Buffer size changed — recreate buffer + bind group.
+            self.buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("material table"),
+                contents: bytes,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            });
+            self.bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("material table bind group"),
+                layout: &self.bind_group_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.buffer.as_entire_binding(),
+                }],
+            });
+            self.count = new_count;
+            true
+        }
+    }
 }
 
+#[deprecated(note = "Use MaterialLibrary::load_palette() to load materials from .rkmat files instead")]
 /// Create a set of test materials for the Phase 6 materials showcase and Cornell box GI scene.
 ///
 /// | Index | Name           | Description                                    |
@@ -187,6 +222,7 @@ pub fn create_test_materials() -> Vec<Material> {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
 

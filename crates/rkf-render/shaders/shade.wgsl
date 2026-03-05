@@ -30,8 +30,9 @@ struct Material {
     noise_scale: f32,
     noise_strength: f32,
     noise_channels: u32,
-    // Padding (72–95)
-    _pad0: f32,
+    // Shader selection (72–75)
+    shader_id: u32,
+    // Padding (76–95)
     _pad1: f32,
     _pad2: f32,
     _pad3: f32,

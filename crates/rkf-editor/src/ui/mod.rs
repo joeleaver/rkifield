@@ -3,6 +3,7 @@
 //! Layout: titlebar → (left panel | viewport | right panel) → status bar.
 //! EditorState is shared via rinch context (create_context in main.rs).
 
+pub mod asset_browser;
 pub mod components;
 pub mod properties_panel;
 pub mod scene_tree_panel;
@@ -20,6 +21,7 @@ use crate::editor_command::EditorCommand;
 use crate::editor_state::{EditorMode, EditorState, SelectedEntity, SliderSignals, UiSignals};
 use crate::gizmo;
 use crate::input::{InputState, KeyCode, Modifiers};
+use asset_browser::AssetBrowser;
 use right_panel::RightPanel;
 use status_bar::StatusBar;
 use titlebar::TitleBar;
@@ -101,6 +103,9 @@ pub fn editor_ui() -> NodeHandle {
         // Track last mouse position for delta computation (lock-free).
         let last_mx = std::cell::Cell::new(0.0f32);
         let last_my = std::cell::Cell::new(0.0f32);
+        // Track drag-drop generation to suppress the spurious MouseUp that
+        // rinch dispatches to the focused surface after ondrop+ondragend.
+        let last_seen_dnd_gen = std::cell::Cell::new(0u64);
         surface_handle.set_event_handler(move |event| {
             use SurfaceEvent::*;
             use SurfaceMouseButton as Btn;
@@ -248,6 +253,9 @@ pub fn editor_ui() -> NodeHandle {
                             state.pick_completed = false;
                             let picked = es.lock().ok().and_then(|s| s.selected_entity);
                             ui.selection.set(picked);
+                            if picked.is_some() {
+                                ui.properties_tab.set(0); // switch to Object tab
+                            }
                         }
                     }
                 }
@@ -350,6 +358,14 @@ pub fn editor_ui() -> NodeHandle {
                     }
                 }
                 MouseUp { x, y, button } => {
+                    // Rinch dispatches MouseUp to the focused surface AFTER
+                    // ondrop+ondragend complete. Detect this by checking if
+                    // the drag-drop generation changed since we last saw it.
+                    let current_gen = ui.drag_drop_generation.get();
+                    if current_gen != last_seen_dnd_gen.get() {
+                        last_seen_dnd_gen.set(current_gen);
+                        return; // Suppress this spurious post-drag MouseUp.
+                    }
                     // Send button state through lock-free channel for camera input.
                     let idx = match button { Btn::Left => 0, Btn::Right => 1, Btn::Middle => 2 };
                     let _ = cmd_tx.send(EditorCommand::MouseUp { button: idx, x, y });
@@ -422,6 +438,9 @@ pub fn editor_ui() -> NodeHandle {
                         if gizmo_was_dragging {
                             // Signal update after lock released.
                             ui.selection.set(picked_after_drag);
+                            if picked_after_drag.is_some() {
+                                ui.properties_tab.set(0); // switch to Object tab
+                            }
                         } else if matches!(mode, EditorMode::Sculpt | EditorMode::Paint) {
                             // Stroke ending is handled by the engine thread.
                         } else {
@@ -499,10 +518,18 @@ pub fn editor_ui() -> NodeHandle {
                     SceneTreePanel {}
                 }
 
-                // Center viewport — zero-copy GPU compositing via RenderSurface
+                // Center column — viewport + asset browser
                 div {
-                    style: "flex:1;",
-                    RenderSurface { surface: Some(surface_handle) }
+                    style: "flex:1;display:flex;flex-direction:column;min-height:0;",
+
+                    // Viewport — zero-copy GPU compositing via RenderSurface
+                    div {
+                        style: "flex:1;min-height:0;",
+                        RenderSurface { surface: Some(surface_handle) }
+                    }
+
+                    // Asset browser — material grid
+                    AssetBrowser {}
                 }
 
                 // Right panel — mode-dependent

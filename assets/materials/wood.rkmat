@@ -1,0 +1,20 @@
+MaterialEntry(
+    name: "Wood",
+    description: "Warm brown, moderate roughness",
+    category: "Organic",
+    properties: (
+        albedo: (0.55, 0.35, 0.18),
+        roughness: 0.65,
+        metallic: 0.0,
+        emission_color: (0.0, 0.0, 0.0),
+        emission_strength: 0.0,
+        subsurface: 0.0,
+        subsurface_color: (1.0, 0.8, 0.6),
+        opacity: 1.0,
+        ior: 1.5,
+        noise_scale: 0.0,
+        noise_strength: 0.0,
+        noise_channels: 0,
+        shader: "pbr",
+    ),
+)

@@ -67,6 +67,8 @@ pub mod main_camera;
 pub mod save_system;
 /// Terrain tile streaming manager — camera-based LOD selection and tile load/unload scheduling.
 pub mod terrain_streaming;
+/// File watcher — monitors asset and shader directories for changes (notify-based).
+pub mod file_watcher;
 
 pub use asset_registry::{AssetEntry, AssetRegistry, AssetState, Handle};
 pub use components::{
@@ -138,3 +140,4 @@ pub use save_system::{
 pub use terrain_streaming::{
     TerrainStreamConfig, TerrainStreaming, TileRequest, TileState,
 };
+pub use file_watcher::{FileEvent, FileWatcher};

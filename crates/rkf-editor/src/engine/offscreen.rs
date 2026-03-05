@@ -14,6 +14,7 @@ use rkf_render::{
 use rkf_render::radiance_inject::{RadianceInjectPass, InjectUniforms};
 use rkf_render::radiance_mip::RadianceMipPass;
 use rkf_render::material_table::{MaterialTable, create_test_materials};
+use rkf_core::material_library::MaterialLibrary;
 use super::EditorEngine;
 use super::{OFFSCREEN_FORMAT, build_demo_scene};
 use crate::engine_viewport::RENDER_SCALE;
@@ -103,8 +104,27 @@ impl EditorEngine {
         );
         let debug_view = DebugViewPass::new(&ctx.device, &gbuffer);
 
-        // Material table.
-        let materials = create_test_materials();
+        // Material library — load from palette file, fallback to hardcoded test materials.
+        let palette_path = std::path::Path::new("assets/materials/default.rkmatlib");
+        let material_library = match MaterialLibrary::load_palette(palette_path) {
+            Ok(lib) => {
+                log::info!("Material library loaded from {}", palette_path.display());
+                lib
+            }
+            Err(e) => {
+                log::warn!("Failed to load material palette: {e} — using test materials");
+                let mut lib = MaterialLibrary::new(16);
+                #[allow(deprecated)]
+                for (i, mat) in create_test_materials().into_iter().enumerate() {
+                    lib.set_material(i as u16, mat);
+                }
+                lib.mark_dirty();
+                lib
+            }
+        };
+        let materials = material_library.all_materials().to_vec();
+        let material_library = Arc::new(Mutex::new(material_library));
+
         let material_table = MaterialTable::upload(&ctx.device, &materials);
 
         // Lights.
@@ -128,11 +148,49 @@ impl EditorEngine {
         );
         let radiance_mip = RadianceMipPass::new(&ctx.device, &radiance_volume);
 
+        // Shader composer — compose the uber-shader from built-in + user shaders.
+        let mut shader_composer = rkf_render::ShaderComposer::new();
+        {
+            let shader_dir = std::path::Path::new("assets/shaders");
+            if shader_dir.exists() {
+                if let Ok(entries) = std::fs::read_dir(shader_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.extension().and_then(|e| e.to_str()) != Some("wgsl") {
+                            continue;
+                        }
+                        if let Ok(source) = std::fs::read_to_string(&path) {
+                            let name = super::EditorEngine::extract_shader_name(&source)
+                                .unwrap_or_else(|| {
+                                    let fname = path.file_name().unwrap().to_str().unwrap_or("unknown");
+                                    fname.strip_prefix("shade_")
+                                        .and_then(|s| s.strip_suffix(".wgsl"))
+                                        .unwrap_or(fname.trim_end_matches(".wgsl"))
+                                        .to_string()
+                                });
+                            let file_path = path.display().to_string();
+                            let id = shader_composer.register_with_path(&name, source, Some(file_path));
+                            log::info!("Registered user shader: {name} (id={id}) from {}", path.display());
+                        }
+                    }
+                }
+            }
+        }
+        let composed_source = shader_composer.compose().to_string();
+
+        // Resolve shader IDs in the material library.
+        {
+            let mut lib = material_library.lock().unwrap();
+            let composer = &shader_composer;
+            lib.resolve_shader_ids(|name| composer.shader_id(name));
+        }
+
         // Shading pass.
         let shading_pass = ShadingPass::new(
             &ctx.device, &gbuffer, &gpu_scene, &light_buffer,
             &coarse_field, &radiance_volume, &material_table.buffer,
             internal_w, internal_h,
+            Some(&composed_source),
         );
 
         // Volumetric pipeline.
@@ -284,7 +342,9 @@ impl EditorEngine {
             camera,
             world_lights,
             light_buffer,
-            material_buffer: material_table.buffer,
+            material_buffer: material_table.buffer.clone(),
+            material_table,
+            material_library: material_library.clone(),
             frame_index: 0,
             prev_vp: [[0.0; 4]; 4],
             shade_debug_mode: 0,
@@ -335,6 +395,23 @@ impl EditorEngine {
             gpu_profiler,
             last_vol_shadow_cam_pos: Vec3::new(f32::NAN, f32::NAN, f32::NAN),
             last_vol_shadow_sun_dir: [f32::NAN; 3],
+            file_watcher: {
+                let assets_dir = std::path::Path::new("assets/materials");
+                let shaders_dir = std::path::Path::new("crates/rkf-render/shaders");
+                let user_shaders_dir = std::path::Path::new("assets/shaders");
+                match rkf_runtime::FileWatcher::new(&[assets_dir, shaders_dir, user_shaders_dir]) {
+                    Ok(w) => {
+                        log::info!("File watcher started for materials + shaders + user shaders");
+                        Some(w)
+                    }
+                    Err(e) => {
+                        log::warn!("File watcher failed: {e}");
+                        None
+                    }
+                }
+            },
+            shader_composer,
+            shader_error: None,
         };
         (engine, scene)
     }

@@ -280,6 +280,75 @@ pub struct MaterialDef {
     pub ior: Option<f32>,
     /// Transmission factor `[0, 1]` (glass, translucency).
     pub transmission: Option<f32>,
+    /// Shader model name (e.g. "pbr", "toon", "unlit", "hologram").
+    pub shader: Option<String>,
+}
+
+/// Summary info about a material slot — returned by `material_list`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MaterialInfo {
+    /// GPU material table slot index.
+    pub slot: u16,
+    /// Human-readable name (empty if no metadata).
+    pub name: String,
+    /// Category (e.g. "Metal", "Stone", "Organic").
+    pub category: String,
+    /// Base color (linear RGB).
+    pub albedo: [f32; 3],
+    /// Roughness factor.
+    pub roughness: f32,
+    /// Metallic factor.
+    pub metallic: f32,
+    /// Whether this material has non-zero emission.
+    pub is_emissive: bool,
+}
+
+/// Info about a registered shader model — returned by `shader_list`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShaderInfo {
+    /// Shader name (e.g. "pbr", "toon", "hologram").
+    pub name: String,
+    /// Numeric ID used in the GPU dispatch switch.
+    pub id: u32,
+    /// Whether this is a built-in shader (vs user-provided).
+    pub built_in: bool,
+}
+
+/// Full snapshot of a material's properties — returned by `material_get`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MaterialSnapshot {
+    /// GPU material table slot index.
+    pub slot: u16,
+    /// Human-readable name.
+    pub name: String,
+    /// Description.
+    pub description: String,
+    /// Category.
+    pub category: String,
+    /// Base color (linear RGB).
+    pub albedo: [f32; 3],
+    /// Roughness factor.
+    pub roughness: f32,
+    /// Metallic factor.
+    pub metallic: f32,
+    /// Emissive color (linear RGB).
+    pub emission_color: [f32; 3],
+    /// Emissive intensity.
+    pub emission_strength: f32,
+    /// Subsurface scattering strength.
+    pub subsurface: f32,
+    /// Subsurface color.
+    pub subsurface_color: [f32; 3],
+    /// Opacity (1.0 = solid).
+    pub opacity: f32,
+    /// Index of refraction.
+    pub ior: f32,
+    /// Procedural noise scale.
+    pub noise_scale: f32,
+    /// Procedural noise strength.
+    pub noise_strength: f32,
+    /// Noise channel bitfield.
+    pub noise_channels: u32,
 }
 
 /// Render quality preset.
@@ -610,6 +679,24 @@ pub trait AutomationApi: Send + Sync {
     /// inside-out normals caused by accumulated CSG corruption.
     fn fix_sdfs(&self, _object_id: u32) -> AutomationResult<()> {
         Err(AutomationError::NotImplemented("fix_sdfs"))
+    }
+
+    // --- Material library methods (default: unsupported) ---------------------
+
+    /// List all materials in the library with summary info.
+    fn material_list(&self) -> AutomationResult<Vec<MaterialInfo>> {
+        Err(AutomationError::NotImplemented("material_list"))
+    }
+
+    /// Get full properties of a material at the given slot.
+    #[allow(unused_variables)]
+    fn material_get(&self, slot: u16) -> AutomationResult<MaterialSnapshot> {
+        Err(AutomationError::NotImplemented("material_get"))
+    }
+
+    /// List available shader models (name, id, built_in).
+    fn shader_list(&self) -> AutomationResult<Vec<ShaderInfo>> {
+        Err(AutomationError::NotImplemented("shader_list"))
     }
 }
 
@@ -994,6 +1081,60 @@ mod tests {
         let back: SpatialQueryResult = serde_json::from_str(&json).unwrap();
         assert!(back.inside);
         assert_eq!(back.material_id, 7);
+    }
+
+    #[test]
+    fn stub_material_list_not_implemented() {
+        assert_not_implemented(make_stub().material_list());
+    }
+
+    #[test]
+    fn stub_material_get_not_implemented() {
+        assert_not_implemented(make_stub().material_get(0));
+    }
+
+    #[test]
+    fn material_info_serde_roundtrip() {
+        let info = MaterialInfo {
+            slot: 1,
+            name: "Stone".into(),
+            category: "Stone".into(),
+            albedo: [0.45, 0.43, 0.40],
+            roughness: 0.85,
+            metallic: 0.0,
+            is_emissive: false,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let back: MaterialInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.slot, 1);
+        assert_eq!(back.name, "Stone");
+    }
+
+    #[test]
+    fn material_snapshot_serde_roundtrip() {
+        let snap = MaterialSnapshot {
+            slot: 2,
+            name: "Gold".into(),
+            description: "Shiny metallic gold".into(),
+            category: "Metal".into(),
+            albedo: [1.0, 0.84, 0.0],
+            roughness: 0.2,
+            metallic: 1.0,
+            emission_color: [0.0, 0.0, 0.0],
+            emission_strength: 0.0,
+            subsurface: 0.0,
+            subsurface_color: [1.0, 1.0, 1.0],
+            opacity: 1.0,
+            ior: 1.5,
+            noise_scale: 0.0,
+            noise_strength: 0.0,
+            noise_channels: 0,
+        };
+        let json = serde_json::to_string(&snap).unwrap();
+        let back: MaterialSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.slot, 2);
+        assert_eq!(back.name, "Gold");
+        assert!((back.metallic - 1.0).abs() < 1e-6);
     }
 
     #[test]

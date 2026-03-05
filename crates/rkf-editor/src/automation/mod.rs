@@ -16,6 +16,8 @@ use glam::Vec3;
 use image::ImageEncoder;
 use rkf_core::automation::*;
 
+use rkf_core::material_library::MaterialLibrary;
+
 use crate::editor_state::EditorState;
 
 /// Camera position + orientation set via MCP camera_set tool.
@@ -107,6 +109,8 @@ pub struct SharedState {
     pub pending_fix_sdfs: Option<u32>,
     /// fix_sdfs result: Ok(()) on success, Err(msg) on failure.
     pub fix_sdfs_result: Option<Result<(), String>>,
+    /// Available shader model names (published by engine thread from ShaderComposer).
+    pub shader_names: Vec<(String, u32, bool)>,
 }
 
 /// Request for a voxel slice diagnostic.
@@ -172,6 +176,7 @@ impl SharedState {
             object_shape_result: None,
             pending_fix_sdfs: None,
             fix_sdfs_result: None,
+            shader_names: Vec::new(),
         }
     }
 
@@ -193,13 +198,19 @@ impl SharedState {
 pub struct EditorAutomationApi {
     state: Arc<Mutex<SharedState>>,
     editor_state: Arc<Mutex<EditorState>>,
+    material_library: Arc<Mutex<MaterialLibrary>>,
 }
 
 impl EditorAutomationApi {
-    pub fn new(state: Arc<Mutex<SharedState>>, editor_state: Arc<Mutex<EditorState>>) -> Self {
+    pub fn new(
+        state: Arc<Mutex<SharedState>>,
+        editor_state: Arc<Mutex<EditorState>>,
+        material_library: Arc<Mutex<MaterialLibrary>>,
+    ) -> Self {
         Self {
             state,
             editor_state,
+            material_library,
         }
     }
 

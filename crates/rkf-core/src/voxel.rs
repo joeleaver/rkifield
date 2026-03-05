@@ -69,6 +69,12 @@ impl VoxelSample {
         (self.word0 >> 16) as u16
     }
 
+    /// Replace the material id in the upper 16 bits of word0, preserving distance.
+    #[inline]
+    pub fn set_material_id(&mut self, id: u16) {
+        self.word0 = (self.word0 & 0xFFFF) | ((id as u32) << 16);
+    }
+
     /// Extract blend_weight from byte 0 of word1.
     #[inline]
     pub fn blend_weight(&self) -> u8 {
@@ -189,6 +195,18 @@ mod tests {
     fn edge_case_max_material_id() {
         let sample = VoxelSample::new(0.0, u16::MAX, 0, 0, 0);
         assert_eq!(sample.material_id(), u16::MAX);
+    }
+
+    #[test]
+    fn set_material_id_preserves_distance() {
+        let mut sample = VoxelSample::new(-0.25, 5, 128, 3, 0);
+        assert_eq!(sample.material_id(), 5);
+        sample.set_material_id(42);
+        assert_eq!(sample.material_id(), 42);
+        // Distance and other fields preserved.
+        assert!((sample.distance_f32() - (-0.25)).abs() < 0.01);
+        assert_eq!(sample.blend_weight(), 128);
+        assert_eq!(sample.secondary_id(), 3);
     }
 
     #[test]

@@ -234,8 +234,135 @@ impl AutomationApi for EditorAutomationApi {
         Err(AutomationError::NotImplemented("entity_set_component"))
     }
 
-    fn material_set(&self, _id: u16, _material: MaterialDef) -> AutomationResult<()> {
-        Err(AutomationError::NotImplemented("material_set"))
+    fn material_set(&self, id: u16, material: MaterialDef) -> AutomationResult<()> {
+        let mut lib = self
+            .material_library
+            .lock()
+            .map_err(|e| AutomationError::EngineError(format!("lock poisoned: {e}")))?;
+
+        let mat = lib.get_material_mut(id).ok_or_else(|| {
+            AutomationError::InvalidParameter(format!("slot {id} out of range"))
+        })?;
+
+        // Merge non-None fields from MaterialDef into existing Material.
+        // Field mapping: base_color→albedo, emissive→emission_color,
+        // sss_radius→subsurface, transmission→opacity.
+        if let Some(c) = material.base_color {
+            mat.albedo = c;
+        }
+        if let Some(m) = material.metallic {
+            mat.metallic = m;
+        }
+        if let Some(r) = material.roughness {
+            mat.roughness = r;
+        }
+        if let Some(e) = material.emissive {
+            mat.emission_color = e;
+        }
+        if let Some(s) = material.sss_radius {
+            mat.subsurface = s;
+        }
+        if let Some(i) = material.ior {
+            mat.ior = i;
+        }
+        if let Some(t) = material.transmission {
+            mat.opacity = 1.0 - t; // transmission → opacity (inverted)
+        }
+        if let Some(ref shader_name) = material.shader {
+            // Set the shader_name in SlotInfo, and set shader_id to 0 (PBR default).
+            // The engine loop will resolve the correct shader_id from the ShaderComposer.
+            if let Some(info) = lib.slot_info_mut(id) {
+                info.shader_name = shader_name.clone();
+            }
+            // Mark dirty so the engine resolves shader IDs on next sync.
+        }
+
+        // dirty flag is already set by get_material_mut
+        Ok(())
+    }
+
+    fn material_list(&self) -> AutomationResult<Vec<MaterialInfo>> {
+        let lib = self
+            .material_library
+            .lock()
+            .map_err(|e| AutomationError::EngineError(format!("lock poisoned: {e}")))?;
+
+        let mut result = Vec::new();
+        for slot in 0..lib.slot_count() as u16 {
+            let mat = lib.get_material(slot).unwrap();
+            let info = lib.slot_info(slot);
+            let (name, category) = if let Some(si) = info {
+                (si.name.clone(), si.category.clone())
+            } else {
+                (String::new(), String::new())
+            };
+            let is_emissive = mat.emission_strength > 0.0
+                && (mat.emission_color[0] > 0.0
+                    || mat.emission_color[1] > 0.0
+                    || mat.emission_color[2] > 0.0);
+            result.push(MaterialInfo {
+                slot,
+                name,
+                category,
+                albedo: mat.albedo,
+                roughness: mat.roughness,
+                metallic: mat.metallic,
+                is_emissive,
+            });
+        }
+        Ok(result)
+    }
+
+    fn material_get(&self, slot: u16) -> AutomationResult<MaterialSnapshot> {
+        let lib = self
+            .material_library
+            .lock()
+            .map_err(|e| AutomationError::EngineError(format!("lock poisoned: {e}")))?;
+
+        let mat = lib.get_material(slot).ok_or_else(|| {
+            AutomationError::InvalidParameter(format!("slot {slot} out of range"))
+        })?;
+
+        let info = lib.slot_info(slot);
+        let (name, description, category) = if let Some(si) = info {
+            (si.name.clone(), si.description.clone(), si.category.clone())
+        } else {
+            (String::new(), String::new(), String::new())
+        };
+
+        Ok(MaterialSnapshot {
+            slot,
+            name,
+            description,
+            category,
+            albedo: mat.albedo,
+            roughness: mat.roughness,
+            metallic: mat.metallic,
+            emission_color: mat.emission_color,
+            emission_strength: mat.emission_strength,
+            subsurface: mat.subsurface,
+            subsurface_color: mat.subsurface_color,
+            opacity: mat.opacity,
+            ior: mat.ior,
+            noise_scale: mat.noise_scale,
+            noise_strength: mat.noise_strength,
+            noise_channels: mat.noise_channels,
+        })
+    }
+
+    fn shader_list(&self) -> AutomationResult<Vec<ShaderInfo>> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|e| AutomationError::EngineError(format!("lock poisoned: {e}")))?;
+
+        Ok(state.shader_names.iter().map(|(name, id, built_in)| {
+            ShaderInfo {
+                name: name.clone(),
+                id: *id,
+                built_in: *built_in,
+            }
+        }).collect())
     }
 
     fn brush_apply(&self, _op: serde_json::Value) -> AutomationResult<()> {

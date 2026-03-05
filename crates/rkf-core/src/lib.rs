@@ -32,6 +32,8 @@ pub mod lod;
 pub mod lod_manager;
 /// Material properties for the global GPU material table.
 pub mod material;
+/// File-driven material library — `.rkmat` files, palettes, hot-reload support.
+pub mod material_library;
 /// CPU reference trilinear sampling within a brick.
 pub mod sampling;
 /// v2 scene and root object container.
@@ -70,6 +72,7 @@ pub use companion::{BoneBrick, BoneVoxel, ColorBrick, ColorVoxel, VolumetricBric
 pub use lod::{LodLevel, LodSelection, ObjectLod, select_lod};
 pub use lod_manager::{LodManager, LodTransition};
 pub use material::Material;
+pub use material_library::{MaterialEntry, MaterialLibrary, MaterialPalette, MaterialProperties};
 pub use voxel::VoxelSample;
 pub use voxelize_object::{evaluate_primitive, voxelize_sdf};
 pub use world_position::WorldPosition;

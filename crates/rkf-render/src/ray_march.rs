@@ -29,6 +29,8 @@ pub const INTERNAL_HEIGHT: u32 = 540;
 pub struct RayMarchPass {
     /// The compute pipeline.
     pipeline: wgpu::ComputePipeline,
+    /// Pipeline layout (stored for shader hot-reload).
+    pipeline_layout: wgpu::PipelineLayout,
 }
 
 impl RayMarchPass {
@@ -71,7 +73,19 @@ impl RayMarchPass {
             cache: None,
         });
 
-        Self { pipeline }
+        Self { pipeline, pipeline_layout }
+    }
+
+    /// Recreate the compute pipeline with a new shader module (hot-reload).
+    pub fn recreate_pipeline(&mut self, device: &wgpu::Device, module: &wgpu::ShaderModule) {
+        self.pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("ray_march_pipeline"),
+            layout: Some(&self.pipeline_layout),
+            module,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
     }
 
     /// Record the ray march dispatch into a command encoder.

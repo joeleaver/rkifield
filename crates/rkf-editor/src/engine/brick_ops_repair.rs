@@ -790,7 +790,7 @@ impl EditorEngine {
     /// Re-upload the entire CPU brick pool and brick maps to the GPU.
     ///
     /// Called after voxelization or when the GPU buffer needs to grow.
-    pub(super) fn reupload_brick_data(&mut self) {
+    pub(crate) fn reupload_brick_data(&mut self) {
         let pool_data: &[u8] = bytemuck::cast_slice(self.cpu_brick_pool.as_slice());
         let gpu_buf = self.gpu_scene.brick_pool_buffer();
 

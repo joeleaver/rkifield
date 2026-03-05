@@ -118,11 +118,37 @@ fn main() -> anyhow::Result<()> {
     let (cmd_tx, cmd_rx) = crossbeam::channel::unbounded::<EditorCommand>();
     let ui_snapshot = Arc::new(arc_swap::ArcSwap::from_pointee(UiSnapshot::default()));
 
+    // 1c. Create shared material library (pre-populated with test materials).
+    let material_library = {
+        use rkf_core::material_library::{MaterialLibrary, SlotInfo};
+        #[allow(deprecated)]
+        use rkf_render::material_table::create_test_materials;
+        #[allow(deprecated)]
+        let mats = create_test_materials();
+        let mut lib = MaterialLibrary::new(mats.len().max(16));
+        for (i, mat) in mats.into_iter().enumerate() {
+            lib.set_material_with_info(
+                i as u16,
+                mat,
+                SlotInfo {
+                    name: format!("Material {i}"),
+                    description: String::new(),
+                    category: "Default".into(),
+                    file_path: String::new(),
+                    shader_name: "pbr".into(),
+                },
+            );
+        }
+        lib.clear_dirty(); // initial state is clean
+        Arc::new(Mutex::new(lib))
+    };
+
     // 2. Create tokio runtime and start IPC server.
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let api = automation::EditorAutomationApi::new(
         Arc::clone(&shared_state),
         Arc::clone(&editor_state),
+        Arc::clone(&material_library),
     );
     let api: Arc<dyn rkf_core::automation::AutomationApi> = Arc::new(api);
     let (_ipc_handle, socket_path) = start_ipc_server(&rt, api);

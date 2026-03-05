@@ -42,6 +42,8 @@ pub mod debug_view;
 pub mod light;
 /// PBR shading compute pass (stub — pending v2 rewrite).
 pub mod shading;
+/// Shader composer — CPU-side WGSL composition for per-material shading models.
+pub mod shader_composer;
 /// Tiled light culling compute pass.
 pub mod tile_cull;
 /// Tone mapping compute pass (HDR → LDR).
@@ -119,6 +121,7 @@ pub use ray_march::RayMarchPass;
 pub use debug_view::{DebugViewPass, DebugMode, DebugUniforms, DEBUG_VIEW_FORMAT};
 pub use light::{Light, LightBuffer, MAX_LIGHTS, MAX_LIGHTS_PER_TILE, TILE_SIZE};
 pub use shading::{ShadeUniforms, ShadingPass};
+pub use shader_composer::{ShaderComposer, ShaderSummaryData};
 pub use tile_cull::{CullUniforms, TileCullPass};
 pub mod tile_object_cull;
 pub use tile_object_cull::{TileObjectCullPass, MAX_OBJECTS_PER_TILE, OBJECT_TILE_SIZE};

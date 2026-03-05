@@ -6,7 +6,7 @@ use rinch::render_surface::{GpuTextureRegistrar, SurfaceWriter};
 
 use crate::automation::SharedState;
 use crate::editor_command::EditorCommand;
-use crate::editor_state::{EditorState, UiSignals};
+use crate::editor_state::{EditorMode, EditorState, UiSignals};
 use crate::engine::EditorEngine;
 use crate::engine_viewport::{DISPLAY_HEIGHT, DISPLAY_WIDTH};
 use crate::ui_snapshot::UiSnapshot;
@@ -187,6 +187,39 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                         }
                         _ => {}
                     }
+                    // Handle SetMaterial directly with engine's MaterialLibrary.
+                    if let EditorCommand::SetMaterial { slot, material } = cmd {
+                        if let Ok(mut lib) = engine.material_library.lock() {
+                            // Record undo action before applying.
+                            let old = lib.get_material(slot).copied().unwrap_or_default();
+                            if old != material {
+                                es.undo.push(crate::undo::UndoAction {
+                                    kind: crate::undo::UndoActionKind::MaterialChange {
+                                        slot,
+                                        old,
+                                        new: material,
+                                    },
+                                    timestamp_ms: 0,
+                                    description: format!("Change material #{slot}"),
+                                });
+                            }
+                            lib.set_material(slot, material);
+                        }
+                        continue;
+                    }
+                    if let EditorCommand::SetMaterialShader { slot, shader_name } = cmd {
+                        let shader_id = engine.shader_composer.shader_id(&shader_name);
+                        if let Ok(mut lib) = engine.material_library.lock() {
+                            if let Some(info) = lib.slot_info_mut(slot) {
+                                info.shader_name = shader_name;
+                            }
+                            if let Some(mat) = lib.get_material_mut(slot) {
+                                mat.shader_id = shader_id;
+                            }
+                            lib.mark_dirty();
+                        }
+                        continue;
+                    }
                     match cmd {
                         EditorCommand::KeyDown { .. } => key_downs.push(cmd),
                         _ => apply_editor_command(&mut es, cmd),
@@ -202,7 +235,8 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         //    We inline what was formerly `take_engine_snapshot()` to avoid the
         //    intermediate `EngineSnapshot` struct.
         let (
-            camera, f_debug_mode, f_revoxelize, f_fix_sdfs, f_environment, f_lights,
+            camera, f_debug_mode, f_revoxelize, f_fix_sdfs, f_remap_material,
+            f_environment, f_lights,
             mut scene_clone, f_selected, f_gizmo_mode, f_gizmo_axis,
             f_show_grid, f_editor_mode, f_brush_radius,
             f_sculpt_edits, f_sculpt_undo, f_sculpting_active,
@@ -239,6 +273,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             }
             let revoxelize = es.pending_revoxelize.take();
             let fix_sdfs = es.pending_fix_sdfs.take();
+            let remap_material = es.pending_remap_material.take();
 
             // Consume undo/redo.
             if es.pending_undo {
@@ -607,7 +642,8 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             // Reset per-frame deltas last.
             es.reset_frame_deltas();
 
-            (cam, debug_mode, revoxelize, fix_sdfs, environment, lights,
+            (cam, debug_mode, revoxelize, fix_sdfs, remap_material,
+             environment, lights,
              scene, sel, gm, gizmo_axis, grid, emode, brush_radius,
              sculpt_edits, sculpt_undo, sculpting_active)
         };
@@ -640,6 +676,42 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                 engine.process_fix_sdfs(es.world.scene_mut(), obj_id);
             }
             frame_dirty_objects.push(obj_id);
+        }
+
+        // e1b. Process pending material remap (no lock needed — reads scene from extracted clone).
+        if let Some((object_id, from_material, to_material)) = f_remap_material {
+            use rkf_core::scene_node::SdfSource;
+            if let Some(obj) = scene_clone.objects.iter().find(|o| o.id as u64 == object_id) {
+                if let SdfSource::Voxelized { brick_map_handle, .. } = &obj.root_node.sdf_source {
+                    let handle = *brick_map_handle;
+                    let dims = handle.dims;
+                    for bz in 0..dims.z {
+                        for by in 0..dims.y {
+                            for bx in 0..dims.x {
+                                if let Some(slot) = engine.cpu_brick_map_alloc.get_entry(&handle, bx, by, bz) {
+                                    if EditorEngine::is_unallocated(slot) {
+                                        continue;
+                                    }
+                                    let brick = engine.cpu_brick_pool.get_mut(slot);
+                                    for vz in 0..8u32 {
+                                        for vy in 0..8u32 {
+                                            for vx in 0..8u32 {
+                                                let mut sample = brick.sample(vx, vy, vz);
+                                                if sample.material_id() == from_material {
+                                                    sample.set_material_id(to_material);
+                                                    brick.set(vx, vy, vz, sample);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    engine.reupload_brick_data();
+                    frame_dirty_objects.push(object_id as u32);
+                }
+            }
         }
 
         // e2. Process sculpt undo (restore brick snapshots to CPU pool + GPU).
@@ -974,6 +1046,11 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             engine.set_wireframe_vertices(wf_verts);
         }
 
+        // g2. Process file watcher events (material + shader hot-reload).
+        engine.process_file_events();
+        // g3. Sync material library to GPU if dirty.
+        engine.sync_materials();
+
         // h. Render frame to offscreen texture (wireframe drawn in same encoder).
         //    The readback copy is appended to the same encoder — one GPU submit.
         let t_render_start = std::time::Instant::now();
@@ -1022,6 +1099,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             ss.frame_time_ms = dt as f64 * 1000.0;
             ss.frame_width = current_vp.0;
             ss.frame_height = current_vp.1;
+            ss.shader_names = engine.shader_composer.shader_info();
         }
 
         // k. GPU pick is handled inside render_frame_offscreen.
@@ -1142,7 +1220,116 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         // n0. Publish UiSnapshot for lock-free UI reads.
         {
             if let Ok(es) = editor_state.lock() {
-                let snapshot = es.to_snapshot(0, dt as f64 * 1000.0);
+                let mut snapshot = es.to_snapshot(0, dt as f64 * 1000.0);
+                // Inject material summaries from the engine's MaterialLibrary.
+                if let Ok(lib) = engine.material_library.lock() {
+                    use crate::ui_snapshot::MaterialSummary;
+                    snapshot.materials = lib.occupied_slots().map(|(slot, mat, info)| {
+                        MaterialSummary {
+                            slot,
+                            name: info.name.clone(),
+                            category: info.category.clone(),
+                            albedo: mat.albedo,
+                            roughness: mat.roughness,
+                            metallic: mat.metallic,
+                            emission_strength: mat.emission_strength,
+                            emission_color: mat.emission_color,
+                            subsurface: mat.subsurface,
+                            subsurface_color: mat.subsurface_color,
+                            opacity: mat.opacity,
+                            ior: mat.ior,
+                            noise_scale: mat.noise_scale,
+                            noise_strength: mat.noise_strength,
+                            noise_channels: mat.noise_channels,
+                            shader_name: info.shader_name.clone(),
+                        }
+                    }).collect();
+                    // Also include unoccupied slots that have non-default materials.
+                    for i in 0..lib.slot_count() {
+                        if lib.slot_info(i as u16).is_none() {
+                            if let Some(mat) = lib.get_material(i as u16) {
+                                let is_default = mat.albedo == rkf_core::material::Material::default().albedo
+                                    && mat.roughness == rkf_core::material::Material::default().roughness
+                                    && mat.metallic == rkf_core::material::Material::default().metallic;
+                                if !is_default || i == 0 {
+                                    // Only include slot 0 (fallback) from unnamed slots
+                                    if i == 0 && snapshot.materials.iter().all(|m| m.slot != 0) {
+                                        snapshot.materials.push(MaterialSummary {
+                                            slot: i as u16,
+                                            name: format!("Material {i}"),
+                                            category: "Other".to_string(),
+                                            albedo: mat.albedo,
+                                            roughness: mat.roughness,
+                                            metallic: mat.metallic,
+                                            emission_strength: mat.emission_strength,
+                                            emission_color: mat.emission_color,
+                                            subsurface: mat.subsurface,
+                                            subsurface_color: mat.subsurface_color,
+                                            opacity: mat.opacity,
+                                            ior: mat.ior,
+                                            noise_scale: mat.noise_scale,
+                                            noise_strength: mat.noise_strength,
+                                            noise_channels: mat.noise_channels,
+                                            shader_name: "pbr".to_string(),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    snapshot.materials.sort_by_key(|m| m.slot);
+                }
+                snapshot.shaders = engine.shader_composer.shader_summaries()
+                    .into_iter()
+                    .map(|s| crate::ui_snapshot::ShaderSummary {
+                        name: s.name,
+                        id: s.id,
+                        built_in: s.built_in,
+                        file_path: s.file_path,
+                    })
+                    .collect();
+
+                // Compute per-material voxel counts for the selected object.
+                if let Some(crate::editor_state::SelectedEntity::Object(eid)) = snapshot.selected_entity {
+                    use rkf_core::scene_node::SdfSource;
+                    let scene = es.world.scene();
+                    if let Some(obj) = scene.objects.iter().find(|o| o.id as u64 == eid) {
+                        if let SdfSource::Voxelized { brick_map_handle, .. } = &obj.root_node.sdf_source {
+                            let handle = *brick_map_handle;
+                            let dims = handle.dims;
+                            let mut counts: std::collections::HashMap<u16, u32> = std::collections::HashMap::new();
+                            for bz in 0..dims.z {
+                                for by in 0..dims.y {
+                                    for bx in 0..dims.x {
+                                        if let Some(slot) = engine.cpu_brick_map_alloc.get_entry(&handle, bx, by, bz) {
+                                            if EditorEngine::is_unallocated(slot) {
+                                                continue;
+                                            }
+                                            let brick = engine.cpu_brick_pool.get(slot);
+                                            for vz in 0..8u32 {
+                                                for vy in 0..8u32 {
+                                                    for vx in 0..8u32 {
+                                                        let sample = brick.sample(vx, vy, vz);
+                                                        if sample.distance_f32() <= 0.0 {
+                                                            *counts.entry(sample.material_id()).or_insert(0) += 1;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            let mut usage: Vec<crate::ui_snapshot::ObjectMaterialUsage> = counts
+                                .into_iter()
+                                .map(|(material_id, voxel_count)| crate::ui_snapshot::ObjectMaterialUsage { material_id, voxel_count })
+                                .collect();
+                            usage.sort_by(|a, b| b.voxel_count.cmp(&a.voxel_count));
+                            snapshot.selected_object_materials = usage;
+                        }
+                    }
+                }
+
                 ui_snapshot.store(Arc::new(snapshot));
             }
         }
@@ -1418,6 +1605,21 @@ fn apply_editor_command(es: &mut EditorState, cmd: EditorCommand) {
         }
         SetAnimationSpeed { speed } => {
             es.animation.speed = speed;
+        }
+
+        // ── Materials ────────────────────────────────────────────
+        SelectMaterial { slot } => {
+            es.material_browser.selected_slot = Some(slot);
+            // In paint mode, also set the active paint material.
+            if es.mode == EditorMode::Paint {
+                es.paint.current_settings.material_id = slot;
+            }
+        }
+        RemapMaterial { object_id, from_material, to_material } => {
+            es.pending_remap_material = Some((object_id, from_material, to_material));
+        }
+        SetMaterial { .. } | SetMaterialShader { .. } => {
+            // Handled separately in engine loop (needs MaterialLibrary / brick pool access).
         }
 
         // ── Window management ────────────────────────────────────

@@ -31,6 +31,7 @@ use rkf_core::aabb::Aabb;
 use rkf_core::material::Material;
 use rkf_core::transform_bake;
 use rkf_core::transform_flatten::flatten_object;
+#[allow(deprecated)]
 use rkf_render::material_table::{create_test_materials, MaterialTable};
 use rkf_render::radiance_inject::{InjectUniforms, RadianceInjectPass};
 use rkf_render::radiance_mip::RadianceMipPass;
@@ -383,6 +384,7 @@ impl Renderer {
             &material_table.buffer,
             iw,
             ih,
+            None,
         );
 
         // Volumetrics
@@ -1492,6 +1494,7 @@ impl Renderer {
             &self.material_table.buffer,
             width,
             height,
+            None,
         );
 
         // Volumetric pipeline

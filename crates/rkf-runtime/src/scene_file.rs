@@ -28,6 +28,11 @@ pub struct SceneFile {
     /// seed) to load alongside this scene.
     #[serde(default)]
     pub environment: Option<String>,
+    /// Path to a `.rkmatlib` material palette file to load with this scene.
+    /// Relative to the project root or scene file directory.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub material_palette: Option<String>,
     /// Generic property bag for subsystem state.
     ///
     /// Each subsystem serializes its state to a RON string under a key.
@@ -198,6 +203,7 @@ impl SceneFile {
             cameras: Vec::new(),
             lights: Vec::new(),
             environment: None,
+            material_palette: None,
             properties: HashMap::new(),
         }
     }

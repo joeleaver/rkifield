@@ -49,6 +49,15 @@ pub enum UndoActionKind {
         old_value: String,
         new_value: String,
     },
+    /// A material was changed in the material library.
+    MaterialChange {
+        /// Material table slot index.
+        slot: u16,
+        /// Material before the change.
+        old: rkf_core::Material,
+        /// Material after the change.
+        new: rkf_core::Material,
+    },
 }
 
 /// A single undoable action with metadata.

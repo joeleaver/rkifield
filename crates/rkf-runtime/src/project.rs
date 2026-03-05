@@ -26,6 +26,11 @@ pub struct ProjectFile {
     /// Default render-quality preset name (e.g. `"medium"`).
     #[serde(default = "default_quality")]
     pub default_quality: String,
+    /// Path to a default `.rkmatlib` material palette for the project.
+    /// Relative to the project root.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub material_palette: Option<String>,
 }
 
 fn default_quality() -> String {
@@ -55,6 +60,7 @@ impl ProjectFile {
             default_scene: None,
             asset_paths: vec!["assets".to_string()],
             default_quality: "medium".to_string(),
+            material_palette: None,
         }
     }
 }

@@ -41,6 +41,7 @@ impl EditorState {
             debug_viz: DebugOverlay::new(),
             frame_time_history: FrameTimeHistory::new(),
             undo: UndoStack::new(100),
+            material_browser: MaterialBrowserState::default(),
             unsaved_changes: UnsavedChangesState::new(),
             recent_files: RecentFiles::new(),
             current_scene_path: None,
@@ -69,6 +70,7 @@ impl EditorState {
             pending_maximize: false,
             pending_revoxelize: None,
             pending_fix_sdfs: None,
+            pending_remap_material: None,
             pending_sculpt_edits: Vec::new(),
             sculpt_undo_accumulator: None,
             pending_sculpt_undo: None,
@@ -523,6 +525,10 @@ impl EditorState {
             chromatic_aberration: self.environment.post_process.chromatic_aberration,
             tone_map_mode: self.environment.post_process.tone_map_mode,
             current_scene_path: self.current_scene_path.clone(),
+            materials: Vec::new(), // Populated by engine loop from MaterialLibrary.
+            material_revision: 0,
+            shaders: Vec::new(), // Populated by engine loop from ShaderComposer.
+            selected_object_materials: Vec::new(), // Populated by engine loop from brick pool.
             fps_ms,
             object_count,
         }

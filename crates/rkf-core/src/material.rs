@@ -28,7 +28,8 @@
 //! |     60 | noise_scale        | f32      |     4 |
 //! |     64 | noise_strength     | f32      |     4 |
 //! |     68 | noise_channels     | u32      |     4 |
-//! |     72 | _padding           | [f32; 6] |    24 |
+//! |     72 | shader_id          | u32      |     4 |
+//! |     76 | _padding           | [f32; 5] |    20 |
 //! |     96 | (end)              |          |       |
 //!
 //! # Example
@@ -96,10 +97,14 @@ pub struct Material {
     /// Bitfield: bit 0 = albedo, bit 1 = roughness, bit 2 = normal perturbation
     pub noise_channels: u32,
 
+    // Shader selection
+    /// Index into the shader registry (0 = default PBR). Set via `resolve_shader_ids()`.
+    pub shader_id: u32,
+
     // Padding to 96 bytes for GPU alignment.
-    // Fields above sum to 72 bytes; 6*f32 = 24 bytes brings total to 96.
+    // Fields above sum to 76 bytes; 5*f32 = 20 bytes brings total to 96.
     /// Reserved padding -- must be zero.
-    pub _padding: [f32; 6],
+    pub _padding: [f32; 5],
 }
 
 // SAFETY: Material is repr(C), all fields are f32/u32/[f32;N] which are Pod
@@ -121,7 +126,8 @@ impl Default for Material {
             noise_scale: 0.0,
             noise_strength: 0.0,
             noise_channels: 0,
-            _padding: [0.0; 6],
+            shader_id: 0,
+            _padding: [0.0; 5],
         }
     }
 }
@@ -208,7 +214,7 @@ mod tests {
     #[test]
     fn default_padding_zero() {
         let m = Material::default();
-        assert_eq!(m._padding, [0.0_f32; 6]);
+        assert_eq!(m._padding, [0.0_f32; 5]);
     }
 
     // -- bytemuck / Pod -------------------------------------------------------
@@ -274,7 +280,8 @@ mod tests {
         assert_eq!(offset!(&m.noise_scale),       60);
         assert_eq!(offset!(&m.noise_strength),    64);
         assert_eq!(offset!(&m.noise_channels),    68);
-        assert_eq!(offset!(&m._padding),          72);
+        assert_eq!(offset!(&m.shader_id),         72);
+        assert_eq!(offset!(&m._padding),          76);
     }
 
     // -- noise channel bitfield -----------------------------------------------

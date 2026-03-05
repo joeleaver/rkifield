@@ -12,11 +12,12 @@ use rkf_core::{
     Aabb, BrickMapAllocator, BrickPool, Scene, SceneNode, SceneObject,
     SdfPrimitive, SdfSource, voxelize_sdf,
 };
+use rkf_core::material_library::MaterialLibrary;
 use rkf_render::{
     AutoExposurePass, BlitPass, BloomCompositePass, BloomPass, Camera, CloudShadowPass,
     CoarseField, ColorGradePass, CosmeticsPass, DebugViewPass, DofPass,
     GBuffer, GodRaysBlurPass, GpuObject, GpuSceneV2, Light, LightBuffer, MotionBlurPass,
-    RadianceVolume, RayMarchPass, RenderContext, ShadingPass,
+    RadianceVolume, RayMarchPass, RenderContext, ShaderComposer, ShadingPass,
     SharpenPass, TileObjectCullPass, ToneMapPass, VolCompositePass, VolMarchPass,
     VolShadowPass, VolUpscalePass,
 };
@@ -332,7 +333,10 @@ pub struct EditorEngine {
     pub(super) camera: Camera,
     pub world_lights: Vec<Light>,
     pub(super) light_buffer: LightBuffer,
+    pub(super) material_table: rkf_render::material_table::MaterialTable,
     pub(super) material_buffer: wgpu::Buffer,
+    /// Material library backing the GPU material table.
+    pub(crate) material_library: Arc<Mutex<MaterialLibrary>>,
     pub(super) frame_index: u32,
     pub(super) prev_vp: [[f32; 4]; 4],
     pub(super) shade_debug_mode: u32,
@@ -408,6 +412,12 @@ pub struct EditorEngine {
     pub(super) last_vol_shadow_cam_pos: Vec3,
     /// Last sun direction used for vol_shadow dispatch (skip when static).
     pub(super) last_vol_shadow_sun_dir: [f32; 3],
+    /// File watcher for material and shader hot-reload.
+    pub(super) file_watcher: Option<rkf_runtime::FileWatcher>,
+    /// Shader composer — manages the uber-shader composition and shader registry.
+    pub(crate) shader_composer: ShaderComposer,
+    /// Last shader compile error for status bar display (cleared on success).
+    pub(crate) shader_error: Option<String>,
 }
 
 impl EditorEngine {
@@ -490,6 +500,238 @@ impl EditorEngine {
     /// Returns true if a brick map slot is unallocated (no pool data).
     pub(super) fn is_unallocated(slot: u32) -> bool {
         slot == rkf_core::brick_map::EMPTY_SLOT || slot == rkf_core::brick_map::INTERIOR_SLOT
+    }
+
+    /// Check if the material library is dirty and re-upload to GPU if needed.
+    ///
+    /// When the material buffer is recreated (size change), rebinds affected
+    /// passes (shading, radiance inject).
+    pub fn sync_materials(&mut self) {
+        let dirty = {
+            let lib = self.material_library.lock().unwrap();
+            lib.is_dirty()
+        };
+        if !dirty {
+            return;
+        }
+
+        let materials = {
+            let mut lib = self.material_library.lock().unwrap();
+            let mats = lib.all_materials().to_vec();
+            lib.clear_dirty();
+            mats
+        };
+
+        let buffer_recreated = self.material_table.update(
+            &self.ctx.device, &self.ctx.queue, &materials,
+        );
+
+        if buffer_recreated {
+            // Update the cached buffer reference.
+            self.material_buffer = self.material_table.buffer.clone();
+            // Rebind passes that reference the material buffer.
+            self.shading_pass.update_materials(&self.ctx.device, &self.material_buffer);
+            self.radiance_inject.update_materials(&self.ctx.device, &self.material_buffer);
+            log::info!("Material buffer recreated ({} materials), passes rebound", materials.len());
+        } else {
+            log::debug!("Material table updated ({} materials)", materials.len());
+        }
+    }
+
+    /// Process file watcher events (material + shader hot-reload).
+    pub fn process_file_events(&mut self) {
+        let events = match self.file_watcher {
+            Some(ref watcher) => watcher.poll_events(),
+            None => return,
+        };
+
+        for event in events {
+            match event {
+                rkf_runtime::FileEvent::MaterialChanged(path) => {
+                    let mut lib = self.material_library.lock().unwrap();
+                    if let Err(e) = lib.reload_material(&path) {
+                        log::warn!("Material reload failed: {e}");
+                    }
+                    // Resolve shader IDs after reload so shader_id in GPU Material is updated.
+                    let composer = &self.shader_composer;
+                    lib.resolve_shader_ids(|name| composer.shader_id(name));
+                }
+                rkf_runtime::FileEvent::ShaderChanged(path) => {
+                    self.try_reload_shader(&path);
+                }
+            }
+        }
+    }
+
+    /// Attempt to reload a shader from disk and recreate the affected pipeline.
+    fn try_reload_shader(&mut self, path: &std::path::Path) {
+        let filename = path.file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or("");
+
+        // User custom shader in assets/shaders/ — register/update in composer and recompose.
+        let is_user_shader = path.starts_with("assets/shaders/") ||
+            path.components().any(|c| c.as_os_str() == "assets") &&
+            path.components().any(|c| c.as_os_str() == "shaders");
+
+        if is_user_shader && filename.ends_with(".wgsl") {
+            let source = match std::fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(e) => {
+                    let msg = format!("Shader read error: {}: {e}", path.display());
+                    log::error!("{msg}");
+                    self.shader_error = Some(msg);
+                    return;
+                }
+            };
+
+            // Extract shader name from function signature: fn shade_<name>(
+            let shader_name = Self::extract_shader_name(&source).unwrap_or_else(|| {
+                filename.strip_prefix("shade_")
+                    .and_then(|s| s.strip_suffix(".wgsl"))
+                    .unwrap_or(filename.trim_end_matches(".wgsl"))
+                    .to_string()
+            });
+
+            log::info!("Custom shader changed: {filename} (name={shader_name}) — recomposing");
+            let file_path = path.display().to_string();
+            self.shader_composer.register_with_path(&shader_name, source, Some(file_path));
+            self.recompose_and_recompile();
+            return;
+        }
+
+        // Built-in shade composition files trigger a recompose + recompile.
+        if filename.starts_with("shade_") && filename.ends_with(".wgsl") {
+            log::info!("Shade component changed: {filename} — recomposing uber-shader");
+            // Re-read the changed source and update in the composer.
+            if let Ok(source) = std::fs::read_to_string(path) {
+                let name = filename.strip_prefix("shade_")
+                    .and_then(|s| s.strip_suffix(".wgsl"))
+                    .unwrap_or("");
+                match name {
+                    "common" | "main" => {
+                        // Common/main changed — rebuild composer from scratch (they're include_str'd).
+                        self.shader_composer = ShaderComposer::new();
+                        // Re-register any user shaders from disk.
+                        self.scan_user_shaders();
+                    }
+                    _ => {
+                        // A built-in shading model changed — update its source.
+                        self.shader_composer.update_source(name, source);
+                    }
+                }
+            }
+            self.recompose_and_recompile();
+            return;
+        }
+
+        let source = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => {
+                let msg = format!("Shader read error: {}: {e}", path.display());
+                log::error!("{msg}");
+                self.shader_error = Some(msg);
+                return;
+            }
+        };
+
+        // Try to create the shader module — validation happens here.
+        let module = self.ctx.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(filename),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Owned(source)),
+        });
+
+        // Map shader filename to the pass that uses it and recreate the pipeline.
+        match filename {
+            "radiance_inject.wgsl" => {
+                self.radiance_inject.recreate_pipeline(&self.ctx.device, &module);
+            }
+            "ray_march.wgsl" => {
+                self.ray_march.recreate_pipeline(&self.ctx.device, &module);
+            }
+            _ => {
+                log::info!("Shader changed but no hot-reload mapping: {filename}");
+                return;
+            }
+        }
+        self.shader_error = None;
+        log::info!("Shader hot-reloaded: {filename}");
+    }
+
+    /// Recompose the uber-shader from the current ShaderComposer state and recompile.
+    fn recompose_and_recompile(&mut self) {
+        let source = self.shader_composer.compose().to_string();
+        self.shading_pass.recompile(&self.ctx.device, &source);
+        self.shader_error = None;
+
+        // Resolve shader IDs in the material library.
+        {
+            let mut lib = self.material_library.lock().unwrap();
+            let composer = &self.shader_composer;
+            lib.resolve_shader_ids(|name| composer.shader_id(name));
+        }
+
+        log::info!("Shade uber-shader recompiled ({} shaders registered)",
+            self.shader_composer.shader_names().len());
+    }
+
+    /// Scan `assets/shaders/` for user shader files and register them.
+    pub(crate) fn scan_user_shaders(&mut self) {
+        let shader_dir = std::path::Path::new("assets/shaders");
+        if !shader_dir.exists() {
+            return;
+        }
+
+        let entries = match std::fs::read_dir(shader_dir) {
+            Ok(e) => e,
+            Err(e) => {
+                log::warn!("Failed to read assets/shaders/: {e}");
+                return;
+            }
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("wgsl") {
+                continue;
+            }
+
+            let source = match std::fs::read_to_string(&path) {
+                Ok(s) => s,
+                Err(e) => {
+                    log::warn!("Failed to read {}: {e}", path.display());
+                    continue;
+                }
+            };
+
+            let shader_name = Self::extract_shader_name(&source).unwrap_or_else(|| {
+                let filename = path.file_name().unwrap().to_str().unwrap_or("unknown");
+                filename.strip_prefix("shade_")
+                    .and_then(|s| s.strip_suffix(".wgsl"))
+                    .unwrap_or(filename.trim_end_matches(".wgsl"))
+                    .to_string()
+            });
+
+            let file_path = path.display().to_string();
+            let id = self.shader_composer.register_with_path(&shader_name, source, Some(file_path));
+            log::info!("Registered user shader: {shader_name} (id={id}) from {}", path.display());
+        }
+    }
+
+    /// Extract shader name from WGSL source by looking for `fn shade_<name>(`.
+    fn extract_shader_name(source: &str) -> Option<String> {
+        for line in source.lines() {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("fn shade_") {
+                if let Some(paren) = rest.find('(') {
+                    let name = rest[..paren].trim();
+                    if !name.is_empty() {
+                        return Some(name.to_string());
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Clear all scene data from the engine, preparing for a fresh scene load.

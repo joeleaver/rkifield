@@ -531,6 +531,46 @@ impl ToolHandler for FixSdfsHandler {
     }
 }
 
+// --- Material List tool ---
+
+struct ShaderListHandler;
+
+impl ToolHandler for ShaderListHandler {
+    fn call(&self, api: &dyn AutomationApi, _params: serde_json::Value) -> Result<ToolResponse, ToolError> {
+        match api.shader_list() {
+            Ok(list) => Ok(serde_json::to_value(list).map_err(ToolError::from)?.into()),
+            Err(e) => Err(ToolError::EngineError(e.to_string())),
+        }
+    }
+}
+
+struct MaterialListHandler;
+
+impl ToolHandler for MaterialListHandler {
+    fn call(&self, api: &dyn AutomationApi, _params: serde_json::Value) -> Result<ToolResponse, ToolError> {
+        match api.material_list() {
+            Ok(list) => Ok(serde_json::to_value(list).map_err(ToolError::from)?.into()),
+            Err(e) => Err(ToolError::EngineError(e.to_string())),
+        }
+    }
+}
+
+// --- Material Get tool ---
+
+struct MaterialGetHandler;
+
+impl ToolHandler for MaterialGetHandler {
+    fn call(&self, api: &dyn AutomationApi, params: serde_json::Value) -> Result<ToolResponse, ToolError> {
+        let slot = params.get("slot").and_then(|v| v.as_u64())
+            .ok_or_else(|| ToolError::InvalidParams("slot is required".to_string()))? as u16;
+
+        match api.material_get(slot) {
+            Ok(snapshot) => Ok(serde_json::to_value(snapshot).map_err(ToolError::from)?.into()),
+            Err(e) => Err(ToolError::EngineError(e.to_string())),
+        }
+    }
+}
+
 /// Register all built-in observation tools with the registry.
 pub fn register_observation_tools(registry: &mut ToolRegistry) {
     registry.register(
@@ -1164,6 +1204,63 @@ pub fn register_observation_tools(registry: &mut ToolRegistry) {
         },
         Arc::new(FixSdfsHandler),
     );
+
+    // --- Material tools ---
+
+    registry.register(
+        ToolDefinition {
+            name: "material_list".to_string(),
+            description: "List all materials in the library with slot, name, category, albedo, roughness, metallic, is_emissive".to_string(),
+            category: ToolCategory::Observation,
+            parameters: vec![],
+            return_type: ReturnTypeDef {
+                description: "Array of material info objects".to_string(),
+                return_type: ParamType::Array,
+            },
+            mode: ToolMode::Both,
+        },
+        Arc::new(MaterialListHandler),
+    );
+
+    registry.register(
+        ToolDefinition {
+            name: "material_get".to_string(),
+            description: "Get full properties of a material at a given slot index".to_string(),
+            category: ToolCategory::Observation,
+            parameters: vec![
+                ParameterDef {
+                    name: "slot".to_string(),
+                    description: "Material table slot index (0-65535)".to_string(),
+                    param_type: ParamType::Integer,
+                    required: true,
+                    default: None,
+                },
+            ],
+            return_type: ReturnTypeDef {
+                description: "Full material properties snapshot".to_string(),
+                return_type: ParamType::Object,
+            },
+            mode: ToolMode::Both,
+        },
+        Arc::new(MaterialGetHandler),
+    );
+
+    // --- Shader tools ---
+
+    registry.register(
+        ToolDefinition {
+            name: "shader_list".to_string(),
+            description: "List available shading models (name, id, built_in)".to_string(),
+            category: ToolCategory::Observation,
+            parameters: vec![],
+            return_type: ReturnTypeDef {
+                description: "Array of shader info objects".to_string(),
+                return_type: ParamType::Array,
+            },
+            mode: ToolMode::Both,
+        },
+        Arc::new(ShaderListHandler),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1485,6 +1582,27 @@ pub fn standard_tool_definitions() -> Value {
                 },
                 "required": ["object_id"]
             }
+        },
+        {
+            "name": "material_list",
+            "description": "List all materials in the library with slot, name, category, albedo, roughness, metallic, is_emissive",
+            "inputSchema": { "type": "object", "properties": {}, "required": [] }
+        },
+        {
+            "name": "material_get",
+            "description": "Get full properties of a material at a given slot index",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "slot": { "type": "integer", "description": "Material table slot index (0-65535)" }
+                },
+                "required": ["slot"]
+            }
+        },
+        {
+            "name": "shader_list",
+            "description": "List available shading models (name, id, built_in)",
+            "inputSchema": { "type": "object", "properties": {}, "required": [] }
         }
     ])
 }
@@ -1824,6 +1942,24 @@ pub fn dispatch_tool_call(
                 Err(e) => Ok(tool_err_json(&e.to_string())),
             }
         }
+        "material_list" => match api.material_list() {
+            Ok(list) => Ok(tool_ok_json(serde_json::to_value(list).unwrap())),
+            Err(e) => Ok(tool_err_json(&e.to_string())),
+        },
+        "material_get" => {
+            let slot = match args.get("slot").and_then(|v| v.as_u64()) {
+                Some(s) => s as u16,
+                None => return Ok(tool_err_json("slot is required")),
+            };
+            match api.material_get(slot) {
+                Ok(snapshot) => Ok(tool_ok_json(serde_json::to_value(snapshot).unwrap())),
+                Err(e) => Ok(tool_err_json(&e.to_string())),
+            }
+        }
+        "shader_list" => match api.shader_list() {
+            Ok(list) => Ok(tool_ok_json(serde_json::to_value(list).unwrap())),
+            Err(e) => Ok(tool_err_json(&e.to_string())),
+        },
         _ => Err(AutomationError::NotImplemented("unknown tool")),
     }
 }
@@ -1837,7 +1973,7 @@ mod tests {
     fn register_all_observation_tools() {
         let mut registry = ToolRegistry::new();
         register_observation_tools(&mut registry);
-        assert_eq!(registry.len(), 28);
+        assert_eq!(registry.len(), 31);
     }
 
     #[test]
@@ -1845,8 +1981,8 @@ mod tests {
         let mut registry = ToolRegistry::new();
         register_observation_tools(&mut registry);
         let tools = registry.list_tools(ToolMode::Debug);
-        // Debug mode sees "Both" tools only (+object_shape is Both)
-        assert_eq!(tools.len(), 18);
+        // Debug mode sees "Both" tools only (+object_shape, +material_list, +material_get, +shader_list)
+        assert_eq!(tools.len(), 21);
     }
 
     #[test]
@@ -1854,7 +1990,7 @@ mod tests {
         let mut registry = ToolRegistry::new();
         register_observation_tools(&mut registry);
         let tools = registry.list_tools(ToolMode::Editor);
-        assert_eq!(tools.len(), 28);
+        assert_eq!(tools.len(), 31);
     }
 
     #[test]

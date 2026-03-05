@@ -9,6 +9,13 @@ use crate::editor_state::{EditorMode, SelectedEntity};
 use crate::gizmo::GizmoMode;
 use crate::light_editor::SceneLightType;
 
+/// Per-material voxel usage within the selected object.
+#[derive(Debug, Clone)]
+pub struct ObjectMaterialUsage {
+    pub material_id: u16,
+    pub voxel_count: u32,
+}
+
 /// Lightweight summary of a scene object for UI display.
 #[derive(Debug, Clone)]
 pub struct ObjectSummary {
@@ -20,6 +27,27 @@ pub struct ObjectSummary {
     pub parent_id: Option<u32>,
 }
 
+/// Lightweight summary of a material slot for UI display.
+#[derive(Debug, Clone)]
+pub struct MaterialSummary {
+    pub slot: u16,
+    pub name: String,
+    pub category: String,
+    pub albedo: [f32; 3],
+    pub roughness: f32,
+    pub metallic: f32,
+    pub emission_strength: f32,
+    pub emission_color: [f32; 3],
+    pub subsurface: f32,
+    pub subsurface_color: [f32; 3],
+    pub opacity: f32,
+    pub ior: f32,
+    pub noise_scale: f32,
+    pub noise_strength: f32,
+    pub noise_channels: u32,
+    pub shader_name: String,
+}
+
 /// Lightweight summary of a light for UI display.
 #[derive(Debug, Clone)]
 pub struct LightSummary {
@@ -28,6 +56,15 @@ pub struct LightSummary {
     pub position: Vec3,
     pub intensity: f32,
     pub range: f32,
+}
+
+/// Lightweight summary of a shader for UI display.
+#[derive(Debug, Clone)]
+pub struct ShaderSummary {
+    pub name: String,
+    pub id: u32,
+    pub built_in: bool,
+    pub file_path: String,
 }
 
 /// Complete read-only snapshot of editor state for the UI thread.
@@ -107,6 +144,18 @@ pub struct UiSnapshot {
 
     // ── Scene I/O ────────────────────────────────────────────────────
     pub current_scene_path: Option<String>,
+
+    // ── Materials ─────────────────────────────────────────────────────
+    pub materials: Vec<MaterialSummary>,
+    pub material_revision: u64,
+
+    // ── Shader registry ────────────────────────────────────────────────
+    /// Available shaders from the ShaderComposer (for UI display + dropdowns).
+    pub shaders: Vec<ShaderSummary>,
+
+    // ── Per-object material usage ───────────────────────────────────
+    /// Materials used by the selected voxelized object, sorted by voxel count descending.
+    pub selected_object_materials: Vec<ObjectMaterialUsage>,
 
     // ── Stats ────────────────────────────────────────────────────────
     pub fps_ms: f64,
@@ -194,6 +243,15 @@ impl Default for UiSnapshot {
             chromatic_aberration: 0.0,
             tone_map_mode: 0,
             current_scene_path: None,
+            materials: Vec::new(),
+            material_revision: 0,
+            shaders: vec![
+                ShaderSummary { name: "pbr".into(), id: 0, built_in: true, file_path: "crates/rkf-render/shaders/shade_pbr.wgsl".into() },
+                ShaderSummary { name: "unlit".into(), id: 1, built_in: true, file_path: "crates/rkf-render/shaders/shade_unlit.wgsl".into() },
+                ShaderSummary { name: "toon".into(), id: 2, built_in: true, file_path: "crates/rkf-render/shaders/shade_toon.wgsl".into() },
+                ShaderSummary { name: "emissive".into(), id: 3, built_in: true, file_path: "crates/rkf-render/shaders/shade_emissive.wgsl".into() },
+            ],
+            selected_object_materials: Vec::new(),
             fps_ms: 0.0,
             object_count: 0,
         }

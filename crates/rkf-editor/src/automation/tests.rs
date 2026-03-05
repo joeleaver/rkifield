@@ -7,7 +7,10 @@ use rkf_core::automation::AutomationApi;
 fn make_api() -> EditorAutomationApi {
     let state = Arc::new(Mutex::new(SharedState::new(4096, 0, 128, 128)));
     let editor_state = Arc::new(Mutex::new(EditorState::new()));
-    EditorAutomationApi::new(state, editor_state)
+    let material_library = Arc::new(Mutex::new(
+        rkf_core::material_library::MaterialLibrary::new(16),
+    ));
+    EditorAutomationApi::new(state, editor_state, material_library)
 }
 
 /// Spawn a test object and return its object_id.
