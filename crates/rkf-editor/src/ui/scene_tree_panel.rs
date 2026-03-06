@@ -113,46 +113,21 @@ pub fn SceneTreePanel() -> NodeHandle {
     let cmd = use_context::<CommandSender>();
     let ui = use_context::<UiSignals>();
 
-    // Persistent tree expand/select state — created once, lives in rinch context.
-    let tree_state = UseTreeReturn::new(UseTreeOptions {
-        initial_expanded: ["project".to_string(), "scene".to_string()]
-            .into_iter()
-            .collect(),
-        ..Default::default()
+    // Tree state lives as a context (created in editor_ui) so the
+    // selection-sync Effect can live outside the render path.
+    let tree_state = use_context::<UseTreeReturn>();
+
+    // Header count — derived value, no .set() needed.
+    let snap_for_header = snap.clone();
+    let header_label = Memo::new(move || {
+        let _ = ui.scene_revision.get();
+        let guard = snap_for_header.0.load();
+        let count = guard.objects.len() + guard.lights.len();
+        format!("Scene ({count})")
     });
 
-    // Header count Effect — tracks scene_revision only.
-    let header_label = Signal::new("Scene (0)".to_string());
-    {
-        let snap = snap.clone();
-        Effect::new(move || {
-            let _ = ui.scene_revision.get();
-            let guard = snap.0.load();
-            let count = guard.objects.len() + guard.lights.len();
-            header_label.set(format!("Scene ({count})"));
-        });
-    }
-
-    // Selection sync Effect — tracks ui.selection, updates tree highlight
-    // without rebuilding the tree DOM.
-    Effect::new(move || {
-        let sel = ui.selection.get();
-        rinch::core::untracked(|| {
-            if let Some(sel) = sel {
-                let value = selected_to_value(&sel);
-                let current = tree_state.selected.get();
-                if !current.contains(&value) {
-                    tree_state.controller.clear_selected();
-                    tree_state.controller.select(&value);
-                }
-            } else {
-                let current = tree_state.selected.get();
-                if !current.is_empty() {
-                    tree_state.controller.clear_selected();
-                }
-            }
-        });
-    });
+    // NOTE: Selection sync Effect lives in editor_ui() (ui/mod.rs),
+    // NOT here. Effects must not .set() signals during render.
 
     // Selection callback → send command (no lock).
     let onselect = ValueCallback::new(move |value: String| {
@@ -184,7 +159,7 @@ pub fn SceneTreePanel() -> NodeHandle {
             div {
                 style: "font-size:11px;color:var(--rinch-color-dimmed);\
                         text-transform:uppercase;letter-spacing:1px;padding:8px 12px;",
-                {|| header_label.get()}
+                {move || header_label.get()}
             }
             Tree {
                 data: initial_data,

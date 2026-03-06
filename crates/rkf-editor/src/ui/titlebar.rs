@@ -6,6 +6,8 @@ use rinch::prelude::*;
 
 use crate::editor_command::EditorCommand;
 use crate::editor_state::{EditorMode, EditorState, UiSignals};
+use crate::layout::state::{LayoutBacking, LayoutState};
+use crate::layout::ContainerKind;
 use crate::{CommandSender, SnapshotReader};
 
 // ── Window control button ───────────────────────────────────────────────────
@@ -49,6 +51,8 @@ pub fn TitleBar() -> NodeHandle {
     let ui = use_context::<UiSignals>();
     let cmd = use_context::<CommandSender>();
     let snapshot = use_context::<SnapshotReader>();
+    let layout = use_context::<LayoutState>();
+    let layout_backing = use_context::<LayoutBacking>();
 
     // -1 = all closed, 0 = File, 1 = Edit, 2 = View.
     let active_menu: Signal<i32> = Signal::new(-1);
@@ -269,6 +273,22 @@ pub fn TitleBar() -> NodeHandle {
             ui.show_grid.update(|v| *v = !*v);
         }
     }));
+
+    // Container visibility toggles.
+    view_menu = view_menu.separator();
+    let container_toggles: &[(&str, ContainerKind)] = &[
+        ("Toggle Left Panel", ContainerKind::Left),
+        ("Toggle Right Panel", ContainerKind::Right),
+        ("Toggle Bottom Panel", ContainerKind::Bottom),
+    ];
+    for &(label, ck) in container_toggles {
+        view_menu = view_menu.item(MenuItem::new(label).on_click({
+            let backing = layout_backing.clone();
+            move || {
+                layout.toggle_container(&backing, ck);
+            }
+        }));
+    }
 
     // ── Build DOM for each top-level menu ──────────────────────────────
     let menus: &[(&str, &Menu)] = &[

@@ -32,6 +32,11 @@ pub struct ProjectFile {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub material_palette: Option<String>,
+    /// Editor layout configuration (panel positions, splitter sizes, etc.).
+    /// Stored inline in the project file. `None` means use the default layout.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub editor_layout: Option<String>,
 }
 
 fn default_quality() -> String {
@@ -62,6 +67,7 @@ impl ProjectFile {
             asset_paths: vec!["assets".to_string()],
             default_quality: "medium".to_string(),
             material_palette: None,
+            editor_layout: None,
         }
     }
 }

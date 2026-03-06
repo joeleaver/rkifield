@@ -36,215 +36,10 @@ pub fn RightPanel() -> NodeHandle {
 
     let sliders = use_context::<SliderSignals>();
 
-    // ── Selection-change Effect: push object/light values into SliderSignals ──
-    {
-        let snap = snapshot.clone();
-        Effect::new(move || {
-            let sel = ui.selection.get();
-
-            enum PushData {
-                Object(glam::Vec3, glam::Vec3, glam::Vec3),
-                Light(glam::Vec3, f32, f32),
-                None,
-            }
-            let snap_guard = snap.0.load();
-            let (push, oid, lid) = match sel {
-                Some(SelectedEntity::Object(oid)) => {
-                    let data = snap_guard
-                        .objects
-                        .iter()
-                        .find(|o| o.id == oid)
-                        .map(|o| PushData::Object(o.position, o.rotation_degrees, o.scale))
-                        .unwrap_or(PushData::None);
-                    (data, Some(oid), None)
-                }
-                Some(SelectedEntity::Light(lid)) => {
-                    let data = snap_guard
-                        .lights
-                        .iter()
-                        .find(|l| l.id == lid)
-                        .map(|l| PushData::Light(l.position, l.intensity, l.range))
-                        .unwrap_or(PushData::None);
-                    (data, None, Some(lid))
-                }
-                _ => (PushData::None, None, None),
-            };
-
-            rinch::core::untracked(|| {
-                sliders.bound_object_id.set(oid);
-                sliders.bound_light_id.set(lid);
-            });
-            match push {
-                PushData::Object(pos, rot_deg, scale) => {
-                    rinch::core::untracked(|| {
-                        sliders.push_object_values(pos, rot_deg, scale);
-                    });
-                }
-                PushData::Light(pos, intensity, range) => {
-                    rinch::core::untracked(|| {
-                        sliders.push_light_values(pos, intensity, range);
-                    });
-                }
-                PushData::None => {}
-            }
-        });
-    }
-
-    // ── Batch sync Effect: slider signals + toggle signals → engine commands ──
-    {
-        let cmd = cmd.clone();
-        Effect::new(move || {
-            sliders.track_all();
-            let _ = ui.atmo_enabled.get();
-            let _ = ui.fog_enabled.get();
-            let _ = ui.clouds_enabled.get();
-            let _ = ui.bloom_enabled.get();
-            let _ = ui.dof_enabled.get();
-            let _ = ui.tone_map_mode.get();
-
-            // Camera.
-            let _ = cmd
-                .0
-                .send(EditorCommand::SetCameraFov {
-                    fov: sliders.fov.get() as f32,
-                });
-            let _ = cmd.0.send(EditorCommand::SetCameraSpeed {
-                speed: sliders.fly_speed.get() as f32,
-            });
-            let _ = cmd.0.send(EditorCommand::SetCameraNearFar {
-                near: sliders.near.get() as f32,
-                far: sliders.far.get() as f32,
-            });
-
-            // Atmosphere.
-            let az = (sliders.sun_azimuth.get() as f32).to_radians();
-            let el = (sliders.sun_elevation.get() as f32).to_radians();
-            let cos_el = el.cos();
-            let sun_dir =
-                glam::Vec3::new(az.sin() * cos_el, el.sin(), az.cos() * cos_el).normalize();
-            let _ = cmd.0.send(EditorCommand::SetAtmosphere {
-                sun_direction: sun_dir,
-                sun_intensity: sliders.sun_intensity.get() as f32,
-                rayleigh_scale: sliders.rayleigh_scale.get() as f32,
-                mie_scale: sliders.mie_scale.get() as f32,
-            });
-
-            // Fog.
-            let _ = cmd.0.send(EditorCommand::SetFog {
-                density: sliders.fog_density.get() as f32,
-                height_falloff: sliders.fog_height_falloff.get() as f32,
-                dust_density: sliders.dust_density.get() as f32,
-                dust_asymmetry: sliders.dust_asymmetry.get() as f32,
-            });
-
-            // Clouds.
-            let _ = cmd.0.send(EditorCommand::SetClouds {
-                coverage: sliders.cloud_coverage.get() as f32,
-                density: sliders.cloud_density.get() as f32,
-                altitude: sliders.cloud_altitude.get() as f32,
-                thickness: sliders.cloud_thickness.get() as f32,
-                wind_speed: sliders.cloud_wind_speed.get() as f32,
-            });
-
-            // Post-process.
-            let _ = cmd.0.send(EditorCommand::SetPostProcess {
-                bloom_intensity: sliders.bloom_intensity.get() as f32,
-                bloom_threshold: sliders.bloom_threshold.get() as f32,
-                exposure: sliders.exposure.get() as f32,
-                sharpen: sliders.sharpen.get() as f32,
-                dof_focus_distance: sliders.dof_focus_dist.get() as f32,
-                dof_focus_range: sliders.dof_focus_range.get() as f32,
-                dof_max_coc: sliders.dof_max_coc.get() as f32,
-                motion_blur: sliders.motion_blur.get() as f32,
-                god_rays: sliders.god_rays.get() as f32,
-                vignette: sliders.vignette.get() as f32,
-                grain: sliders.grain.get() as f32,
-                chromatic_aberration: sliders.chromatic_ab.get() as f32,
-            });
-
-            // Brush.
-            let _ = cmd.0.send(EditorCommand::SetSculptSettings {
-                radius: sliders.brush_radius.get() as f32,
-                strength: sliders.brush_strength.get() as f32,
-                falloff: sliders.brush_falloff.get() as f32,
-            });
-            let _ = cmd.0.send(EditorCommand::SetPaintSettings {
-                radius: sliders.brush_radius.get() as f32,
-                strength: sliders.brush_strength.get() as f32,
-                falloff: sliders.brush_falloff.get() as f32,
-            });
-
-            // Object transform.
-            let obj_id = rinch::core::untracked(|| sliders.bound_object_id.get());
-            if let Some(oid) = obj_id {
-                let _ = cmd.0.send(EditorCommand::SetObjectPosition {
-                    entity_id: oid,
-                    position: glam::Vec3::new(
-                        sliders.obj_pos_x.get() as f32,
-                        sliders.obj_pos_y.get() as f32,
-                        sliders.obj_pos_z.get() as f32,
-                    ),
-                });
-                let _ = cmd.0.send(EditorCommand::SetObjectRotation {
-                    entity_id: oid,
-                    rotation: glam::Vec3::new(
-                        sliders.obj_rot_x.get() as f32,
-                        sliders.obj_rot_y.get() as f32,
-                        sliders.obj_rot_z.get() as f32,
-                    ),
-                });
-                let _ = cmd.0.send(EditorCommand::SetObjectScale {
-                    entity_id: oid,
-                    scale: glam::Vec3::new(
-                        sliders.obj_scale_x.get() as f32,
-                        sliders.obj_scale_y.get() as f32,
-                        sliders.obj_scale_z.get() as f32,
-                    ),
-                });
-            }
-
-            // Light properties.
-            let light_id = rinch::core::untracked(|| sliders.bound_light_id.get());
-            if let Some(lid) = light_id {
-                let _ = cmd.0.send(EditorCommand::SetLightPosition {
-                    light_id: lid,
-                    position: glam::Vec3::new(
-                        sliders.light_pos_x.get() as f32,
-                        sliders.light_pos_y.get() as f32,
-                        sliders.light_pos_z.get() as f32,
-                    ),
-                });
-                let _ = cmd.0.send(EditorCommand::SetLightIntensity {
-                    light_id: lid,
-                    intensity: sliders.light_intensity.get() as f32,
-                });
-                let _ = cmd.0.send(EditorCommand::SetLightRange {
-                    light_id: lid,
-                    range: sliders.light_range.get() as f32,
-                });
-            }
-
-            // Toggles.
-            let _ = cmd.0.send(EditorCommand::ToggleAtmosphere {
-                enabled: ui.atmo_enabled.get(),
-            });
-            let _ = cmd.0.send(EditorCommand::ToggleFog {
-                enabled: ui.fog_enabled.get(),
-            });
-            let _ = cmd.0.send(EditorCommand::ToggleClouds {
-                enabled: ui.clouds_enabled.get(),
-            });
-            let _ = cmd.0.send(EditorCommand::ToggleBloom {
-                enabled: ui.bloom_enabled.get(),
-            });
-            let _ = cmd.0.send(EditorCommand::ToggleDof {
-                enabled: ui.dof_enabled.get(),
-            });
-            let _ = cmd.0.send(EditorCommand::SetToneMapMode {
-                mode: ui.tone_map_mode.get(),
-            });
-        });
-    }
+    // NOTE: Selection-sync and batch-sync Effects live in editor_ui() (ui/mod.rs),
+    // NOT here. Effects must not be created inside render paths (reactive_component_dom)
+    // because Effect::new runs immediately, and .set() during render causes re-entrant
+    // RefCell borrows → panic.
 
     let es = editor_state.clone();
     let snap = snapshot.clone();
@@ -483,6 +278,310 @@ pub fn RightPanel() -> NodeHandle {
     });
 
     root
+}
+
+// ── Standalone panel components ──────────────────────────────────────────────
+//
+// These thin wrappers expose individual sections of the right panel as
+// independent `#[component]`s for the zone-based layout system.
+// They reuse the same helper functions that RightPanel calls internally.
+
+/// Object Properties panel — shows selected object/light/camera properties.
+///
+/// When the camera is selected, also shows environment/post-processing controls.
+/// When in Sculpt/Paint mode, shows brush settings at the top.
+#[component]
+pub fn PropertiesPanel() -> NodeHandle {
+    let editor_state = use_context::<Arc<Mutex<EditorState>>>();
+    let ui = use_context::<UiSignals>();
+    let snapshot = use_context::<SnapshotReader>();
+    let cmd = use_context::<CommandSender>();
+    let sliders = use_context::<SliderSignals>();
+
+    let root = __scope.create_element("div");
+    root.set_attribute("style", "display:flex;flex-direction:column;");
+
+    let es = editor_state.clone();
+    let snap = snapshot.clone();
+    let cmd2 = cmd.clone();
+    rinch::core::reactive_component_dom(__scope, &root, move |__scope| {
+        let _ = ui.selection.get();
+        let _ = ui.editor_mode.get();
+        let _ = ui.atmo_enabled.get();
+        let _ = ui.fog_enabled.get();
+        let _ = ui.clouds_enabled.get();
+        let _ = ui.bloom_enabled.get();
+        let _ = ui.dof_enabled.get();
+        let _ = ui.tone_map_mode.get();
+
+        let snap_guard = snap.0.load();
+        let mode = snap_guard.mode;
+        let selected_entity = ui.selection.get();
+
+        let container = __scope.create_element("div");
+        container.set_attribute("style", "display:flex;flex-direction:column;");
+
+        // ── Tool-specific settings (when Sculpt/Paint active) ──
+        match mode {
+            EditorMode::Sculpt => {
+                let header = __scope.create_element("div");
+                header.set_attribute("style", LABEL_STYLE);
+                header.append_child(&__scope.create_text("Sculpt Brush"));
+                container.append_child(&header);
+
+                if let Ok(es_lock) = es.lock() {
+                    let type_name = match es_lock.sculpt.current_settings.brush_type {
+                        crate::sculpt::BrushType::Add => "Add",
+                        crate::sculpt::BrushType::Subtract => "Subtract",
+                        crate::sculpt::BrushType::Smooth => "Smooth",
+                        crate::sculpt::BrushType::Flatten => "Flatten",
+                        crate::sculpt::BrushType::Sharpen => "Sharpen",
+                    };
+                    let row = __scope.create_element("div");
+                    row.set_attribute("style", VALUE_STYLE);
+                    row.append_child(&__scope.create_text(&format!("Type: {type_name}")));
+                    container.append_child(&row);
+                }
+
+                build_synced_slider_row(
+                    __scope, &container, "Radius", "",
+                    sliders.brush_radius, 0.01, 10.0, 0.01, 2,
+                );
+                build_synced_slider_row(
+                    __scope, &container, "Strength", "",
+                    sliders.brush_strength, 0.0, 1.0, 0.01, 2,
+                );
+                build_synced_slider_row(
+                    __scope, &container, "Falloff", "",
+                    sliders.brush_falloff, 0.0, 1.0, 0.01, 2,
+                );
+
+                if let Some(crate::editor_state::SelectedEntity::Object(eid)) = selected_entity {
+                    let btn_row = __scope.create_element("div");
+                    btn_row.set_attribute("style", "padding: 6px 8px;");
+                    let btn = __scope.create_element("button");
+                    btn.set_attribute(
+                        "style",
+                        "width:100%; padding:4px 8px; background:#223355; \
+                         color:#99ccff; border:1px solid #3355aa; \
+                         border-radius:3px; cursor:pointer; font-size:12px;",
+                    );
+                    btn.append_child(&__scope.create_text("Fix SDFs"));
+                    let hid = __scope.register_handler({
+                        let cmd = cmd2.clone();
+                        move || {
+                            let _ = cmd.0.send(EditorCommand::FixSdfs {
+                                object_id: eid as u32,
+                            });
+                        }
+                    });
+                    btn.set_attribute("data-rid", &hid.to_string());
+                    btn_row.append_child(&btn);
+                    container.append_child(&btn_row);
+                }
+
+                append_divider(__scope, &container);
+            }
+            EditorMode::Paint => {
+                let header = __scope.create_element("div");
+                header.set_attribute("style", LABEL_STYLE);
+                header.append_child(&__scope.create_text("Paint Brush"));
+                container.append_child(&header);
+
+                {
+                    let paint_mat_id = if let Ok(es_lock) = es.lock() {
+                        es_lock.paint.current_settings.material_id
+                    } else {
+                        0
+                    };
+                    let mat_name = snap_guard
+                        .materials
+                        .iter()
+                        .find(|m| m.slot == paint_mat_id)
+                        .map(|m| m.name.as_str())
+                        .unwrap_or("Unknown");
+                    let mat_row = __scope.create_element("div");
+                    mat_row.set_attribute("style", VALUE_STYLE);
+                    mat_row.append_child(
+                        &__scope.create_text(&format!("Material: {mat_name} (#{paint_mat_id})")),
+                    );
+                    container.append_child(&mat_row);
+                }
+
+                build_synced_slider_row(
+                    __scope, &container, "Radius", "",
+                    sliders.brush_radius, 0.01, 10.0, 0.01, 2,
+                );
+                build_synced_slider_row(
+                    __scope, &container, "Strength", "",
+                    sliders.brush_strength, 0.0, 1.0, 0.01, 2,
+                );
+                build_synced_slider_row(
+                    __scope, &container, "Falloff", "",
+                    sliders.brush_falloff, 0.0, 1.0, 0.01, 2,
+                );
+
+                append_divider(__scope, &container);
+            }
+            EditorMode::Default => {}
+        }
+
+        // ── Entity properties ──
+        if let Some(SelectedEntity::Camera) = selected_entity {
+            build_camera_properties(
+                __scope, &container, &snap_guard, &sliders, &ui, &cmd2, &es,
+            );
+        } else {
+            match selected_entity {
+                Some(SelectedEntity::Object(eid)) => {
+                    build_object_properties(
+                        __scope, &container, eid, &snap_guard, &sliders, &cmd2, &es, &ui,
+                    );
+                }
+                Some(SelectedEntity::Light(lid)) => {
+                    build_light_properties(__scope, &container, lid, &snap_guard, &sliders);
+                }
+                Some(SelectedEntity::Scene) => {
+                    let name_row = __scope.create_element("div");
+                    name_row.set_attribute("style", SECTION_STYLE);
+                    name_row.append_child(&__scope.create_text(&snap_guard.scene_name));
+                    container.append_child(&name_row);
+
+                    let detail = __scope.create_element("div");
+                    detail.set_attribute("style", VALUE_STYLE);
+                    detail.append_child(
+                        &__scope.create_text(&format!("{} objects", snap_guard.object_count)),
+                    );
+                    container.append_child(&detail);
+                }
+                Some(SelectedEntity::Project) => {
+                    let hdr = __scope.create_element("div");
+                    hdr.set_attribute("style", SECTION_STYLE);
+                    hdr.append_child(&__scope.create_text("Project"));
+                    container.append_child(&hdr);
+                }
+                _ => {
+                    let msg = __scope.create_element("div");
+                    msg.set_attribute(
+                        "style",
+                        &format!("{SECTION_STYLE}color:var(--rinch-color-placeholder);"),
+                    );
+                    msg.append_child(&__scope.create_text("No object selected"));
+                    container.append_child(&msg);
+                }
+            }
+        }
+
+        container
+    });
+
+    root
+}
+
+/// Asset Properties panel — shows material or shader properties for the selected asset.
+#[component]
+pub fn AssetPropertiesPanel() -> NodeHandle {
+    let ui = use_context::<UiSignals>();
+    let snapshot = use_context::<SnapshotReader>();
+    let cmd = use_context::<CommandSender>();
+
+    let root = __scope.create_element("div");
+    root.set_attribute("style", "display:flex;flex-direction:column;");
+
+    let snap = snapshot.clone();
+    let cmd2 = cmd.clone();
+    rinch::core::reactive_component_dom(__scope, &root, move |__scope| {
+        let _ = ui.selected_material.get();
+        let _ = ui.selected_shader.get();
+        let _ = ui.material_revision.get();
+
+        let snap_guard = snap.0.load();
+        let selected_mat_slot = ui.selected_material.get();
+        let selected_shader_name = ui.selected_shader.get();
+
+        let container = __scope.create_element("div");
+        container.set_attribute("style", "display:flex;flex-direction:column;");
+
+        if let Some(slot) = selected_mat_slot {
+            build_material_properties(
+                __scope, &container, slot, &snap_guard, &cmd2, &ui,
+            );
+        } else if let Some(ref shader_name) = selected_shader_name {
+            if let Some(shader) = snap_guard.shaders.iter().find(|s| &s.name == shader_name) {
+                build_shader_properties(__scope, &container, shader);
+            }
+        } else {
+            let msg = __scope.create_element("div");
+            msg.set_attribute(
+                "style",
+                &format!("{SECTION_STYLE}color:var(--rinch-color-placeholder);"),
+            );
+            msg.append_child(&__scope.create_text("Select a material or shader"));
+            container.append_child(&msg);
+        }
+
+        container
+    });
+
+    root
+}
+
+/// Sculpt settings panel — brush type, radius, strength, falloff.
+#[component]
+pub fn SculptPanel() -> NodeHandle {
+    let sliders = use_context::<SliderSignals>();
+
+    let root = __scope.create_element("div");
+    root.set_attribute("style", "padding:4px 0;");
+
+    let header = __scope.create_element("div");
+    header.set_attribute("style", super::LABEL_STYLE);
+    header.append_child(&__scope.create_text("Sculpt Brush"));
+    root.append_child(&header);
+
+    build_synced_slider_row(
+        __scope, &root, "Radius", "",
+        sliders.brush_radius, 0.01, 10.0, 0.01, 2,
+    );
+    build_synced_slider_row(
+        __scope, &root, "Strength", "",
+        sliders.brush_strength, 0.0, 1.0, 0.01, 2,
+    );
+    build_synced_slider_row(
+        __scope, &root, "Falloff", "",
+        sliders.brush_falloff, 0.0, 1.0, 0.01, 2,
+    );
+
+    root.into()
+}
+
+/// Paint settings panel — material, radius, strength, falloff.
+#[component]
+pub fn PaintPanel() -> NodeHandle {
+    let sliders = use_context::<SliderSignals>();
+
+    let root = __scope.create_element("div");
+    root.set_attribute("style", "padding:4px 0;");
+
+    let header = __scope.create_element("div");
+    header.set_attribute("style", super::LABEL_STYLE);
+    header.append_child(&__scope.create_text("Paint Brush"));
+    root.append_child(&header);
+
+    build_synced_slider_row(
+        __scope, &root, "Radius", "",
+        sliders.brush_radius, 0.01, 10.0, 0.01, 2,
+    );
+    build_synced_slider_row(
+        __scope, &root, "Strength", "",
+        sliders.brush_strength, 0.0, 1.0, 0.01, 2,
+    );
+    build_synced_slider_row(
+        __scope, &root, "Falloff", "",
+        sliders.brush_falloff, 0.0, 1.0, 0.01, 2,
+    );
+
+    root.into()
 }
 
 // ── Helper: divider ──────────────────────────────────────────────────────────

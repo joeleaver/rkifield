@@ -5,8 +5,10 @@
 
 pub mod asset_browser;
 pub mod components;
+pub mod materials_panel;
 pub mod properties_panel;
 pub mod scene_tree_panel;
+pub mod shaders_panel;
 mod slider_helpers;
 pub mod titlebar;
 pub mod right_panel;
@@ -21,12 +23,11 @@ use crate::editor_command::EditorCommand;
 use crate::editor_state::{EditorMode, EditorState, SelectedEntity, SliderSignals, UiSignals};
 use crate::gizmo;
 use crate::input::{InputState, KeyCode, Modifiers};
-use asset_browser::AssetBrowser;
-use right_panel::RightPanel;
 use status_bar::StatusBar;
 use titlebar::TitleBar;
 use crate::wireframe;
-use scene_tree_panel::SceneTreePanel;
+use crate::layout::components::layout_root::LayoutRoot;
+use crate::layout::components::floating_host::FloatingPanelHost;
 
 // ── Style constants ─────────────────────────────────────────────────────────
 // All colors use rinch theme CSS variables for the dark theme.
@@ -35,8 +36,7 @@ use scene_tree_panel::SceneTreePanel;
 
 pub(super) const PANEL_BG: &str = "background:var(--rinch-color-dark-8);";
 pub(super) const PANEL_BORDER: &str = "border:1px solid var(--rinch-color-border);";
-pub(super) const LEFT_PANEL_WIDTH: &str = "width:250px;";
-pub(super) const RIGHT_PANEL_WIDTH: &str = "width:300px;";
+// Panel width constants removed — now driven by LayoutState signals.
 
 pub(super) const LABEL_STYLE: &str = "font-size:11px;color:var(--rinch-color-dimmed);\
     text-transform:uppercase;letter-spacing:1px;padding:8px 12px;";
@@ -90,6 +90,261 @@ pub fn editor_ui() -> NodeHandle {
     let shared_state = use_context::<Arc<Mutex<SharedState>>>();
     let surface_handle = use_context::<RenderSurfaceHandle>();
 
+    // ── Global Effects ──────────────────────────────────────────────────────
+    // These Effects live here (top-level, outside any reactive_component_dom)
+    // so their Effect::new initial run doesn't cause re-entrant RefCell borrows.
+
+    // Selection-change Effect: push object/light values into SliderSignals.
+    {
+        let ui = use_context::<UiSignals>();
+        let sliders = use_context::<SliderSignals>();
+        let snapshot = use_context::<crate::SnapshotReader>();
+        Effect::new(move || {
+            let sel = ui.selection.get();
+
+            enum PushData {
+                Object(glam::Vec3, glam::Vec3, glam::Vec3),
+                Light(glam::Vec3, f32, f32),
+                None,
+            }
+            let snap_guard = snapshot.0.load();
+            let (push, oid, lid) = match sel {
+                Some(SelectedEntity::Object(oid)) => {
+                    let data = snap_guard
+                        .objects
+                        .iter()
+                        .find(|o| o.id == oid)
+                        .map(|o| PushData::Object(o.position, o.rotation_degrees, o.scale))
+                        .unwrap_or(PushData::None);
+                    (data, Some(oid), None)
+                }
+                Some(SelectedEntity::Light(lid)) => {
+                    let data = snap_guard
+                        .lights
+                        .iter()
+                        .find(|l| l.id == lid)
+                        .map(|l| PushData::Light(l.position, l.intensity, l.range))
+                        .unwrap_or(PushData::None);
+                    (data, None, Some(lid))
+                }
+                _ => (PushData::None, None, None),
+            };
+
+            rinch::core::untracked(|| {
+                sliders.bound_object_id.set(oid);
+                sliders.bound_light_id.set(lid);
+            });
+            match push {
+                PushData::Object(pos, rot_deg, scale) => {
+                    rinch::core::untracked(|| {
+                        sliders.push_object_values(pos, rot_deg, scale);
+                    });
+                }
+                PushData::Light(pos, intensity, range) => {
+                    rinch::core::untracked(|| {
+                        sliders.push_light_values(pos, intensity, range);
+                    });
+                }
+                PushData::None => {}
+            }
+        });
+    }
+
+    // Batch sync Effect: slider signals + toggle signals → engine commands.
+    {
+        let ui = use_context::<UiSignals>();
+        let sliders = use_context::<SliderSignals>();
+        let cmd = use_context::<crate::CommandSender>();
+        Effect::new(move || {
+            sliders.track_all();
+            let _ = ui.atmo_enabled.get();
+            let _ = ui.fog_enabled.get();
+            let _ = ui.clouds_enabled.get();
+            let _ = ui.bloom_enabled.get();
+            let _ = ui.dof_enabled.get();
+            let _ = ui.tone_map_mode.get();
+
+            // Camera.
+            let _ = cmd.0.send(EditorCommand::SetCameraFov {
+                fov: sliders.fov.get() as f32,
+            });
+            let _ = cmd.0.send(EditorCommand::SetCameraSpeed {
+                speed: sliders.fly_speed.get() as f32,
+            });
+            let _ = cmd.0.send(EditorCommand::SetCameraNearFar {
+                near: sliders.near.get() as f32,
+                far: sliders.far.get() as f32,
+            });
+
+            // Atmosphere.
+            let az = (sliders.sun_azimuth.get() as f32).to_radians();
+            let el = (sliders.sun_elevation.get() as f32).to_radians();
+            let cos_el = el.cos();
+            let sun_dir =
+                glam::Vec3::new(az.sin() * cos_el, el.sin(), az.cos() * cos_el).normalize();
+            let _ = cmd.0.send(EditorCommand::SetAtmosphere {
+                sun_direction: sun_dir,
+                sun_intensity: sliders.sun_intensity.get() as f32,
+                rayleigh_scale: sliders.rayleigh_scale.get() as f32,
+                mie_scale: sliders.mie_scale.get() as f32,
+            });
+
+            // Fog.
+            let _ = cmd.0.send(EditorCommand::SetFog {
+                density: sliders.fog_density.get() as f32,
+                height_falloff: sliders.fog_height_falloff.get() as f32,
+                dust_density: sliders.dust_density.get() as f32,
+                dust_asymmetry: sliders.dust_asymmetry.get() as f32,
+            });
+
+            // Clouds.
+            let _ = cmd.0.send(EditorCommand::SetClouds {
+                coverage: sliders.cloud_coverage.get() as f32,
+                density: sliders.cloud_density.get() as f32,
+                altitude: sliders.cloud_altitude.get() as f32,
+                thickness: sliders.cloud_thickness.get() as f32,
+                wind_speed: sliders.cloud_wind_speed.get() as f32,
+            });
+
+            // Post-process.
+            let _ = cmd.0.send(EditorCommand::SetPostProcess {
+                bloom_intensity: sliders.bloom_intensity.get() as f32,
+                bloom_threshold: sliders.bloom_threshold.get() as f32,
+                exposure: sliders.exposure.get() as f32,
+                sharpen: sliders.sharpen.get() as f32,
+                dof_focus_distance: sliders.dof_focus_dist.get() as f32,
+                dof_focus_range: sliders.dof_focus_range.get() as f32,
+                dof_max_coc: sliders.dof_max_coc.get() as f32,
+                motion_blur: sliders.motion_blur.get() as f32,
+                god_rays: sliders.god_rays.get() as f32,
+                vignette: sliders.vignette.get() as f32,
+                grain: sliders.grain.get() as f32,
+                chromatic_aberration: sliders.chromatic_ab.get() as f32,
+            });
+
+            // Brush.
+            let _ = cmd.0.send(EditorCommand::SetSculptSettings {
+                radius: sliders.brush_radius.get() as f32,
+                strength: sliders.brush_strength.get() as f32,
+                falloff: sliders.brush_falloff.get() as f32,
+            });
+            let _ = cmd.0.send(EditorCommand::SetPaintSettings {
+                radius: sliders.brush_radius.get() as f32,
+                strength: sliders.brush_strength.get() as f32,
+                falloff: sliders.brush_falloff.get() as f32,
+            });
+
+            // Object transform.
+            let obj_id = rinch::core::untracked(|| sliders.bound_object_id.get());
+            if let Some(oid) = obj_id {
+                let _ = cmd.0.send(EditorCommand::SetObjectPosition {
+                    entity_id: oid,
+                    position: glam::Vec3::new(
+                        sliders.obj_pos_x.get() as f32,
+                        sliders.obj_pos_y.get() as f32,
+                        sliders.obj_pos_z.get() as f32,
+                    ),
+                });
+                let _ = cmd.0.send(EditorCommand::SetObjectRotation {
+                    entity_id: oid,
+                    rotation: glam::Vec3::new(
+                        sliders.obj_rot_x.get() as f32,
+                        sliders.obj_rot_y.get() as f32,
+                        sliders.obj_rot_z.get() as f32,
+                    ),
+                });
+                let _ = cmd.0.send(EditorCommand::SetObjectScale {
+                    entity_id: oid,
+                    scale: glam::Vec3::new(
+                        sliders.obj_scale_x.get() as f32,
+                        sliders.obj_scale_y.get() as f32,
+                        sliders.obj_scale_z.get() as f32,
+                    ),
+                });
+            }
+
+            // Light properties.
+            let light_id = rinch::core::untracked(|| sliders.bound_light_id.get());
+            if let Some(lid) = light_id {
+                let _ = cmd.0.send(EditorCommand::SetLightPosition {
+                    light_id: lid,
+                    position: glam::Vec3::new(
+                        sliders.light_pos_x.get() as f32,
+                        sliders.light_pos_y.get() as f32,
+                        sliders.light_pos_z.get() as f32,
+                    ),
+                });
+                let _ = cmd.0.send(EditorCommand::SetLightIntensity {
+                    light_id: lid,
+                    intensity: sliders.light_intensity.get() as f32,
+                });
+                let _ = cmd.0.send(EditorCommand::SetLightRange {
+                    light_id: lid,
+                    range: sliders.light_range.get() as f32,
+                });
+            }
+
+            // Toggles.
+            let _ = cmd.0.send(EditorCommand::ToggleAtmosphere {
+                enabled: ui.atmo_enabled.get(),
+            });
+            let _ = cmd.0.send(EditorCommand::ToggleFog {
+                enabled: ui.fog_enabled.get(),
+            });
+            let _ = cmd.0.send(EditorCommand::ToggleClouds {
+                enabled: ui.clouds_enabled.get(),
+            });
+            let _ = cmd.0.send(EditorCommand::ToggleBloom {
+                enabled: ui.bloom_enabled.get(),
+            });
+            let _ = cmd.0.send(EditorCommand::ToggleDof {
+                enabled: ui.dof_enabled.get(),
+            });
+            let _ = cmd.0.send(EditorCommand::SetToneMapMode {
+                mode: ui.tone_map_mode.get(),
+            });
+        });
+    }
+
+    // Tree selection-sync Effect: update tree highlight when ui.selection changes.
+    // Lives here (not in SceneTreePanel) to avoid .set() during render.
+    {
+        let ui = use_context::<UiSignals>();
+        // Create tree state as context so SceneTreePanel can use it.
+        let tree_state = UseTreeReturn::new(UseTreeOptions {
+            initial_expanded: ["project".to_string(), "scene".to_string()]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        });
+        create_context(tree_state);
+
+        Effect::new(move || {
+            let sel = ui.selection.get();
+            rinch::core::untracked(|| {
+                if let Some(sel) = sel {
+                    let value = match sel {
+                        SelectedEntity::Object(id) => format!("obj:{id}"),
+                        SelectedEntity::Light(id) => format!("light:{id}"),
+                        SelectedEntity::Camera => "camera".to_string(),
+                        SelectedEntity::Scene => "scene".to_string(),
+                        SelectedEntity::Project => "project".to_string(),
+                    };
+                    let current = tree_state.selected.get();
+                    if !current.contains(&value) {
+                        tree_state.controller.clear_selected();
+                        tree_state.controller.select(&value);
+                    }
+                } else {
+                    let current = tree_state.selected.get();
+                    if !current.is_empty() {
+                        tree_state.controller.clear_selected();
+                    }
+                }
+            });
+        });
+    }
+
     // Wire SurfaceEvent → EditorState.editor_input + gizmo interaction.
     // The handler runs on the main thread every time the surface receives input.
     // All editor logic (gizmo hover/drag/end, mode switching) lives here.
@@ -100,6 +355,8 @@ pub fn editor_ui() -> NodeHandle {
         let ui = use_context::<UiSignals>();
         let sliders = use_context::<SliderSignals>();
         let cmd_tx = use_context::<crate::CommandSender>().0.clone();
+        let layout_for_events = use_context::<crate::layout::state::LayoutState>();
+        let layout_backing = use_context::<crate::layout::state::LayoutBacking>();
         // Track last mouse position for delta computation (lock-free).
         let last_mx = std::cell::Cell::new(0.0f32);
         let last_my = std::cell::Cell::new(0.0f32);
@@ -125,10 +382,16 @@ pub fn editor_ui() -> NodeHandle {
                     last_my.set(y);
                     let _ = cmd_tx.send(EditorCommand::MouseMove { x, y, dx, dy });
 
+                    // Poll for layout config changes from the engine thread (project open).
+                    if layout_backing.poll_dirty() {
+                        layout_for_events.load_from_backing(&layout_backing);
+                    }
+
                     // Brief lock for gizmo hover/drag (needs camera + scene state).
                     // Also update mouse_pos for gizmo ray casting.
                     let (mode, left_down) = if let Ok(mut state) = es.lock() {
                         state.editor_input.mouse_pos = glam::Vec2::new(x, y);
+
                         let mode = state.mode;
                         let left_down = state.editor_input.mouse_buttons[0];
 
@@ -492,6 +755,11 @@ pub fn editor_ui() -> NodeHandle {
         });
     }
 
+    // Compute RenderSurface position from layout signals.
+    // Must read layout state + backing to determine collapsed containers.
+    let layout_for_surface = use_context::<crate::layout::state::LayoutState>();
+    let backing_for_surface = use_context::<crate::layout::state::LayoutBacking>();
+
     rsx! {
         div {
             style: "display:flex;flex-direction:column;width:100%;height:100%;\
@@ -502,47 +770,38 @@ pub fn editor_ui() -> NodeHandle {
             // Inject dark theme CSS overrides for rinch components.
             style { {DARK_OVERRIDES} }
 
+            // ── RenderSurface overlay — absolute-positioned over center viewport ──
+            // Lives outside any reactive_component_dom so it's never destroyed on
+            // layout rebuilds. Position updates reactively via closure syntax.
+            div {
+                style: {
+                    let backing = backing_for_surface.clone();
+                    move || {
+                        let lw = layout_for_surface.left_width.get();
+                        let rw = layout_for_surface.right_width.get();
+                        let bh = layout_for_surface.bottom_height.get();
+                        let cfg = backing.load();
+                        let left = if cfg.left.collapsed || cfg.left.zones.is_empty() { 0.0 } else { lw + 4.0 };
+                        let right = if cfg.right.collapsed || cfg.right.zones.is_empty() { 0.0 } else { rw + 4.0 };
+                        let bottom = 25.0 + if cfg.bottom.collapsed || cfg.bottom.zones.is_empty() { 0.0 } else { bh + 4.0 };
+                        format!("position:absolute;top:36px;left:{left:.0}px;right:{right:.0}px;bottom:{bottom:.0}px;")
+                    }
+                },
+                RenderSurface { surface: Some(surface_handle.clone()) }
+            }
+
             // ── Titlebar spacer (36px) ──
             // Actual titlebar is position:absolute, rendered LAST for z-ordering.
             div { style: "height:36px;flex-shrink:0;background:var(--rinch-titlebar-bg);" }
 
-            // ── Main content row (left + viewport + right) ──
-            div {
-                style: "display:flex;flex:1;min-height:0;",
-
-                // Left panel — scene tree
-                div {
-                    style: {format!("{LEFT_PANEL_WIDTH}{PANEL_BG}{PANEL_BORDER}\
-                        border-right:1px solid var(--rinch-color-border);\
-                        display:flex;flex-direction:column;min-height:0;")},
-                    SceneTreePanel {}
-                }
-
-                // Center column — viewport + asset browser
-                div {
-                    style: "flex:1;display:flex;flex-direction:column;min-height:0;",
-
-                    // Viewport — zero-copy GPU compositing via RenderSurface
-                    div {
-                        style: "flex:1;min-height:0;",
-                        RenderSurface { surface: Some(surface_handle) }
-                    }
-
-                    // Asset browser — material grid
-                    AssetBrowser {}
-                }
-
-                // Right panel — mode-dependent
-                div {
-                    style: {format!("{RIGHT_PANEL_WIDTH}{PANEL_BG}{PANEL_BORDER}\
-                        border-left:1px solid var(--rinch-color-border);\
-                        display:flex;flex-direction:column;min-height:0;")},
-                    RightPanel {}
-                }
-            }
+            // ── Main content row (zone-based layout) ──
+            LayoutRoot {}
 
             // ── Bottom status bar ──
             StatusBar {}
+
+            // ── Floating panels (absolute overlay) ──
+            FloatingPanelHost {}
 
             // ── Titlebar (absolute, last child for z-ordering / hit testing) ──
             TitleBar {}

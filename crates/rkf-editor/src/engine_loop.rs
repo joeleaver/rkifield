@@ -19,6 +19,8 @@ pub(crate) struct EngineThreadData {
     pub(crate) cmd_rx: crossbeam::channel::Receiver<EditorCommand>,
     /// Lock-free snapshot published each frame for the UI thread to read.
     pub(crate) ui_snapshot: Arc<arc_swap::ArcSwap<UiSnapshot>>,
+    /// Lock-free layout config shared between UI and engine threads.
+    pub(crate) layout_backing: crate::layout::state::LayoutBacking,
     /// CPU pixel writer for submitting rendered frames to the compositor.
     pub(crate) surface_writer: SurfaceWriter,
     /// GPU texture registrar — provides layout size and texture submission.
@@ -55,6 +57,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         shared_state,
         cmd_rx,
         ui_snapshot,
+        layout_backing,
         surface_writer,
         gpu_registrar,
     } = data;
@@ -162,6 +165,10 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                                     if let Ok(mut es) = editor_state.lock() {
                                         *es.world.scene_mut() = new_scene;
                                         es.current_scene_path = Some(sp);
+                                        // Restore editor layout if saved in project.
+                                        if let Some(ref layout_ron) = pf.editor_layout {
+                                            layout_backing.from_ron(layout_ron);
+                                        }
                                         es.current_project = Some(pf);
                                         es.current_project_path = Some(project_path_str.clone());
                                         es.world.resync_entity_tracking();
@@ -846,6 +853,10 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                                 es.current_scene_path = None;
                             }
 
+                            // Restore editor layout if saved in project.
+                            if let Some(ref layout_ron) = pf.editor_layout {
+                                layout_backing.from_ron(layout_ron);
+                            }
                             es.current_project = Some(pf);
                             es.current_project_path = Some(path_str.clone());
                             es.selected_entity = None;
@@ -899,10 +910,11 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                         es.pending_save_as = true;
                     }
 
-                    // Save .rkproject file.
+                    // Save .rkproject file (with layout config).
                     if let Some(pp) = es.current_project_path.clone() {
                         if let Some(ref mut pf) = es.current_project {
                             pf.engine_version = env!("CARGO_PKG_VERSION").to_string();
+                            pf.editor_layout = layout_backing.to_ron();
                             match rkf_runtime::save_project(&pp, pf) {
                                 Ok(()) => log::info!("Project saved to {pp}"),
                                 Err(e) => log::error!("Failed to save project: {e}"),

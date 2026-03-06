@@ -31,6 +31,7 @@ mod scene_io;
 mod sculpt;
 mod editor_command;
 mod engine_loop;
+pub(crate) mod layout;
 mod ui;
 mod ui_snapshot;
 mod undo;
@@ -55,6 +56,7 @@ pub(crate) struct CommandSender(pub crossbeam::channel::Sender<EditorCommand>);
 /// Published by the engine thread each frame, read by UI components.
 #[derive(Clone)]
 pub(crate) struct SnapshotReader(pub Arc<arc_swap::ArcSwap<UiSnapshot>>);
+
 
 // ---------------------------------------------------------------------------
 // IPC server setup
@@ -118,6 +120,7 @@ fn main() -> anyhow::Result<()> {
     // 1b. Create UI→engine command channel and lock-free snapshot.
     let (cmd_tx, cmd_rx) = crossbeam::channel::unbounded::<EditorCommand>();
     let ui_snapshot = Arc::new(arc_swap::ArcSwap::from_pointee(UiSnapshot::default()));
+    let layout_backing = layout::state::LayoutBacking::new(layout::default_layout());
 
     // 1c. Create shared material library (pre-populated with test materials).
     let material_library = {
@@ -162,6 +165,7 @@ fn main() -> anyhow::Result<()> {
     let editor_state_for_thread = Arc::clone(&editor_state);
     let shared_state_for_thread = Arc::clone(&shared_state);
     let ui_snapshot_for_thread = Arc::clone(&ui_snapshot);
+    let layout_backing_for_thread = layout_backing.clone();
     let surface_writer = surface_handle.writer();
     let gpu_registrar = surface_handle.gpu_registrar();
     let socket_path_for_cleanup = socket_path.clone();
@@ -174,6 +178,7 @@ fn main() -> anyhow::Result<()> {
             shared_state: shared_state_for_thread,
             cmd_rx,
             ui_snapshot: ui_snapshot_for_thread,
+            layout_backing: layout_backing_for_thread,
             surface_writer,
             gpu_registrar,
         });
@@ -230,6 +235,15 @@ fn main() -> anyhow::Result<()> {
             // Command channel + snapshot for lock-free UI ↔ engine communication.
             create_context(cmd_sender);
             create_context(snapshot_reader);
+            // Layout state — zone-based configurable layout.
+            let layout_state = layout::state::LayoutState::new(
+                layout::default_layout(),
+                DISPLAY_WIDTH as f32,
+                DISPLAY_HEIGHT as f32,
+            );
+            create_context(layout_state);
+            // Layout backing — cross-thread shared config for project save/load.
+            create_context(layout_backing);
 
             // Build the editor UI tree.
             ui::editor_ui(_scope)
