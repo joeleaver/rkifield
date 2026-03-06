@@ -11,7 +11,7 @@ use anyhow::Result;
 use glam::{Quat, Vec3};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
-use winit::event::{DeviceEvent, ElementState, MouseButton, WindowEvent};
+use winit::event::{DeviceEvent, ElementState, MouseButton, WindowEvent, ButtonSource};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowAttributes, WindowId};
@@ -184,7 +184,7 @@ fn cleanup_ipc(socket_path: &str) {
 // ---------------------------------------------------------------------------
 
 struct App {
-    window: Option<Arc<Window>>,
+    window: Option<Arc<dyn Window>>,
     world: Option<World>,
     renderer: Option<Renderer>,
     surface: Option<wgpu::Surface<'static>>,
@@ -256,15 +256,15 @@ impl App {
 }
 
 impl ApplicationHandler for App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+    fn can_create_surfaces(&mut self, event_loop: &dyn ActiveEventLoop) {
         if self.window.is_some() {
             return;
         }
 
         let attrs = WindowAttributes::default()
             .with_title("RKIField Testbed — v2 Object-Centric")
-            .with_inner_size(PhysicalSize::new(DISPLAY_WIDTH, DISPLAY_HEIGHT));
-        let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
+            .with_surface_size(PhysicalSize::new(DISPLAY_WIDTH, DISPLAY_HEIGHT));
+        let window: Arc<dyn Window> = Arc::from(event_loop.create_window(attrs).expect("create window"));
         self.window = Some(window.clone());
 
         // Initialize Renderer (creates GPU device + surface).
@@ -326,11 +326,11 @@ impl ApplicationHandler for App {
 
     fn device_event(
         &mut self,
-        _event_loop: &ActiveEventLoop,
-        _device_id: winit::event::DeviceId,
+        _event_loop: &dyn ActiveEventLoop,
+        _device_id: Option<winit::event::DeviceId>,
         event: DeviceEvent,
     ) {
-        if let DeviceEvent::MouseMotion { delta } = event {
+        if let DeviceEvent::PointerMotion { delta } = event {
             if self.mouse_captured {
                 if let Some(renderer) = self.renderer.as_mut() {
                     renderer.camera_mut().rotate(delta.0, delta.1);
@@ -341,7 +341,7 @@ impl ApplicationHandler for App {
 
     fn window_event(
         &mut self,
-        event_loop: &ActiveEventLoop,
+        event_loop: &dyn ActiveEventLoop,
         _window_id: WindowId,
         event: WindowEvent,
     ) {
@@ -353,7 +353,7 @@ impl ApplicationHandler for App {
                 event_loop.exit();
             }
 
-            WindowEvent::MouseInput { state, button, .. } => {
+            WindowEvent::PointerButton { state, button: ButtonSource::Mouse(button), .. } => {
                 if button == MouseButton::Right {
                     self.mouse_captured = state == ElementState::Pressed;
                     if let Some(window) = &self.window {
@@ -487,7 +487,7 @@ fn main() -> Result<()> {
     log::info!("RKIField Testbed v2 — object-centric ray marching (World + Renderer API)");
 
     let event_loop = EventLoop::new()?;
-    let mut app = App::new();
-    event_loop.run_app(&mut app)?;
+    let app = App::new();
+    event_loop.run_app(app)?;
     Ok(())
 }

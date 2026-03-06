@@ -70,7 +70,7 @@ pub fn FloatingPanelHost() -> NodeHandle {
                 header.append_child(&close_btn);
             }
 
-            // Header drag: real-time panel movement via start_drag_absolute_with_end.
+            // Header drag: real-time panel movement via Drag builder.
             // On drag start, we also set tab_drag so drop zone overlays appear.
             // On drag end, if cursor is over a drop zone, dock the panel there;
             // otherwise persist the new position.
@@ -93,8 +93,8 @@ pub fn FloatingPanelHost() -> NodeHandle {
 
                         let backing_drag = backing.clone();
                         let backing_end = backing.clone();
-                        start_drag_absolute_with_end(
-                            move |mx, my| {
+                        Drag::absolute()
+                            .on_move(move |mx, my| {
                                 x.set(start_x + mx - start_mx);
                                 y.set(start_y + my - start_my);
                                 // Update cursor for ghost overlay.
@@ -102,8 +102,8 @@ pub fn FloatingPanelHost() -> NodeHandle {
                                 // Geometric drop target detection.
                                 let target = layout.hit_test_drop(&backing_drag, mx, my);
                                 layout.drop_target.set(target);
-                            },
-                            move |_mx, _my| {
+                            })
+                            .on_end(move |_mx, _my| {
                                 // Drag ended — check if we're over a drop zone.
                                 let drop = layout.drop_target.get();
                                 if let Some(data) = layout.tab_drag.get() {
@@ -130,8 +130,8 @@ pub fn FloatingPanelHost() -> NodeHandle {
                                 layout.tab_drag.set(None);
                                 layout.drop_target.set(None);
                                 layout.drag_cursor.set(None);
-                            },
-                        );
+                            })
+                            .start();
                     }
                 });
                 header.set_attribute("data-rid", &hid.to_string());
@@ -156,10 +156,12 @@ pub fn FloatingPanelHost() -> NodeHandle {
                     let start_h = h.get();
                     let start_mx = ctx.mouse_x;
                     let start_my = ctx.mouse_y;
-                    start_drag_absolute(move |mx, my| {
-                        w.set((start_w + mx - start_mx).max(200.0));
-                        h.set((start_h + my - start_my).max(100.0));
-                    });
+                    Drag::absolute()
+                        .on_move(move |mx, my| {
+                            w.set((start_w + mx - start_mx).max(200.0));
+                            h.set((start_h + my - start_my).max(100.0));
+                        })
+                        .start();
                 });
                 resize.set_attribute("data-rid", &rhid.to_string());
                 fp_root.append_child(&resize);

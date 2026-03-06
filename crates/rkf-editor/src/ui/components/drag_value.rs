@@ -134,19 +134,21 @@ impl Component for DragValue {
             start_val.set(sv);
             start_mouse_x.set(ctx.mouse_x);
 
-            start_drag_absolute(move |mx, _my| {
-                let mods = rinch::core::get_modifier_state();
-                let speed = if mods.shift {
-                    0.1
-                } else if mods.ctrl {
-                    10.0
-                } else {
-                    1.0
-                };
-                let dx = (mx - start_mouse_x.get()) as f64;
-                let new_val = (sv + dx * step * speed).clamp(min, max);
-                value.set(new_val);
-            });
+            Drag::absolute()
+                .on_move(move |mx, _my| {
+                    let mods = rinch::core::get_modifier_state();
+                    let speed = if mods.shift {
+                        0.1
+                    } else if mods.ctrl {
+                        10.0
+                    } else {
+                        1.0
+                    };
+                    let dx = (mx - start_mouse_x.get()) as f64;
+                    let new_val = (sv + dx * step * speed).clamp(min, max);
+                    value.set(new_val);
+                })
+                .start();
         });
         display_div.set_attribute("data-rid", &click_handler.to_string());
 

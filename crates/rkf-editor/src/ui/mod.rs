@@ -763,7 +763,7 @@ pub fn editor_ui() -> NodeHandle {
     rsx! {
         div {
             style: "display:flex;flex-direction:column;width:100%;height:100%;\
-                    position:relative;\
+                    position:relative;overflow:hidden;\
                     background:var(--rinch-color-dark-9);color:var(--rinch-color-text);\
                     font-family:var(--rinch-font-family);",
 
@@ -784,7 +784,7 @@ pub fn editor_ui() -> NodeHandle {
                         let left = if cfg.left.collapsed || cfg.left.zones.is_empty() { 0.0 } else { lw + 4.0 };
                         let right = if cfg.right.collapsed || cfg.right.zones.is_empty() { 0.0 } else { rw + 4.0 };
                         let bottom = 25.0 + if cfg.bottom.collapsed || cfg.bottom.zones.is_empty() { 0.0 } else { bh + 4.0 };
-                        format!("position:absolute;top:36px;left:{left:.0}px;right:{right:.0}px;bottom:{bottom:.0}px;")
+                        format!("position:absolute;z-index:1;top:36px;left:{left:.0}px;right:{right:.0}px;bottom:{bottom:.0}px;")
                     }
                 },
                 RenderSurface { surface: Some(surface_handle.clone()) }

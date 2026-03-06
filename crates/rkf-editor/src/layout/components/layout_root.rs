@@ -546,14 +546,16 @@ fn build_zone_splitter(
             let min_frac = 0.1;
             let backing = backing.clone();
 
-            start_drag_absolute(move |mx, my| {
-                let current = if horizontal_zones { mx } else { my };
-                let delta_px = current - start_pos;
-                let delta_frac = delta_px / container_px * total_frac;
-                let new_a = (start_frac_a + delta_frac).clamp(min_frac, total_frac - min_frac);
-                let new_b = total_frac - new_a;
-                layout.set_zone_fractions(&backing, kind, zone_a, new_a, zone_b, new_b);
-            });
+            Drag::absolute()
+                .on_move(move |mx, my| {
+                    let current = if horizontal_zones { mx } else { my };
+                    let delta_px = current - start_pos;
+                    let delta_frac = delta_px / container_px * total_frac;
+                    let new_a = (start_frac_a + delta_frac).clamp(min_frac, total_frac - min_frac);
+                    let new_b = total_frac - new_a;
+                    layout.set_zone_fractions(&backing, kind, zone_a, new_a, zone_b, new_b);
+                })
+                .start();
         }
     });
     zone_splitter.set_attribute("data-rid", &hid.to_string());
@@ -603,24 +605,26 @@ fn build_container_splitter(
                 _ => 0.0,
             };
             let backing = backing.clone();
-            start_drag_absolute(move |mx, my| {
-                let current = if matches!(s, ContainerKind::Bottom) { my } else { mx };
-                let delta = current - start_mouse;
-                let min_size = 80.0;
-                let new_size = match s {
-                    ContainerKind::Left => (start_size + delta).max(min_size),
-                    ContainerKind::Right => (start_size - delta).max(min_size),
-                    ContainerKind::Bottom => (start_size - delta).max(min_size),
-                    _ => start_size,
-                };
-                match s {
-                    ContainerKind::Left => layout.left_width.set(new_size),
-                    ContainerKind::Right => layout.right_width.set(new_size),
-                    ContainerKind::Bottom => layout.bottom_height.set(new_size),
-                    _ => {}
-                }
-                layout.publish_to_backing(&backing);
-            });
+            Drag::absolute()
+                .on_move(move |mx, my| {
+                    let current = if matches!(s, ContainerKind::Bottom) { my } else { mx };
+                    let delta = current - start_mouse;
+                    let min_size = 80.0;
+                    let new_size = match s {
+                        ContainerKind::Left => (start_size + delta).max(min_size),
+                        ContainerKind::Right => (start_size - delta).max(min_size),
+                        ContainerKind::Bottom => (start_size - delta).max(min_size),
+                        _ => start_size,
+                    };
+                    match s {
+                        ContainerKind::Left => layout.left_width.set(new_size),
+                        ContainerKind::Right => layout.right_width.set(new_size),
+                        ContainerKind::Bottom => layout.bottom_height.set(new_size),
+                        _ => {}
+                    }
+                    layout.publish_to_backing(&backing);
+                })
+                .start();
         }
     });
     el.set_attribute("data-rid", &hid.to_string());

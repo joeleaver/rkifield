@@ -25,7 +25,7 @@
 use std::sync::Arc;
 
 use glam::{Mat4, Vec3};
-use winit::window::Window;
+use winit::window::Window as WinitWindow;
 
 use rkf_core::aabb::Aabb;
 use rkf_core::material::Material;
@@ -281,7 +281,7 @@ impl Renderer {
     ///
     /// Returns the Renderer and the configured `wgpu::Surface` for frame
     /// presentation. Pass the surface to [`render_to_surface`] each frame.
-    pub fn new(window: Arc<Window>, config: RendererConfig) -> (Self, wgpu::Surface<'static>) {
+    pub fn new(window: Arc<dyn WinitWindow>, config: RendererConfig) -> (Self, wgpu::Surface<'static>) {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..Default::default()
