@@ -290,7 +290,7 @@ pub fn evaluate_shape(shape: ShapeType, dims: &Vec3, pos: Vec3) -> f32 {
 }
 
 /// Evaluate falloff from brush center to edge.
-fn evaluate_falloff(curve: FalloffCurve, distance: f32, radius: f32) -> f32 {
+pub fn evaluate_falloff(curve: FalloffCurve, distance: f32, radius: f32) -> f32 {
     if radius <= 0.0 || distance >= radius {
         return 0.0;
     }

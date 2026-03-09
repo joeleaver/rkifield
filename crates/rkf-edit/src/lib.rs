@@ -22,6 +22,8 @@
 pub mod brush;
 pub mod cpu_apply;
 pub mod edit_op;
+/// Geometry-first edit operations (occupancy-based, SDF derived).
+pub mod geometry_edit;
 pub mod pipeline;
 pub mod transform_ops;
 pub mod types;
