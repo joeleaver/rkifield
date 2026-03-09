@@ -14,10 +14,13 @@ use glam::{UVec3, Vec3};
 
 use crate::aabb::Aabb;
 use crate::brick::Brick;
-use crate::brick_map::{BrickMap, BrickMapAllocator, EMPTY_SLOT};
+use crate::brick_geometry::{BrickGeometry, SurfaceVoxel, voxel_index};
+use crate::brick_map::{BrickMap, BrickMapAllocator, EMPTY_SLOT, INTERIOR_SLOT};
 use crate::brick_pool::Pool;
 use crate::constants::BRICK_DIM;
 use crate::scene_node::BrickMapHandle;
+use crate::sdf_cache::SdfCache;
+use crate::sdf_compute::{SlotMapping, compute_sdf_from_geometry};
 use crate::voxel::VoxelSample;
 
 /// Voxelize an SDF function into a brick map and brick pool.
@@ -176,6 +179,257 @@ where
             }
         }
     }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Geometry-first voxelization
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Result of geometry-first voxelization.
+pub struct VoxelizeGeometryResult {
+    /// Brick map handle in the allocator.
+    pub handle: BrickMapHandle,
+    /// Number of allocated bricks.
+    pub brick_count: u32,
+    /// Geometry pool slots for each allocated brick.
+    pub geometry_slots: Vec<u32>,
+    /// SDF cache pool slots for each allocated brick.
+    pub sdf_slots: Vec<u32>,
+    /// Brick map dims (same as handle.dims).
+    pub dims: UVec3,
+}
+
+/// Voxelize an SDF function into BrickGeometry + SdfCache (geometry-first).
+///
+/// Evaluates `sdf_fn` to determine occupancy (negative = solid), assigns color
+/// and material from the function, then computes SDF distances from geometry.
+///
+/// # Arguments
+///
+/// - `sdf_fn` — evaluates `(distance, material_id, color_rgba)` at a local-space position.
+/// - `aabb` — local-space bounding box.
+/// - `voxel_size` — world-space size of one voxel edge.
+/// - `geo_pool` — geometry pool to allocate into.
+/// - `sdf_pool` — SDF cache pool to allocate into.
+/// - `map_alloc` — brick map allocator.
+///
+/// Returns `None` if pools don't have enough capacity.
+pub fn voxelize_to_geometry<F>(
+    sdf_fn: F,
+    aabb: &Aabb,
+    voxel_size: f32,
+    geo_pool: &mut Pool<BrickGeometry>,
+    sdf_pool: &mut Pool<SdfCache>,
+    map_alloc: &mut BrickMapAllocator,
+) -> Option<VoxelizeGeometryResult>
+where
+    F: Fn(Vec3) -> (f32, u8, [u8; 4]),
+{
+    let brick_world_size = voxel_size * BRICK_DIM as f32;
+
+    // Compute brick grid dimensions from AABB.
+    let aabb_size = aabb.max - aabb.min;
+    let dims = UVec3::new(
+        ((aabb_size.x / brick_world_size).ceil() as u32).max(1),
+        ((aabb_size.y / brick_world_size).ceil() as u32).max(1),
+        ((aabb_size.z / brick_world_size).ceil() as u32).max(1),
+    );
+
+    // Grid origin centered at local origin (matches ray march shader).
+    let grid_origin = -Vec3::new(
+        dims.x as f32 * brick_world_size * 0.5,
+        dims.y as f32 * brick_world_size * 0.5,
+        dims.z as f32 * brick_world_size * 0.5,
+    );
+
+    // Narrow-band threshold for brick-level culling.
+    let narrow_band = brick_world_size * 1.8;
+
+    // First pass: evaluate SDF at brick centers, determine which bricks need allocation.
+    let total_bricks = (dims.x * dims.y * dims.z) as usize;
+    let mut brick_needs_alloc = vec![false; total_bricks];
+    let mut needed_count = 0u32;
+
+    for bz in 0..dims.z {
+        for by in 0..dims.y {
+            for bx in 0..dims.x {
+                let brick_min = grid_origin
+                    + Vec3::new(
+                        bx as f32 * brick_world_size,
+                        by as f32 * brick_world_size,
+                        bz as f32 * brick_world_size,
+                    );
+                let brick_center = brick_min + Vec3::splat(brick_world_size * 0.5);
+                let (dist, _, _) = sdf_fn(brick_center);
+                if dist.abs() < narrow_band {
+                    let bi = (bx + by * dims.x + bz * dims.x * dims.y) as usize;
+                    brick_needs_alloc[bi] = true;
+                    needed_count += 1;
+                }
+            }
+        }
+    }
+
+    if needed_count == 0 {
+        let brick_map = BrickMap::new(dims);
+        let handle = map_alloc.allocate(&brick_map);
+        return Some(VoxelizeGeometryResult {
+            handle,
+            brick_count: 0,
+            geometry_slots: vec![],
+            sdf_slots: vec![],
+            dims,
+        });
+    }
+
+    // Allocate pool slots.
+    let geo_slots = geo_pool.allocate_range(needed_count)?;
+    let sdf_slots_vec = sdf_pool.allocate_range(needed_count)?;
+
+    let mut brick_map = BrickMap::new(dims);
+    let mut slot_mappings = Vec::with_capacity(needed_count as usize);
+    let mut slot_idx = 0usize;
+
+    // Second pass: populate geometry for each allocated brick.
+    for bz in 0..dims.z {
+        for by in 0..dims.y {
+            for bx in 0..dims.x {
+                let bi = (bx + by * dims.x + bz * dims.x * dims.y) as usize;
+                if !brick_needs_alloc[bi] {
+                    continue;
+                }
+
+                let g_slot = geo_slots[slot_idx];
+                let s_slot = sdf_slots_vec[slot_idx];
+                // Use g_slot as the brick map entry (arbitrary choice — it just needs to be unique)
+                brick_map.set(bx, by, bz, g_slot);
+
+                slot_mappings.push(SlotMapping {
+                    brick_slot: g_slot,
+                    geometry_slot: g_slot,
+                    sdf_slot: s_slot,
+                });
+
+                let brick_min = grid_origin
+                    + Vec3::new(
+                        bx as f32 * brick_world_size,
+                        by as f32 * brick_world_size,
+                        bz as f32 * brick_world_size,
+                    );
+
+                let geo = geo_pool.get_mut(g_slot);
+                let half_voxel = voxel_size * 0.5;
+
+                // Sample SDF at each voxel center → occupancy + surface data
+                for vz in 0..8u8 {
+                    for vy in 0..8u8 {
+                        for vx in 0..8u8 {
+                            let pos = brick_min
+                                + Vec3::new(
+                                    vx as f32 * voxel_size + half_voxel,
+                                    vy as f32 * voxel_size + half_voxel,
+                                    vz as f32 * voxel_size + half_voxel,
+                                );
+                            let (dist, _mat_id, _color) = sdf_fn(pos);
+                            if dist <= 0.0 {
+                                geo.set_solid(vx, vy, vz, true);
+                            }
+                        }
+                    }
+                }
+
+                // Classify: if fully empty or fully solid, optimize
+                if geo.is_fully_empty() {
+                    brick_map.set(bx, by, bz, EMPTY_SLOT);
+                    geo_pool.deallocate(g_slot);
+                    sdf_pool.deallocate(s_slot);
+                    slot_mappings.pop();
+                    slot_idx += 1;
+                    continue;
+                }
+                if geo.is_fully_solid() {
+                    brick_map.set(bx, by, bz, INTERIOR_SLOT);
+                    geo_pool.deallocate(g_slot);
+                    sdf_pool.deallocate(s_slot);
+                    slot_mappings.pop();
+                    slot_idx += 1;
+                    continue;
+                }
+
+                // Identify surface voxels and assign color + material
+                // (We use brick-local surface detection for initial pass;
+                //  cross-brick will be handled by SDF computation)
+                for vz in 0..8u8 {
+                    for vy in 0..8u8 {
+                        for vx in 0..8u8 {
+                            if geo.is_surface_voxel(vx, vy, vz) {
+                                let pos = brick_min
+                                    + Vec3::new(
+                                        vx as f32 * voxel_size + half_voxel,
+                                        vy as f32 * voxel_size + half_voxel,
+                                        vz as f32 * voxel_size + half_voxel,
+                                    );
+                                let (_, mat_id, color) = sdf_fn(pos);
+                                geo.surface_voxels.push(SurfaceVoxel::new(
+                                    voxel_index(vx, vy, vz),
+                                    color,
+                                    mat_id,
+                                ));
+                            }
+                        }
+                    }
+                }
+
+                slot_idx += 1;
+            }
+        }
+    }
+
+    // Build geometry and SDF cache slices for compute_sdf_from_geometry
+    let actual_count = slot_mappings.len();
+
+    // Compute SDF from geometry
+    // We need contiguous arrays — use the pool's internal storage
+    {
+        let geo_slice: Vec<BrickGeometry> = slot_mappings
+            .iter()
+            .map(|m| geo_pool.get(m.geometry_slot).clone())
+            .collect();
+        let mut sdf_slice: Vec<SdfCache> = slot_mappings
+            .iter()
+            .map(|m| sdf_pool.get(m.sdf_slot).clone())
+            .collect();
+
+        // Remap slot_mappings to use indices into our temporary arrays
+        let temp_mappings: Vec<SlotMapping> = slot_mappings
+            .iter()
+            .enumerate()
+            .map(|(i, m)| SlotMapping {
+                brick_slot: m.brick_slot,
+                geometry_slot: i as u32,
+                sdf_slot: i as u32,
+            })
+            .collect();
+
+        compute_sdf_from_geometry(&brick_map, &geo_slice, &mut sdf_slice, &temp_mappings, voxel_size);
+
+        // Write back SDF caches to pool
+        for (i, m) in slot_mappings.iter().enumerate() {
+            *sdf_pool.get_mut(m.sdf_slot) = sdf_slice[i].clone();
+        }
+    }
+
+    let handle = map_alloc.allocate(&brick_map);
+    let geometry_slots = slot_mappings.iter().map(|m| m.geometry_slot).collect();
+    let sdf_slots_result = slot_mappings.iter().map(|m| m.sdf_slot).collect();
+
+    Some(VoxelizeGeometryResult {
+        handle,
+        brick_count: actual_count as u32,
+        geometry_slots,
+        sdf_slots: sdf_slots_result,
+        dims,
+    })
 }
 
 /// Evaluate an [`SdfPrimitive`] at a local-space position.

@@ -36,6 +36,8 @@ pub mod lod_manager;
 pub mod material;
 /// File-driven material library — `.rkmat` files, palettes, hot-reload support.
 pub mod material_library;
+/// Geometry resampling — change voxel resolution of an existing object.
+pub mod resample;
 /// CPU reference trilinear sampling within a brick.
 pub mod sampling;
 /// v2 scene and root object container.
@@ -82,6 +84,7 @@ pub use material::Material;
 pub use material_library::{MaterialEntry, MaterialLibrary, MaterialPalette, MaterialProperties};
 pub use sdf_cache::SdfCache;
 pub use sdf_compute::{SlotMapping, compute_sdf_from_geometry, compute_sdf_region};
+pub use resample::{ResampleResult, resample_geometry};
 pub use voxel::VoxelSample;
-pub use voxelize_object::{evaluate_primitive, voxelize_sdf};
+pub use voxelize_object::{VoxelizeGeometryResult, evaluate_primitive, voxelize_sdf, voxelize_to_geometry};
 pub use world_position::WorldPosition;
