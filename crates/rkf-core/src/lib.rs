@@ -15,6 +15,8 @@ pub mod aabb;
 /// .rkf v2 file format — serialization and deserialization for voxelized objects.
 pub mod asset_file;
 pub mod automation;
+/// Geometry-first brick representation — occupancy bitmask + surface voxels.
+pub mod brick_geometry;
 /// Bounding volume hierarchy over scene objects for spatial acceleration.
 pub mod bvh;
 /// 8×8×8 voxel brick — the fundamental unit of SDF storage.
@@ -42,6 +44,8 @@ pub mod scene;
 pub mod terrain;
 /// v2 scene hierarchy node — object SDF tree with transforms and blending.
 pub mod scene_node;
+/// Cached SDF distances derived from brick geometry.
+pub mod sdf_cache;
 /// SDF generation utilities for testing and offline voxelization.
 pub mod sdf;
 /// Transform baking — compute world transforms from parent-local hierarchy.
@@ -66,13 +70,15 @@ pub use scene_node::{
     BlendMode, BrickMapHandle, NodeMetadata, SceneNode, SdfPrimitive, SdfSource, Transform,
 };
 pub use brick::Brick;
+pub use brick_geometry::{BrickGeometry, NeighborContext, SurfaceVoxel, index_to_xyz, voxel_index};
 pub use brick_map::{BrickMap, BrickMapAllocator, EMPTY_SLOT};
-pub use brick_pool::{BonePool, BrickPool, ColorPool, Pool, VolumetricPool};
+pub use brick_pool::{BonePool, BrickPool, ColorPool, GeometryPool, Pool, SdfCachePool, VolumetricPool};
 pub use companion::{BoneBrick, BoneVoxel, ColorBrick, ColorVoxel, VolumetricBrick, VolumetricVoxel};
 pub use lod::{LodLevel, LodSelection, ObjectLod, select_lod};
 pub use lod_manager::{LodManager, LodTransition};
 pub use material::Material;
 pub use material_library::{MaterialEntry, MaterialLibrary, MaterialPalette, MaterialProperties};
+pub use sdf_cache::SdfCache;
 pub use voxel::VoxelSample;
 pub use voxelize_object::{evaluate_primitive, voxelize_sdf};
 pub use world_position::WorldPosition;

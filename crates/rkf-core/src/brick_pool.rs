@@ -11,7 +11,9 @@
 //! - [`ColorPool`] — color companion ([`ColorBrick`])
 
 use crate::brick::Brick;
+use crate::brick_geometry::BrickGeometry;
 use crate::companion::{BoneBrick, ColorBrick, VolumetricBrick};
+use crate::sdf_cache::SdfCache;
 
 /// A fixed-capacity pool of items managed by a free list.
 ///
@@ -175,6 +177,12 @@ pub type VolumetricPool = Pool<VolumetricBrick>;
 
 /// Color data companion pool — stores [`ColorBrick`]s (2 KB each).
 pub type ColorPool = Pool<ColorBrick>;
+
+/// Geometry-first brick pool — stores [`BrickGeometry`] (variable size, CPU-only).
+pub type GeometryPool = Pool<BrickGeometry>;
+
+/// SDF cache pool — stores [`SdfCache`] (1 KB each, derived from geometry).
+pub type SdfCachePool = Pool<SdfCache>;
 
 // ---------------------------------------------------------------------------
 // Tests
