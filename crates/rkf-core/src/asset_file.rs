@@ -204,6 +204,15 @@ pub struct LodData {
 // ---------------------------------------------------------------------------
 
 /// Encode an [`SdfPrimitive`] to `(type_id, [f32; 4])`.
+pub(crate) fn encode_analytical_pub(prim: &SdfPrimitive) -> (u32, [f32; 4]) {
+    encode_analytical(prim)
+}
+
+/// Decode `(type_id, [f32; 4])` to an [`SdfPrimitive`], or `None` if type_id == 0.
+pub(crate) fn decode_analytical_pub(type_id: u32, params: [f32; 4]) -> Option<SdfPrimitive> {
+    decode_analytical(type_id, params)
+}
+
 fn encode_analytical(prim: &SdfPrimitive) -> (u32, [f32; 4]) {
     match *prim {
         SdfPrimitive::Sphere { radius } => (1, [radius, 0.0, 0.0, 0.0]),

@@ -14,6 +14,8 @@
 pub mod aabb;
 /// .rkf v2 file format — serialization and deserialization for voxelized objects.
 pub mod asset_file;
+/// .rkf v3 file format — geometry-first serialization (occupancy + surface voxels + SDF cache).
+pub mod asset_file_v3;
 pub mod automation;
 /// Geometry-first brick representation — occupancy bitmask + surface voxels.
 pub mod brick_geometry;
