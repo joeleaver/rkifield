@@ -46,6 +46,8 @@ pub mod terrain;
 pub mod scene_node;
 /// Cached SDF distances derived from brick geometry.
 pub mod sdf_cache;
+/// Compute SDF distances from geometry (occupancy → signed distances).
+pub mod sdf_compute;
 /// SDF generation utilities for testing and offline voxelization.
 pub mod sdf;
 /// Transform baking — compute world transforms from parent-local hierarchy.
@@ -79,6 +81,7 @@ pub use lod_manager::{LodManager, LodTransition};
 pub use material::Material;
 pub use material_library::{MaterialEntry, MaterialLibrary, MaterialPalette, MaterialProperties};
 pub use sdf_cache::SdfCache;
+pub use sdf_compute::{SlotMapping, compute_sdf_from_geometry, compute_sdf_region};
 pub use voxel::VoxelSample;
 pub use voxelize_object::{evaluate_primitive, voxelize_sdf};
 pub use world_position::WorldPosition;
