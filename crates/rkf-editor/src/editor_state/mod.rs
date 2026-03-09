@@ -671,6 +671,9 @@ pub struct EditorState {
     pub pending_minimize: bool,
     /// Set by maximize window control, consumed by the event loop.
     pub pending_maximize: bool,
+    /// Set by "Convert to Voxel Object" button. Contains the object ID
+    /// of an analytical primitive to convert to geometry-first voxelized form.
+    pub pending_convert_to_voxel: Option<u32>,
     /// Set by "Re-voxelize" button in properties panel. Contains the object ID
     /// of the voxelized object whose brick map should be resampled at the
     /// current non-uniform scale, resetting scale to (1,1,1) afterwards.

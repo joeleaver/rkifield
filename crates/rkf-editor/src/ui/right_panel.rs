@@ -845,7 +845,7 @@ fn build_object_properties(
             .filter(|c| c.parent_id.map(|p| p as u64) == Some(eid))
             .count();
         let has_xf = true;
-        let (show_revoxelize, is_voxelized) = es
+        let (show_revoxelize, is_voxelized, is_analytical) = es
             .lock()
             .ok()
             .map(|es_lock| {
@@ -860,16 +860,20 @@ fn build_object_properties(
                             obj.root_node.sdf_source,
                             rkf_core::scene_node::SdfSource::Voxelized { .. }
                         );
+                        let is_anal = matches!(
+                            obj.root_node.sdf_source,
+                            rkf_core::scene_node::SdfSource::Analytical { .. }
+                        );
                         let non_uniform = (obj.scale - glam::Vec3::ONE).length() > 1e-4;
-                        (is_vox && non_uniform, is_vox)
+                        (is_vox && non_uniform, is_vox, is_anal)
                     })
-                    .unwrap_or((false, false))
+                    .unwrap_or((false, false, false))
             })
-            .unwrap_or((false, false));
-        (name, child_count, has_xf, show_revoxelize, is_voxelized)
+            .unwrap_or((false, false, false));
+        (name, child_count, has_xf, show_revoxelize, is_voxelized, is_analytical)
     });
 
-    if let Some((name, child_count, _has_xf, show_revoxelize, is_voxelized)) = obj_info {
+    if let Some((name, child_count, _has_xf, show_revoxelize, is_voxelized, is_analytical)) = obj_info {
         // Name.
         let name_row = scope.create_element("div");
         name_row.set_attribute("style", SECTION_STYLE);
@@ -927,6 +931,31 @@ fn build_object_properties(
                 let cmd = cmd.clone();
                 move || {
                     let _ = cmd.0.send(EditorCommand::Revoxelize {
+                        object_id: eid as u32,
+                    });
+                }
+            });
+            btn.set_attribute("data-rid", &hid.to_string());
+            btn_row.append_child(&btn);
+            container.append_child(&btn_row);
+        }
+
+        // Convert to Voxel Object button (analytical primitives only).
+        if is_analytical {
+            let btn_row = scope.create_element("div");
+            btn_row.set_attribute("style", "padding: 6px 8px;");
+            let btn = scope.create_element("button");
+            btn.set_attribute(
+                "style",
+                "width:100%; padding:4px 8px; background:#223355; \
+                 color:#99ccff; border:1px solid #334477; \
+                 border-radius:3px; cursor:pointer; font-size:12px;",
+            );
+            btn.append_child(&scope.create_text("Convert to Voxel Object"));
+            let hid = scope.register_handler({
+                let cmd = cmd.clone();
+                move || {
+                    let _ = cmd.0.send(EditorCommand::ConvertToVoxel {
                         object_id: eid as u32,
                     });
                 }

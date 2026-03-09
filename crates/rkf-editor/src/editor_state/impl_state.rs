@@ -74,6 +74,7 @@ impl EditorState {
             pending_drag: false,
             pending_minimize: false,
             pending_maximize: false,
+            pending_convert_to_voxel: None,
             pending_revoxelize: None,
             pending_fix_sdfs: None,
             pending_remap_material: None,

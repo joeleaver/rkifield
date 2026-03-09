@@ -349,7 +349,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         //    We inline what was formerly `take_engine_snapshot()` to avoid the
         //    intermediate `EngineSnapshot` struct.
         let (
-            camera, f_debug_mode, f_revoxelize, f_fix_sdfs, f_remap_material,
+            camera, f_debug_mode, f_convert_to_voxel, f_revoxelize, f_fix_sdfs, f_remap_material,
             f_environment, f_lights,
             mut scene_clone, f_selected, f_gizmo_mode, f_gizmo_axis,
             f_show_grid, f_editor_mode, f_brush_radius,
@@ -385,6 +385,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             if let Some(mode) = debug_mode {
                 es.debug_mode = mode;
             }
+            let convert_to_voxel = es.pending_convert_to_voxel.take();
             let revoxelize = es.pending_revoxelize.take();
             let fix_sdfs = es.pending_fix_sdfs.take();
             let remap_material = es.pending_remap_material.take();
@@ -1014,7 +1015,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             // Reset per-frame deltas last.
             es.reset_frame_deltas();
 
-            (cam, debug_mode, revoxelize, fix_sdfs, remap_material,
+            (cam, debug_mode, convert_to_voxel, revoxelize, fix_sdfs, remap_material,
              environment, lights,
              scene, sel, gm, gizmo_axis, grid, emode, brush_radius,
              sculpt_edits, sculpt_undo, sculpting_active)
@@ -1032,6 +1033,40 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         if let Some(lights) = f_lights {
             engine.world_lights = lights;
             engine.lights_dirty = true;
+        }
+
+        // e0. Process pending convert-to-voxel (analytical → geometry-first).
+        if let Some(obj_id) = f_convert_to_voxel {
+            if let Ok(mut es) = editor_state.lock() {
+                let scene = es.world.scene_mut();
+                if let Some(obj) = scene.objects.iter_mut().find(|o| o.id == obj_id) {
+                    if let rkf_core::SdfSource::Analytical { primitive, material_id } =
+                        obj.root_node.sdf_source.clone()
+                    {
+                        let diameter = crate::engine::primitive_diameter(&primitive);
+                        let voxel_size = (diameter / 32.0).max(0.01); // ~32 voxels across
+                        if let Some((handle, vs, grid_aabb, _count)) =
+                            engine.convert_to_geometry_first(&primitive, material_id as u8, voxel_size)
+                        {
+                            obj.root_node.sdf_source = rkf_core::SdfSource::Voxelized {
+                                brick_map_handle: handle,
+                                voxel_size: vs,
+                                aabb: grid_aabb,
+                            };
+                            obj.aabb = grid_aabb;
+                            engine.reupload_brick_data();
+                            let map_data = engine.cpu_brick_map_alloc.as_slice();
+                            if !map_data.is_empty() {
+                                engine.gpu_scene.upload_brick_maps(
+                                    &engine.ctx.device, &engine.ctx.queue, map_data,
+                                );
+                            }
+                            log::info!("Converted object {} to voxel (vs={voxel_size})", obj.name);
+                        }
+                    }
+                }
+            }
+            frame_topology_changed = true;
         }
 
         // e. Process pending re-voxelize (needs brief lock for scene mutation).
@@ -1974,6 +2009,9 @@ fn apply_editor_command(es: &mut EditorState, cmd: EditorCommand) {
         }
 
         // ── Voxel ops ────────────────────────────────────────────
+        ConvertToVoxel { object_id } => {
+            es.pending_convert_to_voxel = Some(object_id);
+        }
         Revoxelize { object_id } => {
             es.pending_revoxelize = Some(object_id);
         }

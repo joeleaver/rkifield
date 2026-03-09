@@ -112,6 +112,7 @@ pub enum EditorCommand {
     SaveProject,
 
     // ── Voxel ops ────────────────────────────────────────────────────────
+    ConvertToVoxel { object_id: u32 },
     Revoxelize { object_id: u32 },
     FixSdfs { object_id: u32 },
 
