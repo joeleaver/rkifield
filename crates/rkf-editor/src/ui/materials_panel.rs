@@ -7,7 +7,7 @@ use rinch::prelude::*;
 
 use crate::editor_command::EditorCommand;
 use crate::editor_state::UiSignals;
-use crate::{CommandSender, SnapshotReader};
+use crate::CommandSender;
 
 /// Materials panel component.
 ///
@@ -15,7 +15,6 @@ use crate::{CommandSender, SnapshotReader};
 #[component]
 pub fn MaterialsPanel() -> NodeHandle {
     let ui = use_context::<UiSignals>();
-    let snapshot = use_context::<SnapshotReader>();
     let cmd = use_context::<CommandSender>();
 
     let root = __scope.create_element("div");
@@ -24,13 +23,9 @@ pub fn MaterialsPanel() -> NodeHandle {
         "flex:1;min-height:0;display:flex;flex-direction:column;",
     );
 
-    let snap = snapshot.clone();
     let cmd2 = cmd.clone();
     rinch::core::reactive_component_dom(__scope, &root, move |__scope| {
-        let _ = ui.material_revision.get();
-        let _ = ui.selected_material.get();
-
-        let snap_guard = snap.0.load();
+        let materials = ui.materials.get();
         let selected_slot = ui.selected_material.get();
 
         let container = __scope.create_element("div");
@@ -45,7 +40,7 @@ pub fn MaterialsPanel() -> NodeHandle {
              border-bottom:1px solid var(--rinch-color-border);flex-shrink:0;",
         );
         count_bar.append_child(
-            &__scope.create_text(&format!("{} slots", snap_guard.materials.len())),
+            &__scope.create_text(&format!("{} slots", materials.len())),
         );
         container.append_child(&count_bar);
 
@@ -57,7 +52,7 @@ pub fn MaterialsPanel() -> NodeHandle {
              overflow-y:auto;flex:1;min-height:0;align-content:flex-start;",
         );
 
-        for mat in &snap_guard.materials {
+        for mat in &materials {
             let slot = mat.slot;
             let is_selected = selected_slot == Some(slot);
 

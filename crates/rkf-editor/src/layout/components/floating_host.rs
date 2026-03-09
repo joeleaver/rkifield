@@ -167,20 +167,19 @@ pub fn FloatingPanelHost() -> NodeHandle {
                 fp_root.append_child(&resize);
             }
 
-            // Position + size effects
+            // Position + size — reactive via hidden trigger divs.
             {
                 let el = fp_root.clone();
-                Effect::new(move || {
+                let trigger = __scope.create_element("div");
+                trigger.set_attribute("style", "display:none;");
+                rinch::core::reactive_component_dom(__scope, &trigger, move |__scope| {
                     el.set_style("left", &format!("{}px", x.get()));
                     el.set_style("top", &format!("{}px", y.get()));
-                });
-            }
-            {
-                let el = fp_root.clone();
-                Effect::new(move || {
                     el.set_style("width", &format!("{}px", w.get()));
                     el.set_style("height", &format!("{}px", h.get()));
+                    __scope.create_text("")
                 });
+                fp_root.append_child(&trigger);
             }
 
             container.append_child(&fp_root);
@@ -210,7 +209,9 @@ pub fn FloatingPanelHost() -> NodeHandle {
     {
         let ghost = ghost.clone();
         let ghost_label = ghost_label.clone();
-        Effect::new(move || {
+        let trigger = __scope.create_element("div");
+        trigger.set_attribute("style", "display:none;");
+        rinch::core::reactive_component_dom(__scope, &trigger, move |__scope| {
             let drag = layout.tab_drag.get();
             let drop = layout.drop_target.get();
             let cursor = layout.drag_cursor.get();
@@ -230,7 +231,9 @@ pub fn FloatingPanelHost() -> NodeHandle {
             } else {
                 ghost.set_style("display", "none");
             }
+            __scope.create_text("")
         });
+        root.append_child(&trigger);
     }
 
     root.append_child(&ghost);

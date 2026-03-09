@@ -43,17 +43,11 @@ use automation::SharedState;
 use editor_command::EditorCommand;
 use editor_state::{EditorState, SliderSignals, UiSignals};
 use engine_viewport::{DISPLAY_HEIGHT, DISPLAY_WIDTH};
-use ui_snapshot::UiSnapshot;
 
 /// Sender half of the UI→engine command channel.
 /// Stored in rinch context for UI components to send commands.
 #[derive(Clone)]
 pub(crate) struct CommandSender(pub crossbeam::channel::Sender<EditorCommand>);
-
-/// Lock-free snapshot of editor state for the UI thread.
-/// Published by the engine thread each frame, read by UI components.
-#[derive(Clone)]
-pub(crate) struct SnapshotReader(pub Arc<arc_swap::ArcSwap<UiSnapshot>>);
 
 
 // ---------------------------------------------------------------------------
@@ -115,9 +109,8 @@ fn main() -> anyhow::Result<()> {
         DISPLAY_HEIGHT,
     )));
 
-    // 1b. Create UI→engine command channel and lock-free snapshot.
+    // 1b. Create UI→engine command channel.
     let (cmd_tx, cmd_rx) = crossbeam::channel::unbounded::<EditorCommand>();
-    let ui_snapshot = Arc::new(arc_swap::ArcSwap::from_pointee(UiSnapshot::default()));
     let layout_backing = layout::state::LayoutBacking::new(layout::default_layout());
 
     // 1c. Create shared material library (pre-populated with test materials).
@@ -162,7 +155,6 @@ fn main() -> anyhow::Result<()> {
     // 4. Clones for the engine thread.
     let editor_state_for_thread = Arc::clone(&editor_state);
     let shared_state_for_thread = Arc::clone(&shared_state);
-    let ui_snapshot_for_thread = Arc::clone(&ui_snapshot);
     let layout_backing_for_thread = layout_backing.clone();
     let surface_writer = surface_handle.writer();
     let gpu_registrar = surface_handle.gpu_registrar();
@@ -175,7 +167,6 @@ fn main() -> anyhow::Result<()> {
             editor_state: editor_state_for_thread,
             shared_state: shared_state_for_thread,
             cmd_rx,
-            ui_snapshot: ui_snapshot_for_thread,
             layout_backing: layout_backing_for_thread,
             surface_writer,
             gpu_registrar,
@@ -210,7 +201,6 @@ fn main() -> anyhow::Result<()> {
     let editor_state_ctx = Arc::clone(&editor_state);
     let shared_state_ctx = Arc::clone(&shared_state);
     let cmd_sender = CommandSender(cmd_tx);
-    let snapshot_reader = SnapshotReader(ui_snapshot);
 
     // 7. Call rinch shell — BLOCKING until window close.
     //    create_context() calls must be on the main
@@ -230,9 +220,8 @@ fn main() -> anyhow::Result<()> {
             create_context(ui_signals);
             create_context(slider_signals);
             create_context(crate::editor_state::FpsSignal::new());
-            // Command channel + snapshot for lock-free UI ↔ engine communication.
+            // Command channel for UI→engine communication.
             create_context(cmd_sender);
-            create_context(snapshot_reader);
             // Layout state — zone-based configurable layout.
             let layout_state = layout::state::LayoutState::new(
                 layout::default_layout(),

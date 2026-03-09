@@ -45,21 +45,18 @@ pub fn LayoutRoot() -> NodeHandle {
 
         // ── Left container ──
         if !config.left.collapsed && !config.left.zones.is_empty() {
-            let left_div = __scope.create_element("div");
-            left_div.set_attribute(
-                "style",
-                "flex-shrink:0;\
-                 background:var(--rinch-color-dark-8);\
-                 border-right:1px solid var(--rinch-color-border);\
-                 display:flex;flex-direction:column;min-height:0;",
-            );
-            {
-                let el = left_div.clone();
-                Effect::new(move || {
-                    let w = layout.left_width.get();
-                    el.set_style("width", &format!("{w:.0}px"));
-                });
-            }
+            let left_div = rsx! {
+                div {
+                    style: {move || format!(
+                        "flex-shrink:0;\
+                         background:var(--rinch-color-dark-8);\
+                         border-right:1px solid var(--rinch-color-border);\
+                         display:flex;flex-direction:column;min-height:0;\
+                         width:{:.0}px",
+                        layout.left_width.get()
+                    )},
+                }
+            };
             render_container_zones(__scope, &left_div, &config.left, ContainerKind::Left, layout, &backing, &overlay_regions);
             container.append_child(&left_div);
 
@@ -95,21 +92,18 @@ pub fn LayoutRoot() -> NodeHandle {
                 let splitter = build_container_splitter(__scope, ContainerKind::Bottom, layout, backing.clone());
                 center_col.append_child(&splitter);
 
-                let bottom_div = __scope.create_element("div");
-                bottom_div.set_attribute(
-                    "style",
-                    "flex-shrink:0;\
-                     background:var(--rinch-color-dark-8);\
-                     border-top:1px solid var(--rinch-color-border);\
-                     display:flex;flex-direction:row;min-height:0;",
-                );
-                {
-                    let el = bottom_div.clone();
-                    Effect::new(move || {
-                        let h = layout.bottom_height.get();
-                        el.set_style("height", &format!("{h:.0}px"));
-                    });
-                }
+                let bottom_div = rsx! {
+                    div {
+                        style: {move || format!(
+                            "flex-shrink:0;\
+                             background:var(--rinch-color-dark-8);\
+                             border-top:1px solid var(--rinch-color-border);\
+                             display:flex;flex-direction:row;min-height:0;\
+                             height:{:.0}px",
+                            layout.bottom_height.get()
+                        )},
+                    }
+                };
                 render_container_zones(
                     __scope, &bottom_div, &config.bottom, ContainerKind::Bottom, layout, &backing, &overlay_regions,
                 );
@@ -124,30 +118,30 @@ pub fn LayoutRoot() -> NodeHandle {
             let splitter = build_container_splitter(__scope, ContainerKind::Right, layout, backing.clone());
             container.append_child(&splitter);
 
-            let right_div = __scope.create_element("div");
-            right_div.set_attribute(
-                "style",
-                "flex-shrink:0;\
-                 background:var(--rinch-color-dark-8);\
-                 border-left:1px solid var(--rinch-color-border);\
-                 display:flex;flex-direction:column;min-height:0;",
-            );
-            {
-                let el = right_div.clone();
-                Effect::new(move || {
-                    let w = layout.right_width.get();
-                    el.set_style("width", &format!("{w:.0}px"));
-                });
-            }
+            let right_div = rsx! {
+                div {
+                    style: {move || format!(
+                        "flex-shrink:0;\
+                         background:var(--rinch-color-dark-8);\
+                         border-left:1px solid var(--rinch-color-border);\
+                         display:flex;flex-direction:column;min-height:0;\
+                         width:{:.0}px",
+                        layout.right_width.get()
+                    )},
+                }
+            };
             render_container_zones(__scope, &right_div, &config.right, ContainerKind::Right, layout, &backing, &overlay_regions);
             container.append_child(&right_div);
         }
 
-        // Reactive effect: show/hide overlay regions when tab_drag changes.
+        // Reactive overlay visibility: show/hide all overlay regions when tab_drag changes.
         // Works for both tab bar DnD drags and floating panel component drags.
+        // Uses a hidden div with reactive_component_dom as the signal-driven trigger.
         {
             let regions = overlay_regions.clone();
-            Effect::new(move || {
+            let trigger = __scope.create_element("div");
+            trigger.set_attribute("style", "display:none;");
+            rinch::core::reactive_component_dom(__scope, &trigger, move |__scope| {
                 let drag = layout.tab_drag.get();
                 let regions = regions.borrow();
                 if drag.is_some() {
@@ -159,7 +153,9 @@ pub fn LayoutRoot() -> NodeHandle {
                         region.set_style("display", "none");
                     }
                 }
+                __scope.create_text("")
             });
+            container.append_child(&trigger);
         }
 
         container
@@ -399,15 +395,11 @@ fn build_tab_bar(
     let drop_label = scope.create_text("+");
     drop_indicator.append_child(&drop_label);
 
-    // Highlight on dragenter.
+    // Highlight on dragenter — just set the signal.
     let enter_hid = scope.register_handler({
-        let indicator = drop_indicator.clone();
         let ck = container_kind;
         let zi = zone_idx;
         move || {
-            indicator.set_style("background", "rgba(59,130,246,0.2)");
-            indicator.set_style("border-color", "rgba(59,130,246,0.6)");
-            indicator.set_style("color", "rgba(59,130,246,0.9)");
             layout.drop_target.set(Some(crate::layout::state::DropTarget::Zone {
                 container: ck,
                 zone_idx: zi,
@@ -416,28 +408,24 @@ fn build_tab_bar(
     });
     drop_indicator.set_attribute("data-ondragenter", &enter_hid.to_string());
 
-    // Clear on dragleave.
-    let leave_hid = scope.register_handler({
-        let indicator = drop_indicator.clone();
-        move || {
-            indicator.set_style("background", "rgba(59,130,246,0.05)");
-            indicator.set_style("border-color", "rgba(59,130,246,0.4)");
-            indicator.set_style("color", "rgba(59,130,246,0.6)");
-            layout.drop_target.set(None);
-        }
+    // Clear on dragleave — just clear the signal.
+    let leave_hid = scope.register_handler(move || {
+        layout.drop_target.set(None);
     });
     drop_indicator.set_attribute("data-ondragleave", &leave_hid.to_string());
 
-    // Reactive highlight for component drags (floating panels).
+    // Reactive highlight: driven by drop_target signal.
+    // Works for both DnD (dragenter/dragleave) and component drags (floating panels).
     {
         let indicator = drop_indicator.clone();
-        let ck = container_kind;
-        let zi = zone_idx;
         let my_target = crate::layout::state::DropTarget::Zone {
-            container: ck,
-            zone_idx: zi,
+            container: container_kind,
+            zone_idx,
         };
-        Effect::new(move || {
+        // Hidden trigger div — reactive_component_dom drives the style updates.
+        let trigger = scope.create_element("div");
+        trigger.set_attribute("style", "display:none;");
+        rinch::core::reactive_component_dom(scope, &trigger, move |__scope| {
             let drop = layout.drop_target.get();
             if drop == Some(my_target) {
                 indicator.set_style("background", "rgba(59,130,246,0.2)");
@@ -448,7 +436,9 @@ fn build_tab_bar(
                 indicator.set_style("border-color", "rgba(59,130,246,0.4)");
                 indicator.set_style("color", "rgba(59,130,246,0.6)");
             }
+            __scope.create_text("")
         });
+        drop_indicator.append_child(&trigger);
     }
 
     // Drop on indicator → add tab to this zone.
@@ -721,16 +711,19 @@ fn build_drop_edge_overlay(
         });
         region.set_attribute("data-ondragleave", &leave_hid.to_string());
 
-        // Reactive highlight: also highlight/unhighlight based on drop_target signal.
-        // This handles component drags (floating panels) where DnD events don't fire.
+        // Reactive highlight: driven by drop_target signal.
+        // Handles both DnD (dragenter/dragleave) and component drags (floating panels).
         {
-            let region = region.clone();
+            let region_for_reactive = region.clone();
+            let region_outer = region.clone();
             let my_target = crate::layout::state::DropTarget::Split {
                 container: kind,
                 zone_idx: zi,
                 edge,
             };
-            Effect::new(move || {
+            let trigger = scope.create_element("div");
+            trigger.set_attribute("style", "display:none;");
+            rinch::core::reactive_component_dom(scope, &trigger, move |__scope| {
                 let drop = layout.drop_target.get();
                 let border_side = match edge {
                     SplitEdge::Top => "border-bottom",
@@ -739,13 +732,15 @@ fn build_drop_edge_overlay(
                     SplitEdge::Right => "border-left",
                 };
                 if drop == Some(my_target) {
-                    region.set_style("background", highlight_color);
-                    region.set_style(border_side, highlight_border);
+                    region_for_reactive.set_style("background", highlight_color);
+                    region_for_reactive.set_style(border_side, highlight_border);
                 } else {
-                    region.set_style("background", "transparent");
-                    region.set_style(border_side, "none");
+                    region_for_reactive.set_style("background", "transparent");
+                    region_for_reactive.set_style(border_side, "none");
                 }
+                __scope.create_text("")
             });
+            region_outer.append_child(&trigger);
         }
 
         let drop_hid = scope.register_handler({

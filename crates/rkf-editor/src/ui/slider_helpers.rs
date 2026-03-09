@@ -40,16 +40,15 @@ pub(super) fn build_slider_row(
         "font-family:var(--rinch-font-family-monospace);",
     );
     {
-        let val_h = val_span.clone();
         let suffix = suffix.to_string();
-        Effect::new(move || {
+        rinch::core::reactive_component_dom(scope, &val_span, move |__scope| {
             let v = signal.get();
             let text = match decimals {
                 0 => format!("{v:.0}{suffix}"),
                 1 => format!("{v:.1}{suffix}"),
                 _ => format!("{v:.2}{suffix}"),
             };
-            val_h.set_text(&text);
+            __scope.create_text(&text)
         });
     }
     label_row.append_child(&val_span);
@@ -77,10 +76,10 @@ pub(super) fn build_slider_row(
     container.append_child(&row);
 }
 
-/// Build a slider row bound to a `SliderSignals` signal (no lock closure).
+/// Build a slider row bound to a `SliderSignals` signal.
 ///
-/// The slider updates `signal` on drag. The batch sync `Effect` in
-/// `RightPanel` writes all signal values to `EditorState` once per frame.
+/// The slider updates `signal` on drag and calls `send_all_commands()`
+/// on the SliderSignals store to push changes to the engine.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_synced_slider(
     scope: &mut RenderScope,
@@ -92,13 +91,15 @@ pub(super) fn build_synced_slider(
     max: f64,
     step: f64,
     decimals: usize,
+    sliders: crate::editor_state::SliderSignals,
+    cmd: crate::CommandSender,
+    ui: crate::editor_state::UiSignals,
 ) {
     build_slider_row(
         scope, container, label, suffix, signal,
         min, max, step, decimals,
         move |_v| {
-            // No-op — signal already set by build_slider_row's onchange.
-            // Sync happens in the batch Effect.
+            sliders.send_all_commands(&cmd, &ui);
         },
     );
 }

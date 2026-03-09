@@ -5,10 +5,10 @@ use std::sync::{Arc, Mutex};
 use rinch::prelude::*;
 
 use crate::editor_command::EditorCommand;
-use crate::editor_state::{EditorMode, EditorState, UiSignals};
+use crate::editor_state::{EditorMode, EditorState, SliderSignals, UiSignals};
 use crate::layout::state::{LayoutBacking, LayoutState};
 use crate::layout::ContainerKind;
-use crate::{CommandSender, SnapshotReader};
+use crate::CommandSender;
 
 // ── Window control button ───────────────────────────────────────────────────
 
@@ -49,8 +49,9 @@ pub fn TitleBar() -> NodeHandle {
 
     let editor_state = use_context::<Arc<Mutex<EditorState>>>();
     let ui = use_context::<UiSignals>();
+    let sliders = use_context::<SliderSignals>();
     let cmd = use_context::<CommandSender>();
-    let snapshot = use_context::<SnapshotReader>();
+    let tree_state = use_context::<UseTreeReturn>();
     let layout = use_context::<LayoutState>();
     let layout_backing = use_context::<LayoutBacking>();
 
@@ -65,42 +66,26 @@ pub fn TitleBar() -> NodeHandle {
     );
 
     // ── Click-outside overlay ──────────────────────────────────────────
-    let overlay = __scope.create_element("div");
-    {
-        let overlay_h = overlay.clone();
-        Effect::new(move || {
-            if active_menu.get() >= 0 {
-                overlay_h.set_attribute("class", "rinch-app-menu-bar__overlay");
-                overlay_h.set_attribute("style", "");
-            } else {
-                overlay_h.set_attribute("class", "rinch-app-menu-bar__overlay");
-                overlay_h.set_attribute("style", "display:none;");
-            }
-        });
-    }
-    let overlay_click = __scope.register_handler(move || {
-        active_menu.set(-1);
-    });
-    overlay.set_attribute("data-rid", &overlay_click.to_string());
+    let overlay = rsx! {
+        div {
+            class: "rinch-app-menu-bar__overlay",
+            style: {move || if active_menu.get() >= 0 { "" } else { "display:none;" }},
+            onclick: move || active_menu.set(-1),
+        }
+    };
     wrapper.append_child(&overlay);
 
     // ── Titlebar row ───────────────────────────────────────────────────
-    let bar = __scope.create_element("div");
-    bar.set_attribute(
-        "style",
-        "position:relative;z-index:201;background:var(--rinch-titlebar-bg);",
-    );
-    {
-        let bar_h = bar.clone();
-        Effect::new(move || {
-            let cls = if active_menu.get() >= 0 {
+    let bar = rsx! {
+        div {
+            class: {move || if active_menu.get() >= 0 {
                 "rinch-app-menu-bar rinch-app-menu-bar--engaged"
             } else {
                 "rinch-app-menu-bar"
-            };
-            bar_h.set_attribute("class", cls);
-        });
-    }
+            }},
+            style: "position:relative;z-index:201;background:var(--rinch-titlebar-bg);",
+        }
+    };
 
     // Titlebar drag — rinch reads `data-drag-window` and emits AppAction::DragWindow.
     bar.set_attribute("data-drag-window", "1");
@@ -143,8 +128,7 @@ pub fn TitleBar() -> NodeHandle {
             let cmd = cmd.clone();
             move || {
                 let _ = cmd.0.send(EditorCommand::OpenProject { path: String::new() });
-                ui.bump_scene();
-                ui.selection.set(None);
+                ui.set_selection(None, &sliders, &tree_state);
             }
         }))
         .separator()
@@ -152,8 +136,7 @@ pub fn TitleBar() -> NodeHandle {
             let cmd = cmd.clone();
             move || {
                 let _ = cmd.0.send(EditorCommand::OpenScene { path: String::new() });
-                ui.bump_scene();
-                ui.selection.set(None);
+                ui.set_selection(None, &sliders, &tree_state);
             }
         }))
         .item(MenuItem::new("Save").shortcut("Ctrl+S").on_click({
@@ -187,7 +170,6 @@ pub fn TitleBar() -> NodeHandle {
             let name = prim_name.to_string();
             move || {
                 let _ = cmd.0.send(EditorCommand::SpawnPrimitive { name: name.clone() });
-                ui.bump_scene();
             }
         }));
     }
@@ -210,14 +192,12 @@ pub fn TitleBar() -> NodeHandle {
             let cmd = cmd.clone();
             move || {
                 let _ = cmd.0.send(EditorCommand::DeleteSelected);
-                ui.bump_scene();
             }
         }))
         .item(MenuItem::new("Duplicate").shortcut("Ctrl+D").on_click({
             let cmd = cmd.clone();
             move || {
                 let _ = cmd.0.send(EditorCommand::DuplicateSelected);
-                ui.bump_scene();
             }
         }))
         .separator()
@@ -314,18 +294,15 @@ pub fn TitleBar() -> NodeHandle {
     for (idx, &(label, menu)) in menus.iter().enumerate() {
         let index = idx as i32;
 
-        let item = __scope.create_element("div");
-        {
-            let item_h = item.clone();
-            Effect::new(move || {
-                let cls = if active_menu.get() == index {
+        let item = rsx! {
+            div {
+                class: {move || if active_menu.get() == index {
                     "rinch-app-menu-item rinch-app-menu-item--opened"
                 } else {
                     "rinch-app-menu-item"
-                };
-                item_h.set_attribute("class", cls);
-            });
-        }
+                }},
+            }
+        };
 
         let onenter_id = __scope.register_handler(move || {
             if active_menu.get() >= 0 {
@@ -348,20 +325,15 @@ pub fn TitleBar() -> NodeHandle {
         label_node.set_attribute("data-rid", &label_click.to_string());
         item.append_child(&label_node);
 
-        let dropdown = __scope.create_element("div");
-        {
-            let dd_h = dropdown.clone();
-            Effect::new(move || {
-                if active_menu.get() == index {
-                    dd_h.set_attribute(
-                        "class",
-                        "rinch-app-menu-item__dropdown rinch-app-menu-item__dropdown--visible",
-                    );
+        let dropdown = rsx! {
+            div {
+                class: {move || if active_menu.get() == index {
+                    "rinch-app-menu-item__dropdown rinch-app-menu-item__dropdown--visible"
                 } else {
-                    dd_h.set_attribute("class", "rinch-app-menu-item__dropdown");
-                }
-            });
-        }
+                    "rinch-app-menu-item__dropdown"
+                }},
+            }
+        };
 
         for entry in menu.iter_entries() {
             match entry {
@@ -488,7 +460,6 @@ pub fn TitleBar() -> NodeHandle {
 
     // ── Tool buttons (Sculpt/Paint) ────────────────────────────────────
     {
-        let snap = snapshot.clone();
         let cmd2 = cmd.clone();
         let tool_container = __scope.create_element("div");
         tool_container.set_attribute(
@@ -497,9 +468,7 @@ pub fn TitleBar() -> NodeHandle {
         );
 
         rinch::core::reactive_component_dom(__scope, &tool_container, move |__scope| {
-            let _ = ui.editor_mode.get();
-
-            let current_mode = snap.0.load().mode;
+            let current_mode = ui.editor_mode.get();
 
             let inner = __scope.create_element("div");
             inner.set_attribute("style", "display:flex;align-items:center;gap:2px;");
@@ -526,9 +495,8 @@ pub fn TitleBar() -> NodeHandle {
                 btn.append_child(&__scope.create_text(mode.name()));
 
                 let cmd = cmd2.clone();
-                let snap = snap.clone();
                 let handler_id = __scope.register_handler(move || {
-                    let current = snap.0.load().mode;
+                    let current = ui.editor_mode.get();
                     let new_mode = if current == mode {
                         EditorMode::Default
                     } else {

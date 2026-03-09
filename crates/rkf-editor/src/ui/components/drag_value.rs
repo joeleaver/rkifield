@@ -24,6 +24,8 @@ pub struct DragValue {
     pub label_color: String,
     /// Unit suffix ("°", "m").
     pub suffix: String,
+    /// Called when the value changes (drag or text entry).
+    pub on_change: Option<ValueCallback<f64>>,
 }
 
 impl Default for DragValue {
@@ -37,6 +39,7 @@ impl Default for DragValue {
             label: String::new(),
             label_color: String::new(),
             suffix: String::new(),
+            on_change: None,
         }
     }
 }
@@ -50,6 +53,8 @@ impl Component for DragValue {
         let decimals = self.decimals;
         let suffix = self.suffix.clone();
         let suffix2 = self.suffix.clone();
+        let on_change = self.on_change.clone();
+        let on_change2 = on_change.clone();
 
         // Internal state
         let editing = Signal::new(false);
@@ -135,18 +140,24 @@ impl Component for DragValue {
             start_mouse_x.set(ctx.mouse_x);
 
             Drag::absolute()
-                .on_move(move |mx, _my| {
-                    let mods = rinch::core::get_modifier_state();
-                    let speed = if mods.shift {
-                        0.1
-                    } else if mods.ctrl {
-                        10.0
-                    } else {
-                        1.0
-                    };
-                    let dx = (mx - start_mouse_x.get()) as f64;
-                    let new_val = (sv + dx * step * speed).clamp(min, max);
-                    value.set(new_val);
+                .on_move({
+                    let on_change = on_change.clone();
+                    move |mx, _my| {
+                        let mods = rinch::core::get_modifier_state();
+                        let speed = if mods.shift {
+                            0.1
+                        } else if mods.ctrl {
+                            10.0
+                        } else {
+                            1.0
+                        };
+                        let dx = (mx - start_mouse_x.get()) as f64;
+                        let new_val = (sv + dx * step * speed).clamp(min, max);
+                        value.set(new_val);
+                        if let Some(cb) = &on_change {
+                            cb.0(new_val);
+                        }
+                    }
                 })
                 .start();
         });
@@ -177,7 +188,11 @@ impl Component for DragValue {
         let input_handler = scope.register_input_handler(move |text: String| {
             if let Ok(v) = text.parse::<f64>() {
                 if v.is_finite() {
-                    value.set(v.clamp(min, max));
+                    let clamped = v.clamp(min, max);
+                    value.set(clamped);
+                    if let Some(cb) = &on_change2 {
+                        cb.0(clamped);
+                    }
                 }
             }
             editing.set(false);

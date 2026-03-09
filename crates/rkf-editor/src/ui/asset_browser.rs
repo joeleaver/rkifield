@@ -12,7 +12,7 @@ use rinch::prelude::*;
 
 use crate::editor_command::EditorCommand;
 use crate::editor_state::UiSignals;
-use crate::{CommandSender, SnapshotReader};
+use crate::CommandSender;
 
 use super::PANEL_BG;
 
@@ -28,7 +28,6 @@ const DOUBLE_CLICK_MS: u128 = 400;
 #[component]
 pub fn AssetBrowser() -> NodeHandle {
     let ui = use_context::<UiSignals>();
-    let snapshot = use_context::<SnapshotReader>();
     let cmd = use_context::<CommandSender>();
 
     // Double-click tracking for shader cards: (shader_name, last_click_time).
@@ -45,16 +44,15 @@ pub fn AssetBrowser() -> NodeHandle {
         ),
     );
 
-    let snap = snapshot.clone();
     let cmd2 = cmd.clone();
     rinch::core::reactive_component_dom(__scope, &root, move |__scope| {
-        let _ = ui.material_revision.get();
+        let materials = ui.materials.get();
         let _ = ui.selected_material.get();
         let _ = ui.editor_mode.get();
         let active_tab = ui.asset_browser_tab.get();
         let _ = ui.selected_shader.get();
 
-        let snap_guard = snap.0.load();
+        let shaders = ui.shaders.get();
         let selected_slot = ui.selected_material.get();
 
         let container = __scope.create_element("div");
@@ -111,11 +109,11 @@ pub fn AssetBrowser() -> NodeHandle {
         );
         if active_tab == 0 {
             count.append_child(
-                &__scope.create_text(&format!("{} slots", snap_guard.materials.len())),
+                &__scope.create_text(&format!("{} slots", materials.len())),
             );
         } else {
             count.append_child(
-                &__scope.create_text(&format!("{} shaders", snap_guard.shaders.len())),
+                &__scope.create_text(&format!("{} shaders", shaders.len())),
             );
         }
         tab_bar.append_child(&count);
@@ -130,7 +128,7 @@ pub fn AssetBrowser() -> NodeHandle {
                  overflow-y:auto;flex:1;min-height:0;align-content:flex-start;",
             );
 
-            for mat in &snap_guard.materials {
+            for mat in &materials {
                 let slot = mat.slot;
                 let is_selected = selected_slot == Some(slot);
 
@@ -274,7 +272,7 @@ pub fn AssetBrowser() -> NodeHandle {
 
             let selected_shader = ui.selected_shader.get();
 
-            for shader in &snap_guard.shaders {
+            for shader in &shaders {
                 let is_selected = selected_shader.as_deref() == Some(&shader.name);
 
                 let card = __scope.create_element("div");

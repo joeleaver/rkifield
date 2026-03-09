@@ -37,16 +37,15 @@ pub fn SliderRow(
         "font-family:var(--rinch-font-family-monospace);",
     );
     {
-        let val_h = val_span.clone();
         let suffix = suffix.clone();
-        Effect::new(move || {
+        rinch::core::reactive_component_dom(__scope, &val_span, move |__scope| {
             let v = signal.get();
             let text = match decimals {
                 0 => format!("{v:.0}{suffix}"),
                 1 => format!("{v:.1}{suffix}"),
                 _ => format!("{v:.2}{suffix}"),
             };
-            val_h.set_text(&text);
+            __scope.create_text(&text)
         });
     }
     label_row.append_child(&val_span);
@@ -74,9 +73,10 @@ pub fn SliderRow(
     row
 }
 
-/// Build a SliderRow that only sets the signal (no external callback).
+/// Build a SliderRow that sends all commands on change via the store method.
 ///
-/// Used when batch sync writes all signal values to EditorState via an Effect.
+/// Each slider's onchange calls `SliderSignals::send_all_commands()` to push
+/// the current values to the engine (replacing the former batch sync Effect).
 #[allow(clippy::too_many_arguments)]
 pub fn build_synced_slider_row(
     scope: &mut RenderScope,
@@ -88,6 +88,9 @@ pub fn build_synced_slider_row(
     max: f64,
     step: f64,
     decimals: u32,
+    sliders: crate::editor_state::SliderSignals,
+    cmd: crate::CommandSender,
+    ui: crate::editor_state::UiSignals,
 ) {
     let row = SliderRow {
         label: label.to_string(),
@@ -97,6 +100,9 @@ pub fn build_synced_slider_row(
         max,
         step,
         decimals,
+        on_change: Some(ValueCallback::new(move |_v: f64| {
+            sliders.send_all_commands(&cmd, &ui);
+        })),
         ..Default::default()
     };
     let node = rinch::core::untracked(|| row.render(scope, &[]));

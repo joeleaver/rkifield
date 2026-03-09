@@ -29,6 +29,10 @@ use rinch::prelude::{Signal, DragContext};
 use rkf_core::brick::Brick;
 use rkf_runtime::api::World;
 
+use crate::ui_snapshot::{
+    LightSummary, MaterialSummary, ObjectMaterialUsage, ObjectSummary, ShaderSummary,
+};
+
 /// What is currently selected in the scene tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelectedEntity {
@@ -63,21 +67,24 @@ impl FpsSignal {
 /// to specific signals via `.get()` inside `reactive_component_dom`, so changes
 /// to one property only rebuild the panels that care about it.
 ///
+/// **Engine→UI data flow**: The engine thread pushes structural data (objects,
+/// lights, materials) into these signals via `run_on_main_thread`. No ArcSwap,
+/// no polling — changes flow through the reactive system automatically.
+///
 /// **Important**: Never call `.set()` while holding `editor_state.lock()` — signal
 /// updates trigger synchronous reactive effects that may also lock `EditorState`.
 /// Always release the lock first, then update signals.
 #[derive(Clone, Copy)]
 pub struct UiSignals {
-    // Selection & modes
+    // ── Selection & modes ────────────────────────────────────────
     pub selection: Signal<Option<SelectedEntity>>,
     pub editor_mode: Signal<EditorMode>,
     pub gizmo_mode: Signal<GizmoMode>,
     pub debug_mode: Signal<u32>,
     pub show_grid: Signal<bool>,
-    pub object_count: Signal<usize>,
     pub fps: Signal<f64>,
 
-    // Environment toggles
+    // ── Environment toggles ──────────────────────────────────────
     pub atmo_enabled: Signal<bool>,
     pub fog_enabled: Signal<bool>,
     pub clouds_enabled: Signal<bool>,
@@ -85,41 +92,46 @@ pub struct UiSignals {
     pub dof_enabled: Signal<bool>,
     pub tone_map_mode: Signal<u32>,
 
-    // Scene structure — counter because tree data is too complex for a Signal
-    pub scene_revision: Signal<u64>,
-
-    // Animation playback state (0=stopped, 1=playing, 2=paused)
+    // ── Animation ────────────────────────────────────────────────
     pub animation_state: Signal<u32>,
 
-    // Material browser
+    // ── Material browser ─────────────────────────────────────────
     pub selected_material: Signal<Option<u16>>,
-    pub material_revision: Signal<u64>,
 
-    // Properties panel tab (0 = Object, 1 = Asset)
+    // ── Properties panel tab (0 = Object, 1 = Asset) ─────────────
     pub properties_tab: Signal<u32>,
 
-    // Asset browser tab (0 = Materials, 1 = Shaders)
+    // ── Asset browser tab (0 = Materials, 1 = Shaders) ───────────
     pub asset_browser_tab: Signal<u32>,
 
-    // Selected shader name (for properties display)
+    // ── Selected shader name (for properties display) ────────────
     pub selected_shader: Signal<Option<String>>,
 
-    // Shader drag-and-drop context (from shader card to material shader slot)
+    // ── Drag-and-drop ────────────────────────────────────────────
     pub shader_drag: DragContext<String>,
-
-    // Whether the shader drop target is being hovered during a drag
     pub shader_drop_highlight: Signal<bool>,
-
-    // Material drag-and-drop context (from asset browser material card to object material row)
     pub material_drag: DragContext<u16>,
-
-    // Which material row is highlighted during drag (stores from_material_id)
     pub material_drop_highlight: Signal<Option<u16>>,
-
-    /// Counter incremented on drag-drop completion. The viewport's MouseUp
-    /// handler compares against its own snapshot to suppress the spurious
-    /// MouseUp that rinch dispatches after ondrop+ondragend.
+    /// Counter incremented on drag-drop completion.
     pub drag_drop_generation: Signal<u64>,
+
+    // ── Engine→UI structural data (pushed via run_on_main_thread) ─
+    /// Scene objects — pushed by engine when scene structure changes.
+    pub objects: Signal<Vec<ObjectSummary>>,
+    /// Scene lights — pushed by engine when light list changes.
+    pub lights: Signal<Vec<LightSummary>>,
+    /// Material table — pushed by engine when materials change.
+    pub materials: Signal<Vec<MaterialSummary>>,
+    /// Shader registry — pushed by engine on startup and hot-reload.
+    pub shaders: Signal<Vec<ShaderSummary>>,
+    /// Per-material voxel counts for the selected object.
+    pub selected_object_materials: Signal<Vec<ObjectMaterialUsage>>,
+    /// Camera position for display readout (throttled push from engine).
+    pub camera_display_pos: Signal<Vec3>,
+    /// Current scene name.
+    pub scene_name: Signal<String>,
+    /// Current scene file path.
+    pub scene_path: Signal<Option<String>>,
 }
 
 impl UiSignals {
@@ -132,7 +144,6 @@ impl UiSignals {
             gizmo_mode: Signal::new(GizmoMode::Translate),
             debug_mode: Signal::new(0),
             show_grid: Signal::new(false),
-            object_count: Signal::new(0),
             fps: Signal::new(0.0),
             atmo_enabled: Signal::new(true),
             fog_enabled: Signal::new(false),
@@ -140,10 +151,8 @@ impl UiSignals {
             bloom_enabled: Signal::new(true),
             dof_enabled: Signal::new(false),
             tone_map_mode: Signal::new(0),
-            scene_revision: Signal::new(0),
             animation_state: Signal::new(0),
             selected_material: Signal::new(None),
-            material_revision: Signal::new(0),
             properties_tab: Signal::new(0),
             asset_browser_tab: Signal::new(0),
             selected_shader: Signal::new(None),
@@ -152,12 +161,113 @@ impl UiSignals {
             material_drag: DragContext::new(),
             material_drop_highlight: Signal::new(None),
             drag_drop_generation: Signal::new(0),
+            // Engine→UI structural data — populated by engine thread.
+            objects: Signal::new(Vec::new()),
+            lights: Signal::new(Vec::new()),
+            materials: Signal::new(Vec::new()),
+            shaders: Signal::new(vec![
+                ShaderSummary { name: "pbr".into(), id: 0, built_in: true, file_path: "crates/rkf-render/shaders/shade_pbr.wgsl".into() },
+                ShaderSummary { name: "unlit".into(), id: 1, built_in: true, file_path: "crates/rkf-render/shaders/shade_unlit.wgsl".into() },
+                ShaderSummary { name: "toon".into(), id: 2, built_in: true, file_path: "crates/rkf-render/shaders/shade_toon.wgsl".into() },
+                ShaderSummary { name: "emissive".into(), id: 3, built_in: true, file_path: "crates/rkf-render/shaders/shade_emissive.wgsl".into() },
+            ]),
+            selected_object_materials: Signal::new(Vec::new()),
+            camera_display_pos: Signal::new(Vec3::new(0.0, 2.5, 5.0)),
+            scene_name: Signal::new("Untitled".into()),
+            scene_path: Signal::new(None),
         }
     }
 
-    /// Increment scene_revision to trigger tree/count rebuilds.
-    pub fn bump_scene(&self) {
-        self.scene_revision.update(|r| *r += 1);
+    /// Set selection and sync dependent state (sliders + tree highlight).
+    ///
+    /// Replaces the former selection-change and tree-sync Effects.
+    /// Call this instead of `selection.set()` directly.
+    pub fn set_selection(
+        &self,
+        sel: Option<SelectedEntity>,
+        sliders: &SliderSignals,
+        tree_state: &rinch::prelude::UseTreeReturn,
+    ) {
+        self.selection.set(sel);
+        self.on_selection_changed(sliders);
+        self.sync_tree_selection(tree_state);
+    }
+
+    /// Push object/light data into SliderSignals when selection changes.
+    ///
+    /// Reads from reactive signals (objects/lights) — always up-to-date
+    /// since the engine pushes changes via `run_on_main_thread`.
+    pub fn on_selection_changed(
+        &self,
+        sliders: &SliderSignals,
+    ) {
+        let sel = self.selection.get();
+
+        enum PushData {
+            Object(glam::Vec3, glam::Vec3, glam::Vec3),
+            Light(glam::Vec3, f32, f32),
+            None,
+        }
+        let (push, oid, lid) = match sel {
+            Some(SelectedEntity::Object(oid)) => {
+                let objects = self.objects.get();
+                let data = objects
+                    .iter()
+                    .find(|o| o.id == oid)
+                    .map(|o| PushData::Object(o.position, o.rotation_degrees, o.scale))
+                    .unwrap_or(PushData::None);
+                (data, Some(oid), None)
+            }
+            Some(SelectedEntity::Light(lid)) => {
+                let lights = self.lights.get();
+                let data = lights
+                    .iter()
+                    .find(|l| l.id == lid)
+                    .map(|l| PushData::Light(l.position, l.intensity, l.range))
+                    .unwrap_or(PushData::None);
+                (data, None, Some(lid))
+            }
+            _ => (PushData::None, None, None),
+        };
+
+        sliders.bound_object_id.set(oid);
+        sliders.bound_light_id.set(lid);
+        match push {
+            PushData::Object(pos, rot_deg, scale) => {
+                sliders.push_object_values(pos, rot_deg, scale);
+            }
+            PushData::Light(pos, intensity, range) => {
+                sliders.push_light_values(pos, intensity, range);
+            }
+            PushData::None => {}
+        }
+    }
+
+    /// Sync tree selection highlight when ui.selection changes.
+    ///
+    /// Store method — called from event handlers that change selection,
+    /// replacing the tree selection-sync Effect.
+    pub fn sync_tree_selection(&self, tree_state: &rinch::prelude::UseTreeReturn) {
+        let sel = self.selection.get();
+        if let Some(sel) = sel {
+            let value = match sel {
+                SelectedEntity::Object(id) => format!("obj:{id}"),
+                SelectedEntity::Light(id) => format!("light:{id}"),
+                SelectedEntity::Camera => "camera".to_string(),
+                SelectedEntity::Scene => "scene".to_string(),
+                SelectedEntity::Project => "project".to_string(),
+            };
+            let current = tree_state.selected.get();
+            if !current.contains(&value) {
+                tree_state.controller.clear_selected();
+                tree_state.controller.select(&value);
+            }
+        } else {
+            let current = tree_state.selected.get();
+            if !current.is_empty() {
+                tree_state.controller.clear_selected();
+            }
+        }
     }
 }
 
@@ -297,8 +407,215 @@ impl SliderSignals {
         }
     }
 
+    /// Send all slider and toggle values as EditorCommands.
+    ///
+    /// Called from slider onchange callbacks (replacing the batch sync Effect).
+    /// Each slider calls this when its value changes, which sends all commands.
+    /// This is a store method per the rinch store pattern.
+    ///
+    /// Prefer the targeted `send_*_commands()` methods when only one UI section
+    /// changed — they avoid sending unrelated commands.
+    pub fn send_all_commands(&self, cmd: &crate::CommandSender, ui: &UiSignals) {
+        self.send_camera_commands(cmd);
+        self.send_atmosphere_commands(cmd, ui);
+        self.send_fog_commands(cmd, ui);
+        self.send_cloud_commands(cmd, ui);
+        self.send_post_process_commands(cmd, ui);
+        self.send_brush_commands(cmd);
+        self.send_object_transform_commands(cmd);
+        self.send_light_commands(cmd);
+    }
+
+    /// Send camera-related commands (FOV, speed, near/far).
+    pub fn send_camera_commands(&self, cmd: &crate::CommandSender) {
+        use crate::editor_command::EditorCommand;
+        let _ = cmd.0.send(EditorCommand::SetCameraFov {
+            fov: self.fov.get() as f32,
+        });
+        let _ = cmd.0.send(EditorCommand::SetCameraSpeed {
+            speed: self.fly_speed.get() as f32,
+        });
+        let _ = cmd.0.send(EditorCommand::SetCameraNearFar {
+            near: self.near.get() as f32,
+            far: self.far.get() as f32,
+        });
+    }
+
+    /// Send atmosphere commands (sun direction, intensity, scattering).
+    /// Also sends the atmosphere toggle from `ui`.
+    pub fn send_atmosphere_commands(&self, cmd: &crate::CommandSender, ui: &UiSignals) {
+        use crate::editor_command::EditorCommand;
+        let az = (self.sun_azimuth.get() as f32).to_radians();
+        let el = (self.sun_elevation.get() as f32).to_radians();
+        let cos_el = el.cos();
+        let sun_dir =
+            Vec3::new(az.sin() * cos_el, el.sin(), az.cos() * cos_el).normalize();
+        let _ = cmd.0.send(EditorCommand::SetAtmosphere {
+            sun_direction: sun_dir,
+            sun_intensity: self.sun_intensity.get() as f32,
+            rayleigh_scale: self.rayleigh_scale.get() as f32,
+            mie_scale: self.mie_scale.get() as f32,
+        });
+        let _ = cmd.0.send(EditorCommand::ToggleAtmosphere {
+            enabled: ui.atmo_enabled.get(),
+        });
+    }
+
+    /// Send fog commands (density, height falloff, dust).
+    /// Also sends the fog toggle from `ui`.
+    pub fn send_fog_commands(&self, cmd: &crate::CommandSender, ui: &UiSignals) {
+        use crate::editor_command::EditorCommand;
+        let _ = cmd.0.send(EditorCommand::SetFog {
+            density: self.fog_density.get() as f32,
+            height_falloff: self.fog_height_falloff.get() as f32,
+            dust_density: self.dust_density.get() as f32,
+            dust_asymmetry: self.dust_asymmetry.get() as f32,
+        });
+        let _ = cmd.0.send(EditorCommand::ToggleFog {
+            enabled: ui.fog_enabled.get(),
+        });
+    }
+
+    /// Send cloud commands (coverage, density, altitude, thickness, wind).
+    /// Also sends the clouds toggle from `ui`.
+    pub fn send_cloud_commands(&self, cmd: &crate::CommandSender, ui: &UiSignals) {
+        use crate::editor_command::EditorCommand;
+        let _ = cmd.0.send(EditorCommand::SetClouds {
+            coverage: self.cloud_coverage.get() as f32,
+            density: self.cloud_density.get() as f32,
+            altitude: self.cloud_altitude.get() as f32,
+            thickness: self.cloud_thickness.get() as f32,
+            wind_speed: self.cloud_wind_speed.get() as f32,
+        });
+        let _ = cmd.0.send(EditorCommand::ToggleClouds {
+            enabled: ui.clouds_enabled.get(),
+        });
+    }
+
+    /// Send post-processing commands (bloom, exposure, DoF, etc.).
+    /// Also sends bloom/DoF toggles and tone map mode from `ui`.
+    pub fn send_post_process_commands(&self, cmd: &crate::CommandSender, ui: &UiSignals) {
+        use crate::editor_command::EditorCommand;
+        let _ = cmd.0.send(EditorCommand::SetPostProcess {
+            bloom_intensity: self.bloom_intensity.get() as f32,
+            bloom_threshold: self.bloom_threshold.get() as f32,
+            exposure: self.exposure.get() as f32,
+            sharpen: self.sharpen.get() as f32,
+            dof_focus_distance: self.dof_focus_dist.get() as f32,
+            dof_focus_range: self.dof_focus_range.get() as f32,
+            dof_max_coc: self.dof_max_coc.get() as f32,
+            motion_blur: self.motion_blur.get() as f32,
+            god_rays: self.god_rays.get() as f32,
+            vignette: self.vignette.get() as f32,
+            grain: self.grain.get() as f32,
+            chromatic_aberration: self.chromatic_ab.get() as f32,
+        });
+        let _ = cmd.0.send(EditorCommand::ToggleBloom {
+            enabled: ui.bloom_enabled.get(),
+        });
+        let _ = cmd.0.send(EditorCommand::ToggleDof {
+            enabled: ui.dof_enabled.get(),
+        });
+        let _ = cmd.0.send(EditorCommand::SetToneMapMode {
+            mode: ui.tone_map_mode.get(),
+        });
+    }
+
+    /// Send brush/sculpt/paint settings commands.
+    pub fn send_brush_commands(&self, cmd: &crate::CommandSender) {
+        use crate::editor_command::EditorCommand;
+        let _ = cmd.0.send(EditorCommand::SetSculptSettings {
+            radius: self.brush_radius.get() as f32,
+            strength: self.brush_strength.get() as f32,
+            falloff: self.brush_falloff.get() as f32,
+        });
+        let _ = cmd.0.send(EditorCommand::SetPaintSettings {
+            radius: self.brush_radius.get() as f32,
+            strength: self.brush_strength.get() as f32,
+            falloff: self.brush_falloff.get() as f32,
+        });
+    }
+
+    /// Send object transform commands (position, rotation, scale) for the bound object.
+    pub fn send_object_transform_commands(&self, cmd: &crate::CommandSender) {
+        use crate::editor_command::EditorCommand;
+        if let Some(oid) = self.bound_object_id.get() {
+            let _ = cmd.0.send(EditorCommand::SetObjectPosition {
+                entity_id: oid,
+                position: Vec3::new(
+                    self.obj_pos_x.get() as f32,
+                    self.obj_pos_y.get() as f32,
+                    self.obj_pos_z.get() as f32,
+                ),
+            });
+            let _ = cmd.0.send(EditorCommand::SetObjectRotation {
+                entity_id: oid,
+                rotation: Vec3::new(
+                    self.obj_rot_x.get() as f32,
+                    self.obj_rot_y.get() as f32,
+                    self.obj_rot_z.get() as f32,
+                ),
+            });
+            let _ = cmd.0.send(EditorCommand::SetObjectScale {
+                entity_id: oid,
+                scale: Vec3::new(
+                    self.obj_scale_x.get() as f32,
+                    self.obj_scale_y.get() as f32,
+                    self.obj_scale_z.get() as f32,
+                ),
+            });
+        }
+    }
+
+    /// Send light property commands (position, intensity, range) for the bound light.
+    pub fn send_light_commands(&self, cmd: &crate::CommandSender) {
+        use crate::editor_command::EditorCommand;
+        if let Some(lid) = self.bound_light_id.get() {
+            let _ = cmd.0.send(EditorCommand::SetLightPosition {
+                light_id: lid,
+                position: Vec3::new(
+                    self.light_pos_x.get() as f32,
+                    self.light_pos_y.get() as f32,
+                    self.light_pos_z.get() as f32,
+                ),
+            });
+            let _ = cmd.0.send(EditorCommand::SetLightIntensity {
+                light_id: lid,
+                intensity: self.light_intensity.get() as f32,
+            });
+            let _ = cmd.0.send(EditorCommand::SetLightRange {
+                light_id: lid,
+                range: self.light_range.get() as f32,
+            });
+        }
+    }
+
+    /// Send toggle/state commands (atmosphere, fog, clouds, bloom, DoF, tone map mode).
+    pub fn send_toggle_commands(&self, cmd: &crate::CommandSender, ui: &UiSignals) {
+        use crate::editor_command::EditorCommand;
+        let _ = cmd.0.send(EditorCommand::ToggleAtmosphere {
+            enabled: ui.atmo_enabled.get(),
+        });
+        let _ = cmd.0.send(EditorCommand::ToggleFog {
+            enabled: ui.fog_enabled.get(),
+        });
+        let _ = cmd.0.send(EditorCommand::ToggleClouds {
+            enabled: ui.clouds_enabled.get(),
+        });
+        let _ = cmd.0.send(EditorCommand::ToggleBloom {
+            enabled: ui.bloom_enabled.get(),
+        });
+        let _ = cmd.0.send(EditorCommand::ToggleDof {
+            enabled: ui.dof_enabled.get(),
+        });
+        let _ = cmd.0.send(EditorCommand::SetToneMapMode {
+            mode: ui.tone_map_mode.get(),
+        });
+    }
+
     /// Subscribe the current reactive scope to every signal.
     /// Call inside an `Effect` to re-run whenever any slider changes.
+    #[allow(dead_code)]
     pub fn track_all(&self) {
         let _ = self.fov.get();
         let _ = self.fly_speed.get();

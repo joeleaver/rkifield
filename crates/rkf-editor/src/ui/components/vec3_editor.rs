@@ -15,6 +15,8 @@ pub struct Vec3Editor {
     pub max: f64,
     pub decimals: u32,
     pub suffix: String,
+    /// Called when any axis value changes (drag or text entry).
+    pub on_change: Option<ValueCallback<f64>>,
 }
 
 impl Default for Vec3Editor {
@@ -28,6 +30,7 @@ impl Default for Vec3Editor {
             max: 1e9,
             decimals: 2,
             suffix: String::new(),
+            on_change: None,
         }
     }
 }
@@ -56,6 +59,7 @@ impl Component for Vec3Editor {
                 label: label.into(),
                 label_color: color.into(),
                 suffix: self.suffix.clone(),
+                on_change: self.on_change.clone(),
             };
             let node = dv.render(scope, &[]);
             container.append_child(&node);

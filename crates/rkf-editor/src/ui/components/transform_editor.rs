@@ -2,6 +2,9 @@
 
 use rinch::prelude::*;
 
+use crate::editor_state::SliderSignals;
+use crate::CommandSender;
+
 use super::Vec3Editor;
 
 /// Edits a full transform: Position, Rotation, Scale, each as a Vec3Editor row.
@@ -36,6 +39,13 @@ impl Default for TransformEditor {
 
 impl Component for TransformEditor {
     fn render(&self, scope: &mut RenderScope, _children: &[NodeHandle]) -> NodeHandle {
+        let sliders = use_context::<SliderSignals>();
+        let cmd = use_context::<CommandSender>();
+
+        let on_change = ValueCallback::new(move |_v: f64| {
+            sliders.send_object_transform_commands(&cmd);
+        });
+
         let container = scope.create_element("div");
         container.set_attribute(
             "style",
@@ -74,6 +84,7 @@ impl Component for TransformEditor {
                 max,
                 decimals,
                 suffix: suffix.into(),
+                on_change: Some(on_change.clone()),
             };
             let editor_node = editor.render(scope, &[]);
             row.append_child(&editor_node);

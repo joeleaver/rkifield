@@ -4,10 +4,15 @@
 //! EditorState is shared via rinch context (create_context in main.rs).
 
 pub mod asset_browser;
+pub mod camera_properties;
 pub mod components;
+pub mod environment_panel;
+pub mod light_properties;
+pub mod material_properties;
 pub mod materials_panel;
-pub mod properties_panel;
+pub mod object_properties;
 pub mod scene_tree_panel;
+pub mod shader_properties;
 pub mod shaders_panel;
 mod slider_helpers;
 pub mod titlebar;
@@ -90,227 +95,13 @@ pub fn editor_ui() -> NodeHandle {
     let shared_state = use_context::<Arc<Mutex<SharedState>>>();
     let surface_handle = use_context::<RenderSurfaceHandle>();
 
-    // ── Global Effects ──────────────────────────────────────────────────────
-    // These Effects live here (top-level, outside any reactive_component_dom)
-    // so their Effect::new initial run doesn't cause re-entrant RefCell borrows.
+    // ── Store setup ─────────────────────────────────────────────────────────
+    // Selection-change sync and batch command sync are now store methods
+    // (UiSignals::on_selection_changed, SliderSignals::send_all_commands)
+    // called from event handlers instead of reactive Effects.
 
-    // Selection-change Effect: push object/light values into SliderSignals.
+    // Create tree state as context so SceneTreePanel can use it.
     {
-        let ui = use_context::<UiSignals>();
-        let sliders = use_context::<SliderSignals>();
-        let snapshot = use_context::<crate::SnapshotReader>();
-        Effect::new(move || {
-            let sel = ui.selection.get();
-
-            enum PushData {
-                Object(glam::Vec3, glam::Vec3, glam::Vec3),
-                Light(glam::Vec3, f32, f32),
-                None,
-            }
-            let snap_guard = snapshot.0.load();
-            let (push, oid, lid) = match sel {
-                Some(SelectedEntity::Object(oid)) => {
-                    let data = snap_guard
-                        .objects
-                        .iter()
-                        .find(|o| o.id == oid)
-                        .map(|o| PushData::Object(o.position, o.rotation_degrees, o.scale))
-                        .unwrap_or(PushData::None);
-                    (data, Some(oid), None)
-                }
-                Some(SelectedEntity::Light(lid)) => {
-                    let data = snap_guard
-                        .lights
-                        .iter()
-                        .find(|l| l.id == lid)
-                        .map(|l| PushData::Light(l.position, l.intensity, l.range))
-                        .unwrap_or(PushData::None);
-                    (data, None, Some(lid))
-                }
-                _ => (PushData::None, None, None),
-            };
-
-            rinch::core::untracked(|| {
-                sliders.bound_object_id.set(oid);
-                sliders.bound_light_id.set(lid);
-            });
-            match push {
-                PushData::Object(pos, rot_deg, scale) => {
-                    rinch::core::untracked(|| {
-                        sliders.push_object_values(pos, rot_deg, scale);
-                    });
-                }
-                PushData::Light(pos, intensity, range) => {
-                    rinch::core::untracked(|| {
-                        sliders.push_light_values(pos, intensity, range);
-                    });
-                }
-                PushData::None => {}
-            }
-        });
-    }
-
-    // Batch sync Effect: slider signals + toggle signals → engine commands.
-    {
-        let ui = use_context::<UiSignals>();
-        let sliders = use_context::<SliderSignals>();
-        let cmd = use_context::<crate::CommandSender>();
-        Effect::new(move || {
-            sliders.track_all();
-            let _ = ui.atmo_enabled.get();
-            let _ = ui.fog_enabled.get();
-            let _ = ui.clouds_enabled.get();
-            let _ = ui.bloom_enabled.get();
-            let _ = ui.dof_enabled.get();
-            let _ = ui.tone_map_mode.get();
-
-            // Camera.
-            let _ = cmd.0.send(EditorCommand::SetCameraFov {
-                fov: sliders.fov.get() as f32,
-            });
-            let _ = cmd.0.send(EditorCommand::SetCameraSpeed {
-                speed: sliders.fly_speed.get() as f32,
-            });
-            let _ = cmd.0.send(EditorCommand::SetCameraNearFar {
-                near: sliders.near.get() as f32,
-                far: sliders.far.get() as f32,
-            });
-
-            // Atmosphere.
-            let az = (sliders.sun_azimuth.get() as f32).to_radians();
-            let el = (sliders.sun_elevation.get() as f32).to_radians();
-            let cos_el = el.cos();
-            let sun_dir =
-                glam::Vec3::new(az.sin() * cos_el, el.sin(), az.cos() * cos_el).normalize();
-            let _ = cmd.0.send(EditorCommand::SetAtmosphere {
-                sun_direction: sun_dir,
-                sun_intensity: sliders.sun_intensity.get() as f32,
-                rayleigh_scale: sliders.rayleigh_scale.get() as f32,
-                mie_scale: sliders.mie_scale.get() as f32,
-            });
-
-            // Fog.
-            let _ = cmd.0.send(EditorCommand::SetFog {
-                density: sliders.fog_density.get() as f32,
-                height_falloff: sliders.fog_height_falloff.get() as f32,
-                dust_density: sliders.dust_density.get() as f32,
-                dust_asymmetry: sliders.dust_asymmetry.get() as f32,
-            });
-
-            // Clouds.
-            let _ = cmd.0.send(EditorCommand::SetClouds {
-                coverage: sliders.cloud_coverage.get() as f32,
-                density: sliders.cloud_density.get() as f32,
-                altitude: sliders.cloud_altitude.get() as f32,
-                thickness: sliders.cloud_thickness.get() as f32,
-                wind_speed: sliders.cloud_wind_speed.get() as f32,
-            });
-
-            // Post-process.
-            let _ = cmd.0.send(EditorCommand::SetPostProcess {
-                bloom_intensity: sliders.bloom_intensity.get() as f32,
-                bloom_threshold: sliders.bloom_threshold.get() as f32,
-                exposure: sliders.exposure.get() as f32,
-                sharpen: sliders.sharpen.get() as f32,
-                dof_focus_distance: sliders.dof_focus_dist.get() as f32,
-                dof_focus_range: sliders.dof_focus_range.get() as f32,
-                dof_max_coc: sliders.dof_max_coc.get() as f32,
-                motion_blur: sliders.motion_blur.get() as f32,
-                god_rays: sliders.god_rays.get() as f32,
-                vignette: sliders.vignette.get() as f32,
-                grain: sliders.grain.get() as f32,
-                chromatic_aberration: sliders.chromatic_ab.get() as f32,
-            });
-
-            // Brush.
-            let _ = cmd.0.send(EditorCommand::SetSculptSettings {
-                radius: sliders.brush_radius.get() as f32,
-                strength: sliders.brush_strength.get() as f32,
-                falloff: sliders.brush_falloff.get() as f32,
-            });
-            let _ = cmd.0.send(EditorCommand::SetPaintSettings {
-                radius: sliders.brush_radius.get() as f32,
-                strength: sliders.brush_strength.get() as f32,
-                falloff: sliders.brush_falloff.get() as f32,
-            });
-
-            // Object transform.
-            let obj_id = rinch::core::untracked(|| sliders.bound_object_id.get());
-            if let Some(oid) = obj_id {
-                let _ = cmd.0.send(EditorCommand::SetObjectPosition {
-                    entity_id: oid,
-                    position: glam::Vec3::new(
-                        sliders.obj_pos_x.get() as f32,
-                        sliders.obj_pos_y.get() as f32,
-                        sliders.obj_pos_z.get() as f32,
-                    ),
-                });
-                let _ = cmd.0.send(EditorCommand::SetObjectRotation {
-                    entity_id: oid,
-                    rotation: glam::Vec3::new(
-                        sliders.obj_rot_x.get() as f32,
-                        sliders.obj_rot_y.get() as f32,
-                        sliders.obj_rot_z.get() as f32,
-                    ),
-                });
-                let _ = cmd.0.send(EditorCommand::SetObjectScale {
-                    entity_id: oid,
-                    scale: glam::Vec3::new(
-                        sliders.obj_scale_x.get() as f32,
-                        sliders.obj_scale_y.get() as f32,
-                        sliders.obj_scale_z.get() as f32,
-                    ),
-                });
-            }
-
-            // Light properties.
-            let light_id = rinch::core::untracked(|| sliders.bound_light_id.get());
-            if let Some(lid) = light_id {
-                let _ = cmd.0.send(EditorCommand::SetLightPosition {
-                    light_id: lid,
-                    position: glam::Vec3::new(
-                        sliders.light_pos_x.get() as f32,
-                        sliders.light_pos_y.get() as f32,
-                        sliders.light_pos_z.get() as f32,
-                    ),
-                });
-                let _ = cmd.0.send(EditorCommand::SetLightIntensity {
-                    light_id: lid,
-                    intensity: sliders.light_intensity.get() as f32,
-                });
-                let _ = cmd.0.send(EditorCommand::SetLightRange {
-                    light_id: lid,
-                    range: sliders.light_range.get() as f32,
-                });
-            }
-
-            // Toggles.
-            let _ = cmd.0.send(EditorCommand::ToggleAtmosphere {
-                enabled: ui.atmo_enabled.get(),
-            });
-            let _ = cmd.0.send(EditorCommand::ToggleFog {
-                enabled: ui.fog_enabled.get(),
-            });
-            let _ = cmd.0.send(EditorCommand::ToggleClouds {
-                enabled: ui.clouds_enabled.get(),
-            });
-            let _ = cmd.0.send(EditorCommand::ToggleBloom {
-                enabled: ui.bloom_enabled.get(),
-            });
-            let _ = cmd.0.send(EditorCommand::ToggleDof {
-                enabled: ui.dof_enabled.get(),
-            });
-            let _ = cmd.0.send(EditorCommand::SetToneMapMode {
-                mode: ui.tone_map_mode.get(),
-            });
-        });
-    }
-
-    // Tree selection-sync Effect: update tree highlight when ui.selection changes.
-    // Lives here (not in SceneTreePanel) to avoid .set() during render.
-    {
-        let ui = use_context::<UiSignals>();
-        // Create tree state as context so SceneTreePanel can use it.
         let tree_state = UseTreeReturn::new(UseTreeOptions {
             initial_expanded: ["project".to_string(), "scene".to_string()]
                 .into_iter()
@@ -318,31 +109,6 @@ pub fn editor_ui() -> NodeHandle {
             ..Default::default()
         });
         create_context(tree_state);
-
-        Effect::new(move || {
-            let sel = ui.selection.get();
-            rinch::core::untracked(|| {
-                if let Some(sel) = sel {
-                    let value = match sel {
-                        SelectedEntity::Object(id) => format!("obj:{id}"),
-                        SelectedEntity::Light(id) => format!("light:{id}"),
-                        SelectedEntity::Camera => "camera".to_string(),
-                        SelectedEntity::Scene => "scene".to_string(),
-                        SelectedEntity::Project => "project".to_string(),
-                    };
-                    let current = tree_state.selected.get();
-                    if !current.contains(&value) {
-                        tree_state.controller.clear_selected();
-                        tree_state.controller.select(&value);
-                    }
-                } else {
-                    let current = tree_state.selected.get();
-                    if !current.is_empty() {
-                        tree_state.controller.clear_selected();
-                    }
-                }
-            });
-        });
     }
 
     // Wire SurfaceEvent → EditorState.editor_input + gizmo interaction.
@@ -354,6 +120,7 @@ pub fn editor_ui() -> NodeHandle {
         let sh = surface_handle.clone();
         let ui = use_context::<UiSignals>();
         let sliders = use_context::<SliderSignals>();
+        let tree_state = use_context::<UseTreeReturn>();
         let cmd_tx = use_context::<crate::CommandSender>().0.clone();
         let layout_for_events = use_context::<crate::layout::state::LayoutState>();
         let layout_backing = use_context::<crate::layout::state::LayoutBacking>();
@@ -515,7 +282,7 @@ pub fn editor_ui() -> NodeHandle {
                         if state.pick_completed {
                             state.pick_completed = false;
                             let picked = es.lock().ok().and_then(|s| s.selected_entity);
-                            ui.selection.set(picked);
+                            ui.set_selection(picked, &sliders, &tree_state);
                             if picked.is_some() {
                                 ui.properties_tab.set(0); // switch to Object tab
                             }
@@ -700,7 +467,7 @@ pub fn editor_ui() -> NodeHandle {
                     if button == Btn::Left {
                         if gizmo_was_dragging {
                             // Signal update after lock released.
-                            ui.selection.set(picked_after_drag);
+                            ui.set_selection(picked_after_drag, &sliders, &tree_state);
                             if picked_after_drag.is_some() {
                                 ui.properties_tab.set(0); // switch to Object tab
                             }

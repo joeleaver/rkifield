@@ -10,7 +10,6 @@ use std::time::Instant;
 use rinch::prelude::*;
 
 use crate::editor_state::UiSignals;
-use crate::SnapshotReader;
 
 /// Double-click detection threshold in milliseconds.
 const DOUBLE_CLICK_MS: u128 = 400;
@@ -21,7 +20,6 @@ const DOUBLE_CLICK_MS: u128 = 400;
 #[component]
 pub fn ShadersPanel() -> NodeHandle {
     let ui = use_context::<UiSignals>();
-    let snapshot = use_context::<SnapshotReader>();
 
     let last_shader_click: Rc<RefCell<(String, Instant)>> =
         Rc::new(RefCell::new((String::new(), Instant::now() - std::time::Duration::from_secs(10))));
@@ -32,11 +30,10 @@ pub fn ShadersPanel() -> NodeHandle {
         "flex:1;min-height:0;display:flex;flex-direction:column;",
     );
 
-    let snap = snapshot.clone();
     rinch::core::reactive_component_dom(__scope, &root, move |__scope| {
         let _ = ui.selected_shader.get();
 
-        let snap_guard = snap.0.load();
+        let shaders = ui.shaders.get();
 
         let container = __scope.create_element("div");
         container.set_attribute("style", "display:flex;flex-direction:column;height:100%;");
@@ -50,7 +47,7 @@ pub fn ShadersPanel() -> NodeHandle {
              border-bottom:1px solid var(--rinch-color-border);flex-shrink:0;",
         );
         count_bar.append_child(
-            &__scope.create_text(&format!("{} shaders", snap_guard.shaders.len())),
+            &__scope.create_text(&format!("{} shaders", shaders.len())),
         );
         container.append_child(&count_bar);
 
@@ -64,7 +61,7 @@ pub fn ShadersPanel() -> NodeHandle {
 
         let selected_shader = ui.selected_shader.get();
 
-        for shader in &snap_guard.shaders {
+        for shader in &shaders {
             let is_selected = selected_shader.as_deref() == Some(&shader.name);
 
             let card = __scope.create_element("div");

@@ -9,22 +9,33 @@ use crate::editor_command::EditorCommand;
 use crate::editor_state::{EditorMode, EditorState, UiSignals};
 use crate::engine::EditorEngine;
 use crate::engine_viewport::{DISPLAY_HEIGHT, DISPLAY_WIDTH};
-use crate::ui_snapshot::UiSnapshot;
 
 /// Data bundle passed to the engine thread.
 pub(crate) struct EngineThreadData {
     pub(crate) editor_state: Arc<Mutex<EditorState>>,
     pub(crate) shared_state: Arc<Mutex<SharedState>>,
-    /// Receiver for UI→engine commands (replaces many direct EditorState locks).
+    /// Receiver for UI→engine commands.
     pub(crate) cmd_rx: crossbeam::channel::Receiver<EditorCommand>,
-    /// Lock-free snapshot published each frame for the UI thread to read.
-    pub(crate) ui_snapshot: Arc<arc_swap::ArcSwap<UiSnapshot>>,
     /// Lock-free layout config shared between UI and engine threads.
     pub(crate) layout_backing: crate::layout::state::LayoutBacking,
     /// CPU pixel writer for submitting rendered frames to the compositor.
     pub(crate) surface_writer: SurfaceWriter,
     /// GPU texture registrar — provides layout size and texture submission.
     pub(crate) gpu_registrar: GpuTextureRegistrar,
+}
+
+/// Tracks which categories of data changed this frame, so we only
+/// push signals that actually need updating.
+#[derive(Default)]
+struct DirtyFlags {
+    /// Scene objects added/removed/renamed/reparented/transformed.
+    scene: bool,
+    /// Light list changed (add/remove/modify).
+    lights: bool,
+    /// Material table changed.
+    materials: bool,
+    /// Shader registry changed.
+    shaders: bool,
 }
 
 /// Map a user-facing primitive name to an SdfPrimitive.
@@ -56,7 +67,6 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         editor_state,
         shared_state,
         cmd_rx,
-        ui_snapshot,
         layout_backing,
         surface_writer,
         gpu_registrar,
@@ -217,6 +227,9 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
 
     let mut last_frame = std::time::Instant::now();
     let mut last_fps_push = std::time::Instant::now();
+    let mut last_camera_push = std::time::Instant::now();
+    // Push everything on the first frame so the UI has initial data.
+    let mut first_frame = true;
     let mut current_vp = engine.viewport_size();
 
     loop {
@@ -281,6 +294,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         //
         // Process KeyDown AFTER KeyUp so that X11/Wayland synthetic
         // key-repeat pairs (Release+Press) don't flicker keys_pressed.
+        let mut dirty = DirtyFlags::default();
         {
             if let Ok(mut es) = editor_state.lock() {
                 let mut key_downs = Vec::new();
@@ -291,6 +305,30 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                         | EditorCommand::SetObjectRotation { entity_id, .. }
                         | EditorCommand::SetObjectScale { entity_id, .. } => {
                             frame_dirty_objects.push(*entity_id as u32);
+                            // Don't set dirty.scene — slider signals already drive
+                            // the UI reactively.  Pushing the full objects list on
+                            // every mouse-move would freeze the UI.
+                        }
+                        // Structural scene changes.
+                        EditorCommand::SpawnPrimitive { .. }
+                        | EditorCommand::DeleteSelected
+                        | EditorCommand::DuplicateSelected
+                        | EditorCommand::Undo
+                        | EditorCommand::Redo
+                        | EditorCommand::OpenScene { .. }
+                        | EditorCommand::OpenProject { .. }
+                        | EditorCommand::NewProject
+                        | EditorCommand::ConvertToVoxel { .. }
+                        | EditorCommand::RemapMaterial { .. } => {
+                            dirty.scene = true;
+                            dirty.lights = true;
+                        }
+                        // Light property edits — same as transforms, slider
+                        // signals are the UI source of truth during drags.
+                        EditorCommand::SetLightPosition { .. }
+                        | EditorCommand::SetLightIntensity { .. }
+                        | EditorCommand::SetLightRange { .. } => {
+                            // Don't set dirty.lights here.
                         }
                         _ => {}
                     }
@@ -312,6 +350,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                             }
                             lib.set_material(slot, material);
                         }
+                        dirty.materials = true;
                         continue;
                     }
                     if let EditorCommand::SetMaterialShader { slot, shader_name } = cmd {
@@ -325,6 +364,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                             }
                             lib.mark_dirty();
                         }
+                        dirty.materials = true;
                         continue;
                     }
                     match cmd {
@@ -1586,124 +1626,130 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             }
         }
 
-        // n0. Publish UiSnapshot for lock-free UI reads.
-        {
+        // n0. Push dirty data into UI signals via run_on_main_thread.
+        //     Only push categories that actually changed this frame.
+        if first_frame {
+            dirty.scene = true;
+            dirty.lights = true;
+            dirty.materials = true;
+            dirty.shaders = true;
+            first_frame = false;
+        }
+
+        if dirty.scene || dirty.lights || dirty.materials || dirty.shaders {
             if let Ok(es) = editor_state.lock() {
-                let mut snapshot = es.to_snapshot(0, dt as f64 * 1000.0);
-                // Inject material summaries from the engine's MaterialLibrary.
-                if let Ok(lib) = engine.material_library.lock() {
-                    use crate::ui_snapshot::MaterialSummary;
-                    snapshot.materials = lib.occupied_slots().map(|(slot, mat, info)| {
-                        MaterialSummary {
-                            slot,
-                            name: info.name.clone(),
-                            category: info.category.clone(),
-                            albedo: mat.albedo,
-                            roughness: mat.roughness,
-                            metallic: mat.metallic,
-                            emission_strength: mat.emission_strength,
-                            emission_color: mat.emission_color,
-                            subsurface: mat.subsurface,
-                            subsurface_color: mat.subsurface_color,
-                            opacity: mat.opacity,
-                            ior: mat.ior,
-                            noise_scale: mat.noise_scale,
-                            noise_strength: mat.noise_strength,
-                            noise_channels: mat.noise_channels,
-                            shader_name: info.shader_name.clone(),
+                // Scene objects.
+                if dirty.scene {
+                    let objects = es.build_object_summaries();
+                    let scene_name = es.world.scene().name.clone();
+                    let scene_path = es.current_scene_path.clone();
+                    // Also compute material usage for selected object.
+                    let mat_usage = if let Some(crate::editor_state::SelectedEntity::Object(eid)) = es.selected_entity {
+                        compute_material_usage(&es, &engine, eid)
+                    } else {
+                        Vec::new()
+                    };
+                    rinch::shell::rinch_runtime::run_on_main_thread(move || {
+                        if let Some(ui) = rinch::core::context::try_use_context::<UiSignals>() {
+                            ui.objects.set(objects);
+                            ui.scene_name.set(scene_name);
+                            ui.scene_path.set(scene_path);
+                            ui.selected_object_materials.set(mat_usage);
                         }
-                    }).collect();
-                    // Also include unoccupied slots that have non-default materials.
-                    for i in 0..lib.slot_count() {
-                        if lib.slot_info(i as u16).is_none() {
-                            if let Some(mat) = lib.get_material(i as u16) {
-                                let is_default = mat.albedo == rkf_core::material::Material::default().albedo
-                                    && mat.roughness == rkf_core::material::Material::default().roughness
-                                    && mat.metallic == rkf_core::material::Material::default().metallic;
-                                if !is_default || i == 0 {
-                                    // Only include slot 0 (fallback) from unnamed slots
-                                    if i == 0 && snapshot.materials.iter().all(|m| m.slot != 0) {
-                                        snapshot.materials.push(MaterialSummary {
-                                            slot: i as u16,
-                                            name: format!("Material {i}"),
-                                            category: "Other".to_string(),
-                                            albedo: mat.albedo,
-                                            roughness: mat.roughness,
-                                            metallic: mat.metallic,
-                                            emission_strength: mat.emission_strength,
-                                            emission_color: mat.emission_color,
-                                            subsurface: mat.subsurface,
-                                            subsurface_color: mat.subsurface_color,
-                                            opacity: mat.opacity,
-                                            ior: mat.ior,
-                                            noise_scale: mat.noise_scale,
-                                            noise_strength: mat.noise_strength,
-                                            noise_channels: mat.noise_channels,
-                                            shader_name: "pbr".to_string(),
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    snapshot.materials.sort_by_key(|m| m.slot);
+                    });
                 }
-                snapshot.shaders = engine.shader_composer.shader_summaries()
-                    .into_iter()
-                    .map(|s| crate::ui_snapshot::ShaderSummary {
-                        name: s.name,
-                        id: s.id,
-                        built_in: s.built_in,
-                        file_path: s.file_path,
-                    })
-                    .collect();
-
-                // Compute per-material voxel counts for the selected object.
-                if let Some(crate::editor_state::SelectedEntity::Object(eid)) = snapshot.selected_entity {
-                    use rkf_core::scene_node::SdfSource;
-                    let scene = es.world.scene();
-                    if let Some(obj) = scene.objects.iter().find(|o| o.id as u64 == eid) {
-                        if let SdfSource::Voxelized { brick_map_handle, .. } = &obj.root_node.sdf_source {
-                            let handle = *brick_map_handle;
-                            let dims = handle.dims;
-                            let mut counts: std::collections::HashMap<u16, u32> = std::collections::HashMap::new();
-                            for bz in 0..dims.z {
-                                for by in 0..dims.y {
-                                    for bx in 0..dims.x {
-                                        if let Some(slot) = engine.cpu_brick_map_alloc.get_entry(&handle, bx, by, bz) {
-                                            if EditorEngine::is_unallocated(slot) {
-                                                continue;
-                                            }
-                                            let brick = engine.cpu_brick_pool.get(slot);
-                                            for vz in 0..8u32 {
-                                                for vy in 0..8u32 {
-                                                    for vx in 0..8u32 {
-                                                        let sample = brick.sample(vx, vy, vz);
-                                                        if sample.distance_f32() <= 0.0 {
-                                                            *counts.entry(sample.material_id()).or_insert(0) += 1;
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            let mut usage: Vec<crate::ui_snapshot::ObjectMaterialUsage> = counts
-                                .into_iter()
-                                .map(|(material_id, voxel_count)| crate::ui_snapshot::ObjectMaterialUsage { material_id, voxel_count })
-                                .collect();
-                            usage.sort_by(|a, b| b.voxel_count.cmp(&a.voxel_count));
-                            snapshot.selected_object_materials = usage;
+                // Lights.
+                if dirty.lights {
+                    let lights = es.build_light_summaries();
+                    rinch::shell::rinch_runtime::run_on_main_thread(move || {
+                        if let Some(ui) = rinch::core::context::try_use_context::<UiSignals>() {
+                            ui.lights.set(lights);
                         }
-                    }
+                    });
                 }
-
-                ui_snapshot.store(Arc::new(snapshot));
             }
         }
 
-        // n. Periodically push the FPS value to the main thread (~4/sec).
+        // Materials (from engine's MaterialLibrary).
+        if dirty.materials {
+            if let Ok(lib) = engine.material_library.lock() {
+                use crate::ui_snapshot::MaterialSummary;
+                let mut materials: Vec<MaterialSummary> = lib.occupied_slots().map(|(slot, mat, info)| {
+                    MaterialSummary {
+                        slot,
+                        name: info.name.clone(),
+                        category: info.category.clone(),
+                        albedo: mat.albedo,
+                        roughness: mat.roughness,
+                        metallic: mat.metallic,
+                        emission_strength: mat.emission_strength,
+                        emission_color: mat.emission_color,
+                        subsurface: mat.subsurface,
+                        subsurface_color: mat.subsurface_color,
+                        opacity: mat.opacity,
+                        ior: mat.ior,
+                        noise_scale: mat.noise_scale,
+                        noise_strength: mat.noise_strength,
+                        noise_channels: mat.noise_channels,
+                        shader_name: info.shader_name.clone(),
+                    }
+                }).collect();
+                // Also include slot 0 (fallback) if not already present.
+                for i in 0..lib.slot_count() {
+                    if lib.slot_info(i as u16).is_none() {
+                        if i == 0 && materials.iter().all(|m| m.slot != 0) {
+                            if let Some(mat) = lib.get_material(0) {
+                                materials.push(MaterialSummary {
+                                    slot: 0,
+                                    name: "Material 0".to_string(),
+                                    category: "Other".to_string(),
+                                    albedo: mat.albedo,
+                                    roughness: mat.roughness,
+                                    metallic: mat.metallic,
+                                    emission_strength: mat.emission_strength,
+                                    emission_color: mat.emission_color,
+                                    subsurface: mat.subsurface,
+                                    subsurface_color: mat.subsurface_color,
+                                    opacity: mat.opacity,
+                                    ior: mat.ior,
+                                    noise_scale: mat.noise_scale,
+                                    noise_strength: mat.noise_strength,
+                                    noise_channels: mat.noise_channels,
+                                    shader_name: "pbr".to_string(),
+                                });
+                            }
+                        }
+                        break; // Only check slot 0
+                    }
+                }
+                materials.sort_by_key(|m| m.slot);
+                rinch::shell::rinch_runtime::run_on_main_thread(move || {
+                    if let Some(ui) = rinch::core::context::try_use_context::<UiSignals>() {
+                        ui.materials.set(materials);
+                    }
+                });
+            }
+        }
+
+        // Shaders (from engine's ShaderComposer).
+        if dirty.shaders {
+            let shaders: Vec<crate::ui_snapshot::ShaderSummary> = engine.shader_composer.shader_summaries()
+                .into_iter()
+                .map(|s| crate::ui_snapshot::ShaderSummary {
+                    name: s.name,
+                    id: s.id,
+                    built_in: s.built_in,
+                    file_path: s.file_path,
+                })
+                .collect();
+            rinch::shell::rinch_runtime::run_on_main_thread(move || {
+                if let Some(ui) = rinch::core::context::try_use_context::<UiSignals>() {
+                    ui.shaders.set(shaders);
+                }
+            });
+        }
+
+        // n. Periodically push FPS + camera position to the main thread.
         if last_fps_push.elapsed() >= std::time::Duration::from_millis(500) {
             last_fps_push = std::time::Instant::now();
             let fps_ms = dt as f64 * 1000.0;
@@ -1712,6 +1758,17 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                     ui.fps.set(fps_ms);
                 }
             });
+        }
+        if last_camera_push.elapsed() >= std::time::Duration::from_millis(250) {
+            last_camera_push = std::time::Instant::now();
+            if let Ok(es) = editor_state.lock() {
+                let cam_pos = es.editor_camera.position;
+                rinch::shell::rinch_runtime::run_on_main_thread(move || {
+                    if let Some(ui) = rinch::core::context::try_use_context::<UiSignals>() {
+                        ui.camera_display_pos.set(cam_pos);
+                    }
+                });
+            }
         }
 
         // o. Yield to let OS schedule other threads between frames.
@@ -1723,6 +1780,52 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
 ///
 /// Called by the engine thread while holding the EditorState lock.
 /// This is the command consumer for the UI→engine channel.
+/// Compute per-material voxel counts for the selected object.
+fn compute_material_usage(
+    es: &EditorState,
+    engine: &EditorEngine,
+    eid: u64,
+) -> Vec<crate::ui_snapshot::ObjectMaterialUsage> {
+    use rkf_core::scene_node::SdfSource;
+    let scene = es.world.scene();
+    if let Some(obj) = scene.objects.iter().find(|o| o.id as u64 == eid) {
+        if let SdfSource::Voxelized { brick_map_handle, .. } = &obj.root_node.sdf_source {
+            let handle = *brick_map_handle;
+            let dims = handle.dims;
+            let mut counts: std::collections::HashMap<u16, u32> = std::collections::HashMap::new();
+            for bz in 0..dims.z {
+                for by in 0..dims.y {
+                    for bx in 0..dims.x {
+                        if let Some(slot) = engine.cpu_brick_map_alloc.get_entry(&handle, bx, by, bz) {
+                            if EditorEngine::is_unallocated(slot) {
+                                continue;
+                            }
+                            let brick = engine.cpu_brick_pool.get(slot);
+                            for vz in 0..8u32 {
+                                for vy in 0..8u32 {
+                                    for vx in 0..8u32 {
+                                        let sample = brick.sample(vx, vy, vz);
+                                        if sample.distance_f32() <= 0.0 {
+                                            *counts.entry(sample.material_id()).or_insert(0) += 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let mut usage: Vec<crate::ui_snapshot::ObjectMaterialUsage> = counts
+                .into_iter()
+                .map(|(material_id, voxel_count)| crate::ui_snapshot::ObjectMaterialUsage { material_id, voxel_count })
+                .collect();
+            usage.sort_by(|a, b| b.voxel_count.cmp(&a.voxel_count));
+            return usage;
+        }
+    }
+    Vec::new()
+}
+
 fn apply_editor_command(es: &mut EditorState, cmd: EditorCommand) {
     use crate::editor_command::EditorCommand::*;
     match cmd {

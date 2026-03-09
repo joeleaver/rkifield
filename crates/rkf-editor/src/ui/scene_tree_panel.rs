@@ -2,34 +2,39 @@
 //!
 //! Uses rinch's `Tree` component with `TreeNodeData` to render the project
 //! hierarchy: Project → Camera + Scene → objects + lights.
-//! Reads from the lock-free `SnapshotReader` — no mutex locks needed.
+//! Reads from reactive UiSignals — no mutex locks needed.
 
 use rinch::prelude::*;
 use rinch_tabler_icons::TablerIcon;
 
 use crate::editor_command::EditorCommand;
-use crate::editor_state::{SelectedEntity, UiSignals};
+use crate::editor_state::{SelectedEntity, SliderSignals, UiSignals};
 use crate::light_editor::SceneLightType;
-use crate::ui_snapshot::UiSnapshot;
-use crate::{CommandSender, SnapshotReader};
+use crate::ui_snapshot::{LightSummary, ObjectSummary};
+use crate::CommandSender;
 
 // ── Tree data builder ────────────────────────────────────────────────────────
 
-/// Build the full tree data from a lock-free snapshot.
-fn build_tree_data_from_snapshot(snap: &UiSnapshot) -> Vec<TreeNodeData> {
+/// Build the full tree data from object/light summaries.
+fn build_tree_data(
+    objects: &[ObjectSummary],
+    lights: &[LightSummary],
+    scene_name: &str,
+    scene_path: &Option<String>,
+) -> Vec<TreeNodeData> {
     let camera_node = TreeNodeData::new("camera", "Camera")
         .with_icon(TablerIcon::Camera);
 
     let mut scene_children: Vec<TreeNodeData> = Vec::new();
 
     // Root objects (no parent).
-    for obj in &snap.objects {
+    for obj in objects {
         if obj.parent_id.is_none() {
-            scene_children.push(build_snapshot_object_node(obj, &snap.objects));
+            scene_children.push(build_snapshot_object_node(obj, objects));
         }
     }
 
-    for light in &snap.lights {
+    for light in lights {
         let value = format!("light:{}", light.id);
         let label = match light.light_type {
             SceneLightType::Point => format!("Point Light {}", light.id),
@@ -39,11 +44,11 @@ fn build_tree_data_from_snapshot(snap: &UiSnapshot) -> Vec<TreeNodeData> {
         scene_children.push(node);
     }
 
-    let scene_node = TreeNodeData::new("scene", snap.scene_name.clone())
+    let scene_node = TreeNodeData::new("scene", scene_name)
         .with_icon(TablerIcon::World)
         .with_children(scene_children);
 
-    let project_name = snap.current_scene_path.as_ref()
+    let project_name = scene_path.as_ref()
         .and_then(|p| std::path::Path::new(p).file_stem())
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "Untitled Project".to_string());
@@ -109,7 +114,6 @@ fn parse_value(value: &str) -> Option<SelectedEntity> {
 /// Selection sync is a separate lightweight Effect — no tree rebuild needed.
 #[component]
 pub fn SceneTreePanel() -> NodeHandle {
-    let snap = use_context::<SnapshotReader>();
     let cmd = use_context::<CommandSender>();
     let ui = use_context::<UiSignals>();
 
@@ -118,39 +122,44 @@ pub fn SceneTreePanel() -> NodeHandle {
     let tree_state = use_context::<UseTreeReturn>();
 
     // Header count — derived value, no .set() needed.
-    let snap_for_header = snap.clone();
     let header_label = Memo::new(move || {
-        let _ = ui.scene_revision.get();
-        let guard = snap_for_header.0.load();
-        let count = guard.objects.len() + guard.lights.len();
+        let count = ui.objects.get().len() + ui.lights.get().len();
         format!("Scene ({count})")
     });
 
     // NOTE: Selection sync Effect lives in editor_ui() (ui/mod.rs),
     // NOT here. Effects must not .set() signals during render.
 
-    // Selection callback → send command (no lock).
+    // Selection callback → send command + sync slider values (no lock).
+    let sliders = use_context::<SliderSignals>();
     let onselect = ValueCallback::new(move |value: String| {
         if let Some(entity) = parse_value(&value) {
             let _ = cmd.0.send(EditorCommand::SelectEntity { entity: Some(entity) });
             ui.selection.set(Some(entity));
+            // Sync slider values from signals (replaces selection-change Effect).
+            // Tree is already in sync (selection came from tree click).
+            ui.on_selection_changed(&sliders);
             ui.properties_tab.set(0); // switch to Object tab
         }
     });
 
-    // Reactive data source for the Tree — rebuilds only on scene_revision.
-    let snap2 = snap.clone();
+    // Reactive data source for the Tree — rebuilds when objects/lights/scene change.
     let data_source: std::rc::Rc<dyn Fn() -> Vec<TreeNodeData>> =
         std::rc::Rc::new(move || {
-            let _ = ui.scene_revision.get();
-            let guard = snap2.0.load();
-            build_tree_data_from_snapshot(&guard)
+            let objects = ui.objects.get();
+            let lights = ui.lights.get();
+            let scene_name = ui.scene_name.get();
+            let scene_path = ui.scene_path.get();
+            build_tree_data(&objects, &lights, &scene_name, &scene_path)
         });
 
     // Initial data for the Tree (read once, data_source handles updates).
     let initial_data = {
-        let guard = snap.0.load();
-        build_tree_data_from_snapshot(&guard)
+        let objects = ui.objects.get();
+        let lights = ui.lights.get();
+        let scene_name = ui.scene_name.get();
+        let scene_path = ui.scene_path.get();
+        build_tree_data(&objects, &lights, &scene_name, &scene_path)
     };
 
     rsx! {
