@@ -145,6 +145,12 @@ impl<T: Default + Clone> Pool<T> {
         &self.items
     }
 
+    /// Mutable backing slice — for in-place SDF computation.
+    #[inline]
+    pub fn as_slice_mut(&mut self) -> &mut [T] {
+        &mut self.items
+    }
+
     /// Grow the pool to `new_capacity` slots, preserving existing allocations.
     ///
     /// Slots `old_capacity..new_capacity` are added to the free list.

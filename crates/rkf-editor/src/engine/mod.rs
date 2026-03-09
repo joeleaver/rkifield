@@ -76,13 +76,17 @@ pub(super) const OFFSCREEN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg
 ///
 /// Tracks the correspondence between geometry pool, SDF cache pool, and brick pool
 /// slots for objects that use the geometry-first data model.
+///
+/// The `geo_brick_map` is the geometry-layer spatial index — entries are geometry
+/// pool slot indices (or EMPTY_SLOT / INTERIOR_SLOT). This is distinct from the
+/// GPU brick map in the allocator, which maps to brick pool slots.
 pub(super) struct GeometryFirstData {
-    /// Geometry pool slot indices (ordered by brick map traversal).
-    pub geo_slots: Vec<u32>,
-    /// SDF cache pool slot indices (same order as geo_slots).
-    pub sdf_slots: Vec<u32>,
-    /// Corresponding brick pool slot indices (same order).
-    pub brick_slots: Vec<u32>,
+    /// Geometry-layer brick map: entries are geometry pool slot indices.
+    pub geo_brick_map: rkf_core::brick_map::BrickMap,
+    /// Per-slot mapping: geometry pool slot → (SDF cache slot, brick pool slot).
+    pub slot_map: std::collections::HashMap<u32, (u32, u32)>,
+    /// Voxel size for this object.
+    pub voxel_size: f32,
 }
 
 /// Build result containing the scene and CPU brick data for GPU upload.
@@ -756,30 +760,33 @@ impl EditorEngine {
 
     /// Sync geometry-first data to the brick pool for a specific object.
     ///
-    /// For each slot triple (geo, sdf, brick), converts BrickGeometry + SdfCache
-    /// to a Brick and writes it to cpu_brick_pool.
+    /// For each allocated slot in the geometry brick map, converts
+    /// BrickGeometry + SdfCache to a Brick and writes it to cpu_brick_pool.
     pub(super) fn sync_geometry_to_bricks(&mut self, object_id: u32) {
         let data = match self.geometry_first_data.get(&object_id) {
             Some(d) => d,
             None => return,
         };
-        for i in 0..data.geo_slots.len() {
-            let geo = self.cpu_geometry_pool.get(data.geo_slots[i]);
-            let cache = self.cpu_sdf_cache_pool.get(data.sdf_slots[i]);
+        for (&geo_slot, &(sdf_slot, brick_slot)) in &data.slot_map {
+            let geo = self.cpu_geometry_pool.get(geo_slot);
+            let cache = self.cpu_sdf_cache_pool.get(sdf_slot);
             let brick = Brick::from_geometry(geo, cache);
-            *self.cpu_brick_pool.get_mut(data.brick_slots[i]) = brick;
+            *self.cpu_brick_pool.get_mut(brick_slot) = brick;
         }
     }
 
     /// Convert an analytical primitive object to a geometry-first voxelized object.
     ///
+    /// Populates `geometry_first_data` for the given `object_id`.
     /// Returns the new BrickMapHandle and voxel_size, or None if conversion fails.
     pub fn convert_to_geometry_first(
         &mut self,
         primitive: &SdfPrimitive,
         material_id: u8,
         voxel_size: f32,
+        object_id: u32,
     ) -> Option<(rkf_core::scene_node::BrickMapHandle, f32, Aabb, u32)> {
+        use rkf_core::brick_map::{BrickMap, EMPTY_SLOT};
         use rkf_core::voxelize_object::voxelize_to_geometry;
 
         let diameter = primitive_diameter(primitive);
@@ -803,11 +810,25 @@ impl EditorEngine {
         )?;
 
         let brick_count = result.brick_count;
+        let dims = result.handle.dims;
+
+        // Build geometry-layer brick map (entries = geo pool slots).
+        // The allocator's handle currently has geo pool slot indices in it
+        // (that's what voxelize_to_geometry stores).
+        let mut geo_brick_map = BrickMap::new(dims);
+        for bz in 0..dims.z {
+            for by in 0..dims.y {
+                for bx in 0..dims.x {
+                    if let Some(entry) = self.cpu_brick_map_alloc.get_entry(&result.handle, bx, by, bz) {
+                        geo_brick_map.set(bx, by, bz, entry);
+                    }
+                }
+            }
+        }
 
         // Allocate brick pool slots for GPU staging
         let brick_slots = self.cpu_brick_pool.allocate_range(brick_count)
             .unwrap_or_else(|| {
-                // Grow pool and retry
                 let new_cap = (self.cpu_brick_pool.capacity() * 2).max(
                     self.cpu_brick_pool.capacity() + brick_count,
                 );
@@ -816,40 +837,46 @@ impl EditorEngine {
                     .expect("allocation after grow")
             });
 
-        // Remap brick map entries from geometry pool slots to brick pool slots
-        let geo_to_brick: std::collections::HashMap<u32, u32> = result.geometry_slots.iter()
-            .zip(brick_slots.iter())
-            .map(|(&g, &b)| (g, b))
-            .collect();
+        // Build slot map and remap allocator entries from geo slots → brick pool slots
+        let mut slot_map = std::collections::HashMap::new();
+        for (i, (&geo_slot, &sdf_slot)) in result.geometry_slots.iter()
+            .zip(result.sdf_slots.iter())
+            .enumerate()
+        {
+            let brick_slot = brick_slots[i];
+            slot_map.insert(geo_slot, (sdf_slot, brick_slot));
 
-        // Remap entries in the packed allocator buffer
-        let dims = result.handle.dims;
+            // Convert geometry → brick and write to brick pool
+            let geo = self.cpu_geometry_pool.get(geo_slot);
+            let cache = self.cpu_sdf_cache_pool.get(sdf_slot);
+            let brick = Brick::from_geometry(geo, cache);
+            *self.cpu_brick_pool.get_mut(brick_slot) = brick;
+        }
+
+        // Remap entries in the packed allocator buffer to brick pool slots
         for bz in 0..dims.z {
             for by in 0..dims.y {
                 for bx in 0..dims.x {
                     if let Some(entry) = self.cpu_brick_map_alloc.get_entry(&result.handle, bx, by, bz) {
-                        if let Some(&brick_slot) = geo_to_brick.get(&entry) {
-                            self.cpu_brick_map_alloc.set_entry(&result.handle, bx, by, bz, brick_slot);
+                        if entry != EMPTY_SLOT {
+                            if let Some(&(_, brick_slot)) = slot_map.get(&entry) {
+                                self.cpu_brick_map_alloc.set_entry(&result.handle, bx, by, bz, brick_slot);
+                            }
                         }
                     }
                 }
             }
         }
 
-        // Convert geometry → brick and write to brick pool
-        for (i, (&geo_slot, &sdf_slot)) in result.geometry_slots.iter()
-            .zip(result.sdf_slots.iter())
-            .enumerate()
-        {
-            let geo = self.cpu_geometry_pool.get(geo_slot);
-            let cache = self.cpu_sdf_cache_pool.get(sdf_slot);
-            let brick = Brick::from_geometry(geo, cache);
-            *self.cpu_brick_pool.get_mut(brick_slots[i]) = brick;
-        }
+        // Store geometry-first data
+        self.geometry_first_data.insert(object_id, GeometryFirstData {
+            geo_brick_map,
+            slot_map,
+            voxel_size,
+        });
 
         // Compute grid AABB
         let brick_world = voxel_size * 8.0;
-        let dims = result.handle.dims;
         let grid_half = Vec3::new(
             dims.x as f32 * brick_world * 0.5,
             dims.y as f32 * brick_world * 0.5,

@@ -1046,7 +1046,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                         let diameter = crate::engine::primitive_diameter(&primitive);
                         let voxel_size = (diameter / 32.0).max(0.01); // ~32 voxels across
                         if let Some((handle, vs, grid_aabb, _count)) =
-                            engine.convert_to_geometry_first(&primitive, material_id as u8, voxel_size)
+                            engine.convert_to_geometry_first(&primitive, material_id as u8, voxel_size, obj_id)
                         {
                             obj.root_node.sdf_source = rkf_core::SdfSource::Voxelized {
                                 brick_map_handle: handle,
