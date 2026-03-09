@@ -9,11 +9,11 @@ This is a novel engine — not a wrapper around an existing renderer. Many subsy
 ## Critical Rules
 
 1. **No meshes, ever.** Every geometric primitive is an SDF stored in voxel bricks. If you're tempted to add a mesh path, you're solving the wrong problem.
-2. **No textures on surfaces.** Materials are volumetric — PBR properties come from a global material table indexed by `material_id`. Per-voxel color comes from companion color bricks, not UV-mapped textures.
+2. **No textures on surfaces.** Materials are volumetric — PBR properties come from a global material table indexed by `material_id` (u8, 256 max). Per-voxel RGBA color is stored in `SurfaceVoxel.color`, not UV-mapped textures.
 3. **Non-uniform scale uses conservative correction.** Per-axis `Vec3` scale is supported. SDF distances are multiplied by `min(sx, sy, sz)` to keep ray marching safe (never overshoots). For voxelized objects, the editor offers a "Re-voxelize" button that resamples the brick volume at the current stretched dimensions and resets scale to `(1,1,1)`, eliminating the extra march-step overhead.
 4. **All rendering is compute shaders.** No rasterization pipeline except editor gizmo wireframes.
 5. **WorldPosition everywhere.** Never use raw `Vec3` for world-space positions. Always `WorldPosition { chunk: IVec3, local: Vec3 }` to avoid float precision loss. GPU receives camera-relative f32 only.
-6. **Brick pool is the central resource.** All voxel data lives in a single GPU brick pool with companion pools (bone, volumetric, color). The `BrickPoolManager` coordinates streaming, animation, and editing.
+6. **Geometry pools are the source of truth.** CPU-side `GeometryPool` (BrickGeometry) and `SdfCachePool` hold authoritative voxel data. The GPU brick pool holds derived VoxelSample data (via `Brick::from_geometry`). The `BrickPoolManager` coordinates streaming, animation, and editing.
 7. **The architecture docs are the spec. Follow them exactly.** Never substitute simpler alternatives, skip features, or deviate from the documented designs. If the architecture says "multi-level DDA + sphere tracing," implement multi-level DDA + sphere tracing — not a simplified single-level version. When in doubt, read the relevant architecture doc. The decisions were made deliberately.
 8. **Test-driven development.** Write tests before implementation. Every new type, algorithm, and pipeline pass gets tests first. Red → green → refactor. Target 80%+ coverage on library crates. GPU code that can't be unit-tested gets visual regression tests in `rkf-testbed`.
 9. **Commit after every step.** Each completed task within a phase gets its own atomic commit. Don't batch multiple tasks into one commit. Commit messages reference the phase and task number (e.g., `phase-1: 1.1 — implement WorldPosition type`). This creates a clean, reviewable history that maps directly to the implementation plan.
@@ -84,13 +84,20 @@ SdfSource::Analytical { primitive, material_id } | SdfSource::Voxelized { brick_
 // Per-object brick map — flat 3D array mapping brick coords to pool slots
 BrickMap { dims: UVec3, entries: Vec<u32> }  // EMPTY_SLOT = u32::MAX
 
-// Voxel sample — 8 bytes, tightly packed
-// Word 0: f16 distance | u16 material_id
-// Word 1: u8 blend_weight | u8 secondary_id | u8 flags | u8 reserved
+// Geometry-first data model (source of truth):
+// BrickGeometry { occupancy: [u64; 8], surface_voxels: Vec<SurfaceVoxel> }
+//   occupancy: 512-bit bitmask — bit N = voxel N is solid
+//   SurfaceVoxel { index: u16, color: [u8; 4], material_id: u8, _reserved: u8 }
+// SdfCache { distances: [u16; 512] }  // f16 distances, DERIVED from geometry
 
-// Brick: 8×8×8 = 512 voxel samples = 4KB
+// GPU format (bridge pattern — Brick::from_geometry converts geometry→GPU):
+// VoxelSample { word0: u32, word1: u32 }  // 8 bytes
+//   word0: lower 16 = f16 distance (from SdfCache), bits 16-23 = u8 material_id
+//   word1: RGBA8 per-voxel color (from SurfaceVoxel.color)
+// Brick: 8×8×8 = 512 VoxelSamples = 4KB (GPU upload format)
+
 // Material: 96 bytes — PBR + SSS + procedural noise
-// Max 65536 materials (u16), stored in GPU storage buffer
+// Max 256 materials (u8 index), stored in GPU storage buffer
 ```
 
 ## Render Pipeline (all compute)
@@ -127,11 +134,13 @@ BrickMap { dims: UVec3, entries: Vec<u32> }  // EMPTY_SLOT = u32::MAX
 
 **Three particle backends:** Volumetric density splats (glowing), SDF micro-objects (solid), screen-space overlay (weather). NOT traditional billboards. Collision uses per-object BVH queries.
 
-**Per-object editing.** CSG operations target an object's brick map in local space. Brush positions transform from world to object-local before applying. Undo/redo is per-object, not per-chunk.
+**Geometry-first architecture.** Occupancy bitmask (`[u64; 8]` = 512 bits per brick) is the source of truth for shape. SDF distances are a derived cache computed from geometry via CPU Dijkstra propagation. Per-voxel color and material live in `SurfaceVoxel` (only boundary voxels carry data). A bridge pattern (`Brick::from_geometry`) converts geometry-first data to the GPU's VoxelSample format for ray marching.
+
+**Per-object editing.** Sculpt operations modify occupancy bits and surface voxel properties in local space. After edit, SDF distances are recomputed for the affected region. Undo/redo snapshots geometry bricks, not SDF. Brush positions transform from world to object-local before applying.
 
 **Floating point precision** solved via WorldPosition (IVec3 chunk + Vec3 local). CPU does f64 subtraction, GPU only sees camera-relative f32. Effective range ±17 billion meters.
 
-**Per-object streaming.** Objects load from `.rkf` v2 files with multi-LOD LZ4 compression (coarsest first). Streaming priority = screen_coverage × importance_bias. LRU eviction with watermark-based policy demotes LOD before full eviction.
+**Per-object streaming.** Objects load from `.rkf` v2/v3 files with multi-LOD LZ4 compression (coarsest first). v3 stores geometry-first data (occupancy + surface voxels + optional SDF cache). Streaming priority = screen_coverage × importance_bias. LRU eviction with watermark-based policy demotes LOD before full eviction.
 
 **MCP-native engine.** The engine is designed to be operated by AI agents. `rkf-mcp` is a standalone MCP server binary that connects to any running engine process via IPC. Tools self-register via a discovery system — add new tools by implementing a trait, not modifying the server. Every feature ships with MCP tools. If the MCP is broken, that's priority zero.
 
@@ -242,7 +251,7 @@ MCP server is configured in `.mcp.json` at the project root:
 
 | Format | Extension | Purpose |
 |--------|-----------|---------|
-| RKIField Asset v2 | `.rkf` | Per-object multi-LOD voxel data, LZ4 compressed, coarsest-first |
+| RKIField Asset v2/v3 | `.rkf` | Per-object multi-LOD voxel data, LZ4 compressed; v3 = geometry-first (occupancy + surface voxels + optional SDF cache) |
 | Scene v2 | `.rkscene` | RON-serialized scene (object hierarchy, cameras, lights, environment) |
 | Project | `.rkproject` | RON-serialized project descriptor (scene list, asset paths, quality) |
 | Environment | `.rkenv` | RON-serialized environment profile (sky, fog, ambient, volumetrics) |
@@ -255,6 +264,8 @@ MCP server is configured in `.mcp.json` at the project root:
 
 - [v2 Architecture](docs/v2/ARCHITECTURE.md) — object-centric scene hierarchy, per-object SDF, BVH acceleration, transform-at-march-time
 - [v2 Implementation Plan](docs/v2/IMPLEMENTATION_PLAN.md) — 16 phases, 82 tasks, dependency graph
+- [Geometry-First Architecture](docs/v2/GEOMETRY_FIRST_ARCHITECTURE.md) — occupancy bitmask source of truth, SDF as derived cache
+- [Geometry-First Implementation Plan](docs/v2/GEOMETRY_FIRST_IMPLEMENTATION_PLAN.md) — 8 phases, geometry-first migration
 
 **v1 (superseded):** Chunk-based engine — retained for reference only:
 
@@ -277,7 +288,8 @@ MCP server is configured in `.mcp.json` at the project root:
 
 - **Shader code is WGSL** — not GLSL, not HLSL. All GPU work is `@compute` dispatches.
 - **GPU structs use `bytemuck` or `encase`** for Rust ↔ GPU layout. Match WGSL alignment rules.
-- **Brick pool access is centralized** through `BrickPoolManager`. Never write to the brick pool buffer directly.
+- **Geometry is source of truth, SDF is derived.** Occupancy bitmask + surface voxels are authoritative. SDF distances are computed from geometry via CPU Dijkstra and cached. Never edit SDF directly — edit geometry, then recompute SDF.
+- **Brick pool access is centralized** through `BrickPoolManager`. Never write to the brick pool buffer directly. The GPU brick pool holds VoxelSample data converted from geometry via `Brick::from_geometry()`.
 - **All world positions flow through WorldPosition.** The only f32 Vec3 positions on the GPU are camera-relative or object-local.
 - **BVH is the spatial acceleration structure.** CPU-side BVH over object AABBs is uploaded to GPU. Objects not in the BVH won't be ray marched.
 - **Per-object brick maps.** Each voxelized object owns a `BrickMap` — a flat 3D array mapping brick coordinates to pool slots. `BrickMapAllocator` packs multiple maps contiguously.
