@@ -379,6 +379,9 @@ impl EditorEngine {
             wireframe_pass: Some(wireframe_pass),
             cpu_brick_pool: demo.brick_pool,
             cpu_brick_map_alloc: demo.brick_map_alloc,
+            cpu_geometry_pool: rkf_core::brick_pool::GeometryPool::new(256),
+            cpu_sdf_cache_pool: rkf_core::brick_pool::SdfCachePool::new(256),
+            geometry_first_data: std::collections::HashMap::new(),
             jfa_sdf,
             eikonal_repair,
             // Incremental update cache — first frame triggers full rebuild.
