@@ -56,7 +56,7 @@ impl Default for BrushSettings {
         Self {
             brush_type: BrushType::Add,
             shape: BrushShape::Sphere,
-            radius: 1.0,
+            radius: 0.1,
             strength: 0.5,
             material_id: 1,
             falloff: 0.5,
@@ -287,7 +287,7 @@ mod tests {
         let settings = BrushSettings::default();
         assert_eq!(settings.brush_type, BrushType::Add);
         assert_eq!(settings.shape, BrushShape::Sphere);
-        assert!(approx_eq(settings.radius, 1.0));
+        assert!(approx_eq(settings.radius, 0.1));
         assert!(approx_eq(settings.strength, 0.5));
         assert_eq!(settings.material_id, 1);
         assert!(approx_eq(settings.falloff, 0.5));

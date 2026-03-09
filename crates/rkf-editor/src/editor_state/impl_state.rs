@@ -75,8 +75,6 @@ impl EditorState {
             pending_minimize: false,
             pending_maximize: false,
             pending_convert_to_voxel: None,
-            pending_revoxelize: None,
-            pending_fix_sdfs: None,
             pending_remap_material: None,
             pending_sculpt_edits: Vec::new(),
             sculpt_undo_accumulator: None,

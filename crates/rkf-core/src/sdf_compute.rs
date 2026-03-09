@@ -8,14 +8,11 @@
 //! - [`compute_sdf_from_geometry`] — full object, all allocated bricks
 //! - [`compute_sdf_region`] — local region (e.g., after a sculpt edit)
 //!
-//! Both use Dijkstra propagation from identified surface voxels.
-
-use std::collections::BinaryHeap;
-use std::cmp::Ordering;
+//! Both use Fast Sweeping Method (Eikonal solver) for true Euclidean distances.
 
 use glam::UVec3;
 
-use crate::brick_geometry::{BrickGeometry, NeighborContext, index_to_xyz, voxel_index};
+use crate::brick_geometry::{BrickGeometry, NeighborContext};
 use crate::brick_map::{BrickMap, EMPTY_SLOT, INTERIOR_SLOT};
 use crate::sdf_cache::SdfCache;
 
@@ -33,8 +30,8 @@ pub struct SlotMapping {
 /// Compute SDF distances for all allocated bricks from their geometry.
 ///
 /// Identifies surface voxels across the entire object (considering cross-brick
-/// neighbors), then runs Dijkstra propagation to compute signed distances at
-/// every voxel in every allocated brick.
+/// neighbors), then runs Fast Sweeping to compute signed distances at every
+/// voxel in every allocated brick.
 pub fn compute_sdf_from_geometry(
     brick_map: &BrickMap,
     geometry: &[BrickGeometry],       // indexed by slot_mapping.geometry_slot
@@ -50,14 +47,19 @@ pub fn compute_sdf_from_geometry(
         UVec3::ZERO,
         brick_map.dims,
         voxel_size,
+        None, // write all bricks
     );
 }
 
-/// Compute SDF distances for a region of bricks.
+/// Compute SDF distances for a region of bricks using the Fast Sweeping Method.
 ///
 /// `region_min` and `region_max` are in brick coordinates (inclusive min, exclusive max).
 /// Only bricks within this region have their SDF updated, but neighbor geometry
 /// outside the region is read for cross-brick surface identification.
+///
+/// If `dirty_bricks` is provided, only those brick coordinates have their SDF cache
+/// written back. Margin bricks participate in the Eikonal solve for context but
+/// keep their existing SDF values.
 pub fn compute_sdf_region(
     brick_map: &BrickMap,
     geometry: &[BrickGeometry],
@@ -66,6 +68,7 @@ pub fn compute_sdf_region(
     region_min: UVec3,
     region_max: UVec3,
     voxel_size: f32,
+    dirty_bricks: Option<&std::collections::HashSet<UVec3>>,
 ) {
     let dims = brick_map.dims;
 
@@ -85,25 +88,24 @@ pub fn compute_sdf_region(
         Some(&geometry[slot_mappings[*idx].geometry_slot as usize])
     };
 
-    // Helper: check if a brick coordinate is in the region
-    let in_region = |bx: u32, by: u32, bz: u32| -> bool {
-        bx >= region_min.x && bx < region_max.x
-            && by >= region_min.y && by < region_max.y
-            && bz >= region_min.z && bz < region_max.z
-    };
-
-    // Phase 1: Identify surface voxels and seed the priority queue
-    // Global voxel coordinate = (bx * 8 + vx, by * 8 + vy, bz * 8 + vz)
-    let mut heap: BinaryHeap<DijkstraEntry> = BinaryHeap::new();
-
-    // Track best known distance for each voxel in region
-    // Key: (brick_index_in_mappings, voxel_index_in_brick)
-    // We use a flat map keyed by global voxel coordinate for simplicity
+    // Region voxel grid
     let region_dims = region_max - region_min;
-    let region_voxel_dims = region_dims * 8;
-    let total_region_voxels = (region_voxel_dims.x * region_voxel_dims.y * region_voxel_dims.z) as usize;
-    let mut best_dist: Vec<f32> = vec![f32::INFINITY; total_region_voxels];
-    let mut is_solid: Vec<bool> = vec![false; total_region_voxels];
+    let rvx = region_dims.x * 8;
+    let rvy = region_dims.y * 8;
+    let rvz = region_dims.z * 8;
+    let total = (rvx * rvy * rvz) as usize;
+    if total == 0 {
+        return;
+    }
+
+    let mut dist: Vec<f32> = vec![f32::MAX; total];
+    let mut is_solid: Vec<bool> = vec![false; total];
+    // Track which voxels are in allocated bricks (vs empty/interior/out-of-bounds)
+    let mut is_allocated: Vec<bool> = vec![false; total];
+
+    let idx = |gx: u32, gy: u32, gz: u32| -> usize {
+        (gx + gy * rvx + gz * rvx * rvy) as usize
+    };
 
     let region_voxel_index = |bx: u32, by: u32, bz: u32, vx: u8, vy: u8, vz: u8| -> Option<usize> {
         let rbx = bx.checked_sub(region_min.x)?;
@@ -112,13 +114,11 @@ pub fn compute_sdf_region(
         if rbx >= region_dims.x || rby >= region_dims.y || rbz >= region_dims.z {
             return None;
         }
-        let gx = rbx * 8 + vx as u32;
-        let gy = rby * 8 + vy as u32;
-        let gz = rbz * 8 + vz as u32;
-        Some((gx + gy * region_voxel_dims.x + gz * region_voxel_dims.x * region_voxel_dims.y) as usize)
+        Some(idx(rbx * 8 + vx as u32, rby * 8 + vy as u32, rbz * 8 + vz as u32))
     };
 
-    // Populate is_solid array and find surface voxels
+    // ── Phase 1: Populate is_solid, is_allocated, and seed surface voxels ───
+
     for bz in region_min.z..region_max.z {
         for by in region_min.y..region_max.y {
             for bx in region_min.x..region_max.x {
@@ -128,17 +128,16 @@ pub fn compute_sdf_region(
                 };
 
                 if slot == EMPTY_SLOT {
-                    // All voxels empty (is_solid already false)
                     continue;
                 }
 
                 if slot == INTERIOR_SLOT {
-                    // All voxels solid
                     for vz in 0..8u8 {
                         for vy in 0..8u8 {
                             for vx in 0..8u8 {
-                                if let Some(idx) = region_voxel_index(bx, by, bz, vx, vy, vz) {
-                                    is_solid[idx] = true;
+                                if let Some(i) = region_voxel_index(bx, by, bz, vx, vy, vz) {
+                                    is_solid[i] = true;
+                                    is_allocated[i] = true;
                                 }
                             }
                         }
@@ -151,29 +150,28 @@ pub fn compute_sdf_region(
                     None => continue,
                 };
 
-                // Populate is_solid
+                // Mark solid and allocated
                 for vz in 0..8u8 {
                     for vy in 0..8u8 {
                         for vx in 0..8u8 {
-                            if geo.is_solid(vx, vy, vz) {
-                                if let Some(idx) = region_voxel_index(bx, by, bz, vx, vy, vz) {
-                                    is_solid[idx] = true;
+                            if let Some(i) = region_voxel_index(bx, by, bz, vx, vy, vz) {
+                                is_allocated[i] = true;
+                                if geo.is_solid(vx, vy, vz) {
+                                    is_solid[i] = true;
                                 }
                             }
                         }
                     }
                 }
 
-                // NeighborContext.neighbors: None = EMPTY, Some(None) = INTERIOR, Some(Some(geo)) = allocated
-                // get_neighbor returns Some(outer) where outer: Option<Option<&BrickGeometry>>
-                // For out-of-bounds, treat as EMPTY_SLOT (None)
+                // Build cross-brick neighbor context for surface detection
                 let neighbor = |nbx: i32, nby: i32, nbz: i32| -> Option<Option<&BrickGeometry>> {
                     if nbx < 0 || nby < 0 || nbz < 0 {
-                        return None; // Out of bounds → EMPTY
+                        return None;
                     }
                     let (nbx, nby, nbz) = (nbx as u32, nby as u32, nbz as u32);
                     if nbx >= dims.x || nby >= dims.y || nbz >= dims.z {
-                        return None; // Out of bounds → EMPTY
+                        return None;
                     }
                     match brick_map.get(nbx, nby, nbz)? {
                         EMPTY_SLOT => None,
@@ -194,16 +192,14 @@ pub fn compute_sdf_region(
                     ],
                 };
 
-                // Seed surface voxels with distance ~0.5 voxel_size
+                // Seed surface voxels with sub-voxel distance estimate
                 for vz in 0..8u8 {
                     for vy in 0..8u8 {
                         for vx in 0..8u8 {
                             if ctx.is_surface_voxel(vx, vy, vz) {
-                                if let Some(idx) = region_voxel_index(bx, by, bz, vx, vy, vz) {
-                                    // Surface voxels seed with sub-voxel distance estimate
-                                    let d = 0.5 * voxel_size;
-                                    best_dist[idx] = d;
-                                    heap.push(DijkstraEntry { dist: d, index: idx });
+                                if let Some(i) = region_voxel_index(bx, by, bz, vx, vy, vz) {
+                                    let d = surface_seed_distance(&ctx, vx, vy, vz, voxel_size);
+                                    dist[i] = d;
                                 }
                             }
                         }
@@ -213,72 +209,67 @@ pub fn compute_sdf_region(
         }
     }
 
-    // Phase 2: Dijkstra propagation (26-connected)
-    while let Some(entry) = heap.pop() {
-        if entry.dist > best_dist[entry.index] {
-            continue; // Stale entry
-        }
+    // ── Phase 2: Fast Sweeping Method (Eikonal solver) ──────────────────
+    //
+    // Solve |∇d| = 1/h via iterative axis-aligned sweeps in all 8 octant
+    // directions. Each voxel update solves the quadratic Eikonal equation
+    // using its 6-connected neighbors' current distances.
 
-        // Decode global voxel position in region
-        let gi = entry.index as u32;
-        let gx = gi % region_voxel_dims.x;
-        let gy = (gi / region_voxel_dims.x) % region_voxel_dims.y;
-        let gz = gi / (region_voxel_dims.x * region_voxel_dims.y);
+    let h = voxel_size;
 
-        // 26-connected neighbors
-        for dz in -1i32..=1 {
-            for dy in -1i32..=1 {
-                for dx in -1i32..=1 {
-                    if dx == 0 && dy == 0 && dz == 0 {
-                        continue;
-                    }
+    // 8 sweep directions: all combinations of (±x, ±y, ±z)
+    const SWEEPS: [(bool, bool, bool); 8] = [
+        (false, false, false), (true,  false, false),
+        (false, true,  false), (true,  true,  false),
+        (false, false, true),  (true,  false, true),
+        (false, true,  true),  (true,  true,  true),
+    ];
 
-                    let nx = gx as i32 + dx;
-                    let ny = gy as i32 + dy;
-                    let nz = gz as i32 + dz;
+    // 2 full iterations (typically converges in 1 for convex, 2 for concave)
+    for _iter in 0..2 {
+        for &(rev_x, rev_y, rev_z) in &SWEEPS {
+            let x_range: Box<dyn Iterator<Item = u32>> = if rev_x {
+                Box::new((0..rvx).rev())
+            } else {
+                Box::new(0..rvx)
+            };
 
-                    if nx < 0 || ny < 0 || nz < 0 {
-                        continue;
-                    }
-                    let (nx, ny, nz) = (nx as u32, ny as u32, nz as u32);
-                    if nx >= region_voxel_dims.x || ny >= region_voxel_dims.y || nz >= region_voxel_dims.z {
-                        continue;
-                    }
-
-                    let ni = (nx + ny * region_voxel_dims.x + nz * region_voxel_dims.x * region_voxel_dims.y) as usize;
-
-                    // Check that neighbor is in an allocated brick
-                    let nbx = nx / 8 + region_min.x;
-                    let nby = ny / 8 + region_min.y;
-                    let nbz = nz / 8 + region_min.z;
-
-                    if let Some(nslot) = brick_map.get(nbx, nby, nbz) {
-                        if nslot == EMPTY_SLOT || nslot == INTERIOR_SLOT {
-                            // Skip — we only compute distances within allocated bricks
-                            // (plus interior/empty get sentinel values)
+            for gz in sweep_range(rvz, rev_z) {
+                for gy in sweep_range(rvy, rev_y) {
+                    for gx in x_range_clone(rvx, rev_x) {
+                        let i = idx(gx, gy, gz);
+                        if !is_allocated[i] {
                             continue;
                         }
-                    } else {
-                        continue;
-                    }
 
-                    // Euclidean distance between voxel centers
-                    let step_dist = ((dx * dx + dy * dy + dz * dz) as f32).sqrt() * voxel_size;
-                    let new_dist = entry.dist + step_dist;
+                        // Gather the minimum neighbor distance along each axis
+                        let ax = axis_min(&dist, rvx, rvy, rvz, gx, gy, gz, 0);
+                        let ay = axis_min(&dist, rvx, rvy, rvz, gx, gy, gz, 1);
+                        let az = axis_min(&dist, rvx, rvy, rvz, gx, gy, gz, 2);
 
-                    if new_dist < best_dist[ni] {
-                        best_dist[ni] = new_dist;
-                        heap.push(DijkstraEntry { dist: new_dist, index: ni });
+                        let new_d = eikonal_solve(ax, ay, az, h);
+                        if new_d < dist[i] {
+                            dist[i] = new_d;
+                        }
                     }
                 }
             }
+            drop(x_range);
         }
     }
 
-    // Phase 3: Write signed distances to SDF caches
+    // ── Phase 3: Write signed distances to SDF caches ───────────────────
+
     for bz in region_min.z..region_max.z {
         for by in region_min.y..region_max.y {
             for bx in region_min.x..region_max.x {
+                // Skip bricks not in the dirty set.
+                if let Some(dirty) = dirty_bricks {
+                    if !dirty.contains(&UVec3::new(bx, by, bz)) {
+                        continue;
+                    }
+                }
+
                 let slot = match brick_map.get(bx, by, bz) {
                     Some(s) => s,
                     None => continue,
@@ -293,19 +284,15 @@ pub fn compute_sdf_region(
                     None => continue,
                 };
 
-                if !in_region(bx, by, bz) {
-                    continue;
-                }
-
                 let sdf_slot = slot_mappings[mapping_idx].sdf_slot as usize;
                 let cache = &mut sdf_caches[sdf_slot];
 
                 for vz in 0..8u8 {
                     for vy in 0..8u8 {
                         for vx in 0..8u8 {
-                            if let Some(idx) = region_voxel_index(bx, by, bz, vx, vy, vz) {
-                                let dist = best_dist[idx];
-                                let signed = if is_solid[idx] { -dist } else { dist };
+                            if let Some(i) = region_voxel_index(bx, by, bz, vx, vy, vz) {
+                                let d = dist[i];
+                                let signed = if is_solid[i] { -d } else { d };
                                 cache.set_distance(vx, vy, vz, signed);
                             }
                         }
@@ -316,33 +303,142 @@ pub fn compute_sdf_region(
     }
 }
 
-/// Priority queue entry for Dijkstra propagation.
-#[derive(Clone, Copy)]
-struct DijkstraEntry {
-    dist: f32,
-    index: usize,
+// ── Eikonal solver helpers ──────────────────────────────────────────────────
+
+/// Solve the Eikonal equation `|∇d| = 1` at a voxel given the minimum
+/// neighbor distances along each axis (a ≤ b ≤ c after sorting).
+///
+/// Returns the candidate distance. If no valid solution exists, returns f32::MAX.
+fn eikonal_solve(ax: f32, ay: f32, az: f32, h: f32) -> f32 {
+    // Sort so a ≤ b ≤ c
+    let mut abc = [ax, ay, az];
+    if abc[0] > abc[1] { abc.swap(0, 1); }
+    if abc[1] > abc[2] { abc.swap(1, 2); }
+    if abc[0] > abc[1] { abc.swap(0, 1); }
+    let [a, b, c] = abc;
+
+    // 1D: d = a + h
+    let d1 = a + h;
+    if d1 <= b {
+        return d1;
+    }
+
+    // 2D: solve (d-a)² + (d-b)² = h²
+    let sum_ab = a + b;
+    let diff_ab = a - b;
+    let disc2 = 2.0 * h * h - diff_ab * diff_ab;
+    if disc2 >= 0.0 {
+        let d2 = (sum_ab + disc2.sqrt()) * 0.5;
+        if d2 <= c {
+            return d2;
+        }
+    }
+
+    // 3D: solve (d-a)² + (d-b)² + (d-c)² = h²
+    let sum_abc = a + b + c;
+    let sq_sum = a * a + b * b + c * c;
+    let disc3 = sum_abc * sum_abc - 3.0 * (sq_sum - h * h);
+    if disc3 >= 0.0 {
+        let d3 = (sum_abc + disc3.sqrt()) / 3.0;
+        return d3;
+    }
+
+    f32::MAX
 }
 
-impl PartialEq for DijkstraEntry {
-    fn eq(&self, other: &Self) -> bool {
-        self.dist == other.dist
+/// Get the minimum distance from the two axis-aligned neighbors along `axis` (0=x, 1=y, 2=z).
+#[inline]
+fn axis_min(dist: &[f32], sx: u32, sy: u32, _sz: u32, gx: u32, gy: u32, gz: u32, axis: u8) -> f32 {
+    let stride = match axis {
+        0 => 1u32,
+        1 => sx,
+        _ => sx * sy,
+    };
+    let coord = match axis {
+        0 => gx,
+        1 => gy,
+        _ => gz,
+    };
+    let max_coord = match axis {
+        0 => sx,
+        1 => sy,
+        _ => _sz,
+    };
+    let base = gx + gy * sx + gz * sx * sy;
+
+    let lo = if coord > 0 { dist[(base - stride) as usize] } else { f32::MAX };
+    let hi = if coord + 1 < max_coord { dist[(base + stride) as usize] } else { f32::MAX };
+    lo.min(hi)
+}
+
+/// Produce an iterator for a sweep direction along one axis.
+fn sweep_range(size: u32, reverse: bool) -> Box<dyn Iterator<Item = u32>> {
+    if reverse {
+        Box::new((0..size).rev())
+    } else {
+        Box::new(0..size)
     }
 }
 
-impl Eq for DijkstraEntry {}
-
-impl PartialOrd for DijkstraEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
+/// Clone-friendly version of sweep_range for the inner x loop.
+fn x_range_clone(size: u32, reverse: bool) -> Box<dyn Iterator<Item = u32>> {
+    if reverse {
+        Box::new((0..size).rev())
+    } else {
+        Box::new(0..size)
     }
 }
 
-impl Ord for DijkstraEntry {
-    fn cmp(&self, other: &Self) -> Ordering {
-        // Reverse order for min-heap (BinaryHeap is a max-heap)
-        other.dist.partial_cmp(&self.dist).unwrap_or(Ordering::Equal)
+/// Estimate sub-voxel distance for a surface voxel using the local occupancy gradient.
+///
+/// Instead of a flat 0.5h, count how many axes have a boundary crossing
+/// (face neighbor with different occupancy). More crossing axes means the
+/// surface passes closer to the voxel center:
+/// - 1 axis:  ~0.50h (surface perpendicular to one axis)
+/// - 2 axes:  ~0.35h (surface crosses an edge region)
+/// - 3 axes:  ~0.29h (surface crosses a corner region)
+fn surface_seed_distance(
+    ctx: &NeighborContext<'_>,
+    vx: u8,
+    vy: u8,
+    vz: u8,
+    voxel_size: f32,
+) -> f32 {
+    let solid = ctx.center.is_solid(vx, vy, vz);
+    let mut crossing_axes = 0u32;
+
+    // Check each axis for a boundary crossing
+    let offsets: [(i8, i8, i8); 6] = [
+        (-1, 0, 0), (1, 0, 0),  // x axis
+        (0, -1, 0), (0, 1, 0),  // y axis
+        (0, 0, -1), (0, 0, 1),  // z axis
+    ];
+
+    let mut x_cross = false;
+    let mut y_cross = false;
+    let mut z_cross = false;
+
+    for (i, &(dx, dy, dz)) in offsets.iter().enumerate() {
+        let nx = vx as i8 + dx;
+        let ny = vy as i8 + dy;
+        let nz = vz as i8 + dz;
+        let neighbor_solid = ctx.is_neighbor_solid(nx, ny, nz);
+        if solid != neighbor_solid {
+            match i / 2 {
+                0 => x_cross = true,
+                1 => y_cross = true,
+                _ => z_cross = true,
+            }
+        }
     }
+
+    crossing_axes = x_cross as u32 + y_cross as u32 + z_cross as u32;
+
+    // Distance = 0.5h / sqrt(crossing_axes), clamped to at least 1 axis
+    let axes = crossing_axes.max(1) as f32;
+    0.5 * voxel_size / axes.sqrt()
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -483,16 +579,17 @@ mod tests {
     }
 
     #[test]
-    fn empty_brick_stays_infinity() {
+    fn empty_brick_stays_large() {
         let geo = BrickGeometry::new();
         let cache = compute_single_brick(&geo, 0.1);
 
-        // All distances should remain at infinity (no surface voxels to seed from)
+        // All distances should remain large (no surface voxels to seed from)
         for z in 0..8u8 {
             for y in 0..8u8 {
                 for x in 0..8u8 {
                     let d = cache.get_distance(x, y, z);
-                    assert!(d.is_infinite() || d > 100.0, "expected large positive, got {d} at ({x},{y},{z})");
+                    assert!(d > 100.0 || d == f32::MAX || d.is_infinite(),
+                        "expected large positive, got {d} at ({x},{y},{z})");
                 }
             }
         }
@@ -523,6 +620,7 @@ mod tests {
         compute_sdf_region(
             &map, &geometry, &mut sdf_caches, &mappings,
             UVec3::ZERO, UVec3::new(1, 1, 1), 0.1,
+            None,
         );
 
         // Brick 0 should have distances computed
@@ -562,5 +660,38 @@ mod tests {
         // Voxel (6,4,4) is solid with an empty neighbor at (7,4,4) → surface → small negative
         let d2 = sdf_caches[0].get_distance(6, 4, 4);
         assert!(d2 < 0.0, "solid surface voxel should be negative, got {d2}");
+    }
+
+    #[test]
+    fn eikonal_flat_plane_accuracy() {
+        // Half-solid plane: exact distance should be (z_from_surface + 0.5) * voxel_size
+        // The Eikonal solver should produce nearly linear distances.
+        let mut geo = BrickGeometry::new();
+        for z in 0..4u8 {
+            for y in 0..8u8 {
+                for x in 0..8u8 {
+                    geo.set_solid(x, y, z, true);
+                }
+            }
+        }
+
+        let vs = 0.1;
+        let cache = compute_single_brick(&geo, vs);
+
+        // At x=4, y=4, along z: distances should be approximately linear
+        // z=3 is the last solid, z=4 is first empty. Surface between z=3 and z=4.
+        // Expected: d(z) ≈ (|z - 3.5| + some_offset) * vs
+        // The Eikonal should give smooth, approximately linear values.
+        let d3 = cache.get_distance(4, 4, 3).abs();
+        let d4 = cache.get_distance(4, 4, 4).abs();
+        let d5 = cache.get_distance(4, 4, 5).abs();
+
+        // d4 and d3 should be approximately equal (symmetric around surface)
+        let asymmetry = (d4 - d3).abs();
+        assert!(asymmetry < vs * 0.3, "asymmetry too large: {asymmetry} (d3={d3}, d4={d4})");
+
+        // d5 should be approximately d4 + vs
+        let step = d5 - d4;
+        assert!((step - vs).abs() < vs * 0.5, "step from z4→z5 should be ~{vs}, got {step}");
     }
 }

@@ -730,6 +730,12 @@ pub fn editor_ui() -> NodeHandle {
                             ctrl: key_data.ctrl,
                             alt: key_data.alt,
                         };
+                        // Escape exits sculpt/paint mode — handle on UI thread
+                        // so the toolbar signal updates immediately.
+                        if kc == KeyCode::Escape && ui.editor_mode.get() != EditorMode::Default {
+                            ui.editor_mode.set(EditorMode::Default);
+                            let _ = cmd_tx.send(EditorCommand::SetEditorMode { mode: EditorMode::Default });
+                        }
                         let _ = cmd_tx.send(EditorCommand::KeyDown { key: kc, modifiers: mods });
                     }
                 }

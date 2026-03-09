@@ -20,7 +20,7 @@ use crate::brick_pool::Pool;
 use crate::constants::BRICK_DIM;
 use crate::scene_node::BrickMapHandle;
 use crate::sdf_cache::SdfCache;
-use crate::sdf_compute::{SlotMapping, compute_sdf_from_geometry};
+use crate::sdf_compute::SlotMapping;
 use crate::voxel::VoxelSample;
 
 /// Voxelize an SDF function into a brick map and brick pool.
@@ -318,9 +318,11 @@ where
                     );
 
                 let geo = geo_pool.get_mut(g_slot);
+                let sdf_cache = sdf_pool.get_mut(s_slot);
                 let half_voxel = voxel_size * 0.5;
 
-                // Sample SDF at each voxel center → occupancy + surface data
+                // Sample SDF at each voxel center → occupancy + surface data + SDF cache.
+                // Store analytical distances directly — much smoother than Dijkstra.
                 for vz in 0..8u8 {
                     for vy in 0..8u8 {
                         for vx in 0..8u8 {
@@ -331,6 +333,7 @@ where
                                     vz as f32 * voxel_size + half_voxel,
                                 );
                             let (dist, _mat_id, _color) = sdf_fn(pos);
+                            sdf_cache.set_distance(vx, vy, vz, dist);
                             if dist <= 0.0 {
                                 geo.set_solid(vx, vy, vz, true);
                             }
@@ -385,39 +388,9 @@ where
         }
     }
 
-    // Build geometry and SDF cache slices for compute_sdf_from_geometry
+    // SDF cache was populated with analytical distances during the second pass above.
+    // No Dijkstra needed — analytical values are exact.
     let actual_count = slot_mappings.len();
-
-    // Compute SDF from geometry
-    // We need contiguous arrays — use the pool's internal storage
-    {
-        let geo_slice: Vec<BrickGeometry> = slot_mappings
-            .iter()
-            .map(|m| geo_pool.get(m.geometry_slot).clone())
-            .collect();
-        let mut sdf_slice: Vec<SdfCache> = slot_mappings
-            .iter()
-            .map(|m| sdf_pool.get(m.sdf_slot).clone())
-            .collect();
-
-        // Remap slot_mappings to use indices into our temporary arrays
-        let temp_mappings: Vec<SlotMapping> = slot_mappings
-            .iter()
-            .enumerate()
-            .map(|(i, m)| SlotMapping {
-                brick_slot: m.brick_slot,
-                geometry_slot: i as u32,
-                sdf_slot: i as u32,
-            })
-            .collect();
-
-        compute_sdf_from_geometry(&brick_map, &geo_slice, &mut sdf_slice, &temp_mappings, voxel_size);
-
-        // Write back SDF caches to pool
-        for (i, m) in slot_mappings.iter().enumerate() {
-            *sdf_pool.get_mut(m.sdf_slot) = sdf_slice[i].clone();
-        }
-    }
 
     let handle = map_alloc.allocate(&brick_map);
     let geometry_slots = slot_mappings.iter().map(|m| m.geometry_slot).collect();

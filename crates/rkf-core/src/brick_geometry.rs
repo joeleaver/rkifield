@@ -331,7 +331,7 @@ pub struct NeighborContext<'a> {
 
 impl<'a> NeighborContext<'a> {
     /// Check if a neighbor voxel (possibly in an adjacent brick) is solid.
-    fn is_neighbor_solid(&self, x: i8, y: i8, z: i8) -> bool {
+    pub fn is_neighbor_solid(&self, x: i8, y: i8, z: i8) -> bool {
         if x >= 0 && x < 8 && y >= 0 && y < 8 && z >= 0 && z < 8 {
             return self.center.is_solid(x as u8, y as u8, z as u8);
         }

@@ -106,10 +106,6 @@ pub struct SharedState {
     pub pending_object_shape: Option<u32>,
     /// Object shape result (set by render loop, consumed by MCP polling).
     pub object_shape_result: Option<rkf_core::automation::ObjectShapeResult>,
-    /// Pending fix_sdfs request (set by MCP, consumed by render loop).
-    pub pending_fix_sdfs: Option<u32>,
-    /// fix_sdfs result: Ok(()) on success, Err(msg) on failure.
-    pub fix_sdfs_result: Option<Result<(), String>>,
     /// Available shader model names (published by engine thread from ShaderComposer).
     pub shader_names: Vec<(String, u32, bool)>,
 }
@@ -175,8 +171,6 @@ impl SharedState {
             mcp_sculpt_result: None,
             pending_object_shape: None,
             object_shape_result: None,
-            pending_fix_sdfs: None,
-            fix_sdfs_result: None,
             shader_names: Vec::new(),
         }
     }

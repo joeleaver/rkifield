@@ -10,7 +10,7 @@ use glam::{Quat, Vec3};
 
 use rkf_core::{
     Aabb, BrickMapAllocator, BrickPool, Scene, SceneNode, SceneObject,
-    SdfPrimitive, SdfSource, voxelize_sdf,
+    SdfPrimitive, SdfSource,
 };
 use rkf_core::brick::Brick;
 use rkf_core::brick_pool::{GeometryPool, SdfCachePool};
@@ -33,28 +33,9 @@ mod init;
 mod environment;
 mod render;
 mod sculpt;
-mod sdf_repair;
-mod sdf_fmm;
-mod eikonal;
 mod brick_ops;
-mod brick_ops_repair;
 mod offscreen;
 mod query;
-
-// ---------------------------------------------------------------------------
-// Sculpt blend helpers
-// ---------------------------------------------------------------------------
-
-/// Polynomial smooth-minimum.  Returns the smooth union of two SDF distances.
-///
-/// `k` controls the blend radius: larger k → softer junction.
-/// At k=0 this degenerates to `a.min(b)`.
-#[inline]
-pub(super) fn smin_poly(a: f32, b: f32, k: f32) -> f32 {
-    if k <= 0.0 { return a.min(b); }
-    let h = ((k - (a - b).abs()) / k).max(0.0);
-    a.min(b) - h * h * k * 0.25
-}
 
 /// Internal render resolution width (used by the legacy surface-based path).
 pub const INTERNAL_WIDTH: u32 = 960;
@@ -221,53 +202,23 @@ pub(super) fn build_demo_scene() -> DemoScene {
             scene.add_object_full(vox_obj);
         }
         Err(e) => {
-            log::warn!("Failed to load {rkf_path}: {e} — falling back to inline sphere");
+            log::warn!("Failed to load {rkf_path}: {e} — falling back to analytical sphere");
 
-            // Fallback: inline voxelized sphere
-            let vox_radius = 0.4;
-            let voxel_size = 0.04;
-            let margin = voxel_size * 2.0;
-            let vox_aabb = Aabb::new(
-                Vec3::splat(-vox_radius - margin),
-                Vec3::splat(vox_radius + margin),
-            );
-            let sdf_fn = |pos: Vec3| -> (f32, u16) {
-                (pos.length() - vox_radius, 6u16)
-            };
-            let (handle, brick_count) = voxelize_sdf(
-                sdf_fn, &vox_aabb, voxel_size, &mut brick_pool, &mut brick_map_alloc,
-            ).expect("voxelize sphere");
-
-            let vox_brick_size = voxel_size * 8.0;
-            let vox_grid_half = Vec3::new(
-                handle.dims.x as f32 * vox_brick_size * 0.5,
-                handle.dims.y as f32 * vox_brick_size * 0.5,
-                handle.dims.z as f32 * vox_brick_size * 0.5,
-            );
-            let vox_grid_aabb = Aabb::new(-vox_grid_half, vox_grid_half);
-
-            log::info!(
-                "Voxelized sphere: {} bricks, handle offset={} dims={:?}",
-                brick_count, handle.offset, handle.dims
-            );
-
-            let mut vox_node = SceneNode::new("vox_sphere");
-            vox_node.sdf_source = SdfSource::Voxelized {
-                brick_map_handle: handle,
-                voxel_size,
-                aabb: vox_grid_aabb,
-            };
-            let vox_obj = SceneObject {
+            // Fallback: analytical sphere (voxelized on demand via convert_to_geometry_first).
+            let radius = 0.4;
+            let sphere_node = SceneNode::analytical("sphere", SdfPrimitive::Sphere { radius }, 6);
+            let sphere_aabb = Aabb::new(Vec3::splat(-radius), Vec3::splat(radius));
+            let sphere_obj = SceneObject {
                 id: 0,
-                name: "vox_sphere".into(),
+                name: "sphere".into(),
                 parent_id: None,
                 position: Vec3::new(0.0, 0.0, -2.0),
                 rotation: Quat::IDENTITY,
                 scale: Vec3::ONE,
-                root_node: vox_node,
-                aabb: vox_grid_aabb,
+                root_node: sphere_node,
+                aabb: sphere_aabb,
             };
-            scene.add_object_full(vox_obj);
+            scene.add_object_full(sphere_obj);
         }
     }
 
@@ -405,10 +356,6 @@ pub struct EditorEngine {
     pub(super) cpu_sdf_cache_pool: SdfCachePool,
     /// Per-object geometry-first slot mappings: object_id → GeometryFirstData.
     pub(super) geometry_first_data: std::collections::HashMap<u32, GeometryFirstData>,
-    // GPU JFA pipeline for per-stroke SDF repair.
-    pub(super) jfa_sdf: crate::jfa_sdf::JfaSdfPass,
-    // GPU eikonal PDE pipeline for per-stroke SDF repair.
-    pub(super) eikonal_repair: crate::eikonal_repair::EikonalRepairPass,
     // ── Cached GPU state for incremental updates ──
     /// Cached GPU objects from last full rebuild. Used for partial updates.
     pub(super) cached_gpu_objects: Vec<GpuObject>,

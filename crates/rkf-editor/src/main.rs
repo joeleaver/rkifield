@@ -17,8 +17,6 @@ mod editor_config;
 mod editor_state;
 mod engine;
 mod engine_viewport;
-mod jfa_sdf;
-mod eikonal_repair;
 mod environment;
 mod gizmo;
 mod input;

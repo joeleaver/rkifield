@@ -113,8 +113,6 @@ pub enum EditorCommand {
 
     // ── Voxel ops ────────────────────────────────────────────────────────
     ConvertToVoxel { object_id: u32 },
-    Revoxelize { object_id: u32 },
-    FixSdfs { object_id: u32 },
 
     // ── Materials ────────────────────────────────────────────────────────
     SelectMaterial { slot: u16 },

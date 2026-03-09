@@ -98,32 +98,6 @@ pub fn RightPanel() -> NodeHandle {
                     sliders.brush_falloff, 0.0, 1.0, 0.01, 2,
                 );
 
-                // Fix SDFs button.
-                if let Some(crate::editor_state::SelectedEntity::Object(eid)) = selected_entity {
-                    let btn_row = __scope.create_element("div");
-                    btn_row.set_attribute("style", "padding: 6px 8px;");
-                    let btn = __scope.create_element("button");
-                    btn.set_attribute(
-                        "style",
-                        "width:100%; padding:4px 8px; background:#223355; \
-                         color:#99ccff; border:1px solid #3355aa; \
-                         border-radius:3px; cursor:pointer; font-size:12px;",
-                    );
-                    btn.append_child(&__scope.create_text("Fix SDFs"));
-                    let hid = __scope.register_handler({
-                        let cmd = cmd2.clone();
-                        move || {
-                            let _ =
-                                cmd.0.send(EditorCommand::FixSdfs {
-                                    object_id: eid as u32,
-                                });
-                        }
-                    });
-                    btn.set_attribute("data-rid", &hid.to_string());
-                    btn_row.append_child(&btn);
-                    container.append_child(&btn_row);
-                }
-
                 append_divider(__scope, &container);
             }
             EditorMode::Paint => {
@@ -355,30 +329,6 @@ pub fn PropertiesPanel() -> NodeHandle {
                     __scope, &container, "Falloff", "",
                     sliders.brush_falloff, 0.0, 1.0, 0.01, 2,
                 );
-
-                if let Some(crate::editor_state::SelectedEntity::Object(eid)) = selected_entity {
-                    let btn_row = __scope.create_element("div");
-                    btn_row.set_attribute("style", "padding: 6px 8px;");
-                    let btn = __scope.create_element("button");
-                    btn.set_attribute(
-                        "style",
-                        "width:100%; padding:4px 8px; background:#223355; \
-                         color:#99ccff; border:1px solid #3355aa; \
-                         border-radius:3px; cursor:pointer; font-size:12px;",
-                    );
-                    btn.append_child(&__scope.create_text("Fix SDFs"));
-                    let hid = __scope.register_handler({
-                        let cmd = cmd2.clone();
-                        move || {
-                            let _ = cmd.0.send(EditorCommand::FixSdfs {
-                                object_id: eid as u32,
-                            });
-                        }
-                    });
-                    btn.set_attribute("data-rid", &hid.to_string());
-                    btn_row.append_child(&btn);
-                    container.append_child(&btn_row);
-                }
 
                 append_divider(__scope, &container);
             }
@@ -845,7 +795,7 @@ fn build_object_properties(
             .filter(|c| c.parent_id.map(|p| p as u64) == Some(eid))
             .count();
         let has_xf = true;
-        let (show_revoxelize, is_voxelized, is_analytical) = es
+        let (is_voxelized, is_analytical) = es
             .lock()
             .ok()
             .map(|es_lock| {
@@ -864,16 +814,15 @@ fn build_object_properties(
                             obj.root_node.sdf_source,
                             rkf_core::scene_node::SdfSource::Analytical { .. }
                         );
-                        let non_uniform = (obj.scale - glam::Vec3::ONE).length() > 1e-4;
-                        (is_vox && non_uniform, is_vox, is_anal)
+                        (is_vox, is_anal)
                     })
-                    .unwrap_or((false, false, false))
+                    .unwrap_or((false, false))
             })
-            .unwrap_or((false, false, false));
-        (name, child_count, has_xf, show_revoxelize, is_voxelized, is_analytical)
+            .unwrap_or((false, false));
+        (name, child_count, has_xf, is_voxelized, is_analytical)
     });
 
-    if let Some((name, child_count, _has_xf, show_revoxelize, is_voxelized, is_analytical)) = obj_info {
+    if let Some((name, child_count, _has_xf, is_voxelized, is_analytical)) = obj_info {
         // Name.
         let name_row = scope.create_element("div");
         name_row.set_attribute("style", SECTION_STYLE);
@@ -914,31 +863,6 @@ fn build_object_properties(
         };
         let xf_node = rinch::core::untracked(|| transform.render(scope, &[]));
         container.append_child(&xf_node);
-
-        // Re-voxelize button.
-        if show_revoxelize {
-            let btn_row = scope.create_element("div");
-            btn_row.set_attribute("style", "padding: 6px 8px;");
-            let btn = scope.create_element("button");
-            btn.set_attribute(
-                "style",
-                "width:100%; padding:4px 8px; background:#553322; \
-                 color:#ffcc99; border:1px solid #774433; \
-                 border-radius:3px; cursor:pointer; font-size:12px;",
-            );
-            btn.append_child(&scope.create_text("Re-voxelize (bake scale)"));
-            let hid = scope.register_handler({
-                let cmd = cmd.clone();
-                move || {
-                    let _ = cmd.0.send(EditorCommand::Revoxelize {
-                        object_id: eid as u32,
-                    });
-                }
-            });
-            btn.set_attribute("data-rid", &hid.to_string());
-            btn_row.append_child(&btn);
-            container.append_child(&btn_row);
-        }
 
         // Convert to Voxel Object button (analytical primitives only).
         if is_analytical {

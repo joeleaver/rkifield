@@ -123,18 +123,42 @@ impl EditorEngine {
             let local_pos = inv.transform_point3(world_pos);
 
             let dist = match &obj.root_node.sdf_source {
-                SdfSource::Voxelized { brick_map_handle, voxel_size, .. } => {
-                    let exterior = Self::classify_exterior_bricks(
-                        &self.cpu_brick_map_alloc, brick_map_handle,
+                SdfSource::Voxelized { brick_map_handle, voxel_size, aabb } => {
+                    // Simple nearest-voxel lookup from CPU brick pool.
+                    let vs = *voxel_size;
+                    let dims = brick_map_handle.dims;
+                    let grid_size = Vec3::new(
+                        dims.x as f32 * vs * 8.0,
+                        dims.y as f32 * vs * 8.0,
+                        dims.z as f32 * vs * 8.0,
                     );
-                    Self::sample_sdf_cpu(
-                        &self.cpu_brick_pool,
-                        &self.cpu_brick_map_alloc,
-                        brick_map_handle,
-                        *voxel_size,
-                        local_pos,
-                        &exterior,
-                    )
+                    let grid_pos = local_pos + grid_size * 0.5;
+                    let vx = (grid_pos.x / vs).floor() as i32;
+                    let vy = (grid_pos.y / vs).floor() as i32;
+                    let vz = (grid_pos.z / vs).floor() as i32;
+                    let total_x = (dims.x * 8) as i32;
+                    let total_y = (dims.y * 8) as i32;
+                    let total_z = (dims.z * 8) as i32;
+                    if vx < 0 || vy < 0 || vz < 0
+                        || vx >= total_x || vy >= total_y || vz >= total_z
+                    {
+                        // Outside grid — treat as far exterior.
+                        let half = (aabb.max - aabb.min) * 0.5;
+                        (local_pos.abs() - half).max(Vec3::ZERO).length()
+                    } else {
+                        let bx = (vx / 8) as u32;
+                        let by = (vy / 8) as u32;
+                        let bz = (vz / 8) as u32;
+                        let lx = (vx % 8) as u32;
+                        let ly = (vy % 8) as u32;
+                        let lz = (vz % 8) as u32;
+                        match self.cpu_brick_map_alloc.get_entry(brick_map_handle, bx, by, bz) {
+                            Some(slot) if !Self::is_unallocated(slot) => {
+                                self.cpu_brick_pool.get(slot).sample(lx, ly, lz).distance_f32()
+                            }
+                            _ => vs * 2.0,
+                        }
+                    }
                 }
                 SdfSource::Analytical { primitive, .. } => {
                     rkf_core::evaluate_primitive(primitive, local_pos)

@@ -72,20 +72,25 @@ impl EditorEngine {
         let mut all_modified_slots = Vec::new();
 
         for req in edits {
+            log::info!(
+                "sculpt edit: object_id={}, world_pos={:?}, brush_type={:?}, radius={}",
+                req.object_id, req.world_position, req.settings.brush_type, req.settings.radius,
+            );
+
             // 1. Auto-voxelize if analytical.
             self.ensure_object_voxelized(scene, req.object_id);
 
             // 2. Look up the object to get transform + SDF source info.
             let obj = match scene.objects.iter().find(|o| o.id == req.object_id) {
                 Some(o) => o,
-                None => continue,
+                None => { log::warn!("sculpt: object {} not found in scene", req.object_id); continue; },
             };
 
             let (voxel_size, handle, _aabb_min) = match &obj.root_node.sdf_source {
                 SdfSource::Voxelized { voxel_size, brick_map_handle, aabb } => {
                     (*voxel_size, *brick_map_handle, aabb.min)
                 }
-                _ => continue,
+                _ => { log::warn!("sculpt: object {} not voxelized after ensure", req.object_id); continue; },
             };
 
             // 3. Ensure geometry-first data exists for this object.
@@ -93,6 +98,7 @@ impl EditorEngine {
                 log::warn!("No geometry-first data for object {} — skipping sculpt", req.object_id);
                 continue;
             }
+            log::info!("sculpt: voxel_size={}, handle.dims={:?}", voxel_size, handle.dims);
 
             // 4. Transform world position to object-local space.
             let local_pos = crate::sculpt::world_to_object_local_v2(
@@ -180,8 +186,35 @@ impl EditorEngine {
                 }
             }
 
-            // 9. Apply geometry edit — take geo_brick_map out temporarily
-            //    to avoid borrow conflicts with self.
+            // 9. Pre-grow the geometry pool so apply_geometry_edit never
+            //    silently drops bricks due to pool exhaustion.
+            {
+                let brick_size = voxel_size * 8.0;
+                let (edit_min, edit_max) = op.local_aabb();
+                let grid_origin = -Vec3::new(
+                    handle.dims.x as f32 * brick_size * 0.5,
+                    handle.dims.y as f32 * brick_size * 0.5,
+                    handle.dims.z as f32 * brick_size * 0.5,
+                );
+                let bmin = ((edit_min - grid_origin) / brick_size).floor().max(Vec3::ZERO);
+                let bmax = ((edit_max - grid_origin) / brick_size).ceil();
+                let bmax = Vec3::new(
+                    bmax.x.min(handle.dims.x as f32),
+                    bmax.y.min(handle.dims.y as f32),
+                    bmax.z.min(handle.dims.z as f32),
+                );
+                let max_new = ((bmax.x - bmin.x) * (bmax.y - bmin.y) * (bmax.z - bmin.z)) as u32;
+                if self.cpu_geometry_pool.free_count() < max_new {
+                    let new_cap = (self.cpu_geometry_pool.capacity() * 2).max(
+                        self.cpu_geometry_pool.capacity() + max_new,
+                    );
+                    self.cpu_geometry_pool.grow(new_cap);
+                    log::info!("Grew geometry pool to {} for sculpt edit", new_cap);
+                }
+            }
+
+            // 10. Apply geometry edit — take geo_brick_map out temporarily
+            //     to avoid borrow conflicts with self.
             let mut geo_brick_map = {
                 let gfd = self.geometry_first_data.get_mut(&req.object_id).unwrap();
                 std::mem::replace(&mut gfd.geo_brick_map, BrickMap::new(glam::UVec3::ONE))
@@ -194,6 +227,12 @@ impl EditorEngine {
                 &handle,
                 &op,
                 voxel_size,
+            );
+
+            log::info!(
+                "geometry_edit result: modified={}, new={}, removed={}, sdf_region={:?}..{:?}",
+                result.modified_bricks.len(), result.new_bricks.len(), result.removed_bricks.len(),
+                result.sdf_region_min, result.sdf_region_max,
             );
 
             // 10. Allocate SDF cache + brick pool slots for new bricks.
@@ -301,6 +340,12 @@ impl EditorEngine {
             };
 
             // 12. Compute SDF for the affected region.
+            // Only write back SDF to actually-modified bricks — preserve existing
+            // analytical SDF values on margin/untouched bricks.
+            let dirty_set: std::collections::HashSet<glam::UVec3> = result.modified_bricks.iter()
+                .chain(result.new_bricks.iter())
+                .copied()
+                .collect();
             compute_sdf_region(
                 &geo_brick_map,
                 self.cpu_geometry_pool.as_slice(),
@@ -309,31 +354,27 @@ impl EditorEngine {
                 result.sdf_region_min,
                 result.sdf_region_max,
                 voxel_size,
+                Some(&dirty_set),
             );
 
             // Put the brick map back.
             self.geometry_first_data.get_mut(&req.object_id).unwrap().geo_brick_map = geo_brick_map;
 
-            // 13. Convert geometry + SDF → Brick for all modified slots and upload to GPU.
+            // 13. Convert geometry + SDF → Brick for dirty bricks and upload to GPU.
             let mut modified_brick_slots = Vec::new();
 
-            // Collect all bricks in the SDF region that need updating.
             let gfd = self.geometry_first_data.get(&req.object_id).unwrap();
-            for bz in result.sdf_region_min.z..result.sdf_region_max.z {
-                for by in result.sdf_region_min.y..result.sdf_region_max.y {
-                    for bx in result.sdf_region_min.x..result.sdf_region_max.x {
-                        let geo_slot = match gfd.geo_brick_map.get(bx, by, bz) {
-                            Some(s) if s != EMPTY_SLOT && s != INTERIOR_SLOT => s,
-                            _ => continue,
-                        };
-                        if let Some(&(sdf_slot, brick_slot)) = gfd.slot_map.get(&geo_slot) {
-                            let geo = self.cpu_geometry_pool.get(geo_slot);
-                            let cache = self.cpu_sdf_cache_pool.get(sdf_slot);
-                            let brick = Brick::from_geometry(geo, cache);
-                            *self.cpu_brick_pool.get_mut(brick_slot) = brick;
-                            modified_brick_slots.push(brick_slot);
-                        }
-                    }
+            for brick_coord in &dirty_set {
+                let geo_slot = match gfd.geo_brick_map.get(brick_coord.x, brick_coord.y, brick_coord.z) {
+                    Some(s) if s != EMPTY_SLOT && s != INTERIOR_SLOT => s,
+                    _ => continue,
+                };
+                if let Some(&(sdf_slot, brick_slot)) = gfd.slot_map.get(&geo_slot) {
+                    let geo = self.cpu_geometry_pool.get(geo_slot);
+                    let cache = self.cpu_sdf_cache_pool.get(sdf_slot);
+                    let brick = Brick::from_geometry(geo, cache);
+                    *self.cpu_brick_pool.get_mut(brick_slot) = brick;
+                    modified_brick_slots.push(brick_slot);
                 }
             }
 

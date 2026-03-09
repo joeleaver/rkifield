@@ -681,13 +681,6 @@ pub trait AutomationApi: Send + Sync {
         Err(AutomationError::NotImplemented("object_shape"))
     }
 
-    /// Recompute correct SDF magnitudes and signs for a voxelized object from
-    /// its zero-crossings (BFS/FMM re-initialization). Repairs banding and
-    /// inside-out normals caused by accumulated CSG corruption.
-    fn fix_sdfs(&self, _object_id: u32) -> AutomationResult<()> {
-        Err(AutomationError::NotImplemented("fix_sdfs"))
-    }
-
     // --- Material library methods (default: unsupported) ---------------------
 
     /// List all materials in the library with summary info.

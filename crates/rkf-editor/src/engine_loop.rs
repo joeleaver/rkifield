@@ -76,9 +76,6 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         *es.world.scene_mut() = demo_scene;
         es.world.resync_entity_tracking();
 
-        // Fill SDF padding bricks for smooth normals at narrow-band boundaries.
-        engine.init_sdf_padding(es.world.scene_mut());
-
         // Seed editor light list from render lights (point/spot only).
         for rl in &engine.world_lights {
             use crate::light_editor::{SceneLight, SceneLightType};
@@ -201,7 +198,6 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                                             }
                                         }
 
-                                        engine.init_sdf_padding(es.world.scene_mut());
                                     }
                                     log::info!("Last project restored: {project_path_str}");
                                 }
@@ -263,7 +259,6 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         let pending_spatial_query;
         let pending_mcp_sculpt;
         let pending_object_shape;
-        let pending_mcp_fix_sdfs;
         {
             if let Ok(mut ss) = shared_state.lock() {
                 pending_camera = ss.pending_camera.take();
@@ -272,7 +267,6 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                 pending_spatial_query = ss.pending_spatial_query.take();
                 pending_mcp_sculpt = ss.pending_mcp_sculpt.take();
                 pending_object_shape = ss.pending_object_shape.take();
-                pending_mcp_fix_sdfs = ss.pending_fix_sdfs.take();
             } else {
                 pending_camera = None;
                 pending_debug = None;
@@ -280,7 +274,6 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                 pending_spatial_query = None;
                 pending_mcp_sculpt = None;
                 pending_object_shape = None;
-                pending_mcp_fix_sdfs = None;
             }
         }
 
@@ -349,7 +342,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         //    We inline what was formerly `take_engine_snapshot()` to avoid the
         //    intermediate `EngineSnapshot` struct.
         let (
-            camera, f_debug_mode, f_convert_to_voxel, f_revoxelize, f_fix_sdfs, f_remap_material,
+            camera, f_debug_mode, f_convert_to_voxel, f_remap_material,
             f_environment, f_lights,
             mut scene_clone, f_selected, f_gizmo_mode, f_gizmo_axis,
             f_show_grid, f_editor_mode, f_brush_radius,
@@ -386,8 +379,6 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                 es.debug_mode = mode;
             }
             let convert_to_voxel = es.pending_convert_to_voxel.take();
-            let revoxelize = es.pending_revoxelize.take();
-            let fix_sdfs = es.pending_fix_sdfs.take();
             let remap_material = es.pending_remap_material.take();
 
             // Consume undo/redo.
@@ -1015,7 +1006,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             // Reset per-frame deltas last.
             es.reset_frame_deltas();
 
-            (cam, debug_mode, convert_to_voxel, revoxelize, fix_sdfs, remap_material,
+            (cam, debug_mode, convert_to_voxel, remap_material,
              environment, lights,
              scene, sel, gm, gizmo_axis, grid, emode, brush_radius,
              sculpt_edits, sculpt_undo, sculpting_active)
@@ -1067,22 +1058,6 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                 }
             }
             frame_topology_changed = true;
-        }
-
-        // e. Process pending re-voxelize (needs brief lock for scene mutation).
-        if let Some(obj_id) = f_revoxelize {
-            if let Ok(mut es) = editor_state.lock() {
-                engine.process_revoxelize(es.world.scene_mut(), obj_id);
-            }
-            frame_dirty_objects.push(obj_id);
-        }
-
-        // e1. Process pending Fix SDFs (BFS SDF re-initialization).
-        if let Some(obj_id) = f_fix_sdfs {
-            if let Ok(mut es) = editor_state.lock() {
-                engine.process_fix_sdfs(es.world.scene_mut(), obj_id);
-            }
-            frame_dirty_objects.push(obj_id);
         }
 
         // e1b. Process pending material remap (no lock needed — reads scene from extracted clone).
@@ -1295,21 +1270,6 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                     }
                 }
             }
-        }
-
-        // e8. Process pending MCP fix_sdfs request.
-        if let Some(obj_id) = pending_mcp_fix_sdfs {
-            let ok = engine.process_fix_sdfs(&mut scene_clone, obj_id);
-            if let Ok(mut ss) = shared_state.lock() {
-                if ok {
-                    ss.fix_sdfs_result = Some(Ok(()));
-                } else {
-                    ss.fix_sdfs_result = Some(Err(format!(
-                        "fix_sdfs: object {obj_id} not found or not voxelized"
-                    )));
-                }
-            }
-            frame_dirty_objects.push(obj_id);
         }
 
         // f. Apply incremental dirty tracking to the engine.
@@ -1539,6 +1499,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             let brush_hit = shared_state.lock().ok()
                 .and_then(|mut ss| ss.brush_hit_result.take());
             if let Some(hit) = brush_hit {
+                log::info!("brush_hit: pos={:?}, object_id={}", hit.position, hit.object_id);
                 let (left_down, mode, selected_obj_id) = editor_state.lock().ok()
                     .map(|es| {
                         let sel_id = match es.selected_entity {
@@ -1551,6 +1512,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
 
                 // Only allow sculpt/paint on the currently selected object.
                 let hit_on_selected = selected_obj_id == Some(hit.object_id);
+                log::info!("brush dispatch: left_down={}, mode={:?}, selected={:?}, hit_on_selected={}", left_down, mode, selected_obj_id, hit_on_selected);
 
                 if left_down {
                     if let Ok(mut es) = editor_state.lock() {
@@ -2012,13 +1974,6 @@ fn apply_editor_command(es: &mut EditorState, cmd: EditorCommand) {
         ConvertToVoxel { object_id } => {
             es.pending_convert_to_voxel = Some(object_id);
         }
-        Revoxelize { object_id } => {
-            es.pending_revoxelize = Some(object_id);
-        }
-        FixSdfs { object_id } => {
-            es.pending_fix_sdfs = Some(object_id);
-        }
-
         // ── Animation ────────────────────────────────────────────
         SetAnimationState { state } => {
             es.animation.playback_state = match state {

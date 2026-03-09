@@ -674,13 +674,6 @@ pub struct EditorState {
     /// Set by "Convert to Voxel Object" button. Contains the object ID
     /// of an analytical primitive to convert to geometry-first voxelized form.
     pub pending_convert_to_voxel: Option<u32>,
-    /// Set by "Re-voxelize" button in properties panel. Contains the object ID
-    /// of the voxelized object whose brick map should be resampled at the
-    /// current non-uniform scale, resetting scale to (1,1,1) afterwards.
-    pub pending_revoxelize: Option<u32>,
-    /// Set by "Fix SDFs" button in sculpt panel. Contains the object ID whose
-    /// SDF magnitudes should be recomputed from zero-crossings via BFS.
-    pub pending_fix_sdfs: Option<u32>,
     /// Set by material drag-and-drop in object properties panel.
     /// Contains (object_id, from_material, to_material).
     pub pending_remap_material: Option<(u64, u16, u16)>,

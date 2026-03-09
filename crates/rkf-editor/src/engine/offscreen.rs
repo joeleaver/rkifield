@@ -298,8 +298,6 @@ impl EditorEngine {
             &ctx.device, vp_w, vp_h,
         );
 
-        let jfa_sdf = crate::jfa_sdf::JfaSdfPass::new(&ctx.device);
-        let eikonal_repair = crate::eikonal_repair::EikonalRepairPass::new(&ctx.device);
         let gpu_profiler = rkf_render::gpu_profiler::GpuProfiler::new(
             &ctx.device, &ctx.queue,
         );
@@ -382,8 +380,6 @@ impl EditorEngine {
             cpu_geometry_pool: rkf_core::brick_pool::GeometryPool::new(256),
             cpu_sdf_cache_pool: rkf_core::brick_pool::SdfCachePool::new(256),
             geometry_first_data: std::collections::HashMap::new(),
-            jfa_sdf,
-            eikonal_repair,
             // Incremental update cache — first frame triggers full rebuild.
             cached_gpu_objects: Vec::new(),
             cached_bvh: None,
