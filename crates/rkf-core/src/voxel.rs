@@ -116,6 +116,26 @@ impl VoxelSample {
     pub fn has_color_data(&self) -> bool {
         self.flags() & FLAG_HAS_COLOR_DATA != 0
     }
+
+    /// Construct a voxel from geometry-first data.
+    ///
+    /// `distance_f16_bits` is the raw f16 bits from [`SdfCache`].
+    /// `material_id` is a u8 (geometry-first uses 256 materials max).
+    /// `color` is RGBA8 from the surface voxel (white = no tint).
+    ///
+    /// word0: f16 distance | (material_id << 16)
+    /// word1: RGBA8 packed (R=byte0, G=byte1, B=byte2, A=byte3)
+    pub fn from_geometry_data(distance_f16_bits: u16, material_id: u8, color: [u8; 4]) -> Self {
+        let word0 = (distance_f16_bits as u32) | ((material_id as u32) << 16);
+        let word1 = u32::from_le_bytes(color);
+        Self { word0, word1 }
+    }
+
+    /// Extract per-voxel RGBA8 color from word1 (geometry-first format).
+    #[inline]
+    pub fn color(&self) -> [u8; 4] {
+        self.word1.to_le_bytes()
+    }
 }
 
 impl Default for VoxelSample {

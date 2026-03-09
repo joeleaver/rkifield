@@ -290,6 +290,11 @@ fn extract_distance(word0: u32) -> f32 {
     return unpack2x16float(word0).x;
 }
 
+/// Extract per-voxel RGBA color from word1 (geometry-first: surface voxel color).
+fn extract_voxel_color(word1: u32) -> vec4<f32> {
+    return unpack4x8unorm(word1);
+}
+
 // ---------- SDF Primitives ----------
 
 fn sdf_sphere(p: vec3<f32>, radius: f32) -> f32 {
@@ -393,6 +398,32 @@ fn sample_voxelized(local_pos: vec3<f32>, obj: GpuObject) -> f32 {
     let c0 = mix(c00, c10, t.y);
     let c1 = mix(c01, c11, t.y);
     return mix(c0, c1, t.z) + outside_dist;
+}
+
+/// Sample per-voxel RGBA color from a voxelized object at a local-space position.
+/// Returns vec4(1.0) (white) if the position is outside the grid or in an empty/interior slot.
+fn sample_voxelized_color(local_pos: vec3<f32>, obj: GpuObject) -> vec4<f32> {
+    let vs = obj.voxel_size;
+    let brick_extent = vs * 8.0;
+    let dims = vec3<u32>(obj.brick_map_dims_x, obj.brick_map_dims_y, obj.brick_map_dims_z);
+    let grid_size = vec3<f32>(dims) * brick_extent;
+    let grid_pos = local_pos + grid_size * 0.5;
+
+    if any(grid_pos < vec3<f32>(0.0)) || any(grid_pos >= grid_size) {
+        return vec4<f32>(1.0);
+    }
+
+    let voxel_coord = grid_pos / vs;
+    let vc = clamp(vec3<i32>(floor(voxel_coord)), vec3<i32>(0), vec3<i32>(dims) * 8 - vec3<i32>(1));
+    let brick = vec3<u32>(vc / vec3<i32>(8));
+    let local = vec3<u32>(vc % vec3<i32>(8));
+    let flat_brick = brick.x + brick.y * dims.x + brick.z * dims.x * dims.y;
+    let slot = brick_maps[obj.brick_map_offset + flat_brick];
+    if slot == EMPTY_SLOT || slot == INTERIOR_SLOT {
+        return vec4<f32>(1.0);
+    }
+    let idx = slot * 512u + local.x + local.y * 8u + local.z * 64u;
+    return extract_voxel_color(brick_pool[idx].word1);
 }
 
 /// Evaluate a single object at a world-space position. Returns world-space distance.

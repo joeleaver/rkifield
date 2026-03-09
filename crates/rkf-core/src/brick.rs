@@ -7,7 +7,9 @@
 //! Use [`brick_index`] to convert 3D coordinates to a flat array index, then
 //! [`Brick::sample`] / [`Brick::set`] for typed access.
 
+use crate::brick_geometry::BrickGeometry;
 use crate::constants::BRICK_DIM;
+use crate::sdf_cache::SdfCache;
 use crate::voxel::VoxelSample;
 use bytemuck::{Pod, Zeroable};
 
@@ -106,6 +108,37 @@ impl Brick {
     pub fn set(&mut self, x: u32, y: u32, z: u32, sample: VoxelSample) {
         self.voxels[Self::index(x, y, z)] = sample;
     }
+
+    /// Convert geometry-first data (BrickGeometry + SdfCache) to GPU-ready Brick.
+    ///
+    /// Populates word0 with f16 distance + material_id and word1 with RGBA8 color.
+    /// Surface voxels get their material_id and color from the surface voxel list.
+    /// Non-surface voxels get material_id=0 and color=white (255,255,255,255).
+    pub fn from_geometry(geo: &BrickGeometry, cache: &SdfCache) -> Self {
+        let mut brick = Self::default();
+
+        // Build per-voxel lookup from surface voxel list.
+        // Index 512 is small enough for a fixed array.
+        let mut surface_mat: [u8; 512] = [0; 512];
+        let mut surface_color: [[u8; 4]; 512] = [[255, 255, 255, 255]; 512];
+        for sv in &geo.surface_voxels {
+            let idx = sv.index as usize;
+            if idx < 512 {
+                surface_mat[idx] = sv.material_id;
+                surface_color[idx] = sv.color;
+            }
+        }
+
+        for i in 0..512 {
+            brick.voxels[i] = VoxelSample::from_geometry_data(
+                cache.distances[i],
+                surface_mat[i],
+                surface_color[i],
+            );
+        }
+
+        brick
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -195,6 +228,55 @@ mod tests {
         let bytes: &[u8] = bytemuck::bytes_of(&brick);
         assert_eq!(bytes.len(), 4096);
         assert!(bytes.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn from_geometry_roundtrip() {
+        use crate::brick_geometry::BrickGeometry;
+        use crate::sdf_cache::SdfCache;
+
+        // Create geometry with a few solid voxels and surface data
+        let mut geo = BrickGeometry::new();
+        for z in 0..4u8 {
+            for y in 0..8u8 {
+                for x in 0..8u8 {
+                    geo.set_solid(x, y, z, true);
+                }
+            }
+        }
+        geo.rebuild_surface_list();
+        // Paint some surface voxels
+        if let Some(sv) = geo.surface_voxels.first_mut() {
+            sv.material_id = 5;
+            sv.color = [200, 100, 50, 255];
+        }
+
+        // Create SDF cache with distances
+        let mut cache = SdfCache::empty();
+        cache.set_distance(0, 0, 0, -1.0);
+        cache.set_distance(7, 7, 7, 2.0);
+
+        let brick = Brick::from_geometry(&geo, &cache);
+
+        // Verify distance at (0,0,0) — should be close to -1.0
+        let v000 = brick.sample(0, 0, 0);
+        assert!((v000.distance_f32() - (-1.0)).abs() < 0.01, "distance at (0,0,0): {}", v000.distance_f32());
+
+        // Verify distance at (7,7,7) — should be close to 2.0
+        let v777 = brick.sample(7, 7, 7);
+        assert!((v777.distance_f32() - 2.0).abs() < 0.01, "distance at (7,7,7): {}", v777.distance_f32());
+
+        // Verify painted surface voxel has correct material and color
+        let first_sv_idx = geo.surface_voxels.first().unwrap().index;
+        let (sx, sy, sz) = crate::brick_geometry::index_to_xyz(first_sv_idx);
+        let sv_voxel = brick.sample(sx as u32, sy as u32, sz as u32);
+        assert_eq!(sv_voxel.material_id(), 5);
+        assert_eq!(sv_voxel.color(), [200, 100, 50, 255]);
+
+        // Non-surface voxel should have material 0 and white color
+        // (7,7,7) is exterior, should be default
+        assert_eq!(v777.material_id(), 0);
+        assert_eq!(v777.color(), [255, 255, 255, 255]);
     }
 
     #[test]

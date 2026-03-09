@@ -162,7 +162,12 @@ fn extract_distance(word0: u32) -> f32 {
 }
 
 fn extract_material_id(word0: u32) -> u32 {
-    return word0 >> 16u;
+    return (word0 >> 16u) & 0xFFu;
+}
+
+/// Extract per-voxel RGBA color from word1 (geometry-first: surface voxel color).
+fn extract_voxel_color(word1: u32) -> vec4<f32> {
+    return unpack4x8unorm(word1);
 }
 
 // ---------- SDF Primitives ----------

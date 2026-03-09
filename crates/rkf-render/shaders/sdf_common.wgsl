@@ -26,8 +26,8 @@ const MAX_FLOAT: f32 = 3.402823e+38;
 // ---------- GPU Structs ----------
 
 struct VoxelSample {
-    word0: u32, // lower 16 = f16 distance, upper 16 = u16 material_id
-    word1: u32, // byte0 = blend_weight, byte1 = secondary_id, byte2 = flags, byte3 = reserved
+    word0: u32, // lower 16 = f16 distance (from SdfCache), upper 8 = u8 material_id
+    word1: u32, // RGBA8 per-voxel color (from surface voxels, geometry-first)
 }
 
 struct GpuObject {
@@ -99,7 +99,12 @@ fn extract_distance(word0: u32) -> f32 {
 }
 
 fn extract_material_id(word0: u32) -> u32 {
-    return word0 >> 16u;
+    return (word0 >> 16u) & 0xFFu;
+}
+
+/// Extract per-voxel RGBA color from word1 (geometry-first: surface voxel color).
+fn extract_voxel_color(word1: u32) -> vec4<f32> {
+    return unpack4x8unorm(word1);
 }
 
 fn extract_blend_weight(word1: u32) -> f32 {

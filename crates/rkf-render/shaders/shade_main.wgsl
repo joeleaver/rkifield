@@ -48,12 +48,25 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
     let blend_weight = normal_data.w;
 
     let packed_mat = textureLoad(gbuf_material, coord, 0).r;
-    let material_id = packed_mat & 0xFFFFu;
-    let secondary_id = (packed_mat >> 16u) & 0xFFu;
+    let material_id = packed_mat & 0xFFu;
+    let object_id_bits = (packed_mat >> 24u) & 0xFFu;
 
-    // Resolve material with blending
-    let resolved = blend_materials(material_id, secondary_id, blend_weight);
+    // Resolve material from table (geometry-first: u8 material_id, no blending)
+    let resolved = resolve_material_from(materials[material_id]);
     var albedo = resolved.albedo;
+
+    // Per-voxel color modulation (geometry-first: surface voxel RGBA tints albedo)
+    if object_id_bits > 0u {
+        let color_obj = objects[object_id_bits - 1u];
+        if color_obj.sdf_type == SDF_TYPE_VOXELIZED {
+            let local_pos = (color_obj.inverse_world * vec4<f32>(world_pos, 1.0)).xyz;
+            let voxel_color = sample_voxelized_color(local_pos, color_obj);
+            // White (1,1,1) = no tint. Any other color modulates albedo.
+            if voxel_color.a > 0.01 {
+                albedo = albedo * voxel_color.rgb;
+            }
+        }
+    }
     var roughness = clamp(resolved.roughness, 0.04, 1.0);
     let metallic = resolved.metallic;
 
