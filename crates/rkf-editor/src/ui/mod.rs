@@ -777,6 +777,9 @@ pub fn editor_ui() -> NodeHandle {
                 style: {
                     let backing = backing_for_surface.clone();
                     move || {
+                        // Subscribe to structure_rev so we re-evaluate when
+                        // containers are collapsed/expanded/zones added/removed.
+                        let _ = layout_for_surface.structure_rev.get();
                         let lw = layout_for_surface.left_width.get();
                         let rw = layout_for_surface.right_width.get();
                         let bh = layout_for_surface.bottom_height.get();

@@ -256,6 +256,55 @@ impl LayoutState {
         self.bump_structure();
     }
 
+    /// Ensure a panel is visible. If already docked and its container is
+    /// visible, activate the tab. If the container is collapsed (user hid it),
+    /// or the panel isn't in the layout at all, spawn it as a floating panel
+    /// so we don't override the user's decision to hide that area.
+    pub fn ensure_panel(&self, backing: &LayoutBacking, panel: PanelId) {
+        use super::FloatingPanelConfig;
+
+        let mut cfg = self.read_config(backing);
+
+        // Already floating — nothing to do.
+        if cfg.floating.iter().any(|f| f.panel == panel) {
+            return;
+        }
+
+        if let Some((ck, zi, ti)) = cfg.find_panel(panel) {
+            let collapsed = cfg.container_mut(ck).map_or(true, |c| c.collapsed);
+            if !collapsed {
+                // Container is visible — just activate the tab.
+                if let Some(c) = cfg.container_mut(ck) {
+                    if let Some(zone) = c.zones.get_mut(zi) {
+                        zone.active_tab = ti;
+                    }
+                }
+                backing.store(cfg);
+                self.tab_rev.update(|r| *r += 1);
+                return;
+            }
+            // Container is collapsed — remove the panel and float it instead.
+            super::operations::remove_tab(&mut cfg, panel).ok();
+            super::operations::cleanup_empty_zones(&mut cfg);
+        }
+
+        // Panel is not visible — spawn as floating.
+        let (w, h) = rinch::core::untracked(|| self.window_size.get());
+        let fw = 300.0_f32;
+        let fh = 400.0_f32;
+        let fx = (w * 0.5 - fw * 0.5).max(40.0);
+        let fy = (h * 0.5 - fh * 0.5).max(60.0);
+        cfg.floating.push(FloatingPanelConfig {
+            panel,
+            x: fx,
+            y: fy,
+            width: fw,
+            height: fh,
+        });
+        backing.store(cfg);
+        self.bump_structure();
+    }
+
     /// Update zone size fractions (zone splitter drag). Bumps `structure_rev`.
     pub fn set_zone_fractions(
         &self,

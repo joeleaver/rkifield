@@ -290,6 +290,20 @@ pub fn TitleBar() -> NodeHandle {
         }));
     }
 
+    // Panels submenu — open/focus any panel by name.
+    use crate::layout::PanelId;
+    let mut panels_menu = Menu::new();
+    for &panel in PanelId::ALL {
+        panels_menu = panels_menu.item(MenuItem::new(panel.display_name()).on_click({
+            let backing = layout_backing.clone();
+            move || {
+                layout.ensure_panel(&backing, panel);
+            }
+        }));
+    }
+    view_menu = view_menu.separator();
+    view_menu = view_menu.submenu("Panels", panels_menu);
+
     // ── Build DOM for each top-level menu ──────────────────────────────
     let menus: &[(&str, &Menu)] = &[
         ("File", &file_menu),
@@ -390,7 +404,73 @@ pub fn TitleBar() -> NodeHandle {
                     sep.set_attribute("class", "rinch-app-menu-separator");
                     dropdown.append_child(&sep);
                 }
-                MenuEntryRef::Submenu { .. } => {}
+                MenuEntryRef::Submenu { label, menu: submenu } => {
+                    let sub_node = __scope.create_element("div");
+                    sub_node.set_attribute("class", "rinch-app-menu-submenu");
+
+                    let trigger = __scope.create_element("div");
+                    trigger.set_attribute("class", "rinch-app-menu-submenu__trigger");
+
+                    let lbl = __scope.create_element("span");
+                    lbl.set_attribute("class", "rinch-app-menu-submenu__label");
+                    lbl.append_child(&__scope.create_text(label));
+                    trigger.append_child(&lbl);
+
+                    let arrow = __scope.create_element("span");
+                    arrow.set_attribute("class", "rinch-app-menu-submenu__arrow");
+                    arrow.append_child(&__scope.create_text("\u{203A}"));
+                    trigger.append_child(&arrow);
+                    sub_node.append_child(&trigger);
+
+                    let nested = __scope.create_element("div");
+                    nested.set_attribute("class", "rinch-app-menu-submenu__dropdown");
+                    for sub_entry in submenu.iter_entries() {
+                        match sub_entry {
+                            MenuEntryRef::Item { label, shortcut, enabled, callback } => {
+                                let entry_node = __scope.create_element("div");
+                                let cls = if enabled {
+                                    "rinch-app-menu-entry"
+                                } else {
+                                    "rinch-app-menu-entry rinch-app-menu-entry--disabled"
+                                };
+                                entry_node.set_attribute("class", cls);
+
+                                let lbl = __scope.create_element("span");
+                                lbl.set_attribute("class", "rinch-app-menu-entry__label");
+                                lbl.append_child(&__scope.create_text(label));
+                                entry_node.append_child(&lbl);
+
+                                if let Some(sc) = shortcut {
+                                    let sc_span = __scope.create_element("span");
+                                    sc_span.set_attribute("class", "rinch-app-menu-entry__shortcut");
+                                    sc_span.append_child(&__scope.create_text(sc));
+                                    entry_node.append_child(&sc_span);
+                                }
+
+                                if enabled {
+                                    if let Some(cb) = callback {
+                                        let cb = std::rc::Rc::clone(cb);
+                                        let hid = __scope.register_handler(move || {
+                                            active_menu.set(-1);
+                                            cb();
+                                        });
+                                        entry_node.set_attribute("data-rid", &hid.to_string());
+                                    }
+                                }
+
+                                nested.append_child(&entry_node);
+                            }
+                            MenuEntryRef::Separator => {
+                                let sep = __scope.create_element("div");
+                                sep.set_attribute("class", "rinch-app-menu-separator");
+                                nested.append_child(&sep);
+                            }
+                            _ => {}
+                        }
+                    }
+                    sub_node.append_child(&nested);
+                    dropdown.append_child(&sub_node);
+                }
             }
         }
 

@@ -43,6 +43,22 @@ pub enum PanelCategory {
 }
 
 impl PanelId {
+    /// All panel variants, for iteration (e.g. building View > Panels menu).
+    pub const ALL: &[PanelId] = &[
+        Self::SceneTree,
+        Self::ObjectProperties,
+        Self::AssetProperties,
+        Self::SculptSettings,
+        Self::PaintSettings,
+        Self::Materials,
+        Self::Shaders,
+        Self::Console,
+        Self::DebugOverlay,
+        Self::SceneView,
+        Self::GameView,
+        Self::AnimationEditor,
+    ];
+
     /// Get the category of this panel.
     pub fn category(self) -> PanelCategory {
         match self {
