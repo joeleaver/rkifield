@@ -23,7 +23,7 @@ glam = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 anyhow = { workspace = true }
-rinch = { workspace = true, features = ["desktop", "components", "theme", "debug"] }
+rinch = { workspace = true, features = ["desktop", "gpu", "components", "theme", "debug"] }
 rinch-platform = { workspace = true }
 rinch-tabler-icons = { workspace = true }
 pollster = { workspace = true }

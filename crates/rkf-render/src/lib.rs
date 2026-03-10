@@ -106,6 +106,8 @@ pub mod brick_clouds;
 pub mod wireframe;
 /// GPU timestamp profiler for per-pass timing.
 pub mod gpu_profiler;
+/// Material preview renderer — self-contained GPU pipeline for 128x128 thumbnails.
+pub mod material_preview;
 
 pub use camera::{Camera, CameraUniforms};
 pub use context::RenderContext;

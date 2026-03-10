@@ -91,6 +91,9 @@ pub struct LayoutState {
     pub window_size: Signal<(f32, f32)>,
     /// Cursor position during tab drag (for ghost overlay). None when not dragging.
     pub drag_cursor: Signal<Option<(f32, f32)>>,
+    /// Bumped on zone fraction changes (splitter drag). Zone divs subscribe
+    /// to this to update their flex CSS without a full tree rebuild.
+    pub zone_frac_rev: Signal<u64>,
 }
 
 // ─── Cross-thread backing store ──────────────────────────────────────────────
@@ -173,6 +176,7 @@ impl LayoutState {
             drop_target: Signal::new(None),
             window_size: Signal::new((window_width, window_height)),
             drag_cursor: Signal::new(None),
+            zone_frac_rev: Signal::new(0),
         }
     }
 
@@ -305,7 +309,8 @@ impl LayoutState {
         self.bump_structure();
     }
 
-    /// Update zone size fractions (zone splitter drag). Bumps `structure_rev`.
+    /// Update zone size fractions (zone splitter drag). Bumps `zone_frac_rev`
+    /// only — zone divs update their flex CSS reactively without a full tree rebuild.
     pub fn set_zone_fractions(
         &self,
         backing: &LayoutBacking,
@@ -325,7 +330,7 @@ impl LayoutState {
             }
         }
         backing.store(cfg);
-        self.bump_structure();
+        self.zone_frac_rev.update(|r| *r += 1);
     }
 
     /// Split a zone by dropping a tab on an edge. Bumps `structure_rev`.
@@ -527,8 +532,9 @@ impl LayoutState {
 
     fn bump_structure(&self) {
         self.structure_rev.update(|r| *r += 1);
-        // Structure changes may invalidate active tab indices,
-        // so also bump tab_rev so content areas re-check.
-        self.tab_rev.update(|r| *r += 1);
+        // No need to bump tab_rev — structure_rev triggers a full layout
+        // rebuild which recreates all content areas from scratch. Bumping
+        // both in sequence causes a re-entrant RefCell borrow panic when
+        // disposing child scopes during effect flush.
     }
 }

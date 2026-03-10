@@ -27,7 +27,7 @@ pub struct ObjectSummary {
 }
 
 /// Lightweight summary of a material slot for UI display.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MaterialSummary {
     pub slot: u16,
     pub name: String,
@@ -58,7 +58,7 @@ pub struct LightSummary {
 }
 
 /// Lightweight summary of a shader for UI display.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ShaderSummary {
     pub name: String,
     pub id: u32,

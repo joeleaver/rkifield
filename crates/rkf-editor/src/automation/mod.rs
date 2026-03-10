@@ -108,6 +108,12 @@ pub struct SharedState {
     pub object_shape_result: Option<rkf_core::automation::ObjectShapeResult>,
     /// Available shader model names (published by engine thread from ShaderComposer).
     pub shader_names: Vec<(String, u32, bool)>,
+    /// Which material slot to preview (None = no preview).
+    pub preview_material_slot: Option<u16>,
+    /// Preview primitive type: 0=sphere, 1=box, 2=capsule, 3=torus, 4=cylinder, 5=plane.
+    pub preview_primitive_type: u32,
+    /// Whether the preview needs re-rendering.
+    pub preview_dirty: bool,
 }
 
 /// Request for a voxel slice diagnostic.
@@ -172,6 +178,9 @@ impl SharedState {
             pending_object_shape: None,
             object_shape_result: None,
             shader_names: Vec::new(),
+            preview_material_slot: None,
+            preview_primitive_type: 0,
+            preview_dirty: false,
         }
     }
 

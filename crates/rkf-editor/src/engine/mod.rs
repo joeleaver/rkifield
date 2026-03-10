@@ -389,6 +389,8 @@ pub struct EditorEngine {
     pub(crate) shader_composer: ShaderComposer,
     /// Last shader compile error for status bar display (cleared on success).
     pub(crate) shader_error: Option<String>,
+    /// Material preview renderer — renders a small preview of a single material on a primitive.
+    pub(crate) material_preview: rkf_render::material_preview::MaterialPreviewRenderer,
 }
 
 impl EditorEngine {

@@ -1,14 +1,16 @@
 //! Right panel — composes property components with fine-grained reactivity.
 //!
-//! Each section (camera, environment, object, light, material) is its own
-//! component that tracks only its relevant signals. The panels here dispatch
-//! to those components based on selection and editor mode.
+//! Uses rsx! with reactive if/match for conditional rendering. Each section
+//! (camera, environment, object, light, material) is its own component that
+//! tracks only its relevant signals.
 
 use std::sync::{Arc, Mutex};
 
 use rinch::prelude::*;
+use rinch::render_surface::RenderSurface;
 
 use crate::editor_state::{EditorMode, EditorState, SelectedEntity, SliderSignals, UiSignals};
+use crate::PreviewSurfaceHandle;
 use crate::CommandSender;
 
 use super::camera_properties::CameraProperties;
@@ -30,134 +32,109 @@ use super::{LABEL_STYLE, SECTION_STYLE, VALUE_STYLE};
 pub fn RightPanel() -> NodeHandle {
     let ui = use_context::<UiSignals>();
     let editor_state = use_context::<Arc<Mutex<EditorState>>>();
+    let preview_handle = use_context::<PreviewSurfaceHandle>();
 
-    let root = __scope.create_element("div");
-    root.set_attribute(
-        "style",
-        "flex:1;overflow-y:scroll;min-height:0;height:0;",
-    );
+    rsx! {
+        div { style: "flex:1;overflow-y:scroll;min-height:0;height:0;display:flex;flex-direction:column;",
 
-    let es = editor_state.clone();
-    rinch::core::reactive_component_dom(__scope, &root, move |__scope| {
-        // Only track signals that affect WHICH components to show.
-        let _ = ui.selection.get();
-        let _ = ui.editor_mode.get();
-        let _ = ui.properties_tab.get();
-        let _ = ui.selected_material.get();
-        let _ = ui.selected_shader.get();
-
-        let mode = ui.editor_mode.get();
-        let selected_entity = ui.selection.get();
-        let active_tab = ui.properties_tab.get();
-
-        let container = __scope.create_element("div");
-        container.set_attribute("style", "display:flex;flex-direction:column;");
-
-        // ── Tool-specific settings (when Sculpt/Paint active) ──
-        match mode {
-            EditorMode::Sculpt => {
-                let panel = SculptPanel::default();
-                container.append_child(&panel.render(__scope, &[]));
-                append_divider(__scope, &container);
+            // ── Material preview surface ──
+            RenderSurface { surface: Some(preview_handle.0.clone()),
+                style: {
+                    let ui = ui;
+                    move || {
+                        let show = ui.properties_tab.get() == 1
+                            && ui.selected_material.get().is_some();
+                        if show {
+                            "flex-shrink:0;width:200px;height:200px;\
+                             align-self:center;\
+                             border-radius:4px;\
+                             border:1px solid var(--rinch-color-border);\
+                             overflow:hidden;margin:8px auto;"
+                        } else {
+                            "width:0;height:0;overflow:hidden;"
+                        }
+                    }
+                },
             }
-            EditorMode::Paint => {
-                let panel = PaintPanel::default();
-                container.append_child(&panel.render(__scope, &[]));
-                append_divider(__scope, &container);
+
+            // ── Tool-specific settings (Sculpt/Paint) ──
+            if matches!(ui.editor_mode.get(), EditorMode::Sculpt) {
+                SculptPanel {}
+                div { style: {super::DIVIDER_STYLE} }
             }
-            EditorMode::Default => {}
+            if matches!(ui.editor_mode.get(), EditorMode::Paint) {
+                PaintPanel {}
+                div { style: {super::DIVIDER_STYLE} }
+            }
+
+            // ── Tab bar ──
+            {build_tab_bar(__scope, ui)}
+
+            // ── Tab content ──
+            if ui.properties_tab.get() == 0 {
+                // Object tab
+                {build_entity_content(__scope, ui, &editor_state)}
+            }
+            if ui.properties_tab.get() == 1 {
+                // Asset tab
+                {build_asset_content(__scope, ui)}
+            }
         }
-
-        // ── Tab bar ──
-        let tab_bar = build_tab_bar(__scope, ui, active_tab);
-        container.append_child(&tab_bar);
-
-        if active_tab == 0 {
-            // ── Object tab ──
-            build_entity_content(__scope, &container, selected_entity, &ui, &es);
-        } else {
-            // ── Asset tab ──
-            build_asset_content(__scope, &container, &ui);
-        }
-
-        container
-    });
-
-    root
+    }
 }
 
 // ── Standalone panel components for zone-based layout ───────────────────────
 
 /// Object Properties panel — dispatches to entity-specific components.
-///
-/// Each entity type (camera, object, light) is rendered by its own component
-/// with fine-grained reactivity — toggling fog doesn't rebuild object properties.
 #[component]
 pub fn PropertiesPanel() -> NodeHandle {
     let ui = use_context::<UiSignals>();
     let editor_state = use_context::<Arc<Mutex<EditorState>>>();
 
-    let root = __scope.create_element("div");
-    root.set_attribute("style", "display:flex;flex-direction:column;");
-
-    let es = editor_state.clone();
-    rinch::core::reactive_component_dom(__scope, &root, move |__scope| {
-        // Only track selection and editor mode — NOT toggles.
-        let _ = ui.selection.get();
-        let _ = ui.editor_mode.get();
-
-        let mode = ui.editor_mode.get();
-        let selected_entity = ui.selection.get();
-
-        let container = __scope.create_element("div");
-        container.set_attribute("style", "display:flex;flex-direction:column;");
-
-        // ── Tool-specific settings ──
-        match mode {
-            EditorMode::Sculpt => {
-                let panel = SculptPanel::default();
-                container.append_child(&panel.render(__scope, &[]));
-                append_divider(__scope, &container);
+    rsx! {
+        div { style: "display:flex;flex-direction:column;",
+            if matches!(ui.editor_mode.get(), EditorMode::Sculpt) {
+                SculptPanel {}
+                div { style: {super::DIVIDER_STYLE} }
             }
-            EditorMode::Paint => {
-                let panel = PaintPanel::default();
-                container.append_child(&panel.render(__scope, &[]));
-                append_divider(__scope, &container);
+            if matches!(ui.editor_mode.get(), EditorMode::Paint) {
+                PaintPanel {}
+                div { style: {super::DIVIDER_STYLE} }
             }
-            EditorMode::Default => {}
+            {build_entity_content(__scope, ui, &editor_state)}
         }
-
-        // ── Entity properties ──
-        build_entity_content(__scope, &container, selected_entity, &ui, &es);
-
-        container
-    });
-
-    root
+    }
 }
 
-/// Asset Properties panel — shows material or shader properties.
+/// Asset Properties panel — shows material or shader properties,
+/// with a material preview surface at the top.
 #[component]
 pub fn AssetPropertiesPanel() -> NodeHandle {
     let ui = use_context::<UiSignals>();
+    let preview_handle = use_context::<PreviewSurfaceHandle>();
 
-    let root = __scope.create_element("div");
-    root.set_attribute("style", "display:flex;flex-direction:column;");
-
-    rinch::core::reactive_component_dom(__scope, &root, move |__scope| {
-        let _ = ui.selected_material.get();
-        let _ = ui.selected_shader.get();
-        let _ = ui.materials.get();
-
-        let container = __scope.create_element("div");
-        container.set_attribute("style", "display:flex;flex-direction:column;");
-
-        build_asset_content(__scope, &container, &ui);
-
-        container
-    });
-
-    root
+    rsx! {
+        div { style: "display:flex;flex-direction:column;",
+            // Material preview — visible when a material is selected.
+            RenderSurface { surface: Some(preview_handle.0.clone()),
+                style: {
+                    let ui = ui;
+                    move || {
+                        if ui.selected_material.get().is_some() {
+                            "flex-shrink:0;width:200px;height:200px;\
+                             align-self:center;\
+                             border-radius:4px;\
+                             border:1px solid var(--rinch-color-border);\
+                             overflow:hidden;margin:8px auto;"
+                        } else {
+                            "width:0;height:0;overflow:hidden;"
+                        }
+                    }
+                },
+            }
+            {build_asset_content(__scope, ui)}
+        }
+    }
 }
 
 /// Sculpt settings panel — brush type, radius, strength, falloff.
@@ -244,14 +221,8 @@ pub fn PaintPanel() -> NodeHandle {
 
 // ── Shared helpers ──────────────────────────────────────────────────────────
 
-fn append_divider(scope: &mut RenderScope, container: &NodeHandle) {
-    let div = scope.create_element("div");
-    div.set_attribute("style", super::DIVIDER_STYLE);
-    container.append_child(&div);
-}
-
-/// Build the Object/Asset tab bar.
-fn build_tab_bar(scope: &mut RenderScope, ui: UiSignals, active_tab: u32) -> NodeHandle {
+/// Build the Object/Asset tab bar with reactive active-tab styling.
+fn build_tab_bar(scope: &mut RenderScope, ui: UiSignals) -> NodeHandle {
     let tab_bar = scope.create_element("div");
     tab_bar.set_attribute(
         "style",
@@ -260,19 +231,25 @@ fn build_tab_bar(scope: &mut RenderScope, ui: UiSignals, active_tab: u32) -> Nod
     );
     for (idx, label) in [(0u32, "Object"), (1u32, "Asset")] {
         let tab = scope.create_element("div");
-        let is_active = active_tab == idx;
-        let bg = if is_active { "var(--rinch-color-dark-7)" } else { "transparent" };
-        let color = if is_active { "var(--rinch-color-text)" } else { "var(--rinch-color-dimmed)" };
-        let border_bottom = if is_active { "2px solid var(--rinch-primary-color)" } else { "2px solid transparent" };
-        tab.set_attribute(
-            "style",
-            &format!(
-                "flex:1;text-align:center;padding:4px 0;font-size:11px;\
-                 cursor:pointer;background:{bg};color:{color};\
-                 border-bottom:{border_bottom};text-transform:uppercase;\
-                 letter-spacing:0.5px;"
-            ),
-        );
+        // Reactive style — updates when properties_tab changes without rebuild.
+        {
+            let tab_clone = tab.clone();
+            scope.create_effect(move || {
+                let is_active = ui.properties_tab.get() == idx;
+                let bg = if is_active { "var(--rinch-color-dark-7)" } else { "transparent" };
+                let color = if is_active { "var(--rinch-color-text)" } else { "var(--rinch-color-dimmed)" };
+                let border_bottom = if is_active { "2px solid var(--rinch-primary-color)" } else { "2px solid transparent" };
+                tab_clone.set_attribute(
+                    "style",
+                    &format!(
+                        "flex:1;text-align:center;padding:4px 0;font-size:11px;\
+                         cursor:pointer;background:{bg};color:{color};\
+                         border-bottom:{border_bottom};text-transform:uppercase;\
+                         letter-spacing:0.5px;"
+                    ),
+                );
+            });
+        }
         tab.append_child(&scope.create_text(label));
         let hid = scope.register_handler(move || { ui.properties_tab.set(idx); });
         tab.set_attribute("data-rid", &hid.to_string());
@@ -282,93 +259,135 @@ fn build_tab_bar(scope: &mut RenderScope, ui: UiSignals, active_tab: u32) -> Nod
 }
 
 /// Build entity-specific content based on the current selection.
-///
-/// Dispatches to dedicated property components — each component manages
-/// its own fine-grained reactivity internally.
 fn build_entity_content(
     scope: &mut RenderScope,
-    container: &NodeHandle,
-    selected_entity: Option<SelectedEntity>,
-    ui: &UiSignals,
+    ui: UiSignals,
     _es: &Arc<Mutex<EditorState>>,
-) {
-    match selected_entity {
-        Some(SelectedEntity::Camera) => {
-            let camera = CameraProperties::default();
-            container.append_child(&camera.render(scope, &[]));
-            append_divider(scope, container);
-            let env = EnvironmentPanel::default();
-            container.append_child(&env.render(scope, &[]));
-        }
-        Some(SelectedEntity::Object(eid)) => {
-            let obj = ObjectProperties { entity_id: eid, ..Default::default() };
-            container.append_child(&obj.render(scope, &[]));
-        }
-        Some(SelectedEntity::Light(lid)) => {
-            let light = LightProperties { light_id: lid, ..Default::default() };
-            container.append_child(&light.render(scope, &[]));
-        }
-        Some(SelectedEntity::Scene) => {
-            let scene_name = ui.scene_name.get();
-            let name_row = scope.create_element("div");
-            name_row.set_attribute("style", SECTION_STYLE);
-            name_row.append_child(&scope.create_text(&scene_name));
-            container.append_child(&name_row);
+) -> NodeHandle {
+    let container = scope.create_element("div");
+    container.set_attribute("style", "display:flex;flex-direction:column;");
 
-            let object_count = ui.objects.get().len();
-            let detail = scope.create_element("div");
-            detail.set_attribute("style", VALUE_STYLE);
-            detail.append_child(
-                &scope.create_text(&format!("{} objects", object_count)),
-            );
-            container.append_child(&detail);
-        }
-        Some(SelectedEntity::Project) => {
-            let hdr = scope.create_element("div");
-            hdr.set_attribute("style", SECTION_STYLE);
-            hdr.append_child(&scope.create_text("Project"));
-            container.append_child(&hdr);
-        }
-        None => {
-            let msg = scope.create_element("div");
-            msg.set_attribute(
-                "style",
-                &format!("{SECTION_STYLE}color:var(--rinch-color-placeholder);"),
-            );
-            msg.append_child(&scope.create_text("No object selected"));
-            container.append_child(&msg);
-        }
-    }
+    rinch::core::for_each_dom_typed(
+        scope, &container,
+        move || vec![ui.selection.get()],
+        |sel| match &sel {
+            None => "none".to_string(),
+            Some(SelectedEntity::Camera) => "camera".to_string(),
+            Some(SelectedEntity::Object(eid)) => format!("obj-{eid}"),
+            Some(SelectedEntity::Light(lid)) => format!("light-{lid}"),
+            Some(SelectedEntity::Scene) => "scene".to_string(),
+            Some(SelectedEntity::Project) => "project".to_string(),
+        },
+        move |selected_entity, scope| {
+            let inner = scope.create_element("div");
+
+            match selected_entity {
+                Some(SelectedEntity::Camera) => {
+                    let camera = CameraProperties::default();
+                    inner.append_child(&camera.render(scope, &[]));
+                    let div = scope.create_element("div");
+                    div.set_attribute("style", super::DIVIDER_STYLE);
+                    inner.append_child(&div);
+                    let env = EnvironmentPanel::default();
+                    inner.append_child(&env.render(scope, &[]));
+                }
+                Some(SelectedEntity::Object(eid)) => {
+                    let obj = ObjectProperties { entity_id: eid, ..Default::default() };
+                    inner.append_child(&obj.render(scope, &[]));
+                }
+                Some(SelectedEntity::Light(lid)) => {
+                    let light = LightProperties { light_id: lid, ..Default::default() };
+                    inner.append_child(&light.render(scope, &[]));
+                }
+                Some(SelectedEntity::Scene) => {
+                    let scene_name = ui.scene_name.get();
+                    let name_row = scope.create_element("div");
+                    name_row.set_attribute("style", SECTION_STYLE);
+                    name_row.append_child(&scope.create_text(&scene_name));
+                    inner.append_child(&name_row);
+
+                    let object_count = ui.objects.get().len();
+                    let detail = scope.create_element("div");
+                    detail.set_attribute("style", VALUE_STYLE);
+                    detail.append_child(
+                        &scope.create_text(&format!("{} objects", object_count)),
+                    );
+                    inner.append_child(&detail);
+                }
+                Some(SelectedEntity::Project) => {
+                    let hdr = scope.create_element("div");
+                    hdr.set_attribute("style", SECTION_STYLE);
+                    hdr.append_child(&scope.create_text("Project"));
+                    inner.append_child(&hdr);
+                }
+                None => {
+                    let msg = scope.create_element("div");
+                    msg.set_attribute(
+                        "style",
+                        &format!("{SECTION_STYLE}color:var(--rinch-color-placeholder);"),
+                    );
+                    msg.append_child(&scope.create_text("No object selected"));
+                    inner.append_child(&msg);
+                }
+            }
+
+            inner
+        },
+    );
+
+    container
 }
 
 /// Build asset-specific content (material or shader properties).
 fn build_asset_content(
     scope: &mut RenderScope,
-    container: &NodeHandle,
-    ui: &UiSignals,
-) {
-    let selected_mat_slot = ui.selected_material.get();
-    let selected_shader_name = ui.selected_shader.get();
+    ui: UiSignals,
+) -> NodeHandle {
+    let container = scope.create_element("div");
+    container.set_attribute("style", "display:flex;flex-direction:column;");
 
-    if let Some(slot) = selected_mat_slot {
-        let mat = MaterialProperties { slot, ..Default::default() };
-        container.append_child(&mat.render(scope, &[]));
-    } else if let Some(ref shader_name) = selected_shader_name {
-        let shaders = ui.shaders.get();
-        if shaders.iter().any(|s| &s.name == shader_name) {
-            let shader = ShaderProperties {
-                shader_name: shader_name.clone(),
-                ..Default::default()
-            };
-            container.append_child(&shader.render(scope, &[]));
-        }
-    } else {
-        let msg = scope.create_element("div");
-        msg.set_attribute(
-            "style",
-            &format!("{SECTION_STYLE}color:var(--rinch-color-placeholder);"),
-        );
-        msg.append_child(&scope.create_text("No asset selected"));
-        container.append_child(&msg);
-    }
+    rinch::core::for_each_dom_typed(
+        scope, &container,
+        move || {
+            let mat = ui.selected_material.get();
+            let shader = ui.selected_shader.get();
+            vec![(mat, shader)]
+        },
+        |(mat, shader)| {
+            match (mat, shader) {
+                (Some(slot), _) => format!("mat-{slot}"),
+                (None, Some(name)) => format!("shader-{name}"),
+                (None, None) => "none".to_string(),
+            }
+        },
+        move |(selected_mat_slot, selected_shader_name), scope| {
+            let inner = scope.create_element("div");
+
+            if let Some(slot) = selected_mat_slot {
+                let mat = MaterialProperties { slot, ..Default::default() };
+                inner.append_child(&mat.render(scope, &[]));
+            } else if let Some(ref shader_name) = selected_shader_name {
+                let shaders = ui.shaders.get();
+                if shaders.iter().any(|s| &s.name == shader_name) {
+                    let shader = ShaderProperties {
+                        shader_name: shader_name.clone(),
+                        ..Default::default()
+                    };
+                    inner.append_child(&shader.render(scope, &[]));
+                }
+            } else {
+                let msg = scope.create_element("div");
+                msg.set_attribute(
+                    "style",
+                    &format!("{SECTION_STYLE}color:var(--rinch-color-placeholder);"),
+                );
+                msg.append_child(&scope.create_text("No asset selected"));
+                inner.append_child(&msg);
+            }
+
+            inner
+        },
+    );
+
+    container
 }

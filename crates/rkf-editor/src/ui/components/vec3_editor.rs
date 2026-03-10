@@ -36,18 +36,16 @@ impl Default for Vec3Editor {
 }
 
 impl Component for Vec3Editor {
-    fn render(&self, scope: &mut RenderScope, _children: &[NodeHandle]) -> NodeHandle {
-        let container = scope.create_element("div");
-        container.set_attribute(
-            "style",
-            "display: flex; gap: 4px; align-items: center;",
-        );
-
+    fn render(&self, __scope: &mut RenderScope, _children: &[NodeHandle]) -> NodeHandle {
         let axes: [(Signal<f64>, &str, &str); 3] = [
             (self.x, "X", "#e05050"),
             (self.y, "Y", "#50c050"),
             (self.z, "Z", "#5080e0"),
         ];
+
+        let container = rsx! {
+            div { style: "display: flex; gap: 4px; align-items: center;" }
+        };
 
         for (sig, label, color) in axes {
             let dv = DragValue {
@@ -61,8 +59,7 @@ impl Component for Vec3Editor {
                 suffix: self.suffix.clone(),
                 on_change: self.on_change.clone(),
             };
-            let node = dv.render(scope, &[]);
-            container.append_child(&node);
+            container.append_child(&dv.render(__scope, &[]));
         }
 
         container

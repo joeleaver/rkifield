@@ -115,7 +115,7 @@ stylo_atoms = "0.11"
 stylo_config = "0.11"
 servo_arc = "0.4"
 tracing = "0.1"
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 notify = "7"
 peniko = "0.6"
 keyboard-types = "0.7"

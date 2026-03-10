@@ -64,8 +64,8 @@ impl FpsSignal {
 /// Per-property reactive signals for fine-grained UI updates.
 ///
 /// Each signal holds the actual value (not a counter). UI components subscribe
-/// to specific signals via `.get()` inside `reactive_component_dom`, so changes
-/// to one property only rebuild the panels that care about it.
+/// to specific signals via `.get()` inside reactive closures, so changes
+/// to one property only update the UI elements that care about it.
 ///
 /// **Engine→UI data flow**: The engine thread pushes structural data (objects,
 /// lights, materials) into these signals via `run_on_main_thread`. No ArcSwap,
@@ -106,6 +106,9 @@ pub struct UiSignals {
 
     // ── Selected shader name (for properties display) ────────────
     pub selected_shader: Signal<Option<String>>,
+
+    // ── Material preview ──────────────────────────────────────────
+    pub preview_primitive_type: Signal<u32>,
 
     // ── Drag-and-drop ────────────────────────────────────────────
     pub shader_drag: DragContext<String>,
@@ -156,6 +159,7 @@ impl UiSignals {
             properties_tab: Signal::new(0),
             asset_browser_tab: Signal::new(0),
             selected_shader: Signal::new(None),
+            preview_primitive_type: Signal::new(0),
             shader_drag: DragContext::new(),
             shader_drop_highlight: Signal::new(false),
             material_drag: DragContext::new(),

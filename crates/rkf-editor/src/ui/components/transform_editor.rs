@@ -38,19 +38,13 @@ impl Default for TransformEditor {
 }
 
 impl Component for TransformEditor {
-    fn render(&self, scope: &mut RenderScope, _children: &[NodeHandle]) -> NodeHandle {
+    fn render(&self, __scope: &mut RenderScope, _children: &[NodeHandle]) -> NodeHandle {
         let sliders = use_context::<SliderSignals>();
         let cmd = use_context::<CommandSender>();
 
         let on_change = ValueCallback::new(move |_v: f64| {
             sliders.send_object_transform_commands(&cmd);
         });
-
-        let container = scope.create_element("div");
-        container.set_attribute(
-            "style",
-            "display: flex; flex-direction: column; gap: 4px;",
-        );
 
         #[allow(clippy::type_complexity)]
         let sections: [(&str, Signal<f64>, Signal<f64>, Signal<f64>, f64, u32, &str, f64, f64); 3] = [
@@ -59,22 +53,11 @@ impl Component for TransformEditor {
             ("Scale", self.scale_x, self.scale_y, self.scale_z, 0.01, 2, "", 0.01, 1e9),
         ];
 
+        let container = rsx! {
+            div { style: "display: flex; flex-direction: column; gap: 4px;" }
+        };
+
         for (label, x, y, z, step, decimals, suffix, min, max) in sections {
-            let row = scope.create_element("div");
-            row.set_attribute(
-                "style",
-                "display: flex; align-items: center; padding: 2px 12px; gap: 8px;",
-            );
-
-            let label_span = scope.create_element("span");
-            label_span.set_attribute(
-                "style",
-                "font-size: 11px; color: #999; min-width: 56px; user-select: none;",
-            );
-            let label_text = scope.create_text(label);
-            label_span.append_child(&label_text);
-            row.append_child(&label_span);
-
             let editor = Vec3Editor {
                 x,
                 y,
@@ -86,9 +69,18 @@ impl Component for TransformEditor {
                 suffix: suffix.into(),
                 on_change: Some(on_change.clone()),
             };
-            let editor_node = editor.render(scope, &[]);
-            row.append_child(&editor_node);
 
+            let row = rsx! {
+                div {
+                    style: "display: flex; align-items: center; padding: 2px 12px; gap: 8px;",
+                    span {
+                        style: "font-size: 11px; color: #999; min-width: 56px; user-select: none;",
+                        {label}
+                    }
+                }
+            };
+
+            row.append_child(&editor.render(__scope, &[]));
             container.append_child(&row);
         }
 

@@ -302,6 +302,10 @@ impl EditorEngine {
             &ctx.device, &ctx.queue,
         );
 
+        let material_preview = rkf_render::material_preview::MaterialPreviewRenderer::new(
+            &ctx.device, &ctx.queue,
+        );
+
         let engine = Self {
             ctx,
             surface: None,
@@ -411,6 +415,7 @@ impl EditorEngine {
             },
             shader_composer,
             shader_error: None,
+            material_preview,
         };
         (engine, scene)
     }

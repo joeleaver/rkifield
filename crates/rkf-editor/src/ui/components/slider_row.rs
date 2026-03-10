@@ -19,40 +19,8 @@ pub fn SliderRow(
 ) -> NodeHandle {
     let signal = signal.expect("SliderRow requires signal");
 
-    let row = __scope.create_element("div");
-    row.set_attribute("style", "padding:3px 12px;");
-
-    // Label + reactive value display.
-    let label_row = __scope.create_element("div");
-    label_row.set_attribute(
-        "style",
-        "display:flex;justify-content:space-between;\
-         font-size:11px;color:var(--rinch-color-dimmed);margin-bottom:2px;",
-    );
-    label_row.append_child(&__scope.create_text(&label));
-
-    let val_span = __scope.create_element("span");
-    val_span.set_attribute(
-        "style",
-        "font-family:var(--rinch-font-family-monospace);",
-    );
-    {
-        let suffix = suffix.clone();
-        rinch::core::reactive_component_dom(__scope, &val_span, move |__scope| {
-            let v = signal.get();
-            let text = match decimals {
-                0 => format!("{v:.0}{suffix}"),
-                1 => format!("{v:.1}{suffix}"),
-                _ => format!("{v:.2}{suffix}"),
-            };
-            __scope.create_text(&text)
-        });
-    }
-    label_row.append_child(&val_span);
-    row.append_child(&label_row);
-
-    // Slider component — rendered in untracked scope to avoid subscribing
-    // parent reactive_component_dom to slider signal changes.
+    // Build Slider imperatively — needs untracked to avoid subscribing
+    // parent scope to slider signal changes.
     let slider = Slider {
         min: Some(min),
         max: Some(max),
@@ -68,9 +36,36 @@ pub fn SliderRow(
         ..Default::default()
     };
     let slider_node = rinch::core::untracked(|| slider.render(__scope, &[]));
-    row.append_child(&slider_node);
 
-    row
+    // Build reactive value text imperatively — rsx! reactive closures are FnMut,
+    // and String can't be moved out of FnMut. Use create_effect for surgical updates.
+    let val_text = __scope.create_text("");
+    let suffix2 = suffix;
+    {
+        let val_text = val_text.clone();
+        __scope.create_effect(move || {
+            let v = signal.get();
+            let text = match decimals {
+                0 => format!("{v:.0}{suffix2}"),
+                1 => format!("{v:.1}{suffix2}"),
+                _ => format!("{v:.2}{suffix2}"),
+            };
+            val_text.set_text(&text);
+        });
+    }
+    let val_span = __scope.create_element("span");
+    val_span.set_attribute("style", "font-family:var(--rinch-font-family-monospace);");
+    val_span.append_child(&val_text);
+
+    rsx! {
+        div { style: "padding:3px 12px;",
+            div { style: "display:flex;justify-content:space-between;font-size:11px;color:var(--rinch-color-dimmed);margin-bottom:2px;",
+                {label.clone()}
+                {val_span}
+            }
+            {slider_node}
+        }
+    }
 }
 
 /// Build a SliderRow that sends all commands on change via the store method.

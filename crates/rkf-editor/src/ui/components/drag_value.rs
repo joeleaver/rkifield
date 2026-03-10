@@ -1,7 +1,6 @@
 //! DragValue — Unity-style number field with drag-to-adjust and double-click-to-edit.
 
 use std::cell::Cell;
-
 use rinch::prelude::*;
 
 /// Unity-style number field: displays value as text, click-drag left/right to adjust,
@@ -45,14 +44,12 @@ impl Default for DragValue {
 }
 
 impl Component for DragValue {
-    fn render(&self, scope: &mut RenderScope, _children: &[NodeHandle]) -> NodeHandle {
+    fn render(&self, __scope: &mut RenderScope, _children: &[NodeHandle]) -> NodeHandle {
         let value = self.value;
         let step = self.step;
         let min = self.min;
         let max = self.max;
         let decimals = self.decimals;
-        let suffix = self.suffix.clone();
-        let suffix2 = self.suffix.clone();
         let on_change = self.on_change.clone();
         let on_change2 = on_change.clone();
 
@@ -67,15 +64,15 @@ impl Component for DragValue {
         }
 
         // --- Container ---
-        let container = scope.create_element("div");
+        let container = __scope.create_element("div");
         container.set_attribute(
             "style",
             "display: flex; align-items: center; gap: 2px; min-width: 60px; height: 20px;",
         );
 
-        // --- Label span ---
+        // --- Label span (static, built imperatively) ---
         if !self.label.is_empty() {
-            let label_span = scope.create_element("span");
+            let label_span = __scope.create_element("span");
             let label_style = format!(
                 "color: {}; font-weight: 600; font-size: 11px; width: 12px; text-align: center; \
                  user-select: none; flex-shrink: 0;",
@@ -86,87 +83,88 @@ impl Component for DragValue {
                 }
             );
             label_span.set_attribute("style", &label_style);
-            let label_text = scope.create_text(&self.label);
+            let label_text = __scope.create_text(&self.label);
             label_span.append_child(&label_text);
             container.append_child(&label_span);
         }
 
-        // --- Value display (non-editing mode) ---
-        let display_div = scope.create_element("div");
-        display_div.set_attribute(
-            "style",
-            "flex: 1; background: rgba(255,255,255,0.06); border-radius: 3px; \
+        // --- Value display div (non-editing mode) with reactive visibility and text ---
+        let display_style_base = "flex: 1; background: rgba(255,255,255,0.06); border-radius: 3px; \
              padding: 1px 4px; font-size: 11px; color: #ddd; cursor: ew-resize; \
              user-select: none; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; \
-             height: 18px; line-height: 18px;",
-        );
+             height: 18px; line-height: 18px;";
 
-        let format_value = {
-            let suffix = suffix.clone();
-            move |v: f64| -> String {
-                format!("{:.prec$}{}", v, suffix, prec = decimals as usize)
-            }
-        };
+        // Store suffix in a Signal so it's Copy and usable in reactive closures
+        let display_suffix = Signal::new(self.suffix.clone());
 
-        let value_text = scope.create_text(&format_value(untracked(|| value.get())));
-        display_div.append_child(&value_text);
-
-        // Click handler for display_div: start drag, detect double-click
-        let click_handler = scope.register_handler(move || {
-            let ctx = get_click_context();
-
-            // Double-click detection (300ms window)
-            let is_double = LAST_CLICK.with(|lc| {
-                let now = std::time::Instant::now();
-                let prev = lc.get();
-                lc.set(Some(now));
-                if let Some(prev_time) = prev {
-                    now.duration_since(prev_time).as_millis() < 300
-                } else {
-                    false
-                }
-            });
-
-            if is_double {
-                // Enter edit mode
-                editing.set(true);
-                LAST_CLICK.with(|lc| lc.set(None));
-                return;
-            }
-
-            // Start drag
-            let sv = untracked(|| value.get());
-            start_val.set(sv);
-            start_mouse_x.set(ctx.mouse_x);
-
-            Drag::absolute()
-                .on_move({
-                    let on_change = on_change.clone();
-                    move |mx, _my| {
-                        let mods = rinch::core::get_modifier_state();
-                        let speed = if mods.shift {
-                            0.1
-                        } else if mods.ctrl {
-                            10.0
+        let display_div = rsx! {
+            div {
+                style: {
+                    let base = display_style_base.to_string();
+                    move || {
+                        if editing.get() {
+                            format!("display: none; {base}")
                         } else {
-                            1.0
-                        };
-                        let dx = (mx - start_mouse_x.get()) as f64;
-                        let new_val = (sv + dx * step * speed).clamp(min, max);
-                        value.set(new_val);
-                        if let Some(cb) = &on_change {
-                            cb.0(new_val);
+                            format!("display: block; {base}")
                         }
                     }
-                })
-                .start();
-        });
-        display_div.set_attribute("data-rid", &click_handler.to_string());
+                },
+                onclick: move || {
+                    let ctx = get_click_context();
 
+                    // Double-click detection (300ms window)
+                    let is_double = LAST_CLICK.with(|lc| {
+                        let now = std::time::Instant::now();
+                        let prev = lc.get();
+                        lc.set(Some(now));
+                        if let Some(prev_time) = prev {
+                            now.duration_since(prev_time).as_millis() < 300
+                        } else {
+                            false
+                        }
+                    });
+
+                    if is_double {
+                        editing.set(true);
+                        LAST_CLICK.with(|lc| lc.set(None));
+                        return;
+                    }
+
+                    // Start drag
+                    let sv = untracked(|| value.get());
+                    start_val.set(sv);
+                    start_mouse_x.set(ctx.mouse_x);
+
+                    Drag::absolute()
+                        .on_move({
+                            let on_change = on_change.clone();
+                            move |mx, _my| {
+                                let mods = rinch::core::get_modifier_state();
+                                let speed = if mods.shift {
+                                    0.1
+                                } else if mods.ctrl {
+                                    10.0
+                                } else {
+                                    1.0
+                                };
+                                let dx = (mx - start_mouse_x.get()) as f64;
+                                let new_val = (sv + dx * step * speed).clamp(min, max);
+                                value.set(new_val);
+                                if let Some(cb) = &on_change {
+                                    cb.0(new_val);
+                                }
+                            }
+                        })
+                        .start();
+                },
+
+                {move || format!("{:.prec$}{}", value.get(), untracked(|| display_suffix.get()), prec = decimals as usize)}
+            }
+        };
         container.append_child(&display_div);
 
-        // --- Input field (editing mode) ---
-        let input_el = scope.create_element("input");
+        // --- Input field (editing mode, built imperatively for effect access) ---
+        let input_el = __scope.create_element("input");
         input_el.set_attribute("type", "text");
         input_el.set_attribute(
             "style",
@@ -185,7 +183,7 @@ impl Component for DragValue {
         );
 
         // Input handler — update value on Enter/change
-        let input_handler = scope.register_input_handler(move |text: String| {
+        let input_handler = __scope.register_input_handler(move |text: String| {
             if let Ok(v) = text.parse::<f64>() {
                 if v.is_finite() {
                     let clamped = v.clamp(min, max);
@@ -199,32 +197,11 @@ impl Component for DragValue {
         });
         input_el.set_attribute("data-oninput", &input_handler.to_string());
 
-        container.append_child(&input_el);
-
-        // --- Reactive effects ---
-
-        // Update display text when value changes
-        let value_text_clone = value_text.clone();
-        let format_fn = {
-            let suffix = suffix2;
-            move |v: f64| -> String {
-                format!("{:.prec$}{}", v, suffix, prec = decimals as usize)
-            }
-        };
-        scope.create_effect(move || {
-            let v = value.get();
-            value_text_clone.set_text(&format_fn(v));
-        });
-
-        // Toggle display/input visibility when editing changes
-        let display_clone = display_div.clone();
+        // Toggle input visibility and pre-fill when editing changes
         let input_clone = input_el.clone();
-        scope.create_effect(move || {
+        __scope.create_effect(move || {
             let is_editing = editing.get();
             if is_editing {
-                display_clone.set_style("display", "none");
-                input_clone.set_style("display", "block");
-                // Pre-fill current value
                 input_clone.set_attribute(
                     "value",
                     &format!(
@@ -233,11 +210,13 @@ impl Component for DragValue {
                         prec = decimals as usize
                     ),
                 );
+                input_clone.set_style("display", "block");
             } else {
-                display_clone.set_style("display", "block");
                 input_clone.set_style("display", "none");
             }
         });
+
+        container.append_child(&input_el);
 
         container
     }

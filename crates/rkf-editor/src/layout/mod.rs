@@ -101,8 +101,9 @@ impl PanelId {
 // ── Layout configuration (serializable) ─────────────────────────────────────
 
 /// Which container kind in the layout.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ContainerKind {
+    #[default]
     Left,
     Right,
     Bottom,

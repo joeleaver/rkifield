@@ -49,6 +49,13 @@ use engine_viewport::{DISPLAY_HEIGHT, DISPLAY_WIDTH};
 #[derive(Clone)]
 pub(crate) struct CommandSender(pub crossbeam::channel::Sender<EditorCommand>);
 
+/// Newtype wrapper for the material preview RenderSurfaceHandle.
+///
+/// Stored as a separate context type so UI components can retrieve it
+/// independently from the main viewport surface handle.
+#[derive(Clone)]
+pub(crate) struct PreviewSurfaceHandle(pub rinch::render_surface::RenderSurfaceHandle);
+
 
 // ---------------------------------------------------------------------------
 // IPC server setup
@@ -152,12 +159,16 @@ fn main() -> anyhow::Result<()> {
     //    the engine's offscreen texture will be composited.
     let surface_handle = create_render_surface();
 
+    // 3b. Create a second RenderSurface for the material preview thumbnail.
+    let preview_surface = create_render_surface();
+
     // 4. Clones for the engine thread.
     let editor_state_for_thread = Arc::clone(&editor_state);
     let shared_state_for_thread = Arc::clone(&shared_state);
     let layout_backing_for_thread = layout_backing.clone();
     let surface_writer = surface_handle.writer();
     let gpu_registrar = surface_handle.gpu_registrar();
+    let preview_writer = preview_surface.writer();
     let socket_path_for_cleanup = socket_path.clone();
 
     // 5. Spawn engine thread.
@@ -170,6 +181,7 @@ fn main() -> anyhow::Result<()> {
             layout_backing: layout_backing_for_thread,
             surface_writer,
             gpu_registrar,
+            preview_writer,
         });
     });
 
@@ -215,6 +227,8 @@ fn main() -> anyhow::Result<()> {
             create_context(shared_state_ctx);
             // Surface handle context — editor_ui uses it to wire SurfaceEvent → editor input.
             create_context(surface_handle);
+            // Material preview surface — used by material properties panel.
+            create_context(PreviewSurfaceHandle(preview_surface));
             // Per-property UI signals for fine-grained reactivity.
             let ui_signals = UiSignals::new();
             create_context(ui_signals);

@@ -3,13 +3,21 @@
 //! Displays a tabbed view with "Materials" and "Shaders" tabs. The Materials
 //! tab shows a horizontal grid of material swatches. The Shaders tab shows
 //! registered shader cards. Double-clicking a shader opens its `.wgsl` file.
+//!
+//! Uses fine-grained reactivity:
+//! - Tab buttons have reactive style closures for active state
+//! - Count badge uses a reactive text closure
+//! - Tab content uses reactive `display:none` wrappers
+//! - Material and shader grids use `for_each_dom_typed` with reactive selection borders
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use rinch::prelude::*;
 
+use crate::automation::SharedState;
 use crate::editor_command::EditorCommand;
 use crate::editor_state::UiSignals;
 use crate::CommandSender;
@@ -25,383 +33,403 @@ const DOUBLE_CLICK_MS: u128 = 400;
 /// Asset browser panel component.
 ///
 /// Shows a tabbed panel with Materials and Shaders grids.
+/// Each sub-section uses fine-grained reactivity so that changing selection,
+/// switching tabs, or updating material/shader lists only rebuilds the
+/// affected DOM nodes.
 #[component]
 pub fn AssetBrowser() -> NodeHandle {
     let ui = use_context::<UiSignals>();
     let cmd = use_context::<CommandSender>();
+    let shared_state = use_context::<Arc<Mutex<SharedState>>>();
 
     // Double-click tracking for shader cards: (shader_name, last_click_time).
     let last_shader_click: Rc<RefCell<(String, Instant)>> =
         Rc::new(RefCell::new((String::new(), Instant::now() - std::time::Duration::from_secs(10))));
 
-    let root = __scope.create_element("div");
-    root.set_attribute(
-        "style",
-        &format!(
-            "{BROWSER_HEIGHT}{PANEL_BG}\
-             border-top:1px solid var(--rinch-color-border);\
-             display:flex;flex-direction:column;flex-shrink:0;min-height:0;"
-        ),
+    let root_style = format!(
+        "{BROWSER_HEIGHT}{PANEL_BG}\
+         border-top:1px solid var(--rinch-color-border);\
+         display:flex;flex-direction:column;flex-shrink:0;min-height:0;"
     );
 
-    let cmd2 = cmd.clone();
-    rinch::core::reactive_component_dom(__scope, &root, move |__scope| {
-        let materials = ui.materials.get();
-        let _ = ui.selected_material.get();
-        let _ = ui.editor_mode.get();
-        let active_tab = ui.asset_browser_tab.get();
-        let _ = ui.selected_shader.get();
+    rsx! {
+        div { style: {root_style.as_str()},
+            div { style: "display:flex;flex-direction:column;height:100%;",
+                // ── Tab bar ──
+                div {
+                    style: "display:flex;align-items:center;gap:0;flex-shrink:0;\
+                            border-bottom:1px solid var(--rinch-color-border);",
 
-        let shaders = ui.shaders.get();
-        let selected_slot = ui.selected_material.get();
+                    // Materials tab button — reactive style for active state.
+                    div {
+                        style: {
+                            let ui = ui;
+                            move || {
+                                let is_active = ui.asset_browser_tab.get() == 0;
+                                let border_bottom = if is_active {
+                                    "border-bottom:2px solid var(--rinch-primary-color);"
+                                } else {
+                                    "border-bottom:2px solid transparent;"
+                                };
+                                let color = if is_active {
+                                    "color:var(--rinch-color-text);"
+                                } else {
+                                    "color:var(--rinch-color-dimmed);"
+                                };
+                                format!(
+                                    "padding:4px 12px;font-size:11px;text-transform:uppercase;\
+                                     letter-spacing:1px;cursor:pointer;{border_bottom}{color}"
+                                )
+                            }
+                        },
+                        onclick: { let ui = ui; move || ui.asset_browser_tab.set(0) },
+                        "Materials"
+                    }
 
-        let container = __scope.create_element("div");
-        container.set_attribute("style", "display:flex;flex-direction:column;height:100%;");
+                    // Shaders tab button — reactive style for active state.
+                    div {
+                        style: {
+                            let ui = ui;
+                            move || {
+                                let is_active = ui.asset_browser_tab.get() == 1;
+                                let border_bottom = if is_active {
+                                    "border-bottom:2px solid var(--rinch-primary-color);"
+                                } else {
+                                    "border-bottom:2px solid transparent;"
+                                };
+                                let color = if is_active {
+                                    "color:var(--rinch-color-text);"
+                                } else {
+                                    "color:var(--rinch-color-dimmed);"
+                                };
+                                format!(
+                                    "padding:4px 12px;font-size:11px;text-transform:uppercase;\
+                                     letter-spacing:1px;cursor:pointer;{border_bottom}{color}"
+                                )
+                            }
+                        },
+                        onclick: { let ui = ui; move || ui.asset_browser_tab.set(1) },
+                        "Shaders"
+                    }
 
-        // ── Tab bar ──
-        let tab_bar = __scope.create_element("div");
-        tab_bar.set_attribute(
-            "style",
-            "display:flex;align-items:center;gap:0;flex-shrink:0;\
-             border-bottom:1px solid var(--rinch-color-border);",
-        );
+                    // Count badge — reactive text.
+                    span {
+                        style: "font-size:10px;color:var(--rinch-color-placeholder);\
+                                font-family:var(--rinch-font-family-monospace);margin-left:auto;padding-right:12px;",
+                        {move || {
+                            if ui.asset_browser_tab.get() == 0 {
+                                format!("{} slots", ui.materials.get().len())
+                            } else {
+                                format!("{} shaders", ui.shaders.get().len())
+                            }
+                        }}
+                    }
+                }
 
-        let tabs = [("Materials", 0u32), ("Shaders", 1u32)];
-        for (label, idx) in &tabs {
-            let tab = __scope.create_element("div");
-            let is_active = active_tab == *idx;
-            let border_bottom = if is_active {
-                "border-bottom:2px solid var(--rinch-primary-color);"
-            } else {
-                "border-bottom:2px solid transparent;"
-            };
-            let color = if is_active {
-                "color:var(--rinch-color-text);"
-            } else {
-                "color:var(--rinch-color-dimmed);"
-            };
-            tab.set_attribute(
-                "style",
-                &format!(
-                    "padding:4px 12px;font-size:11px;text-transform:uppercase;\
-                     letter-spacing:1px;cursor:pointer;{border_bottom}{color}"
-                ),
-            );
-            tab.append_child(&__scope.create_text(label));
+                // ── Materials grid (hidden when shaders tab active) ──
+                {build_materials_grid(__scope, ui, cmd.clone(), shared_state)}
 
-            let tab_idx = *idx;
-            let hid = __scope.register_handler({
+                // ── Shaders grid (hidden when materials tab active) ──
+                {build_shaders_grid(__scope, ui, last_shader_click)}
+            }
+        }
+    }
+}
+
+/// Build the materials grid with `for_each_dom_typed`.
+///
+/// The wrapper div uses a reactive style to toggle `display:none` when the
+/// shaders tab is active. Each material card has a reactive style closure
+/// for its selection border.
+fn build_materials_grid(
+    __scope: &mut RenderScope,
+    ui: UiSignals,
+    cmd: CommandSender,
+    shared_state: Arc<Mutex<SharedState>>,
+) -> NodeHandle {
+    let wrapper = rsx! {
+        div {
+            style: {
                 let ui = ui;
                 move || {
-                    ui.asset_browser_tab.set(tab_idx);
+                    if ui.asset_browser_tab.get() == 0 {
+                        "display:flex;flex-wrap:wrap;gap:6px;padding:4px 12px;\
+                         overflow-y:auto;flex:1;min-height:0;align-content:flex-start;"
+                    } else {
+                        "display:none;"
+                    }
                 }
-            });
-            tab.set_attribute("data-rid", &hid.to_string());
-            tab_bar.append_child(&tab);
+            },
         }
+    };
 
-        // Count badge on right side of tab bar.
-        let count = __scope.create_element("span");
-        count.set_attribute(
-            "style",
-            "font-size:10px;color:var(--rinch-color-placeholder);\
-             font-family:var(--rinch-font-family-monospace);margin-left:auto;padding-right:12px;",
-        );
-        if active_tab == 0 {
-            count.append_child(
-                &__scope.create_text(&format!("{} slots", materials.len())),
+    rinch::core::for_each_dom_typed(
+        __scope,
+        &wrapper,
+        move || ui.materials.get(),
+        |mat| format!("{}", mat.slot),
+        move |mat, __scope| {
+            let slot = mat.slot;
+
+            // Build swatch style from material properties (static per-item).
+            let r = (mat.albedo[0] * 255.0).round() as u8;
+            let g = (mat.albedo[1] * 255.0).round() as u8;
+            let b = (mat.albedo[2] * 255.0).round() as u8;
+            let mut swatch_style = format!(
+                "width:100%;height:32px;background:rgb({r},{g},{b});"
             );
-        } else {
-            count.append_child(
-                &__scope.create_text(&format!("{} shaders", shaders.len())),
-            );
-        }
-        tab_bar.append_child(&count);
-        container.append_child(&tab_bar);
-
-        if active_tab == 0 {
-            // ── Materials grid ──
-            let grid = __scope.create_element("div");
-            grid.set_attribute(
-                "style",
-                "display:flex;flex-wrap:wrap;gap:6px;padding:4px 12px;\
-                 overflow-y:auto;flex:1;min-height:0;align-content:flex-start;",
-            );
-
-            for mat in &materials {
-                let slot = mat.slot;
-                let is_selected = selected_slot == Some(slot);
-
-                // Card container.
-                let card = __scope.create_element("div");
-                let border_color = if is_selected {
-                    "var(--rinch-primary-color)"
-                } else {
-                    "var(--rinch-color-border)"
-                };
-                card.set_attribute(
-                    "style",
-                    &format!(
-                        "width:64px;display:flex;flex-direction:column;\
-                         border:1px solid {border_color};border-radius:4px;\
-                         background:var(--rinch-color-dark-7);cursor:pointer;\
-                         overflow:hidden;flex-shrink:0;"
-                    ),
-                );
-
-                // Color swatch (albedo).
-                let swatch = __scope.create_element("div");
-                let r = (mat.albedo[0] * 255.0).round() as u8;
-                let g = (mat.albedo[1] * 255.0).round() as u8;
-                let b = (mat.albedo[2] * 255.0).round() as u8;
-                let mut swatch_style = format!(
-                    "width:100%;height:32px;background:rgb({r},{g},{b});"
-                );
-                // Emissive glow overlay.
-                if mat.emission_strength > 0.01 {
-                    let er = (mat.emission_color[0] * 255.0).round() as u8;
-                    let eg = (mat.emission_color[1] * 255.0).round() as u8;
-                    let eb = (mat.emission_color[2] * 255.0).round() as u8;
-                    swatch_style.push_str(&format!(
-                        "box-shadow:inset 0 0 8px rgb({er},{eg},{eb});"
-                    ));
-                }
-                swatch.set_attribute("style", &swatch_style);
-
-                // Indicator row (metallic/emissive icons).
-                let indicators = __scope.create_element("div");
-                indicators.set_attribute(
-                    "style",
-                    "display:flex;gap:2px;padding:1px 2px;height:10px;align-items:center;",
-                );
-                if mat.metallic > 0.5 {
-                    let m_dot = __scope.create_element("div");
-                    m_dot.set_attribute(
-                        "style",
-                        "width:6px;height:6px;border-radius:50%;\
-                         background:#a0a0c0;border:1px solid #8080a0;",
-                    );
-                    indicators.append_child(&m_dot);
-                }
-                if mat.emission_strength > 0.01 {
-                    let e_dot = __scope.create_element("div");
-                    e_dot.set_attribute(
-                        "style",
-                        "width:6px;height:6px;border-radius:50%;\
-                         background:#ffcc44;border:1px solid #cc9900;",
-                    );
-                    indicators.append_child(&e_dot);
-                }
-                swatch.append_child(&indicators);
-                card.append_child(&swatch);
-
-                // Name + slot label.
-                let info = __scope.create_element("div");
-                info.set_attribute(
-                    "style",
-                    "padding:2px 3px;display:flex;flex-direction:column;gap:1px;",
-                );
-                let name_el = __scope.create_element("div");
-                name_el.set_attribute(
-                    "style",
-                    "font-size:9px;color:var(--rinch-color-text);\
-                     white-space:nowrap;overflow:hidden;text-overflow:ellipsis;",
-                );
-                name_el.append_child(&__scope.create_text(&mat.name));
-                info.append_child(&name_el);
-
-                let slot_el = __scope.create_element("div");
-                slot_el.set_attribute(
-                    "style",
-                    "font-size:8px;color:var(--rinch-color-placeholder);\
-                     font-family:var(--rinch-font-family-monospace);",
-                );
-                slot_el.append_child(&__scope.create_text(&format!("#{slot}")));
-                info.append_child(&slot_el);
-                card.append_child(&info);
-
-                // Make material card draggable for drag-and-drop to object material rows.
-                card.set_attribute("draggable", "true");
-
-                let drag_start_hid = __scope.register_handler({
-                    let ui = ui;
-                    move || {
-                        ui.material_drag.set(slot);
-                    }
-                });
-                card.set_attribute("data-ondragstart", &drag_start_hid.to_string());
-
-                let drag_end_hid = __scope.register_handler({
-                    let ui = ui;
-                    move || {
-                        ui.material_drag.clear();
-                        ui.material_drop_highlight.set(None);
-                        // Bump generation so the viewport's MouseUp handler
-                        // (which rinch dispatches immediately after ondragend)
-                        // knows to suppress the GPU pick.
-                        ui.drag_drop_generation.update(|g| *g += 1);
-                    }
-                });
-                card.set_attribute("data-ondragend", &drag_end_hid.to_string());
-
-                // Click handler — select material (and in Paint mode, set paint material).
-                let hid = __scope.register_handler({
-                    let cmd = cmd2.clone();
-                    let ui = ui;
-                    move || {
-                        ui.selected_material.set(Some(slot));
-                        ui.selected_shader.set(None); // clear shader selection
-                        ui.properties_tab.set(1); // switch to Asset tab
-                        let _ = cmd.0.send(EditorCommand::SelectMaterial { slot });
-                    }
-                });
-                card.set_attribute("data-rid", &hid.to_string());
-
-                grid.append_child(&card);
+            if mat.emission_strength > 0.01 {
+                let er = (mat.emission_color[0] * 255.0).round() as u8;
+                let eg = (mat.emission_color[1] * 255.0).round() as u8;
+                let eb = (mat.emission_color[2] * 255.0).round() as u8;
+                swatch_style.push_str(&format!(
+                    "box-shadow:inset 0 0 8px rgb({er},{eg},{eb});"
+                ));
             }
 
-            container.append_child(&grid);
-        } else {
-            // ── Shaders grid ──
-            let grid = __scope.create_element("div");
-            grid.set_attribute(
-                "style",
-                "display:flex;flex-wrap:wrap;gap:6px;padding:4px 12px;\
-                 overflow-y:auto;flex:1;min-height:0;align-content:flex-start;",
+            // Build indicator dots.
+            let indicators = rsx! {
+                div { style: "display:flex;gap:2px;padding:1px 2px;height:10px;align-items:center;" }
+            };
+            if mat.metallic > 0.5 {
+                indicators.append_child(&rsx! {
+                    div {
+                        style: "width:6px;height:6px;border-radius:50%;\
+                                background:#a0a0c0;border:1px solid #8080a0;",
+                    }
+                });
+            }
+            if mat.emission_strength > 0.01 {
+                indicators.append_child(&rsx! {
+                    div {
+                        style: "width:6px;height:6px;border-radius:50%;\
+                                background:#ffcc44;border:1px solid #cc9900;",
+                    }
+                });
+            }
+
+            // Build swatch with indicators overlay.
+            let swatch = rsx! {
+                div { style: {swatch_style.as_str()} }
+            };
+            swatch.append_child(&indicators);
+
+            // Card — reactive style closure for selection border.
+            let card = rsx! {
+                div {
+                    style: {
+                        let ui = ui;
+                        move || {
+                            let is_selected = ui.selected_material.get() == Some(slot);
+                            let border_color = if is_selected {
+                                "var(--rinch-primary-color)"
+                            } else {
+                                "var(--rinch-color-border)"
+                            };
+                            format!(
+                                "width:64px;display:flex;flex-direction:column;\
+                                 border:1px solid {border_color};border-radius:4px;\
+                                 background:var(--rinch-color-dark-7);cursor:pointer;\
+                                 overflow:hidden;flex-shrink:0;"
+                            )
+                        }
+                    },
+                    draggable: "true",
+                    ondragstart: { let ui = ui; move || ui.material_drag.set(slot) },
+                    ondragend: {
+                        let ui = ui;
+                        move || {
+                            ui.material_drag.clear();
+                            ui.material_drop_highlight.set(None);
+                            // Bump generation so the viewport's MouseUp handler
+                            // (which rinch dispatches immediately after ondragend)
+                            // knows to suppress the GPU pick.
+                            ui.drag_drop_generation.update(|g| *g += 1);
+                        }
+                    },
+                    onclick: {
+                        let cmd = cmd.clone();
+                        let ui = ui;
+                        let shared_state = shared_state.clone();
+                        move || {
+                            ui.selected_material.set(Some(slot));
+                            ui.selected_shader.set(None);
+                            ui.properties_tab.set(1);
+                            let _ = cmd.0.send(EditorCommand::SelectMaterial { slot });
+                            // Trigger material preview update.
+                            if let Ok(mut ss) = shared_state.lock() {
+                                ss.preview_material_slot = Some(slot);
+                                ss.preview_dirty = true;
+                            }
+                        }
+                    },
+                }
+            };
+
+            // Append swatch (with indicators), then info.
+            card.append_child(&swatch);
+            let mat_name = mat.name.clone();
+            let info = rsx! {
+                div { style: "padding:2px 3px;display:flex;flex-direction:column;gap:1px;",
+                    div {
+                        style: "font-size:9px;color:var(--rinch-color-text);\
+                                white-space:nowrap;overflow:hidden;text-overflow:ellipsis;",
+                        {mat_name}
+                    }
+                    div {
+                        style: "font-size:8px;color:var(--rinch-color-placeholder);\
+                                font-family:var(--rinch-font-family-monospace);",
+                        {format!("#{slot}")}
+                    }
+                }
+            };
+            card.append_child(&info);
+
+            card
+        },
+    );
+
+    wrapper
+}
+
+/// Build the shaders grid with `for_each_dom_typed`.
+///
+/// The wrapper div uses a reactive style to toggle `display:none` when the
+/// materials tab is active. Each shader card has a reactive style closure
+/// for its selection border.
+fn build_shaders_grid(
+    __scope: &mut RenderScope,
+    ui: UiSignals,
+    last_shader_click: Rc<RefCell<(String, Instant)>>,
+) -> NodeHandle {
+    let wrapper = rsx! {
+        div {
+            style: {
+                let ui = ui;
+                move || {
+                    if ui.asset_browser_tab.get() == 1 {
+                        "display:flex;flex-wrap:wrap;gap:6px;padding:4px 12px;\
+                         overflow-y:auto;flex:1;min-height:0;align-content:flex-start;"
+                    } else {
+                        "display:none;"
+                    }
+                }
+            },
+        }
+    };
+
+    rinch::core::for_each_dom_typed(
+        __scope,
+        &wrapper,
+        move || ui.shaders.get(),
+        |shader| shader.name.clone(),
+        move |shader, __scope| {
+            let shader_name_for_style = shader.name.clone();
+            let shader_name = shader.name.clone();
+            let file_path = shader.file_path.clone();
+            let built_in = shader.built_in;
+
+            let (bg_color, icon_text) = if built_in {
+                ("rgba(60,120,200,0.3)", "B")
+            } else {
+                ("rgba(60,180,100,0.3)", "C")
+            };
+            let type_label = if built_in { "built-in" } else { "custom" };
+
+            let icon_style = format!(
+                "width:100%;height:32px;background:{bg_color};\
+                 display:flex;align-items:center;justify-content:center;\
+                 font-size:14px;color:var(--rinch-color-dimmed);font-weight:600;"
             );
 
-            let selected_shader = ui.selected_shader.get();
+            // Card — reactive style closure for selection border.
+            let card = rsx! {
+                div {
+                    style: {
+                        let ui = ui;
+                        let shader_name = shader_name_for_style.clone();
+                        move || {
+                            let is_selected = ui.selected_shader.get().as_deref() == Some(shader_name.as_str());
+                            let border_color = if is_selected {
+                                "var(--rinch-primary-color)"
+                            } else {
+                                "var(--rinch-color-border)"
+                            };
+                            format!(
+                                "width:64px;display:flex;flex-direction:column;\
+                                 border:1px solid {border_color};border-radius:4px;\
+                                 background:var(--rinch-color-dark-7);cursor:pointer;\
+                                 overflow:hidden;flex-shrink:0;"
+                            )
+                        }
+                    },
+                    draggable: "true",
+                    ondragstart: {
+                        let ui = ui;
+                        let shader_name = shader_name.clone();
+                        move || {
+                            ui.shader_drag.set(shader_name.clone());
+                        }
+                    },
+                    ondragend: {
+                        let ui = ui;
+                        move || {
+                            ui.shader_drag.clear();
+                            ui.shader_drop_highlight.set(false);
+                            ui.drag_drop_generation.update(|g| *g += 1);
+                        }
+                    },
+                    onclick: {
+                        let ui = ui;
+                        let last_click = last_shader_click.clone();
+                        let shader_name = shader_name.clone();
+                        let file_path = file_path.clone();
+                        move || {
+                            let now = Instant::now();
+                            let mut prev = last_click.borrow_mut();
+                            let is_double = prev.0 == shader_name
+                                && now.duration_since(prev.1).as_millis() < DOUBLE_CLICK_MS;
 
-            for shader in &shaders {
-                let is_selected = selected_shader.as_deref() == Some(&shader.name);
-
-                let card = __scope.create_element("div");
-                let border_color = if is_selected {
-                    "var(--rinch-primary-color)"
-                } else {
-                    "var(--rinch-color-border)"
-                };
-                card.set_attribute(
-                    "style",
-                    &format!(
-                        "width:64px;display:flex;flex-direction:column;\
-                         border:1px solid {border_color};border-radius:4px;\
-                         background:var(--rinch-color-dark-7);cursor:pointer;\
-                         overflow:hidden;flex-shrink:0;"
-                    ),
-                );
-
-                // Icon area — colored block indicating built-in vs custom.
-                let icon = __scope.create_element("div");
-                let (bg_color, icon_text) = if shader.built_in {
-                    ("rgba(60,120,200,0.3)", "B")
-                } else {
-                    ("rgba(60,180,100,0.3)", "C")
-                };
-                icon.set_attribute(
-                    "style",
-                    &format!(
-                        "width:100%;height:32px;background:{bg_color};\
-                         display:flex;align-items:center;justify-content:center;\
-                         font-size:14px;color:var(--rinch-color-dimmed);font-weight:600;"
-                    ),
-                );
-                icon.append_child(&__scope.create_text(icon_text));
-                card.append_child(&icon);
-
-                // Name + type label.
-                let info = __scope.create_element("div");
-                info.set_attribute(
-                    "style",
-                    "padding:2px 3px;display:flex;flex-direction:column;gap:1px;",
-                );
-                let name_el = __scope.create_element("div");
-                name_el.set_attribute(
-                    "style",
-                    "font-size:9px;color:var(--rinch-color-text);\
-                     white-space:nowrap;overflow:hidden;text-overflow:ellipsis;",
-                );
-                name_el.append_child(&__scope.create_text(&shader.name));
-                info.append_child(&name_el);
-
-                let type_el = __scope.create_element("div");
-                type_el.set_attribute(
-                    "style",
-                    "font-size:8px;color:var(--rinch-color-placeholder);\
-                     font-family:var(--rinch-font-family-monospace);",
-                );
-                let type_label = if shader.built_in { "built-in" } else { "custom" };
-                type_el.append_child(&__scope.create_text(type_label));
-                info.append_child(&type_el);
-                card.append_child(&info);
-
-                // Make card draggable for drag-and-drop to material shader slot.
-                card.set_attribute("draggable", "true");
-
-                let shader_name = shader.name.clone();
-                let file_path = shader.file_path.clone();
-
-                // ondragstart: set drag context data.
-                let drag_start_hid = __scope.register_handler({
-                    let ui = ui;
-                    let shader_name = shader_name.clone();
-                    move || {
-                        ui.shader_drag.set(shader_name.clone());
-                    }
-                });
-                card.set_attribute("data-ondragstart", &drag_start_hid.to_string());
-
-                // ondragend: clear drag context.
-                let drag_end_hid = __scope.register_handler({
-                    let ui = ui;
-                    move || {
-                        ui.shader_drag.clear();
-                        ui.shader_drop_highlight.set(false);
-                        ui.drag_drop_generation.update(|g| *g += 1);
-                    }
-                });
-                card.set_attribute("data-ondragend", &drag_end_hid.to_string());
-
-                // Click handler — select shader (also serves as fallback when
-                // mousedown→mouseup without crossing drag threshold).
-                let hid = __scope.register_handler({
-                    let ui = ui;
-                    let last_click = last_shader_click.clone();
-                    let shader_name = shader_name.clone();
-                    let file_path = file_path.clone();
-                    move || {
-                        let now = Instant::now();
-                        let mut prev = last_click.borrow_mut();
-                        let is_double = prev.0 == shader_name
-                            && now.duration_since(prev.1).as_millis() < DOUBLE_CLICK_MS;
-
-                        if is_double {
-                            // Double-click: open shader file.
-                            if !file_path.is_empty() {
-                                let _ = std::process::Command::new("xdg-open")
-                                    .arg(&file_path)
-                                    .spawn();
+                            if is_double {
+                                // Double-click: open shader file.
+                                if !file_path.is_empty() {
+                                    let _ = std::process::Command::new("xdg-open")
+                                        .arg(&file_path)
+                                        .spawn();
+                                }
+                                *prev = (String::new(), now);
+                            } else {
+                                // Single click: select shader.
+                                ui.selected_shader.set(Some(shader_name.clone()));
+                                ui.selected_material.set(None);
+                                ui.properties_tab.set(1);
+                                *prev = (shader_name.clone(), now);
                             }
-                            *prev = (String::new(), now);
-                        } else {
-                            // Single click: select shader.
-                            ui.selected_shader.set(Some(shader_name.clone()));
-                            ui.selected_material.set(None);
-                            ui.properties_tab.set(1);
-                            *prev = (shader_name.clone(), now);
+                        }
+                    },
+
+                    // Icon area.
+                    div { style: {icon_style.as_str()}, {icon_text} }
+
+                    // Name + type label.
+                    div { style: "padding:2px 3px;display:flex;flex-direction:column;gap:1px;",
+                        div {
+                            style: "font-size:9px;color:var(--rinch-color-text);\
+                                    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;",
+                            {shader_name.clone()}
+                        }
+                        div {
+                            style: "font-size:8px;color:var(--rinch-color-placeholder);\
+                                    font-family:var(--rinch-font-family-monospace);",
+                            {type_label}
                         }
                     }
-                });
-                card.set_attribute("data-rid", &hid.to_string());
+                }
+            };
 
-                grid.append_child(&card);
-            }
+            card
+        },
+    );
 
-            container.append_child(&grid);
-        }
-
-        container
-    });
-
-    root
+    wrapper
 }

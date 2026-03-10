@@ -2,9 +2,16 @@
 //!
 //! Displays material cards with albedo color swatches, metallic/emissive indicators,
 //! and slot numbers. Supports click-to-select and drag-to-assign.
+//!
+//! Uses `for_each_dom_typed` so the grid only rebuilds when the materials list
+//! changes. Selection border updates are handled by reactive style closures on
+//! each card, avoiding a full grid rebuild on every selection change.
+
+use std::sync::{Arc, Mutex};
 
 use rinch::prelude::*;
 
+use crate::automation::SharedState;
 use crate::editor_command::EditorCommand;
 use crate::editor_state::UiSignals;
 use crate::CommandSender;
@@ -16,64 +23,46 @@ use crate::CommandSender;
 pub fn MaterialsPanel() -> NodeHandle {
     let ui = use_context::<UiSignals>();
     let cmd = use_context::<CommandSender>();
+    let shared_state = use_context::<Arc<Mutex<SharedState>>>();
 
-    let root = __scope.create_element("div");
-    root.set_attribute(
-        "style",
-        "flex:1;min-height:0;display:flex;flex-direction:column;",
-    );
+    let root = rsx! {
+        div { style: "flex:1;min-height:0;display:flex;flex-direction:column;" }
+    };
+
+    // Container: count badge + grid.
+    let container = rsx! {
+        div { style: "display:flex;flex-direction:column;height:100%;" }
+    };
+
+    // Count badge — reactive text tracks materials list length.
+    let count_div = rsx! {
+        div {
+            style: "font-size:10px;color:var(--rinch-color-placeholder);\
+                    font-family:var(--rinch-font-family-monospace);padding:4px 12px;\
+                    border-bottom:1px solid var(--rinch-color-border);flex-shrink:0;",
+            {move || format!("{} slots", ui.materials.get().len())}
+        }
+    };
+    container.append_child(&count_div);
+
+    // Grid — for_each_dom_typed rebuilds only when materials list changes.
+    let grid = rsx! {
+        div {
+            style: "display:flex;flex-wrap:wrap;gap:6px;padding:4px 12px;\
+                    overflow-y:auto;flex:1;min-height:0;align-content:flex-start;",
+        }
+    };
 
     let cmd2 = cmd.clone();
-    rinch::core::reactive_component_dom(__scope, &root, move |__scope| {
-        let materials = ui.materials.get();
-        let selected_slot = ui.selected_material.get();
-
-        let container = __scope.create_element("div");
-        container.set_attribute("style", "display:flex;flex-direction:column;height:100%;");
-
-        // ── Count badge ──
-        let count_bar = __scope.create_element("div");
-        count_bar.set_attribute(
-            "style",
-            "font-size:10px;color:var(--rinch-color-placeholder);\
-             font-family:var(--rinch-font-family-monospace);padding:4px 12px;\
-             border-bottom:1px solid var(--rinch-color-border);flex-shrink:0;",
-        );
-        count_bar.append_child(
-            &__scope.create_text(&format!("{} slots", materials.len())),
-        );
-        container.append_child(&count_bar);
-
-        // ── Materials grid ──
-        let grid = __scope.create_element("div");
-        grid.set_attribute(
-            "style",
-            "display:flex;flex-wrap:wrap;gap:6px;padding:4px 12px;\
-             overflow-y:auto;flex:1;min-height:0;align-content:flex-start;",
-        );
-
-        for mat in &materials {
+    rinch::core::for_each_dom_typed(
+        __scope,
+        &grid,
+        move || ui.materials.get(),
+        |mat| format!("{}", mat.slot),
+        move |mat, __scope| {
             let slot = mat.slot;
-            let is_selected = selected_slot == Some(slot);
 
-            let card = __scope.create_element("div");
-            let border_color = if is_selected {
-                "var(--rinch-primary-color)"
-            } else {
-                "var(--rinch-color-border)"
-            };
-            card.set_attribute(
-                "style",
-                &format!(
-                    "width:64px;display:flex;flex-direction:column;\
-                     border:1px solid {border_color};border-radius:4px;\
-                     background:var(--rinch-color-dark-7);cursor:pointer;\
-                     overflow:hidden;flex-shrink:0;"
-                ),
-            );
-
-            // Color swatch (albedo).
-            let swatch = __scope.create_element("div");
+            // Build swatch style from material properties (static per-item).
             let r = (mat.albedo[0] * 255.0).round() as u8;
             let g = (mat.albedo[1] * 255.0).round() as u8;
             let b = (mat.albedo[2] * 255.0).round() as u8;
@@ -88,100 +77,106 @@ pub fn MaterialsPanel() -> NodeHandle {
                     "box-shadow:inset 0 0 8px rgb({er},{eg},{eb});"
                 ));
             }
-            swatch.set_attribute("style", &swatch_style);
 
-            // Indicator row (metallic/emissive icons).
-            let indicators = __scope.create_element("div");
-            indicators.set_attribute(
-                "style",
-                "display:flex;gap:2px;padding:1px 2px;height:10px;align-items:center;",
-            );
+            // Build indicator dots.
+            let indicators = rsx! {
+                div { style: "display:flex;gap:2px;padding:1px 2px;height:10px;align-items:center;" }
+            };
             if mat.metallic > 0.5 {
-                let m_dot = __scope.create_element("div");
-                m_dot.set_attribute(
-                    "style",
-                    "width:6px;height:6px;border-radius:50%;\
-                     background:#a0a0c0;border:1px solid #8080a0;",
-                );
-                indicators.append_child(&m_dot);
+                indicators.append_child(&rsx! {
+                    div {
+                        style: "width:6px;height:6px;border-radius:50%;\
+                                background:#a0a0c0;border:1px solid #8080a0;",
+                    }
+                });
             }
             if mat.emission_strength > 0.01 {
-                let e_dot = __scope.create_element("div");
-                e_dot.set_attribute(
-                    "style",
-                    "width:6px;height:6px;border-radius:50%;\
-                     background:#ffcc44;border:1px solid #cc9900;",
-                );
-                indicators.append_child(&e_dot);
+                indicators.append_child(&rsx! {
+                    div {
+                        style: "width:6px;height:6px;border-radius:50%;\
+                                background:#ffcc44;border:1px solid #cc9900;",
+                    }
+                });
             }
+
+            // Build swatch with indicators overlay.
+            let swatch = rsx! {
+                div { style: {swatch_style.as_str()} }
+            };
             swatch.append_child(&indicators);
+
+            // Card — reactive style closure for selection border.
+            let card = rsx! {
+                div {
+                    style: {
+                        let ui = ui;
+                        move || {
+                            let is_selected = ui.selected_material.get() == Some(slot);
+                            let border_color = if is_selected {
+                                "var(--rinch-primary-color)"
+                            } else {
+                                "var(--rinch-color-border)"
+                            };
+                            format!(
+                                "width:64px;display:flex;flex-direction:column;\
+                                 border:1px solid {border_color};border-radius:4px;\
+                                 background:var(--rinch-color-dark-7);cursor:pointer;\
+                                 overflow:hidden;flex-shrink:0;"
+                            )
+                        }
+                    },
+                    draggable: "true",
+                    ondragstart: { let ui = ui; move || ui.material_drag.set(slot) },
+                    ondragend: {
+                        let ui = ui;
+                        move || {
+                            ui.material_drag.clear();
+                            ui.material_drop_highlight.set(None);
+                            ui.drag_drop_generation.update(|g| *g += 1);
+                        }
+                    },
+                    onclick: {
+                        let cmd = cmd2.clone();
+                        let ui = ui;
+                        let shared_state = shared_state.clone();
+                        move || {
+                            ui.selected_material.set(Some(slot));
+                            ui.selected_shader.set(None);
+                            ui.properties_tab.set(1);
+                            let _ = cmd.0.send(EditorCommand::SelectMaterial { slot });
+                            if let Ok(mut ss) = shared_state.lock() {
+                                ss.preview_material_slot = Some(slot);
+                                ss.preview_dirty = true;
+                            }
+                        }
+                    },
+                }
+            };
+
+            // Append swatch (with indicators), then info.
             card.append_child(&swatch);
-
-            // Name + slot label.
-            let info = __scope.create_element("div");
-            info.set_attribute(
-                "style",
-                "padding:2px 3px;display:flex;flex-direction:column;gap:1px;",
-            );
-            let name_el = __scope.create_element("div");
-            name_el.set_attribute(
-                "style",
-                "font-size:9px;color:var(--rinch-color-text);\
-                 white-space:nowrap;overflow:hidden;text-overflow:ellipsis;",
-            );
-            name_el.append_child(&__scope.create_text(&mat.name));
-            info.append_child(&name_el);
-
-            let slot_el = __scope.create_element("div");
-            slot_el.set_attribute(
-                "style",
-                "font-size:8px;color:var(--rinch-color-placeholder);\
-                 font-family:var(--rinch-font-family-monospace);",
-            );
-            slot_el.append_child(&__scope.create_text(&format!("#{slot}")));
-            info.append_child(&slot_el);
+            let mat_name = mat.name.clone();
+            let info = rsx! {
+                div { style: "padding:2px 3px;display:flex;flex-direction:column;gap:1px;",
+                    div {
+                        style: "font-size:9px;color:var(--rinch-color-text);\
+                                white-space:nowrap;overflow:hidden;text-overflow:ellipsis;",
+                        {mat_name}
+                    }
+                    div {
+                        style: "font-size:8px;color:var(--rinch-color-placeholder);\
+                                font-family:var(--rinch-font-family-monospace);",
+                        {format!("#{slot}")}
+                    }
+                }
+            };
             card.append_child(&info);
 
-            // Make material card draggable.
-            card.set_attribute("draggable", "true");
+            card
+        },
+    );
 
-            let drag_start_hid = __scope.register_handler({
-                let ui = ui;
-                move || {
-                    ui.material_drag.set(slot);
-                }
-            });
-            card.set_attribute("data-ondragstart", &drag_start_hid.to_string());
-
-            let drag_end_hid = __scope.register_handler({
-                let ui = ui;
-                move || {
-                    ui.material_drag.clear();
-                    ui.material_drop_highlight.set(None);
-                    ui.drag_drop_generation.update(|g| *g += 1);
-                }
-            });
-            card.set_attribute("data-ondragend", &drag_end_hid.to_string());
-
-            // Click handler — select material.
-            let hid = __scope.register_handler({
-                let cmd = cmd2.clone();
-                let ui = ui;
-                move || {
-                    ui.selected_material.set(Some(slot));
-                    ui.selected_shader.set(None);
-                    ui.properties_tab.set(1);
-                    let _ = cmd.0.send(EditorCommand::SelectMaterial { slot });
-                }
-            });
-            card.set_attribute("data-rid", &hid.to_string());
-
-            grid.append_child(&card);
-        }
-
-        container.append_child(&grid);
-        container
-    });
-
+    container.append_child(&grid);
+    root.append_child(&container);
     root
 }

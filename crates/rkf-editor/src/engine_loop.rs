@@ -22,6 +22,8 @@ pub(crate) struct EngineThreadData {
     pub(crate) surface_writer: SurfaceWriter,
     /// GPU texture registrar — provides layout size and texture submission.
     pub(crate) gpu_registrar: GpuTextureRegistrar,
+    /// CPU pixel writer for the material preview surface.
+    pub(crate) preview_writer: SurfaceWriter,
 }
 
 /// Tracks which categories of data changed this frame, so we only
@@ -70,6 +72,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         layout_backing,
         surface_writer,
         gpu_registrar,
+        preview_writer,
     } = data;
 
     log::info!("Engine thread: creating dedicated GPU device");
@@ -175,6 +178,11 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                                         // Restore editor layout if saved in project.
                                         if let Some(ref layout_ron) = pf.editor_layout {
                                             layout_backing.from_ron(layout_ron);
+                                            let lb = layout_backing.clone();
+                                            rinch::shell::rinch_runtime::run_on_main_thread(move || {
+                                                let layout = rinch::core::use_context::<crate::layout::state::LayoutState>();
+                                                layout.load_from_backing(&lb);
+                                            });
                                         }
                                         es.current_project = Some(pf);
                                         es.current_project_path = Some(project_path_str.clone());
@@ -231,6 +239,8 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
     // Push everything on the first frame so the UI has initial data.
     let mut first_frame = true;
     let mut current_vp = engine.viewport_size();
+    // Tracks whether the preview texture has been registered with the compositor.
+    let preview_writer = preview_writer;
 
     loop {
         let frame_start = std::time::Instant::now();
@@ -888,6 +898,11 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                             // Restore editor layout if saved in project.
                             if let Some(ref layout_ron) = pf.editor_layout {
                                 layout_backing.from_ron(layout_ron);
+                                let lb = layout_backing.clone();
+                                rinch::shell::rinch_runtime::run_on_main_thread(move || {
+                                    let layout = rinch::core::use_context::<crate::layout::state::LayoutState>();
+                                    layout.load_from_backing(&lb);
+                                });
                             }
                             es.current_project = Some(pf);
                             es.current_project_path = Some(path_str.clone());
@@ -1493,6 +1508,37 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                     ss.frame_width = px_w;
                     ss.frame_height = px_h;
                     ss.screenshot_requested = false;
+                }
+            }
+        }
+
+        // i3. Material preview — dispatch + readback (after main viewport is done).
+        {
+            let (preview_slot, preview_prim) = {
+                if let Ok(mut ss) = shared_state.lock() {
+                    let slot = ss.preview_material_slot;
+                    let prim = ss.preview_primitive_type;
+                    if ss.preview_dirty {
+                        ss.preview_dirty = false;
+                    }
+                    (slot, prim)
+                } else {
+                    (None, 0)
+                }
+            };
+            // Render every frame when a material slot is active.
+            // The preview is tiny (128x128) so this is cheap.
+            if let Some(slot) = preview_slot {
+                let materials = {
+                    let lib = engine.material_library.lock().unwrap();
+                    lib.all_materials().to_vec()
+                };
+                engine.material_preview.dispatch_render(
+                    &engine.ctx.device, &engine.ctx.queue,
+                    &materials, slot, preview_prim,
+                );
+                if let Some((pixels, pw, ph)) = engine.material_preview.read_pixels(&engine.ctx.device) {
+                    preview_writer.submit_frame(&pixels, pw, ph);
                 }
             }
         }

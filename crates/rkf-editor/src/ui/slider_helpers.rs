@@ -34,23 +34,28 @@ pub(super) fn build_slider_row(
     );
     label_row.append_child(&scope.create_text(label));
 
-    let val_span = scope.create_element("span");
-    val_span.set_attribute(
-        "style",
-        "font-family:var(--rinch-font-family-monospace);",
-    );
+    // Reactive value text — create_effect surgically updates the text node
+    // instead of tearing down and rebuilding.
+    let val_text = scope.create_text("");
+    let suffix = suffix.to_string();
     {
-        let suffix = suffix.to_string();
-        rinch::core::reactive_component_dom(scope, &val_span, move |__scope| {
+        let val_text = val_text.clone();
+        scope.create_effect(move || {
             let v = signal.get();
             let text = match decimals {
                 0 => format!("{v:.0}{suffix}"),
                 1 => format!("{v:.1}{suffix}"),
                 _ => format!("{v:.2}{suffix}"),
             };
-            __scope.create_text(&text)
+            val_text.set_text(&text);
         });
     }
+    let val_span = scope.create_element("span");
+    val_span.set_attribute(
+        "style",
+        "font-family:var(--rinch-font-family-monospace);",
+    );
+    val_span.append_child(&val_text);
     label_row.append_child(&val_span);
     row.append_child(&label_row);
 
@@ -69,8 +74,7 @@ pub(super) fn build_slider_row(
     };
     // Render the slider inside `untracked` so the Slider's internal
     // `value_signal.get()` (for initial value) doesn't subscribe the
-    // parent reactive_component_dom scope to every slider signal.
-    // Without this, dragging ANY slider rebuilds the entire RightPanel.
+    // parent scope to every slider signal.
     let slider_node = rinch::core::untracked(|| slider.render(scope, &[]));
     row.append_child(&slider_node);
     container.append_child(&row);

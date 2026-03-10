@@ -19,20 +19,20 @@ fn WindowControl(label: String, extra_class: String, onclick: Option<Callback>) 
     } else {
         format!("rinch-borderlesswindow__control {extra_class}")
     };
-    let el = __scope.create_element("div");
-    el.set_attribute("class", &cls);
-    el.set_attribute(
-        "style",
-        "width:46px;height:36px;display:flex;align-items:center;\
-         justify-content:center;cursor:pointer;\
-         color:var(--rinch-color-dimmed);font-size:14px;",
-    );
-    el.append_child(&__scope.create_text(&label));
-    if let Some(cb) = onclick {
-        let hid = __scope.register_handler(move || cb.invoke());
-        el.set_attribute("data-rid", &hid.to_string());
+    let label2 = label.clone();
+    rsx! {
+        div {
+            class: {cls.clone()},
+            style: "width:46px;height:36px;display:flex;align-items:center;\
+                    justify-content:center;cursor:pointer;\
+                    color:var(--rinch-color-dimmed);font-size:14px;",
+            onclick: {
+                let cb = onclick.clone();
+                move || { if let Some(cb) = &cb { cb.invoke(); } }
+            },
+            {label2}
+        }
     }
-    el
 }
 
 // ── Titlebar ────────────────────────────────────────────────────────────────
@@ -91,29 +91,22 @@ pub fn TitleBar() -> NodeHandle {
     bar.set_attribute("data-drag-window", "1");
 
     // ── App title "RkiField" ───────────────────────────────────────────
-    let title_container = __scope.create_element("div");
-    title_container.set_attribute(
-        "style",
-        "position:relative;overflow:hidden;padding:0 12px 0 10px;\
-         display:flex;align-items:center;",
-    );
-    let title_text = __scope.create_element("span");
-    title_text.set_attribute(
-        "style",
-        "font-size:12px;font-weight:600;color:var(--rinch-color-text);\
-         letter-spacing:0.5px;white-space:nowrap;",
-    );
-    title_text.append_child(&__scope.create_text("RkiField"));
-    title_container.append_child(&title_text);
-    // Gradient fade on right edge.
-    let title_fade = __scope.create_element("span");
-    title_fade.set_attribute(
-        "style",
-        "position:absolute;right:0;top:0;bottom:0;width:16px;\
-         background:linear-gradient(90deg, transparent, var(--rinch-titlebar-bg));",
-    );
-    title_container.append_child(&title_fade);
-    bar.append_child(&title_container);
+    let title_node = rsx! {
+        div {
+            style: "position:relative;overflow:hidden;padding:0 12px 0 10px;\
+                    display:flex;align-items:center;",
+            span {
+                style: "font-size:12px;font-weight:600;color:var(--rinch-color-text);\
+                        letter-spacing:0.5px;white-space:nowrap;",
+                "RkiField"
+            }
+            span {
+                style: "position:absolute;right:0;top:0;bottom:0;width:16px;\
+                        background:linear-gradient(90deg, transparent, var(--rinch-titlebar-bg));",
+            }
+        }
+    };
+    bar.append_child(&title_node);
 
     // ── Build menu data ────────────────────────────────────────────────
     let es = editor_state.clone();
@@ -451,74 +444,62 @@ pub fn TitleBar() -> NodeHandle {
     }
 
     // ── Separator between menus and tool buttons ───────────────────────
-    let separator = __scope.create_element("div");
-    separator.set_attribute(
-        "style",
-        "width:1px;height:14px;background:var(--rinch-color-border);margin:0 8px;",
-    );
+    let separator = rsx! {
+        div {
+            style: "width:1px;height:14px;background:var(--rinch-color-border);margin:0 8px;",
+        }
+    };
     bar.append_child(&separator);
 
     // ── Tool buttons (Sculpt/Paint) ────────────────────────────────────
     {
-        let cmd2 = cmd.clone();
-        let tool_container = __scope.create_element("div");
-        tool_container.set_attribute(
-            "style",
-            "display:flex;align-items:center;gap:2px;",
-        );
-
-        rinch::core::reactive_component_dom(__scope, &tool_container, move |__scope| {
-            let current_mode = ui.editor_mode.get();
-
-            let inner = __scope.create_element("div");
-            inner.set_attribute("style", "display:flex;align-items:center;gap:2px;");
-
-            for mode in EditorMode::TOOLS.iter() {
-                let mode = *mode;
-                let btn = __scope.create_element("div");
-                let is_active = mode == current_mode;
-
-                let style = if is_active {
-                    "padding:2px 8px;cursor:pointer;border-radius:3px;\
-                     background:var(--rinch-titlebar-active);\
-                     font-size:11px;color:var(--rinch-color-text);user-select:none;\
-                     border:1px solid var(--rinch-color-border);font-weight:600;"
-                } else {
-                    "padding:2px 8px;cursor:pointer;border-radius:3px;\
-                     background:transparent;\
-                     font-size:11px;color:var(--rinch-color-dimmed);user-select:none;\
-                     border:1px solid transparent;font-weight:400;"
-                };
-
-                btn.set_attribute("style", style);
-
-                btn.append_child(&__scope.create_text(mode.name()));
-
-                let cmd = cmd2.clone();
-                let handler_id = __scope.register_handler(move || {
-                    let current = ui.editor_mode.get();
-                    let new_mode = if current == mode {
-                        EditorMode::Default
-                    } else {
-                        mode
-                    };
-                    let _ = cmd.0.send(EditorCommand::SetEditorMode { mode: new_mode });
-                    ui.editor_mode.set(new_mode);
-                });
-                btn.set_attribute("data-rid", &handler_id.to_string());
-
-                inner.append_child(&btn);
+        let tool_container = rsx! {
+            div {
+                style: "display:flex;align-items:center;gap:2px;",
             }
+        };
 
-            inner
-        });
+        for &mode in EditorMode::TOOLS.iter() {
+            let cmd = cmd.clone();
+            let btn = rsx! {
+                div {
+                    style: {move || {
+                        let is_active = ui.editor_mode.get() == mode;
+                        if is_active {
+                            "padding:2px 8px;cursor:pointer;border-radius:3px;\
+                             background:var(--rinch-titlebar-active);\
+                             font-size:11px;color:var(--rinch-color-text);user-select:none;\
+                             border:1px solid var(--rinch-color-border);font-weight:600;"
+                        } else {
+                            "padding:2px 8px;cursor:pointer;border-radius:3px;\
+                             background:transparent;\
+                             font-size:11px;color:var(--rinch-color-dimmed);user-select:none;\
+                             border:1px solid transparent;font-weight:400;"
+                        }
+                    }},
+                    onclick: move || {
+                        let current = ui.editor_mode.get();
+                        let new_mode = if current == mode {
+                            EditorMode::Default
+                        } else {
+                            mode
+                        };
+                        let _ = cmd.0.send(EditorCommand::SetEditorMode { mode: new_mode });
+                        ui.editor_mode.set(new_mode);
+                    },
+                    {mode.name()}
+                }
+            };
+            tool_container.append_child(&btn);
+        }
 
         bar.append_child(&tool_container);
     }
 
     // ── Spacer ─────────────────────────────────────────────────────────
-    let spacer = __scope.create_element("div");
-    spacer.set_attribute("style", "flex:1;");
+    let spacer = rsx! {
+        div { style: "flex:1;", }
+    };
     bar.append_child(&spacer);
 
     // ── Window controls (rsx!) ──────────────────────────────────────────

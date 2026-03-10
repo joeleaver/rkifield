@@ -122,8 +122,6 @@ pub fn editor_ui() -> NodeHandle {
         let sliders = use_context::<SliderSignals>();
         let tree_state = use_context::<UseTreeReturn>();
         let cmd_tx = use_context::<crate::CommandSender>().0.clone();
-        let layout_for_events = use_context::<crate::layout::state::LayoutState>();
-        let layout_backing = use_context::<crate::layout::state::LayoutBacking>();
         // Track last mouse position for delta computation (lock-free).
         let last_mx = std::cell::Cell::new(0.0f32);
         let last_my = std::cell::Cell::new(0.0f32);
@@ -148,11 +146,6 @@ pub fn editor_ui() -> NodeHandle {
                     last_mx.set(x);
                     last_my.set(y);
                     let _ = cmd_tx.send(EditorCommand::MouseMove { x, y, dx, dy });
-
-                    // Poll for layout config changes from the engine thread (project open).
-                    if layout_backing.poll_dirty() {
-                        layout_for_events.load_from_backing(&layout_backing);
-                    }
 
                     // Brief lock for gizmo hover/drag (needs camera + scene state).
                     // Also update mouse_pos for gizmo ray casting.
@@ -544,7 +537,7 @@ pub fn editor_ui() -> NodeHandle {
             style { {DARK_OVERRIDES} }
 
             // ── RenderSurface overlay — absolute-positioned over center viewport ──
-            // Lives outside any reactive_component_dom so it's never destroyed on
+            // Lives outside any structural rebuild scope so it's never destroyed on
             // layout rebuilds. Position updates reactively via closure syntax.
             div {
                 style: {
