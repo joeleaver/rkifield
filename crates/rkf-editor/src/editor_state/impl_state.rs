@@ -76,6 +76,7 @@ impl EditorState {
             pending_maximize: false,
             pending_convert_to_voxel: None,
             pending_remap_material: None,
+            pending_set_primitive_material: None,
             pending_sculpt_edits: Vec::new(),
             sculpt_undo_accumulator: None,
             pending_sculpt_undo: None,
@@ -181,10 +182,10 @@ impl EditorState {
             UndoActionKind::DespawnEntity { entity_id: _ } => {
                 // Undo despawn would need stored object data — not supported yet.
             }
-            UndoActionKind::SculptStroke { brick_snapshots, .. } => {
+            UndoActionKind::SculptStroke { object_id, brick_snapshots } => {
                 if reverse {
                     // Undo: queue brick restoration for the render loop.
-                    self.pending_sculpt_undo = Some(brick_snapshots.clone());
+                    self.pending_sculpt_undo = Some((*object_id, brick_snapshots.clone()));
                 }
                 // Redo is not supported for sculpt strokes.
             }
@@ -437,7 +438,7 @@ impl EditorState {
 
     /// Build object summaries from the current scene.
     pub fn build_object_summaries(&self) -> Vec<crate::ui_snapshot::ObjectSummary> {
-        use crate::ui_snapshot::ObjectSummary;
+        use crate::ui_snapshot::{ObjectSummary, ObjectType};
         self.world.scene().objects.iter().map(|obj| {
             let (yaw, pitch, roll) = obj.rotation.to_euler(glam::EulerRot::XYZ);
             ObjectSummary {
@@ -447,6 +448,11 @@ impl EditorState {
                 rotation_degrees: Vec3::new(yaw.to_degrees(), pitch.to_degrees(), roll.to_degrees()),
                 scale: obj.scale,
                 parent_id: obj.parent_id,
+                object_type: match &obj.root_node.sdf_source {
+                    rkf_core::scene_node::SdfSource::None => ObjectType::None,
+                    rkf_core::scene_node::SdfSource::Analytical { .. } => ObjectType::Analytical,
+                    rkf_core::scene_node::SdfSource::Voxelized { .. } => ObjectType::Voxelized,
+                },
             }
         }).collect()
     }

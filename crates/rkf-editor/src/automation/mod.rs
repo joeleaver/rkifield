@@ -71,12 +71,6 @@ pub struct SharedState {
     /// GPU pick result: object_id at the requested pixel (0 = miss/sky).
     /// Set by render loop after readback, consumed by engine thread section l.
     pub pick_result: Option<u32>,
-    /// Set by the engine thread after processing a pick result.
-    /// Cleared by the UI thread after updating signals.
-    pub pick_completed: bool,
-    /// Set by the engine thread when a gizmo drag finishes (transform changed).
-    /// Cleared by the UI thread after updating signals.
-    pub ui_revision_needed: bool,
     /// GPU brush hit request: internal-resolution pixel to sample for position.
     /// Set by mouse handler in Sculpt/Paint modes, consumed by render loop.
     pub pending_brush_hit: Option<(u32, u32)>,
@@ -162,8 +156,6 @@ impl SharedState {
             screenshot_requested: false,
             pending_pick: None,
             pick_result: None,
-            pick_completed: false,
-            ui_revision_needed: false,
             pending_brush_hit: None,
             brush_hit_result: None,
             brush_preview_pos: None,

@@ -261,24 +261,13 @@ pub fn editor_ui() -> NodeHandle {
                     };
                     // es lock released
 
-                    // SINGLE ss lock: brush hit + pick check.
-                    if let Ok(mut state) = ss.lock() {
-                        // Brush hit request in Sculpt/Paint mode.
-                        if left_down && matches!(mode, EditorMode::Sculpt | EditorMode::Paint) {
+                    // Brush hit request in Sculpt/Paint mode.
+                    if left_down && matches!(mode, EditorMode::Sculpt | EditorMode::Paint) {
+                        if let Ok(mut state) = ss.lock() {
                             let scale = crate::engine_viewport::RENDER_SCALE;
                             let bx = (x * scale) as u32;
                             let by = (y * scale) as u32;
                             state.pending_brush_hit = Some((bx, by));
-                        }
-
-                        // Check if the engine thread completed a GPU pick.
-                        if state.pick_completed {
-                            state.pick_completed = false;
-                            let picked = es.lock().ok().and_then(|s| s.selected_entity);
-                            ui.set_selection(picked, &sliders, &tree_state);
-                            if picked.is_some() {
-                                ui.properties_tab.set(0); // switch to Object tab
-                            }
                         }
                     }
                 }

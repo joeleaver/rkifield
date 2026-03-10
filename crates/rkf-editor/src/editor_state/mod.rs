@@ -135,6 +135,8 @@ pub struct UiSignals {
     pub scene_name: Signal<String>,
     /// Current scene file path.
     pub scene_path: Signal<Option<String>>,
+    /// Sculpt brush type name — pushed by engine when brush type changes.
+    pub brush_type: Signal<String>,
 }
 
 impl UiSignals {
@@ -179,6 +181,7 @@ impl UiSignals {
             camera_display_pos: Signal::new(Vec3::new(0.0, 2.5, 5.0)),
             scene_name: Signal::new("Untitled".into()),
             scene_path: Signal::new(None),
+            brush_type: Signal::new("Add".to_string()),
         }
     }
 
@@ -998,6 +1001,9 @@ pub struct EditorState {
     /// Set by material drag-and-drop in object properties panel.
     /// Contains (object_id, from_material, to_material).
     pub pending_remap_material: Option<(u64, u16, u16)>,
+    /// Set by material assignment on analytical primitives.
+    /// Contains (object_id, material_id).
+    pub pending_set_primitive_material: Option<(u64, u16)>,
 
     // ── Sculpt pipeline (UI → render loop) ──────────────────
     /// Queued sculpt edit requests — one per brush-hit point during a stroke.
@@ -1008,9 +1014,9 @@ pub struct EditorState {
     /// Created on stroke begin, finalized on stroke end.
     pub sculpt_undo_accumulator: Option<SculptUndoAccumulator>,
 
-    /// Pending sculpt undo: brick snapshots to restore.
+    /// Pending sculpt undo: (object_id, brick_snapshots) to restore.
     /// Set by apply_undo_action, consumed by the render loop.
-    pub pending_sculpt_undo: Option<Vec<(u32, Brick)>>,
+    pub pending_sculpt_undo: Option<(u64, Vec<(u32, Brick)>)>,
 
     // ── World (unified game state) ──────────────────────────
     /// The unified world container. Wraps `Scene` (SDF objects) + ECS +

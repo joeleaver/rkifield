@@ -15,6 +15,17 @@ pub struct ObjectMaterialUsage {
     pub voxel_count: u32,
 }
 
+/// What kind of SDF source an object has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectType {
+    /// No SDF source.
+    None,
+    /// Analytical SDF primitive.
+    Analytical,
+    /// Voxelized SDF.
+    Voxelized,
+}
+
 /// Lightweight summary of a scene object for UI display.
 #[derive(Debug, Clone)]
 pub struct ObjectSummary {
@@ -24,6 +35,7 @@ pub struct ObjectSummary {
     pub rotation_degrees: Vec3,
     pub scale: Vec3,
     pub parent_id: Option<u32>,
+    pub object_type: ObjectType,
 }
 
 /// Lightweight summary of a material slot for UI display.

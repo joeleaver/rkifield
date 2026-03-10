@@ -87,8 +87,12 @@ pub fn TitleBar() -> NodeHandle {
         }
     };
 
-    // Titlebar drag — rinch reads `data-drag-window` and emits AppAction::DragWindow.
-    bar.set_attribute("data-drag-window", "1");
+    // NOTE: data-drag-window must NOT be on the bar itself, because dropdown
+    // menu entries are children of the bar.  The parent-walk in handle_click
+    // checks data-rid first, then data-drag-window — but if a click lands on
+    // the dropdown container (no data-rid), it would walk up to the bar and
+    // start a window drag instead of closing the menu.  Apply data-drag-window
+    // only to non-interactive regions (title, spacer).
 
     // ── App title "RkiField" ───────────────────────────────────────────
     let title_node = rsx! {
@@ -106,6 +110,7 @@ pub fn TitleBar() -> NodeHandle {
             }
         }
     };
+    title_node.set_attribute("data-drag-window", "1");
     bar.append_child(&title_node);
 
     // ── Build menu data ────────────────────────────────────────────────
@@ -318,15 +323,27 @@ pub fn TitleBar() -> NodeHandle {
         label_node.set_attribute("data-rid", &label_click.to_string());
         item.append_child(&label_node);
 
-        let dropdown = rsx! {
-            div {
-                class: {move || if active_menu.get() == index {
-                    "rinch-app-menu-item__dropdown rinch-app-menu-item__dropdown--visible"
+        // IMPORTANT: Do NOT use the base `rinch-app-menu-item__dropdown` class
+        // because it sets `visibility:hidden` which cascades to children and
+        // blocks hit testing.  Instead, replicate its positioning + visual
+        // styles inline and toggle display:none/block.
+        let dropdown = __scope.create_element("div");
+        {
+            let dh = dropdown.clone();
+            rinch::reactive::Effect::new(move || {
+                if active_menu.get() == index {
+                    dh.set_attribute("style",
+                        "position:absolute;top:100%;left:0;min-width:220px;\
+                         background:var(--rinch-color-body);\
+                         border:1px solid var(--rinch-color-border,var(--rinch-color-gray-3));\
+                         border-radius:var(--rinch-radius-md);\
+                         box-shadow:0 4px 12px rgba(0,0,0,0.15);\
+                         padding:4px;z-index:200;");
                 } else {
-                    "rinch-app-menu-item__dropdown"
-                }},
-            }
-        };
+                    dh.set_attribute("style", "display:none;");
+                }
+            });
+        }
 
         for entry in menu.iter_entries() {
             match entry {
@@ -387,8 +404,17 @@ pub fn TitleBar() -> NodeHandle {
                     trigger.append_child(&arrow);
                     sub_node.append_child(&trigger);
 
+                    // Avoid rinch-app-menu-submenu__dropdown class — its
+                    // visibility:hidden cascades to children and blocks hit testing.
+                    // Use inline styles matching the visual appearance instead.
                     let nested = __scope.create_element("div");
-                    nested.set_attribute("class", "rinch-app-menu-submenu__dropdown");
+                    nested.set_attribute("style",
+                        "position:absolute;left:100%;top:0;min-width:200px;\
+                         background:var(--rinch-color-body);\
+                         border:1px solid var(--rinch-color-border,var(--rinch-color-gray-3));\
+                         border-radius:var(--rinch-radius-md);\
+                         box-shadow:0 4px 12px rgba(0,0,0,0.15);\
+                         padding:4px;z-index:200;");
                     for sub_entry in submenu.iter_entries() {
                         match sub_entry {
                             MenuEntryRef::Item { label, shortcut, enabled, callback } => {
@@ -496,10 +522,11 @@ pub fn TitleBar() -> NodeHandle {
         bar.append_child(&tool_container);
     }
 
-    // ── Spacer ─────────────────────────────────────────────────────────
+    // ── Spacer (draggable empty region) ─────────────────────────────────
     let spacer = rsx! {
         div { style: "flex:1;", }
     };
+    spacer.set_attribute("data-drag-window", "1");
     bar.append_child(&spacer);
 
     // ── Window controls (rsx!) ──────────────────────────────────────────

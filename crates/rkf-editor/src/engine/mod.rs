@@ -363,13 +363,19 @@ pub struct EditorEngine {
     pub(super) cached_bvh: Option<rkf_core::Bvh>,
     /// Cached BVH pairs (gpu_idx, world_aabb) for BVH refit.
     pub(super) cached_bvh_pairs: Vec<(u32, Aabb)>,
-    /// Cached world-space AABBs for coarse field population.
-    pub(super) cached_world_aabbs: Vec<(Vec3, Vec3)>,
+    /// Cached world-space AABBs keyed by object_id (for incremental coarse field updates).
+    pub(super) cached_world_aabbs: std::collections::HashMap<u32, Aabb>,
     /// Map from object_id → (start_index, count) in cached_gpu_objects.
     pub(super) object_gpu_ranges: std::collections::HashMap<u32, (usize, usize)>,
     /// Object IDs that need re-flattening this frame (transform changes, sculpt edits).
     pub(super) dirty_objects: std::collections::HashSet<u32>,
-    /// Full scene topology changed (spawn/delete/open) — triggers complete rebuild.
+    /// Object IDs spawned this frame (need GPU insert).
+    pub(super) spawned_objects: Vec<u32>,
+    /// Object IDs despawned this frame (need GPU tombstone).
+    pub(super) despawned_objects: Vec<u32>,
+    /// Number of tombstoned (dead) GPU object slots.
+    pub(super) tombstone_count: usize,
+    /// Full scene replaced (open/new project) — triggers complete rebuild.
     pub(super) topology_changed: bool,
     /// Lights changed this frame (light editor dirty or world_lights replaced).
     pub(super) lights_dirty: bool,
@@ -866,6 +872,9 @@ impl EditorEngine {
         self.cached_world_aabbs.clear();
         self.object_gpu_ranges.clear();
         self.dirty_objects.clear();
+        self.spawned_objects.clear();
+        self.despawned_objects.clear();
+        self.tombstone_count = 0;
 
         // Force full rebuild on next frame.
         self.topology_changed = true;

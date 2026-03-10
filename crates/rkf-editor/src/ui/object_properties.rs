@@ -1,12 +1,10 @@
 //! Object properties panel — shows name, entity ID, transform editor,
 //! convert-to-voxel button, and material usage for the selected object.
 
-use std::sync::{Arc, Mutex};
-
 use rinch::prelude::*;
 
 use crate::editor_command::EditorCommand;
-use crate::editor_state::{EditorState, SliderSignals, UiSignals};
+use crate::editor_state::{SliderSignals, UiSignals};
 use crate::CommandSender;
 
 use super::components::TransformEditor;
@@ -21,7 +19,6 @@ pub fn ObjectProperties(
     let sliders = use_context::<SliderSignals>();
     let cmd = use_context::<CommandSender>();
     let ui = use_context::<UiSignals>();
-    let editor_state = use_context::<Arc<Mutex<EditorState>>>();
 
     let objects = ui.objects.get();
     let eid = entity_id;
@@ -32,30 +29,8 @@ pub fn ObjectProperties(
             .iter()
             .filter(|c| c.parent_id.map(|p| p as u64) == Some(eid))
             .count();
-        let (is_voxelized, is_analytical) = editor_state
-            .lock()
-            .ok()
-            .map(|es_lock| {
-                es_lock
-                    .world
-                    .scene()
-                    .objects
-                    .iter()
-                    .find(|obj| obj.id as u64 == eid)
-                    .map(|obj| {
-                        let is_vox = matches!(
-                            obj.root_node.sdf_source,
-                            rkf_core::scene_node::SdfSource::Voxelized { .. }
-                        );
-                        let is_anal = matches!(
-                            obj.root_node.sdf_source,
-                            rkf_core::scene_node::SdfSource::Analytical { .. }
-                        );
-                        (is_vox, is_anal)
-                    })
-                    .unwrap_or((false, false))
-            })
-            .unwrap_or((false, false));
+        let is_voxelized = o.object_type == crate::ui_snapshot::ObjectType::Voxelized;
+        let is_analytical = o.object_type == crate::ui_snapshot::ObjectType::Analytical;
         (name, child_count, is_voxelized, is_analytical)
     });
 
@@ -80,7 +55,7 @@ pub fn ObjectProperties(
     // Build material rows imperatively — they use drag-drop handlers and
     // optimistic DOM updates that require element references.
     let materials_section = __scope.create_element("div");
-    if is_voxelized {
+    if is_voxelized || is_analytical {
         // Add divider + label inside the materials section container.
         let divider = __scope.create_element("div");
         divider.set_attribute("style", DIVIDER_STYLE);
@@ -109,13 +84,7 @@ pub fn ObjectProperties(
 
             let from_mat = std::rc::Rc::new(std::cell::Cell::new(usage.material_id));
             let from_mat_for_handler = from_mat.clone();
-            let count_str = if usage.voxel_count >= 1_000_000 {
-                format!("{:.1}M", usage.voxel_count as f64 / 1_000_000.0)
-            } else if usage.voxel_count >= 1_000 {
-                format!("{:.1}K", usage.voxel_count as f64 / 1_000.0)
-            } else {
-                format!("{}", usage.voxel_count)
-            };
+            let show_voxel_count = is_voxelized;
 
             let row = rsx! {
                 div {
@@ -160,15 +129,24 @@ pub fn ObjectProperties(
             name_el.append_child(&__scope.create_text(mat_name));
             row.append_child(&name_el);
 
-            // Voxel count.
-            let count_el = __scope.create_element("span");
-            count_el.set_attribute(
-                "style",
-                "font-size:10px;color:var(--rinch-color-placeholder);\
-                 font-family:var(--rinch-font-family-monospace);flex-shrink:0;",
-            );
-            count_el.append_child(&__scope.create_text(&count_str));
-            row.append_child(&count_el);
+            // Voxel count (voxelized objects only).
+            if show_voxel_count {
+                let count_str = if usage.voxel_count >= 1_000_000 {
+                    format!("{:.1}M", usage.voxel_count as f64 / 1_000_000.0)
+                } else if usage.voxel_count >= 1_000 {
+                    format!("{:.1}K", usage.voxel_count as f64 / 1_000.0)
+                } else {
+                    format!("{}", usage.voxel_count)
+                };
+                let count_el = __scope.create_element("span");
+                count_el.set_attribute(
+                    "style",
+                    "font-size:10px;color:var(--rinch-color-placeholder);\
+                     font-family:var(--rinch-font-family-monospace);flex-shrink:0;",
+                );
+                count_el.append_child(&__scope.create_text(&count_str));
+                row.append_child(&count_el);
+            }
 
             // Drop target handlers — optimistic updates require element references.
             let drop_hid = __scope.register_handler({
@@ -200,11 +178,18 @@ pub fn ObjectProperties(
                                     ),
                                 );
                             }
-                            let _ = cmd.0.send(EditorCommand::RemapMaterial {
-                                object_id: eid,
-                                from_material: current_from,
-                                to_material: to_mat,
-                            });
+                            if is_analytical {
+                                let _ = cmd.0.send(EditorCommand::SetPrimitiveMaterial {
+                                    object_id: eid,
+                                    material_id: to_mat,
+                                });
+                            } else {
+                                let _ = cmd.0.send(EditorCommand::RemapMaterial {
+                                    object_id: eid,
+                                    from_material: current_from,
+                                    to_material: to_mat,
+                                });
+                            }
                             from_mat.set(to_mat);
                         }
                     }

@@ -247,10 +247,11 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         let dt = frame_start.duration_since(last_frame).as_secs_f32();
         last_frame = frame_start;
 
-        // Track whether scene topology or individual objects changed this frame.
-        // Used to drive incremental GPU updates (skip re-flatten on static frames).
-        let mut frame_topology_changed = false;
+        // Track scene changes for incremental GPU updates.
+        let mut frame_topology_changed = false; // Only for scene open / new project.
         let mut frame_dirty_objects: Vec<u32> = Vec::new();
+        let mut frame_spawned: Vec<u32> = Vec::new();
+        let mut frame_despawned: Vec<u32> = Vec::new();
 
         // a. Check viewport size from layout — the compositor updates
         //    layout_size each frame with the physical pixel dimensions of
@@ -329,7 +330,8 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                         | EditorCommand::OpenProject { .. }
                         | EditorCommand::NewProject
                         | EditorCommand::ConvertToVoxel { .. }
-                        | EditorCommand::RemapMaterial { .. } => {
+                        | EditorCommand::RemapMaterial { .. }
+                        | EditorCommand::SetPrimitiveMaterial { .. } => {
                             dirty.scene = true;
                             dirty.lights = true;
                         }
@@ -393,6 +395,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         //    intermediate `EngineSnapshot` struct.
         let (
             camera, f_debug_mode, f_convert_to_voxel, f_remap_material,
+            f_set_prim_mat,
             f_environment, f_lights,
             mut scene_clone, f_selected, f_gizmo_mode, f_gizmo_axis,
             f_show_grid, f_editor_mode, f_brush_radius,
@@ -430,20 +433,53 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             }
             let convert_to_voxel = es.pending_convert_to_voxel.take();
             let remap_material = es.pending_remap_material.take();
+            let set_prim_mat = es.pending_set_primitive_material.take();
 
-            // Consume undo/redo.
+            // Consume undo/redo — classify by action kind.
             if es.pending_undo {
                 es.pending_undo = false;
                 if let Some(action) = es.undo.undo() {
                     es.apply_undo_action(&action, true);
-                    frame_topology_changed = true; // Conservative — undo can be spawn/despawn/transform
+                    match &action.kind {
+                        crate::undo::UndoActionKind::SpawnEntity { entity_id } => {
+                            // Undo spawn = despawn.
+                            frame_despawned.push(*entity_id as u32);
+                        }
+                        crate::undo::UndoActionKind::DespawnEntity { entity_id } => {
+                            // Undo despawn = respawn.
+                            frame_spawned.push(*entity_id as u32);
+                        }
+                        crate::undo::UndoActionKind::Transform { entity_id, .. } => {
+                            frame_dirty_objects.push(*entity_id as u32);
+                        }
+                        crate::undo::UndoActionKind::SculptStroke { object_id, .. } => {
+                            frame_dirty_objects.push(*object_id as u32);
+                        }
+                        _ => {} // MaterialChange, PropertyChange, etc. — no GPU scene change.
+                    }
                 }
             }
             if es.pending_redo {
                 es.pending_redo = false;
                 if let Some(action) = es.undo.redo() {
                     es.apply_undo_action(&action, false);
-                    frame_topology_changed = true;
+                    match &action.kind {
+                        crate::undo::UndoActionKind::SpawnEntity { entity_id } => {
+                            // Redo spawn = spawn.
+                            frame_spawned.push(*entity_id as u32);
+                        }
+                        crate::undo::UndoActionKind::DespawnEntity { entity_id } => {
+                            // Redo despawn = despawn.
+                            frame_despawned.push(*entity_id as u32);
+                        }
+                        crate::undo::UndoActionKind::Transform { entity_id, .. } => {
+                            frame_dirty_objects.push(*entity_id as u32);
+                        }
+                        crate::undo::UndoActionKind::SculptStroke { object_id, .. } => {
+                            frame_dirty_objects.push(*object_id as u32);
+                        }
+                        _ => {}
+                    }
                 }
             }
 
@@ -464,7 +500,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                     timestamp_ms: 0,
                     description: format!("Spawn {prim_name}"),
                 });
-                frame_topology_changed = true;
+                frame_spawned.push(entity.to_u64() as u32);
             }
 
             // Consume pending delete.
@@ -481,7 +517,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                         });
                         let _ = es.world.despawn(entity);
                         es.selected_entity = None;
-                        frame_topology_changed = true;
+                        frame_despawned.push(eid as u32);
                     }
                 }
             }
@@ -518,7 +554,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                                     timestamp_ms: 0,
                                     description: "Duplicate object".into(),
                                 });
-                                frame_topology_changed = true;
+                                frame_spawned.push(new_entity.to_u64() as u32);
                             }
                         }
                     }
@@ -1062,6 +1098,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             es.reset_frame_deltas();
 
             (cam, debug_mode, convert_to_voxel, remap_material,
+             set_prim_mat,
              environment, lights,
              scene, sel, gm, gizmo_axis, grid, emode, brush_radius,
              sculpt_edits, sculpt_undo, sculpting_active)
@@ -1112,7 +1149,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                     }
                 }
             }
-            frame_topology_changed = true;
+            frame_dirty_objects.push(obj_id);
         }
 
         // e1b. Process pending material remap (no lock needed — reads scene from extracted clone).
@@ -1151,11 +1188,33 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             }
         }
 
+        // e1c. Process pending primitive material change.
+        if let Some((object_id, new_mat_id)) = f_set_prim_mat {
+            if let Ok(mut es) = editor_state.lock() {
+                let scene = es.world.scene_mut();
+                if let Some(obj) = scene.objects.iter_mut().find(|o| o.id as u64 == object_id) {
+                    if let rkf_core::SdfSource::Analytical { ref mut material_id, .. } =
+                        obj.root_node.sdf_source
+                    {
+                        *material_id = new_mat_id;
+                    }
+                }
+            }
+            // Update scene_clone so the render pass sees the new material_id.
+            if let Some(obj) = scene_clone.objects.iter_mut().find(|o| o.id as u64 == object_id) {
+                if let rkf_core::SdfSource::Analytical { ref mut material_id, .. } =
+                    obj.root_node.sdf_source
+                {
+                    *material_id = new_mat_id;
+                }
+            }
+            frame_dirty_objects.push(object_id as u32);
+        }
+
         // e2. Process sculpt undo (restore brick snapshots to CPU pool + GPU).
-        if let Some(snapshots) = f_sculpt_undo {
+        if let Some((undo_object_id, snapshots)) = f_sculpt_undo {
             engine.apply_sculpt_undo(&snapshots);
-            // Sculpt undo changes brick data — mark topology changed to rebake AABBs.
-            frame_topology_changed = true;
+            frame_dirty_objects.push(undo_object_id as u32);
         }
 
         // e3. Process sculpt edits (CPU-side CSG, targeted GPU upload).
@@ -1334,6 +1393,8 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         for obj_id in &frame_dirty_objects {
             engine.dirty_objects.insert(*obj_id);
         }
+        engine.spawned_objects.extend(frame_spawned);
+        engine.despawned_objects.extend(frame_despawned);
 
         // g. Build wireframe overlays (selection, gizmos, grid) — staged
         //    so they are drawn in the same GPU submit as the main render.
@@ -1557,7 +1618,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
 
         // k. GPU pick is handled inside render_frame_offscreen.
 
-        // l. Process GPU pick result — sets selected_entity, signals main thread.
+        // l. Process GPU pick result — sets selected_entity, pushes to UI signals.
         //    Suppressed while actively sculpting to prevent accidental selection changes.
         {
             let pick = shared_state.lock().ok()
@@ -1569,13 +1630,32 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                     } else {
                         None
                     };
-                    if let Ok(mut es) = editor_state.lock() {
+                    let mat_usage = if let Ok(mut es) = editor_state.lock() {
                         es.selected_entity = picked_entity;
-                    }
-                    // Signal the main thread to update selection signal.
-                    if let Ok(mut ss) = shared_state.lock() {
-                        ss.pick_completed = true;
-                    }
+                        if let Some(crate::editor_state::SelectedEntity::Object(eid)) = picked_entity {
+                            compute_material_usage(&es, &engine, eid)
+                        } else {
+                            Vec::new()
+                        }
+                    } else {
+                        Vec::new()
+                    };
+                    // Push selection + material usage to UI signals directly.
+                    rinch::shell::rinch_runtime::run_on_main_thread(move || {
+                        if let Some(ui) = rinch::core::context::try_use_context::<crate::editor_state::UiSignals>() {
+                            // Set material usage BEFORE selection — selection change
+                            // triggers ObjectProperties rebuild which reads this signal.
+                            ui.selected_object_materials.set(mat_usage);
+                            let sliders = rinch::core::context::try_use_context::<crate::editor_state::SliderSignals>();
+                            let tree_state = rinch::core::context::try_use_context::<rinch::prelude::UseTreeReturn>();
+                            if let (Some(sliders), Some(tree_state)) = (sliders, tree_state) {
+                                ui.set_selection(picked_entity, &sliders, &tree_state);
+                                if picked_entity.is_some() {
+                                    ui.properties_tab.set(0);
+                                }
+                            }
+                        }
+                    });
                 }
             }
         }
@@ -1697,10 +1777,12 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                     };
                     rinch::shell::rinch_runtime::run_on_main_thread(move || {
                         if let Some(ui) = rinch::core::context::try_use_context::<UiSignals>() {
+                            // Set material usage BEFORE objects — objects.set() triggers
+                            // ObjectProperties rebuild which reads selected_object_materials.
+                            ui.selected_object_materials.set(mat_usage);
                             ui.objects.set(objects);
                             ui.scene_name.set(scene_name);
                             ui.scene_path.set(scene_path);
-                            ui.selected_object_materials.set(mat_usage);
                         }
                     });
                 }
@@ -1715,6 +1797,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                 }
             }
         }
+
 
         // Materials (from engine's MaterialLibrary).
         if dirty.materials {
@@ -1835,6 +1918,12 @@ fn compute_material_usage(
     use rkf_core::scene_node::SdfSource;
     let scene = es.world.scene();
     if let Some(obj) = scene.objects.iter().find(|o| o.id as u64 == eid) {
+        if let SdfSource::Analytical { material_id, .. } = &obj.root_node.sdf_source {
+            return vec![crate::ui_snapshot::ObjectMaterialUsage {
+                material_id: *material_id,
+                voxel_count: 0,
+            }];
+        }
         if let SdfSource::Voxelized { brick_map_handle, .. } = &obj.root_node.sdf_source {
             let handle = *brick_map_handle;
             let dims = handle.dims;
@@ -2145,6 +2234,9 @@ fn apply_editor_command(es: &mut EditorState, cmd: EditorCommand) {
         }
         RemapMaterial { object_id, from_material, to_material } => {
             es.pending_remap_material = Some((object_id, from_material, to_material));
+        }
+        SetPrimitiveMaterial { object_id, material_id } => {
+            es.pending_set_primitive_material = Some((object_id, material_id));
         }
         SetMaterial { .. } | SetMaterialShader { .. } => {
             // Handled separately in engine loop (needs MaterialLibrary / brick pool access).

@@ -1,7 +1,7 @@
 //! Render frame methods for the editor engine.
 
 use glam::Vec3;
-use rkf_core::Scene;
+use rkf_core::{Aabb, Scene};
 use rkf_render::{
     DebugMode, GpuObject, Light, SceneUniforms, ShadeUniforms,
 };
@@ -11,37 +11,154 @@ use rkf_core::transform_flatten::flatten_object;
 use super::EditorEngine;
 
 impl EditorEngine {
-    /// Update GPU scene data incrementally based on dirty state.
+    /// Update GPU scene data incrementally.
     ///
-    /// Three paths:
-    /// 1. `topology_changed` (spawn/delete/open) → full rebuild
-    /// 2. `dirty_objects` non-empty (transform/sculpt) → partial re-flatten + upload + BVH refit
-    /// 3. Static frame → only camera uniform + coarse field uniform update
+    /// Unified path — all changes flow through dirty_objects, spawned_objects,
+    /// or despawned_objects. Full rebuild only for scene open / new project.
     ///
-    /// Returns the number of active GPU objects (for SceneUniforms).
+    /// Returns the number of GPU object slots (including tombstones).
     pub(super) fn update_scene_gpu(&mut self, scene: &Scene) -> u32 {
-        // Static frame — skip everything (no allocations, no transforms).
-        if !self.topology_changed && self.dirty_objects.is_empty() {
+        // Path 0: Full rebuild — only for scene open / new project.
+        if self.topology_changed {
+            self.full_rebuild(scene);
+            return self.cached_gpu_objects.len() as u32;
+        }
+
+        // Static frame — no changes at all.
+        if self.dirty_objects.is_empty()
+            && self.spawned_objects.is_empty()
+            && self.despawned_objects.is_empty()
+        {
             return self.cached_gpu_objects.len() as u32;
         }
 
         let world_transforms = rkf_core::transform_bake::bake_world_transforms(&scene.objects);
         let default_wt = rkf_core::transform_bake::WorldTransform::default();
 
-        if self.topology_changed {
-            // --- Full rebuild ---
-            self.cached_gpu_objects.clear();
-            self.cached_bvh_pairs.clear();
-            self.cached_world_aabbs.clear();
-            self.object_gpu_ranges.clear();
+        // Build O(1) lookup for scene objects.
+        let scene_map: std::collections::HashMap<u32, &rkf_core::SceneObject> =
+            scene.objects.iter().map(|o| (o.id, o)).collect();
 
-            for obj in &scene.objects {
+        let mut bvh_structural_change = false;
+
+        // --- Despawns: tombstone removed objects ---
+        for obj_id in std::mem::take(&mut self.despawned_objects) {
+            if let Some((start_idx, count)) = self.object_gpu_ranges.remove(&obj_id) {
+                // Mark old AABB dirty in coarse field before removing.
+                if let Some(old_aabb) = self.cached_world_aabbs.remove(&obj_id) {
+                    self.coarse_field.mark_dirty(old_aabb.min, old_aabb.max);
+                }
+                // Zero out GPU slots — sdf_type=0 means invisible to ray march.
+                let zeroed: GpuObject = bytemuck::Zeroable::zeroed();
+                let empty_aabb = Aabb::new(Vec3::ZERO, Vec3::ZERO);
+                for i in start_idx..start_idx + count {
+                    self.cached_gpu_objects[i] = zeroed;
+                    self.cached_bvh_pairs[i].1 = empty_aabb;
+                }
+                self.gpu_scene.upload_object_range(
+                    &self.ctx.queue,
+                    &self.cached_gpu_objects[start_idx..start_idx + count],
+                    start_idx,
+                );
+                self.tombstone_count += count;
+                bvh_structural_change = true;
+            }
+        }
+
+        // --- Spawns: append new objects ---
+        for obj_id in std::mem::take(&mut self.spawned_objects) {
+            let Some(obj) = scene_map.get(&obj_id) else { continue };
+            let wt = world_transforms.get(&obj.id).unwrap_or(&default_wt);
+            let world_aabb = Self::compute_world_aabb(obj, wt);
+            let flat_nodes = flatten_object(obj, wt.position);
+
+            let start_idx = self.cached_gpu_objects.len();
+            for flat in &flat_nodes {
+                let gpu_idx = self.cached_gpu_objects.len() as u32;
+                let (geom_min, geom_max) = self.compute_geometry_aabb_for_flat_node(flat);
+                self.cached_gpu_objects.push(GpuObject::from_flat_node(
+                    flat, obj.id,
+                    [world_aabb.min.x, world_aabb.min.y, world_aabb.min.z, 0.0],
+                    [world_aabb.max.x, world_aabb.max.y, world_aabb.max.z, 0.0],
+                    geom_min, geom_max,
+                ));
+                self.cached_bvh_pairs.push((gpu_idx, world_aabb));
+            }
+            let count = self.cached_gpu_objects.len() - start_idx;
+            self.object_gpu_ranges.insert(obj.id, (start_idx, count));
+            self.cached_world_aabbs.insert(obj.id, world_aabb);
+
+            // Upload the full buffer (may have grown past capacity).
+            self.gpu_scene.upload_objects(
+                &self.ctx.device, &self.ctx.queue, &self.cached_gpu_objects,
+            );
+
+            // Mark new AABB dirty in coarse field.
+            self.coarse_field.mark_dirty(world_aabb.min, world_aabb.max);
+            bvh_structural_change = true;
+        }
+
+        // --- Dirty objects: update in-place or classify as spawn ---
+        let dirty_ids: Vec<u32> = self.dirty_objects.drain().collect();
+        let mut deferred_spawns: Vec<u32> = Vec::new();
+
+        for &obj_id in &dirty_ids {
+            let Some(obj) = scene_map.get(&obj_id) else { continue };
+            let Some(&(start_idx, count)) = self.object_gpu_ranges.get(&obj_id) else {
+                // Object not in cache — treat as spawn.
+                deferred_spawns.push(obj_id);
+                continue;
+            };
+            let wt = world_transforms.get(&obj.id).unwrap_or(&default_wt);
+            let world_aabb = Self::compute_world_aabb(obj, wt);
+            let flat_nodes = flatten_object(obj, wt.position);
+
+            if flat_nodes.len() != count {
+                // Node count changed — need full rebuild.
+                self.topology_changed = true;
+                return self.full_rebuild_and_return(scene);
+            }
+
+            // Mark old AABB dirty, then new AABB dirty (for coarse field).
+            if let Some(old_aabb) = self.cached_world_aabbs.get(&obj_id) {
+                if *old_aabb != world_aabb {
+                    self.coarse_field.mark_dirty(old_aabb.min, old_aabb.max);
+                    self.coarse_field.mark_dirty(world_aabb.min, world_aabb.max);
+                }
+            }
+
+            // Patch cached GPU objects in-place.
+            for (i, flat) in flat_nodes.iter().enumerate() {
+                let idx = start_idx + i;
+                let (geom_min, geom_max) = self.compute_geometry_aabb_for_flat_node(flat);
+                self.cached_gpu_objects[idx] = GpuObject::from_flat_node(
+                    flat, obj.id,
+                    [world_aabb.min.x, world_aabb.min.y, world_aabb.min.z, 0.0],
+                    [world_aabb.max.x, world_aabb.max.y, world_aabb.max.z, 0.0],
+                    geom_min, geom_max,
+                );
+                self.cached_bvh_pairs[idx].1 = world_aabb;
+            }
+
+            // Partial GPU upload for this object's range.
+            self.gpu_scene.upload_object_range(
+                &self.ctx.queue,
+                &self.cached_gpu_objects[start_idx..start_idx + count],
+                start_idx,
+            );
+
+            self.cached_world_aabbs.insert(obj_id, world_aabb);
+        }
+
+        // Process any dirty objects that weren't in cache (treat as spawns).
+        if !deferred_spawns.is_empty() {
+            for obj_id in deferred_spawns {
+                let Some(obj) = scene_map.get(&obj_id) else { continue };
                 let wt = world_transforms.get(&obj.id).unwrap_or(&default_wt);
                 let world_aabb = Self::compute_world_aabb(obj, wt);
-                self.cached_world_aabbs.push((world_aabb.min, world_aabb.max));
+                let flat_nodes = flatten_object(obj, wt.position);
 
                 let start_idx = self.cached_gpu_objects.len();
-                let flat_nodes = flatten_object(obj, wt.position);
                 for flat in &flat_nodes {
                     let gpu_idx = self.cached_gpu_objects.len() as u32;
                     let (geom_min, geom_max) = self.compute_geometry_aabb_for_flat_node(flat);
@@ -55,97 +172,120 @@ impl EditorEngine {
                 }
                 let count = self.cached_gpu_objects.len() - start_idx;
                 self.object_gpu_ranges.insert(obj.id, (start_idx, count));
+                self.cached_world_aabbs.insert(obj.id, world_aabb);
+                self.coarse_field.mark_dirty(world_aabb.min, world_aabb.max);
+                bvh_structural_change = true;
             }
-
+            // Upload full buffer (may have grown).
             self.gpu_scene.upload_objects(
                 &self.ctx.device, &self.ctx.queue, &self.cached_gpu_objects,
             );
+        }
 
-            let bvh = rkf_core::Bvh::build(&self.cached_bvh_pairs);
+        // --- BVH: rebuild if topology changed, refit otherwise ---
+        if bvh_structural_change {
+            // Filter out tombstoned entries for a clean BVH build.
+            let live_pairs: Vec<(u32, Aabb)> = self.cached_bvh_pairs.iter()
+                .filter(|(_, aabb)| aabb.min != aabb.max || aabb.min != Vec3::ZERO)
+                .copied()
+                .collect();
+            let bvh = rkf_core::Bvh::build(&live_pairs);
             self.gpu_scene.upload_bvh(&self.ctx.device, &self.ctx.queue, &bvh);
             self.cached_bvh = Some(bvh);
-
-            self.coarse_field.populate(&self.cached_world_aabbs);
-            self.coarse_field.upload(&self.ctx.queue, Vec3::ZERO);
-
-            self.topology_changed = false;
-            self.dirty_objects.clear();
-        } else if !self.dirty_objects.is_empty() {
-            // --- Partial update: only dirty objects ---
-            let dirty_ids: Vec<u32> = self.dirty_objects.drain().collect();
-            let mut coarse_changed = false;
-
-            for &obj_id in &dirty_ids {
-                let Some(obj) = scene.objects.iter().find(|o| o.id == obj_id) else {
-                    continue;
-                };
-                let Some(&(start_idx, count)) = self.object_gpu_ranges.get(&obj_id) else {
-                    // Object not in cache (shouldn't happen) — mark topology changed for next frame.
-                    self.topology_changed = true;
-                    continue;
-                };
-                let wt = world_transforms.get(&obj.id).unwrap_or(&default_wt);
-                let world_aabb = Self::compute_world_aabb(obj, wt);
-
-                // Re-flatten this object.
-                let flat_nodes = flatten_object(obj, wt.position);
-
-                if flat_nodes.len() != count {
-                    // Node count changed (e.g. animation bone added) — need full rebuild.
-                    self.topology_changed = true;
-                    continue;
-                }
-
-                // Patch cached GPU objects in-place.
-                for (i, flat) in flat_nodes.iter().enumerate() {
-                    let idx = start_idx + i;
-                    let (geom_min, geom_max) = self.compute_geometry_aabb_for_flat_node(flat);
-                    self.cached_gpu_objects[idx] = GpuObject::from_flat_node(
-                        flat, obj.id,
-                        [world_aabb.min.x, world_aabb.min.y, world_aabb.min.z, 0.0],
-                        [world_aabb.max.x, world_aabb.max.y, world_aabb.max.z, 0.0],
-                        geom_min, geom_max,
-                    );
-                    // Update BVH pair AABB.
-                    self.cached_bvh_pairs[idx].1 = world_aabb;
-                }
-
-                // Partial GPU upload for this object's range.
-                self.gpu_scene.upload_object_range(
-                    &self.ctx.queue,
-                    &self.cached_gpu_objects[start_idx..start_idx + count],
-                    start_idx,
-                );
-
-                // Update cached world AABB for coarse field.
-                // Find which scene index this object is at.
-                if let Some(scene_idx) = scene.objects.iter().position(|o| o.id == obj_id) {
-                    if scene_idx < self.cached_world_aabbs.len() {
-                        self.cached_world_aabbs[scene_idx] = (world_aabb.min, world_aabb.max);
-                        coarse_changed = true;
-                    }
-                }
-            }
-
-            if self.topology_changed {
-                // A dirty object triggered topology change — recurse to full rebuild.
-                return self.update_scene_gpu(scene);
-            }
-
-            // BVH refit with updated AABBs.
+        } else if !dirty_ids.is_empty() {
             if let Some(ref mut bvh) = self.cached_bvh {
-                bvh.refit(&self.cached_bvh_pairs);
+                // Refit with live pairs only.
+                let live_pairs: Vec<(u32, Aabb)> = self.cached_bvh_pairs.iter()
+                    .filter(|(_, aabb)| aabb.min != aabb.max || aabb.min != Vec3::ZERO)
+                    .copied()
+                    .collect();
+                *bvh = rkf_core::Bvh::build(&live_pairs);
                 self.gpu_scene.upload_bvh(&self.ctx.device, &self.ctx.queue, bvh);
             }
-
-            // Repopulate coarse field if any AABBs changed.
-            if coarse_changed {
-                self.coarse_field.populate(&self.cached_world_aabbs);
-                self.coarse_field.upload(&self.ctx.queue, Vec3::ZERO);
-            }
         }
-        // else: static frame — skip flatten/upload/BVH entirely.
 
+        // --- Coarse field: incremental update from dirty regions ---
+        if self.coarse_field.is_dirty() {
+            let aabb_pairs: Vec<(Vec3, Vec3)> = self.cached_world_aabbs
+                .values()
+                .map(|a| (a.min, a.max))
+                .collect();
+            self.coarse_field.update_dirty(&self.ctx.queue, &aabb_pairs);
+        }
+
+        // --- Compaction: if too many tombstones, do a full rebuild ---
+        let total = self.cached_gpu_objects.len();
+        if total > 0 && self.tombstone_count > 0
+            && self.tombstone_count as f32 / total as f32 > 0.25
+        {
+            log::info!(
+                "Compacting GPU objects: {} tombstones / {} total",
+                self.tombstone_count, total,
+            );
+            self.full_rebuild(scene);
+        }
+
+        self.cached_gpu_objects.len() as u32
+    }
+
+    /// Full rebuild of all GPU scene data from the scene.
+    /// Used for scene open / new project / compaction.
+    fn full_rebuild(&mut self, scene: &Scene) {
+        self.cached_gpu_objects.clear();
+        self.cached_bvh_pairs.clear();
+        self.cached_world_aabbs.clear();
+        self.object_gpu_ranges.clear();
+        self.dirty_objects.clear();
+        self.spawned_objects.clear();
+        self.despawned_objects.clear();
+        self.tombstone_count = 0;
+
+        let world_transforms = rkf_core::transform_bake::bake_world_transforms(&scene.objects);
+        let default_wt = rkf_core::transform_bake::WorldTransform::default();
+
+        for obj in &scene.objects {
+            let wt = world_transforms.get(&obj.id).unwrap_or(&default_wt);
+            let world_aabb = Self::compute_world_aabb(obj, wt);
+            self.cached_world_aabbs.insert(obj.id, world_aabb);
+
+            let start_idx = self.cached_gpu_objects.len();
+            let flat_nodes = flatten_object(obj, wt.position);
+            for flat in &flat_nodes {
+                let gpu_idx = self.cached_gpu_objects.len() as u32;
+                let (geom_min, geom_max) = self.compute_geometry_aabb_for_flat_node(flat);
+                self.cached_gpu_objects.push(GpuObject::from_flat_node(
+                    flat, obj.id,
+                    [world_aabb.min.x, world_aabb.min.y, world_aabb.min.z, 0.0],
+                    [world_aabb.max.x, world_aabb.max.y, world_aabb.max.z, 0.0],
+                    geom_min, geom_max,
+                ));
+                self.cached_bvh_pairs.push((gpu_idx, world_aabb));
+            }
+            let count = self.cached_gpu_objects.len() - start_idx;
+            self.object_gpu_ranges.insert(obj.id, (start_idx, count));
+        }
+
+        self.gpu_scene.upload_objects(
+            &self.ctx.device, &self.ctx.queue, &self.cached_gpu_objects,
+        );
+
+        let bvh = rkf_core::Bvh::build(&self.cached_bvh_pairs);
+        self.gpu_scene.upload_bvh(&self.ctx.device, &self.ctx.queue, &bvh);
+        self.cached_bvh = Some(bvh);
+
+        let aabb_pairs: Vec<(Vec3, Vec3)> = self.cached_world_aabbs
+            .values()
+            .map(|a| (a.min, a.max))
+            .collect();
+        self.coarse_field.populate(&aabb_pairs);
+        self.coarse_field.upload(&self.ctx.queue, Vec3::ZERO);
+
+        self.topology_changed = false;
+    }
+
+    /// Convenience: set topology_changed and do a full rebuild, returning the count.
+    fn full_rebuild_and_return(&mut self, scene: &Scene) -> u32 {
+        self.full_rebuild(scene);
         self.cached_gpu_objects.len() as u32
     }
 

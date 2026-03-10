@@ -120,6 +120,8 @@ pub enum EditorCommand {
     SetMaterialShader { slot: u16, shader_name: String },
     /// Remap all voxels using `from_material` to `to_material` on a specific object.
     RemapMaterial { object_id: u64, from_material: u16, to_material: u16 },
+    /// Set the material_id on an analytical primitive.
+    SetPrimitiveMaterial { object_id: u64, material_id: u16 },
 
     // ── Animation ────────────────────────────────────────────────────────
     SetAnimationState { state: u32 },

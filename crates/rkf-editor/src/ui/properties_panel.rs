@@ -3,11 +3,9 @@
 //! Tracks `UiSignals::selection` for fine-grained reactivity — only rebuilds
 //! when the selection changes (from scene tree clicks or viewport picks).
 
-use std::sync::{Arc, Mutex};
-
 use rinch::prelude::*;
 
-use crate::editor_state::{EditorState, SelectedEntity, UiSignals};
+use crate::editor_state::{SelectedEntity, UiSignals};
 
 // ── Style constants ──────────────────────────────────────────────────────────
 
@@ -29,7 +27,6 @@ const NO_SELECTION_STYLE: &str = "font-size:12px;color:var(--rinch-color-placeho
 /// Re-renders reactively when the `UiSignals::selection` signal changes.
 #[component]
 pub fn PropertiesPanel() -> NodeHandle {
-    let editor_state = use_context::<Arc<Mutex<EditorState>>>();
     let ui = use_context::<UiSignals>();
 
     let root = __scope.create_element("div");
@@ -40,7 +37,6 @@ pub fn PropertiesPanel() -> NodeHandle {
 
     // Reactive content — rebuilds when selection changes.
     // Keyed by selection state so the view fully rebuilds on selection change.
-    let es = editor_state.clone();
     rinch::core::for_each_dom_typed(
         __scope,
         &root,
@@ -54,25 +50,14 @@ pub fn PropertiesPanel() -> NodeHandle {
             Some(SelectedEntity::Project) => "project".to_string(),
         },
         move |sel, __scope| {
-            let es = match es.lock().ok() {
-                Some(es) => es,
-                None => {
-                    return rsx! {
-                        div { style: "display:flex;flex-direction:column;",
-                            div { style: {LABEL_STYLE}, "Properties" }
-                        }
-                    };
-                }
-            };
-
             match sel {
                 Some(SelectedEntity::Object(entity_id)) => {
-                    let scene = es.world.scene();
-                    if let Some(obj) = scene.objects.iter().find(|o| o.id as u64 == entity_id) {
+                    let objects = ui.objects.get();
+                    if let Some(obj) = objects.iter().find(|o| o.id == entity_id) {
                         let name = obj.name.clone();
                         let id_text = format!("Entity ID: {entity_id}");
-                        let child_count = scene.objects.iter()
-                            .filter(|o| o.parent_id == Some(obj.id))
+                        let child_count = objects.iter()
+                            .filter(|o| o.parent_id.map(|p| p as u64) == Some(entity_id))
                             .count();
 
                         rsx! {
@@ -96,7 +81,8 @@ pub fn PropertiesPanel() -> NodeHandle {
                     }
                 }
                 Some(SelectedEntity::Light(lid)) => {
-                    if let Some(light) = es.light_editor.get_light(lid) {
+                    let lights = ui.lights.get();
+                    if let Some(light) = lights.iter().find(|l| l.id == lid) {
                         let type_name = match light.light_type {
                             crate::light_editor::SceneLightType::Point => "Point Light",
                             crate::light_editor::SceneLightType::Spot => "Spot Light",
@@ -122,7 +108,7 @@ pub fn PropertiesPanel() -> NodeHandle {
                     }
                 }
                 Some(SelectedEntity::Camera) => {
-                    let pos = es.editor_camera.position;
+                    let pos = ui.camera_display_pos.get();
                     let pos_text = format!(
                         "Pos: ({:.1}, {:.1}, {:.1})",
                         pos.x, pos.y, pos.z

@@ -142,7 +142,7 @@ pub fn AssetPropertiesPanel() -> NodeHandle {
 pub fn SculptPanel() -> NodeHandle {
     let sliders = use_context::<SliderSignals>();
     let cmd = use_context::<CommandSender>();
-    let editor_state = use_context::<Arc<Mutex<EditorState>>>();
+    let ui = use_context::<UiSignals>();
 
     let root = __scope.create_element("div");
     root.set_attribute("style", "padding:4px 0;");
@@ -152,20 +152,12 @@ pub fn SculptPanel() -> NodeHandle {
     header.append_child(&__scope.create_text("Sculpt Brush"));
     root.append_child(&header);
 
-    // Show brush type from editor state.
-    if let Ok(es_lock) = editor_state.lock() {
-        let type_name = match es_lock.sculpt.current_settings.brush_type {
-            crate::sculpt::BrushType::Add => "Add",
-            crate::sculpt::BrushType::Subtract => "Subtract",
-            crate::sculpt::BrushType::Smooth => "Smooth",
-            crate::sculpt::BrushType::Flatten => "Flatten",
-            crate::sculpt::BrushType::Sharpen => "Sharpen",
-        };
-        let row = __scope.create_element("div");
-        row.set_attribute("style", VALUE_STYLE);
-        row.append_child(&__scope.create_text(&format!("Type: {type_name}")));
-        root.append_child(&row);
-    }
+    // Show brush type from UI signal.
+    let type_name = ui.brush_type.get();
+    let row = __scope.create_element("div");
+    row.set_attribute("style", VALUE_STYLE);
+    row.append_child(&__scope.create_text(&format!("Type: {type_name}")));
+    root.append_child(&row);
 
     build_slider_row(
         __scope, &root, "Radius", "",
