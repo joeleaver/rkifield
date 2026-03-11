@@ -239,7 +239,12 @@ pub fn ObjectProperties(
             {xf_node}
 
             // Convert to Voxel Object button (analytical primitives only).
-            if is_analytical {
+            // Read from signal reactively so the button disappears immediately
+            // when the object is converted to voxelized.
+            if ui.objects.get().iter().find(|o| o.id == eid)
+                .map(|o| o.object_type == crate::ui_snapshot::ObjectType::Analytical)
+                .unwrap_or(false)
+            {
                 div { style: "padding: 6px 8px;",
                     button {
                         style: "width:100%; padding:4px 8px; background:#223355; \
