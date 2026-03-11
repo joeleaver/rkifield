@@ -45,28 +45,41 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
     let world_pos = pos_data.xyz;
     let normal_data = textureLoad(gbuf_normal, coord, 0);
     var normal = normalize(normal_data.xyz);
-    let blend_weight = normal_data.w;
 
     let packed_mat = textureLoad(gbuf_material, coord, 0).r;
     let material_id = packed_mat & 0xFFu;
+    let secondary_id = (packed_mat >> 8u) & 0xFFu;
+    let blend_weight_u8 = (packed_mat >> 16u) & 0xFFu;
     let object_id_bits = (packed_mat >> 24u) & 0xFFu;
 
-    // Resolve material from table (geometry-first: u8 material_id, no blending)
-    let resolved = resolve_material_from(materials[material_id]);
-    var albedo = resolved.albedo;
+    // Resolve primary material from table.
+    var resolved = resolve_material_from(materials[material_id]);
 
-    // Per-voxel color modulation (geometry-first: surface voxel RGBA tints albedo)
+    // Material blending from G-buffer (sampled at exact hit point by ray march).
+    let blend_weight = f32(blend_weight_u8) / 255.0;
+    if blend_weight > 0.0 && secondary_id != material_id {
+        let secondary = resolve_material_from(materials[secondary_id]);
+        resolved = blend_resolved_materials(resolved, secondary, blend_weight);
+    }
+
+    // Per-voxel color tint — still requires brick pool re-sample (RGB data not in G-buffer).
     if object_id_bits > 0u {
-        let color_obj = objects[object_id_bits - 1u];
-        if color_obj.sdf_type == SDF_TYPE_VOXELIZED {
-            let local_pos = (color_obj.inverse_world * vec4<f32>(world_pos, 1.0)).xyz;
-            let voxel_color = sample_voxelized_color(local_pos, color_obj);
-            // White (1,1,1) = no tint. Any other color modulates albedo.
-            if voxel_color.a > 0.01 {
-                albedo = albedo * voxel_color.rgb;
+        for (var oi = 0u; oi < v2_scene.num_objects; oi = oi + 1u) {
+            let obj = objects[oi];
+            if obj.object_id == object_id_bits && obj.sdf_type == SDF_TYPE_VOXELIZED {
+                let local_pos = (obj.inverse_world * vec4<f32>(world_pos, 1.0)).xyz;
+                let voxel_color = sample_voxelized_color(local_pos, obj);
+                // Only apply color tint if RGB channels have actual color data.
+                // byte3 of word1 is blend_weight (not alpha), so check RGB avg instead.
+                let color_intensity = (voxel_color.r + voxel_color.g + voxel_color.b) / 3.0;
+                if color_intensity < 0.99 {
+                    resolved.albedo = resolved.albedo * voxel_color.rgb;
+                }
+                break;
             }
         }
     }
+    var albedo = resolved.albedo;
     var roughness = clamp(resolved.roughness, 0.04, 1.0);
     let metallic = resolved.metallic;
 
@@ -193,9 +206,18 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
         }
         case 8u: {
             // Brick boundary overlay with hash-colored bricks and voxel sub-grid
-            let obj_id = (packed_mat >> 24u) & 0xFFu;
-            if obj_id > 0u {
-                let obj = objects[obj_id - 1u];
+            let obj_id8 = (packed_mat >> 24u) & 0xFFu;
+            var found_obj8 = false;
+            var obj8_idx = 0u;
+            for (var oi8 = 0u; oi8 < v2_scene.num_objects; oi8 = oi8 + 1u) {
+                if objects[oi8].object_id == obj_id8 {
+                    obj8_idx = oi8;
+                    found_obj8 = true;
+                    break;
+                }
+            }
+            if found_obj8 {
+                let obj = objects[obj8_idx];
                 let local_pos = (obj.inverse_world * vec4<f32>(world_pos, 1.0)).xyz;
                 let vs = obj.voxel_size;
                 let grid_size = vec3<f32>(f32(obj.brick_map_dims_x), f32(obj.brick_map_dims_y), f32(obj.brick_map_dims_z)) * vs * 8.0;

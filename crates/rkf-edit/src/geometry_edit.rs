@@ -68,7 +68,7 @@ pub fn apply_geometry_edit(
     );
     let is_paint = matches!(
         op.edit_type,
-        EditType::Paint | EditType::BlendPaint | EditType::ColorPaint
+        EditType::Paint | EditType::ColorPaint
     );
 
     // Grid origin (centered at local origin, matching ray march shader)
@@ -117,12 +117,7 @@ pub fn apply_geometry_edit(
     // ── Paint path (unchanged — operates on surface voxels) ─────────────
     if is_paint {
         let inv_rot = op.rotation.inverse();
-        let color = [
-            ((op.color_packed >> 24) & 0xFF) as u8,
-            ((op.color_packed >> 16) & 0xFF) as u8,
-            ((op.color_packed >> 8) & 0xFF) as u8,
-            (op.color_packed & 0xFF) as u8,
-        ];
+        let color = op.color_packed.to_le_bytes();
 
         for bz in bmin_z..bmax_z {
             for by in bmin_y..bmax_y {
@@ -154,23 +149,73 @@ pub fn apply_geometry_edit(
 
                         if shape_d < 0.0 {
                             let center_dist = (world_pos - op.position).length();
-                            let max_dim = op.dimensions.x.max(op.dimensions.y).max(op.dimensions.z);
-                            let falloff = evaluate_falloff(op.falloff, center_dist, max_dim);
-                            let t = op.strength * falloff;
+                            let radius = op.dimensions.x.max(op.dimensions.y).max(op.dimensions.z);
 
                             match op.edit_type {
                                 EditType::Paint => {
-                                    sv.material_id = op.material_id as u8;
-                                    any_changed = true;
-                                }
-                                EditType::ColorPaint => {
-                                    for i in 0..4 {
-                                        sv.color[i] = (sv.color[i] as f32 * (1.0 - t)
-                                            + color[i] as f32 * t) as u8;
+                                    // Unified blend-based paint: all voxels use
+                                    // secondary_material_id + blend_weight. The shader
+                                    // blends primary→secondary by weight, giving smooth
+                                    // transitions everywhere (no hard core/falloff split).
+                                    let falloff_frac = op.blend_k.clamp(0.0, 1.0);
+                                    let normalized = if radius > 0.0 { center_dist / radius } else { 0.0 };
+                                    let new_mat = op.material_id as u8;
+
+                                    // Compute paint weight: full strength inside core,
+                                    // smoothstep falloff at the edge.
+                                    let w = if falloff_frac < 0.001 {
+                                        // Hard edge: full strength everywhere inside brush.
+                                        1.0_f32
+                                    } else {
+                                        let edge_start = 1.0 - falloff_frac;
+                                        if normalized <= edge_start {
+                                            1.0_f32
+                                        } else {
+                                            let t = ((normalized - edge_start) / falloff_frac).clamp(0.0, 1.0);
+                                            let smooth_t = t * t * (3.0 - 2.0 * t);
+                                            1.0 - smooth_t
+                                        }
+                                    };
+
+                                    let desired_blend = (w * 255.0) as u8;
+
+                                    // Step 1: Commit any existing blend if we're
+                                    // painting a DIFFERENT material than the current
+                                    // secondary.  This "bakes" what the user sees
+                                    // into the primary so we free the secondary slot.
+                                    if sv.secondary_material_id != 0
+                                        && sv.secondary_material_id != new_mat
+                                        && sv.color[3] > 0
+                                    {
+                                        if sv.color[3] > 127 {
+                                            // Secondary was dominant — promote it.
+                                            sv.material_id = sv.secondary_material_id;
+                                        }
+                                        sv.secondary_material_id = 0;
+                                        sv.color[3] = 0;
+                                    }
+
+                                    // Step 2: Apply new paint.
+                                    if sv.material_id == new_mat {
+                                        // Already this material — clear any stale
+                                        // secondary so the voxel is cleanly new_mat.
+                                        sv.secondary_material_id = 0;
+                                        sv.color[3] = 0;
+                                    } else {
+                                        sv.secondary_material_id = new_mat;
+                                        sv.color[3] = sv.color[3].max(desired_blend);
                                     }
                                     any_changed = true;
                                 }
-                                EditType::BlendPaint => {
+                                EditType::ColorPaint => {
+                                    // Color paint uses strength × distance-based falloff.
+                                    let falloff = evaluate_falloff(op.falloff, center_dist, radius);
+                                    let t = op.strength * falloff;
+                                    for i in 0..3 {
+                                        sv.color[i] = (sv.color[i] as f32 * (1.0 - t)
+                                            + color[i] as f32 * t) as u8;
+                                    }
+                                    // Don't touch color[3] (blend_weight) during color paint.
                                     any_changed = true;
                                 }
                                 _ => {}
@@ -338,12 +383,7 @@ pub fn apply_geometry_edit(
 
     // ── Post-process: rebuild surface lists, assign materials, compact ───
 
-    let color = [
-        ((op.color_packed >> 24) & 0xFF) as u8,
-        ((op.color_packed >> 16) & 0xFF) as u8,
-        ((op.color_packed >> 8) & 0xFF) as u8,
-        (op.color_packed & 0xFF) as u8,
-    ];
+    let color = op.color_packed.to_le_bytes();
 
     for brick_coord in &changed_bricks {
         let (bx, by, bz) = (brick_coord.x, brick_coord.y, brick_coord.z);
@@ -549,7 +589,6 @@ mod tests {
             blend_k: 0.0,
             falloff: crate::types::FalloffCurve::Smooth,
             material_id: mat,
-            secondary_id: 0,
             color_packed: 0xFF804020,
         }
     }
@@ -741,7 +780,9 @@ mod tests {
                     let slot = map.get(bx, by, bz).unwrap();
                     if slot != EMPTY_SLOT && slot != INTERIOR_SLOT {
                         for sv in &geo_pool.get(slot).surface_voxels {
-                            if sv.material_id == 5 {
+                            // Paint sets material_id at full strength, or
+                            // secondary_material_id at partial strength (blending).
+                            if sv.material_id == 5 || sv.secondary_material_id == 5 {
                                 found_mat5 = true;
                             }
                         }

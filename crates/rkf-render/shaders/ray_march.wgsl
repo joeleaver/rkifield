@@ -28,6 +28,7 @@ const BVH_INVALID: u32 = 0xFFFFFFFFu;
 const MAX_FLOAT: f32 = 3.402823e+38;
 const HIT_EPSILON: f32 = 0.001;
 const MIN_STEP: f32 = 0.0005;
+const BISECT_STEPS: u32 = 8u;
 
 // BVH traversal stack depth.
 const BVH_STACK_SIZE: u32 = 32u;
@@ -281,6 +282,32 @@ fn sample_voxel_at(obj_offset: u32, vc: vec3<i32>, dims: vec3<u32>,
 }
 
 
+/// Sample a single voxel for gradient/normal computation.
+/// Unlike sample_voxel_at (used for stepping), this returns smoothly-scaled
+/// values for sentinel bricks so that gradients across brick boundaries
+/// don't have massive discontinuities.
+///   EMPTY_SLOT  → +vs*8  (same as stepping — large positive, outside)
+///   INTERIOR_SLOT → -vs*8 (large negative, deep inside — matches magnitude)
+/// The key difference: INTERIOR_SLOT returns -vs*8 here vs -vs*2 in the
+/// stepping version. This keeps the gradient direction correct (pointing
+/// outward from inside) and the magnitude proportional.
+fn sample_voxel_at_grad(obj_offset: u32, vc: vec3<i32>, dims: vec3<u32>,
+                    total_voxels: vec3<i32>, vs: f32) -> f32 {
+    let c = clamp(vc, vec3<i32>(0), total_voxels - vec3<i32>(1));
+    let brick = vec3<u32>(c / vec3<i32>(8));
+    let local = vec3<u32>(c % vec3<i32>(8));
+    let flat_brick = brick.x + brick.y * dims.x + brick.z * dims.x * dims.y;
+    let slot = brick_maps[obj_offset + flat_brick];
+    if slot == EMPTY_SLOT {
+        return vs * 8.0;
+    }
+    if slot == INTERIOR_SLOT {
+        return -(vs * 8.0);
+    }
+    let idx = slot * 512u + local.x + local.y * 8u + local.z * 64u;
+    return extract_distance(brick_pool[idx].word0);
+}
+
 /// Catmull-Rom basis weights for parameter t in [0,1].
 /// Returns weights for the 4 control points: p[-1], p[0], p[1], p[2].
 fn catmull_rom_weights(t: f32) -> vec4<f32> {
@@ -424,17 +451,58 @@ fn sample_density(local_pos: vec3<f32>, obj: GpuObject) -> f32 {
     return mix(b0, b1, t.z);
 }
 
+/// Sample voxelized SDF using the gradient-safe voxel sampler.
+/// Same as sample_voxelized but uses sample_voxel_at_grad which returns
+/// smooth values for sentinel bricks (INTERIOR_SLOT → -vs*8 instead of -vs*2).
+fn sample_voxelized_grad(local_pos: vec3<f32>, obj: GpuObject) -> f32 {
+    let vs = obj.voxel_size;
+    let brick_extent = vs * 8.0;
+    let dims = vec3<u32>(obj.brick_map_dims_x, obj.brick_map_dims_y, obj.brick_map_dims_z);
+    let grid_size = vec3<f32>(dims) * brick_extent;
+
+    let grid_pos = local_pos + grid_size * 0.5;
+    let clamped = clamp(grid_pos, vec3<f32>(vs * 0.01), grid_size - vec3<f32>(vs * 0.01));
+    let outside_dist = length(grid_pos - clamped);
+
+    if outside_dist > brick_extent * 2.0 {
+        return outside_dist;
+    }
+
+    let voxel_coord = clamped / vs - vec3<f32>(0.5);
+    let v0 = vec3<i32>(floor(voxel_coord));
+    let t = voxel_coord - vec3<f32>(v0);
+    let total_voxels = vec3<i32>(dims) * 8;
+
+    let c000 = sample_voxel_at_grad(obj.brick_map_offset, v0 + vec3<i32>(0, 0, 0), dims, total_voxels, vs);
+    let c100 = sample_voxel_at_grad(obj.brick_map_offset, v0 + vec3<i32>(1, 0, 0), dims, total_voxels, vs);
+    let c010 = sample_voxel_at_grad(obj.brick_map_offset, v0 + vec3<i32>(0, 1, 0), dims, total_voxels, vs);
+    let c110 = sample_voxel_at_grad(obj.brick_map_offset, v0 + vec3<i32>(1, 1, 0), dims, total_voxels, vs);
+    let c001 = sample_voxel_at_grad(obj.brick_map_offset, v0 + vec3<i32>(0, 0, 1), dims, total_voxels, vs);
+    let c101 = sample_voxel_at_grad(obj.brick_map_offset, v0 + vec3<i32>(1, 0, 1), dims, total_voxels, vs);
+    let c011 = sample_voxel_at_grad(obj.brick_map_offset, v0 + vec3<i32>(0, 1, 1), dims, total_voxels, vs);
+    let c111 = sample_voxel_at_grad(obj.brick_map_offset, v0 + vec3<i32>(1, 1, 1), dims, total_voxels, vs);
+
+    let c00 = mix(c000, c100, t.x);
+    let c10 = mix(c010, c110, t.x);
+    let c01 = mix(c001, c101, t.x);
+    let c11 = mix(c011, c111, t.x);
+    let c0 = mix(c00, c10, t.y);
+    let c1 = mix(c01, c11, t.y);
+    return mix(c0, c1, t.z) + outside_dist;
+}
+
 /// Compute the surface normal gradient via 6-sample central difference.
 ///
-/// Gradient of stored SDF values via 6-sample central difference.
+/// Uses sample_voxelized_grad (gradient-safe sentinel values).
+/// Epsilon of 2× voxel size balances smoothness with detail.
 fn sample_voxelized_gradient(local_pos: vec3<f32>, obj: GpuObject) -> vec3<f32> {
-    let eps = obj.voxel_size * 1.5;
-    let gx = sample_voxelized(local_pos + vec3<f32>(eps, 0.0, 0.0), obj)
-           - sample_voxelized(local_pos - vec3<f32>(eps, 0.0, 0.0), obj);
-    let gy = sample_voxelized(local_pos + vec3<f32>(0.0, eps, 0.0), obj)
-           - sample_voxelized(local_pos - vec3<f32>(0.0, eps, 0.0), obj);
-    let gz = sample_voxelized(local_pos + vec3<f32>(0.0, 0.0, eps), obj)
-           - sample_voxelized(local_pos - vec3<f32>(0.0, 0.0, eps), obj);
+    let eps = obj.voxel_size * 2.0;
+    let gx = sample_voxelized_grad(local_pos + vec3<f32>(eps, 0.0, 0.0), obj)
+           - sample_voxelized_grad(local_pos - vec3<f32>(eps, 0.0, 0.0), obj);
+    let gy = sample_voxelized_grad(local_pos + vec3<f32>(0.0, eps, 0.0), obj)
+           - sample_voxelized_grad(local_pos - vec3<f32>(0.0, eps, 0.0), obj);
+    let gz = sample_voxelized_grad(local_pos + vec3<f32>(0.0, 0.0, eps), obj)
+           - sample_voxelized_grad(local_pos - vec3<f32>(0.0, 0.0, eps), obj);
     return vec3<f32>(gx, gy, gz);
 }
 
@@ -489,6 +557,36 @@ fn sample_voxelized_material(local_pos: vec3<f32>, obj: GpuObject) -> u32 {
 
     let idx = slot * 512u + local.x + local.y * 8u + local.z * 64u;
     return extract_material_id(brick_pool[idx].word0);
+}
+
+/// Sample blend data (secondary_material_id, blend_weight) from a voxelized object.
+/// Returns vec2(secondary_material_id, blend_weight_0to255) as u32-compatible floats.
+fn sample_voxelized_blend_data(local_pos: vec3<f32>, obj: GpuObject) -> vec2<u32> {
+    let vs = obj.voxel_size;
+    let brick_extent = vs * 8.0;
+    let dims = vec3<u32>(obj.brick_map_dims_x, obj.brick_map_dims_y, obj.brick_map_dims_z);
+    let grid_size = vec3<f32>(dims) * brick_extent;
+    let grid_pos = local_pos + grid_size * 0.5;
+
+    if any(grid_pos < vec3<f32>(0.0)) || any(grid_pos >= grid_size) {
+        return vec2<u32>(0u, 0u);
+    }
+
+    let voxel_coord = grid_pos / vs;
+    let vc = clamp(vec3<i32>(floor(voxel_coord)), vec3<i32>(0), vec3<i32>(dims) * 8 - vec3<i32>(1));
+    let brick = vec3<u32>(vc / vec3<i32>(8));
+    let local = vec3<u32>(vc % vec3<i32>(8));
+    let flat_brick = brick.x + brick.y * dims.x + brick.z * dims.x * dims.y;
+    let slot = brick_maps[obj.brick_map_offset + flat_brick];
+    if slot == EMPTY_SLOT || slot == INTERIOR_SLOT {
+        return vec2<u32>(0u, 0u);
+    }
+    let idx = slot * 512u + local.x + local.y * 8u + local.z * 64u;
+    let w0 = brick_pool[idx].word0;
+    let w1 = brick_pool[idx].word1;
+    let secondary_mat = (w0 >> 24u) & 0xFFu;
+    let blend_weight = (w1 >> 24u) & 0xFFu;
+    return vec2<u32>(secondary_mat, blend_weight);
 }
 
 /// Evaluate a single object at a world-space position.
@@ -551,6 +649,9 @@ fn ray_march_bvh(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
     let inv_dir = 1.0 / safe_dir;
 
     var t = 0.0;
+    var prev_t = 0.0;
+    var prev_dist = MAX_FLOAT;
+    var prev_obj_idx = 0u;
 
     for (var step = 0u; step < scene.max_steps; step++) {
         if t > scene.max_distance {
@@ -612,6 +713,33 @@ fn ray_march_bvh(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
             }
         }
 
+        // Overstep detection: if we went from positive to negative, the ray
+        // stepped through the surface. Bisect to find the precise crossing.
+        if min_dist < 0.0 && prev_dist > scene.hit_threshold {
+            var lo = prev_t;
+            var hi = t;
+            var bisect_obj_idx = best_obj_idx;
+            var bisect_mat = best_mat;
+            var bisect_obj_id = best_obj_id;
+            for (var b = 0u; b < BISECT_STEPS; b++) {
+                let mid = (lo + hi) * 0.5;
+                let mid_pos = origin + safe_dir * mid;
+                let mid_eval = evaluate_object(mid_pos, bisect_obj_idx);
+                if mid_eval.x < 0.0 {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                    bisect_mat = u32(mid_eval.y);
+                }
+            }
+            result.t = (lo + hi) * 0.5;
+            result.hit = true;
+            result.material_id = bisect_mat;
+            result.object_id = bisect_obj_id;
+            result.obj_idx = bisect_obj_idx;
+            return result;
+        }
+
         if min_dist < scene.hit_threshold {
             result.t = t;
             result.hit = true;
@@ -622,6 +750,9 @@ fn ray_march_bvh(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
         }
 
         // Step forward by the minimum distance (sphere tracing).
+        prev_t = t;
+        prev_dist = min_dist;
+        prev_obj_idx = best_obj_idx;
         t += max(min_dist, MIN_STEP);
     }
 
@@ -641,6 +772,8 @@ fn ray_march_brute(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
     let safe_dir = select(dir, vec3<f32>(1e-10), abs(dir) < vec3<f32>(1e-10));
 
     var t = 0.0;
+    var prev_t = 0.0;
+    var prev_dist = MAX_FLOAT;
 
     for (var step = 0u; step < scene.max_steps; step++) {
         if t > scene.max_distance {
@@ -664,6 +797,32 @@ fn ray_march_brute(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
             }
         }
 
+        // Overstep detection: bisect on sign change.
+        if min_dist < 0.0 && prev_dist > scene.hit_threshold {
+            var lo = prev_t;
+            var hi = t;
+            var bisect_mat = best_mat;
+            var bisect_obj_id = best_obj_id;
+            var bisect_obj_idx = best_obj_idx;
+            for (var b = 0u; b < BISECT_STEPS; b++) {
+                let mid = (lo + hi) * 0.5;
+                let mid_pos = origin + safe_dir * mid;
+                let mid_eval = evaluate_object(mid_pos, bisect_obj_idx);
+                if mid_eval.x < 0.0 {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                    bisect_mat = u32(mid_eval.y);
+                }
+            }
+            result.t = (lo + hi) * 0.5;
+            result.hit = true;
+            result.material_id = bisect_mat;
+            result.object_id = bisect_obj_id;
+            result.obj_idx = bisect_obj_idx;
+            return result;
+        }
+
         if min_dist < scene.hit_threshold {
             result.t = t;
             result.hit = true;
@@ -673,6 +832,8 @@ fn ray_march_brute(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
             return result;
         }
 
+        prev_t = t;
+        prev_dist = min_dist;
         t += max(min_dist, MIN_STEP);
     }
 
@@ -719,6 +880,9 @@ fn ray_march_tiled(origin: vec3<f32>, dir: vec3<f32>, pixel: vec2<u32>) -> March
     let cam_pos = camera.position.xyz;
 
     var t = 0.0;
+    var prev_t = 0.0;
+    var prev_dist = MAX_FLOAT;
+    var prev_obj_idx = 0u;
 
     for (var step = 0u; step < scene.max_steps; step++) {
         if t > scene.max_distance {
@@ -732,6 +896,8 @@ fn ray_march_tiled(origin: vec3<f32>, dir: vec3<f32>, pixel: vec2<u32>) -> March
         let cam_rel = pos - cam_pos;
         let coarse_dist = sample_coarse_field(cam_rel);
         if coarse_dist > COARSE_NEAR_THRESHOLD {
+            // Reset prev tracking when skipping — can't bisect across a coarse skip.
+            prev_dist = MAX_FLOAT;
             t += coarse_dist;
             continue;
         }
@@ -753,6 +919,32 @@ fn ray_march_tiled(origin: vec3<f32>, dir: vec3<f32>, pixel: vec2<u32>) -> March
             }
         }
 
+        // Overstep detection: bisect on sign change.
+        if min_dist < 0.0 && prev_dist > scene.hit_threshold {
+            var lo = prev_t;
+            var hi = t;
+            var bisect_mat = best_mat;
+            var bisect_obj_id = best_obj_id;
+            var bisect_obj_idx = best_obj_idx;
+            for (var b = 0u; b < BISECT_STEPS; b++) {
+                let mid = (lo + hi) * 0.5;
+                let mid_pos = origin + safe_dir * mid;
+                let mid_eval = evaluate_object(mid_pos, bisect_obj_idx);
+                if mid_eval.x < 0.0 {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                    bisect_mat = u32(mid_eval.y);
+                }
+            }
+            result.t = (lo + hi) * 0.5;
+            result.hit = true;
+            result.material_id = bisect_mat;
+            result.object_id = bisect_obj_id;
+            result.obj_idx = bisect_obj_idx;
+            return result;
+        }
+
         if min_dist < scene.hit_threshold {
             result.t = t;
             result.hit = true;
@@ -762,6 +954,9 @@ fn ray_march_tiled(origin: vec3<f32>, dir: vec3<f32>, pixel: vec2<u32>) -> March
             return result;
         }
 
+        prev_t = t;
+        prev_dist = min_dist;
+        prev_obj_idx = best_obj_idx;
         t += max(min_dist, MIN_STEP);
     }
 
@@ -850,18 +1045,31 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
         let hit_pos = ray_origin + ray_dir * result.t;
         let normal = compute_normal_for_object(hit_pos, result.obj_idx);
 
-        // Write G-buffer.
-        textureStore(gbuf_position, coord, vec4<f32>(hit_pos, result.t));
-        textureStore(gbuf_normal, coord, vec4<f32>(normal, 0.0));
-        textureStore(gbuf_material, coord, vec4<u32>(result.material_id | (result.object_id << 24u), 0u, 0u, 0u));
-
-        // Re-evaluate SDF distance at hit point for debug visualization.
+        // Sample blend data (secondary material + weight) at the hit point.
+        // Packed into the G-buffer so the shade pass doesn't need to re-sample.
+        var secondary_mat = 0u;
+        var blend_weight = 0u;
         var sdf_at_hit = 0.0;
         let hit_obj = objects[result.obj_idx];
         if hit_obj.sdf_type == SDF_TYPE_VOXELIZED {
             let local_hit = (hit_obj.inverse_world * vec4<f32>(hit_pos, 1.0)).xyz;
+            let blend = sample_voxelized_blend_data(local_hit, hit_obj);
+            secondary_mat = blend.x;
+            blend_weight = blend.y;
             sdf_at_hit = sample_voxelized(local_hit, hit_obj);
         }
+
+        // Write G-buffer.
+        // gbuf_material packing: bits 0-7 = primary material_id,
+        //   bits 8-15 = secondary_material_id, bits 16-23 = blend_weight (0-255),
+        //   bits 24-31 = object_id.
+        let packed_mat = result.material_id
+            | (secondary_mat << 8u)
+            | (blend_weight << 16u)
+            | (result.object_id << 24u);
+        textureStore(gbuf_position, coord, vec4<f32>(hit_pos, result.t));
+        textureStore(gbuf_normal, coord, vec4<f32>(normal, 0.0));
+        textureStore(gbuf_material, coord, vec4<u32>(packed_mat, 0u, 0u, 0u));
 
         // Motion vectors.
         let prev_clip = camera.prev_vp * vec4<f32>(hit_pos, 1.0);
