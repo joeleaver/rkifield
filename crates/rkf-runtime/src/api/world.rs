@@ -17,7 +17,7 @@ use rkf_core::scene::{Scene, SceneObject};
 use rkf_core::scene_node::{BlendMode, SceneNode, SdfSource, Transform as NodeTransform};
 use rkf_core::WorldPosition;
 
-use crate::components::CameraComponent;
+use crate::components::{CameraComponent, EditorMetadata, SdfTree};
 
 use super::entity::Entity;
 use super::error::WorldError;
@@ -182,6 +182,45 @@ impl World {
         self.scenes.iter().map(|sm| sm.scene.object_count()).sum()
     }
 
+    /// Build a merged Scene from hecs entity data for the render thread.
+    ///
+    /// Queries all entities with Transform + SdfTree + SceneLink components
+    /// and reconstructs SceneObject data from them. This is the bridge that
+    /// allows hecs to be the source of truth while the render engine still
+    /// consumes `&Scene`.
+    pub fn build_render_scene(&self) -> Scene {
+        let mut scene = Scene::new("merged");
+
+        for (_ecs_entity, (link, transform, sdf_tree)) in self
+            .ecs
+            .query::<(&SceneLink, &crate::components::Transform, &SdfTree)>()
+            .iter()
+        {
+            let name = self
+                .ecs
+                .get::<&EditorMetadata>(_ecs_entity)
+                .map(|m| m.name.clone())
+                .unwrap_or_default();
+
+            // Resolve parent_id from hecs Parent component if present
+            let parent_id = None; // TODO: resolve from Parent component
+
+            let obj = SceneObject {
+                id: link.object_id,
+                name,
+                parent_id,
+                position: transform.position.to_vec3(),
+                rotation: transform.rotation,
+                scale: transform.scale,
+                root_node: sdf_tree.root.clone(),
+                aabb: sdf_tree.aabb,
+            };
+            scene.objects.push(obj);
+        }
+
+        scene
+    }
+
     // ── Scene persistence ───────────────────────────────────────────────
 
     /// Mark a scene as persistent (survives scene swaps).
@@ -326,7 +365,28 @@ impl World {
                 self.next_generation += 1;
                 let entity = Entity::sdf(obj_id, generation);
 
-                let ecs_entity = self.ecs.spawn((SceneLink { object_id: obj_id },));
+                // Create hecs entity with full component data
+                let transform = crate::components::Transform {
+                    position,
+                    rotation,
+                    scale,
+                };
+                let sdf_tree = SdfTree {
+                    root: obj.root_node.clone(),
+                    asset_path: None,
+                    aabb: obj.aabb,
+                };
+                let editor_meta = EditorMetadata {
+                    name: name.clone(),
+                    tags: Vec::new(),
+                    locked: false,
+                };
+                let ecs_entity = self.ecs.spawn((
+                    SceneLink { object_id: obj_id },
+                    transform,
+                    sdf_tree,
+                    editor_meta,
+                ));
 
                 let record = EntityRecord {
                     ecs_entity,
@@ -462,8 +522,37 @@ impl World {
         self.next_generation += 1;
         let entity = Entity::sdf(obj_id, generation);
 
-        // Create parallel hecs entity
-        let ecs_entity = self.ecs.spawn((SceneLink { object_id: obj_id },));
+        // Retrieve the finalized root_node from the scene (add_object_full may have modified it)
+        let finalized_root = self
+            .active_scene_ref()
+            .objects
+            .iter()
+            .find(|o| o.id == obj_id)
+            .map(|o| o.root_node.clone())
+            .unwrap_or_else(|| SceneNode::new("root"));
+
+        // Create parallel hecs entity with full component data
+        let transform = crate::components::Transform {
+            position,
+            rotation,
+            scale,
+        };
+        let sdf_tree = SdfTree {
+            root: finalized_root,
+            asset_path: None,
+            aabb,
+        };
+        let editor_meta = EditorMetadata {
+            name: name.clone(),
+            tags: Vec::new(),
+            locked: false,
+        };
+        let ecs_entity = self.ecs.spawn((
+            SceneLink { object_id: obj_id },
+            transform,
+            sdf_tree,
+            editor_meta,
+        ));
 
         let record = EntityRecord {
             ecs_entity,
@@ -2870,5 +2959,82 @@ mod tests {
 
         // Same entity handle — not a new one.
         assert_eq!(entity_first, entity_second);
+    }
+
+    // ── build_render_scene ──────────────────────────────────────────────
+
+    #[test]
+    fn build_render_scene_includes_spawned_objects() {
+        let mut world = World::new("test");
+        world
+            .spawn("sphere")
+            .sdf(SdfPrimitive::Sphere { radius: 1.0 })
+            .material(0)
+            .position(WorldPosition::new(glam::IVec3::ZERO, Vec3::new(1.0, 2.0, 3.0)))
+            .build();
+        world
+            .spawn("box")
+            .sdf(SdfPrimitive::Box {
+                half_extents: Vec3::splat(0.5),
+            })
+            .material(1)
+            .build();
+
+        let scene = world.build_render_scene();
+        assert_eq!(scene.objects.len(), 2);
+
+        // Verify object data matches what was spawned
+        let sphere = scene.objects.iter().find(|o| o.name == "sphere").unwrap();
+        assert!((sphere.position.x - 1.0).abs() < 1e-6);
+        assert!((sphere.position.y - 2.0).abs() < 1e-6);
+        assert!((sphere.position.z - 3.0).abs() < 1e-6);
+
+        let box_obj = scene.objects.iter().find(|o| o.name == "box").unwrap();
+        assert!((box_obj.position.x).abs() < 1e-6); // default position
+    }
+
+    #[test]
+    fn build_render_scene_matches_all_objects() {
+        let mut world = World::new("test");
+        world
+            .spawn("obj")
+            .sdf(SdfPrimitive::Sphere { radius: 0.5 })
+            .material(0)
+            .build();
+
+        let scene = world.build_render_scene();
+        let all: Vec<_> = world.all_objects().collect();
+
+        assert_eq!(scene.objects.len(), all.len());
+
+        // Object IDs should match
+        let scene_ids: HashSet<u32> = scene.objects.iter().map(|o| o.id).collect();
+        let all_ids: HashSet<u32> = all.iter().map(|o| o.id).collect();
+        assert_eq!(scene_ids, all_ids);
+    }
+
+    #[test]
+    fn build_render_scene_after_resync() {
+        let mut world = World::new("test");
+
+        // Manually add an object to the scene (simulating scene load)
+        let obj = SceneObject {
+            id: 42,
+            name: "loaded".to_string(),
+            parent_id: None,
+            position: Vec3::new(5.0, 0.0, 0.0),
+            rotation: Quat::IDENTITY,
+            scale: Vec3::ONE,
+            root_node: SceneNode::new("root"),
+            aabb: Aabb::new(Vec3::splat(-1.0), Vec3::splat(1.0)),
+        };
+        world.scene_mut().objects.push(obj);
+        world.resync_entity_tracking();
+
+        let scene = world.build_render_scene();
+        assert_eq!(scene.objects.len(), 1);
+        assert_eq!(scene.objects[0].id, 42);
+        assert_eq!(scene.objects[0].name, "loaded");
+        assert!((scene.objects[0].position.x - 5.0).abs() < 1e-6);
     }
 }

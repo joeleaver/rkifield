@@ -144,6 +144,38 @@ impl Default for EditorMetadata {
     }
 }
 
+/// SDF blend tree — the shape definition for an SDF object entity.
+///
+/// Wraps a [`SceneNode`] tree that defines the object's local-space SDF.
+/// Each node carries geometry (analytical primitives or voxelized brick data),
+/// a local transform, and a blend mode for sibling combination.
+///
+/// # Serialization
+///
+/// Voxelized nodes reference runtime [`BrickMapHandle`]s that are not
+/// serializable. For persistence, use [`SdfTree::asset_path`] to store
+/// the `.rkf` asset path — the streaming system resolves handles on load.
+#[derive(Debug, Clone)]
+pub struct SdfTree {
+    /// Root of the SDF blend tree.
+    pub root: rkf_core::scene_node::SceneNode,
+    /// Optional path to the `.rkf` asset file (for serialization).
+    /// Runtime handles are resolved by the streaming system after load.
+    pub asset_path: Option<String>,
+    /// Local-space bounding box of the SDF. Recomputed after sculpt/import.
+    pub aabb: rkf_core::aabb::Aabb,
+}
+
+impl Default for SdfTree {
+    fn default() -> Self {
+        Self {
+            root: rkf_core::scene_node::SceneNode::new("root"),
+            asset_path: None,
+            aabb: rkf_core::aabb::Aabb::new(glam::Vec3::ZERO, glam::Vec3::ZERO),
+        }
+    }
+}
+
 // ─── tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -216,4 +248,52 @@ mod tests {
         assert!(!m.locked);
     }
 
+    #[test]
+    fn sdf_tree_default() {
+        let tree = SdfTree::default();
+        assert_eq!(tree.root.name, "root");
+        assert!(tree.asset_path.is_none());
+        assert!(tree.root.children.is_empty());
+    }
+
+    #[test]
+    fn sdf_tree_with_asset_path() {
+        let tree = SdfTree {
+            root: rkf_core::scene_node::SceneNode::new("guard"),
+            asset_path: Some("assets/guard.rkf".to_string()),
+            aabb: rkf_core::aabb::Aabb::new(glam::Vec3::ZERO, glam::Vec3::ZERO),
+        };
+        assert_eq!(tree.asset_path.as_deref(), Some("assets/guard.rkf"));
+        assert_eq!(tree.root.name, "guard");
+    }
+
+    #[test]
+    fn sdf_tree_with_analytical_node() {
+        use rkf_core::scene_node::{SceneNode, SdfSource, SdfPrimitive, BlendMode};
+
+        let mut root = SceneNode::new("sphere_group");
+        let mut child = SceneNode::new("sphere");
+        child.sdf_source = SdfSource::Analytical {
+            primitive: SdfPrimitive::Sphere { radius: 1.0 },
+            material_id: 0,
+        };
+        child.blend_mode = BlendMode::SmoothUnion(0.2);
+        root.children.push(child);
+
+        let tree = SdfTree { root, asset_path: None, aabb: rkf_core::aabb::Aabb::new(glam::Vec3::ZERO, glam::Vec3::ZERO) };
+        assert_eq!(tree.root.children.len(), 1);
+        assert_eq!(tree.root.children[0].name, "sphere");
+    }
+
+    #[test]
+    fn sdf_tree_clone() {
+        let tree = SdfTree {
+            root: rkf_core::scene_node::SceneNode::new("test"),
+            asset_path: Some("test.rkf".to_string()),
+            aabb: rkf_core::aabb::Aabb::new(glam::Vec3::ZERO, glam::Vec3::ZERO),
+        };
+        let cloned = tree.clone();
+        assert_eq!(cloned.root.name, "test");
+        assert_eq!(cloned.asset_path, tree.asset_path);
+    }
 }

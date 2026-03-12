@@ -79,7 +79,7 @@ pub mod file_watcher;
 pub use asset_registry::{AssetEntry, AssetRegistry, AssetState, Handle};
 pub use components::{
     CameraComponent, EditorMetadata, FogVolumeComponent, Parent,
-    Transform, WorldTransform,
+    SdfTree, Transform, WorldTransform,
 };
 pub use config::{
     ConfigError, EngineConfig, GiSettings, PostProcessSettings, QualityPreset, RayMarchSettings,
