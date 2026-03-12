@@ -12,6 +12,12 @@
 
 #![warn(missing_docs)]
 
+// Allow `rkf_runtime::` paths in macro-generated code within this crate.
+extern crate self as rkf_runtime;
+
+/// Behavior system types — components, systems, registry, and execution.
+pub mod behavior;
+
 /// Public engine API — World, Entity, Renderer, SpawnBuilder.
 pub mod api;
 
@@ -134,6 +140,15 @@ pub use environment::{
     SkyMode, VolumetricHints, apply_overrides, lerp_profiles, load_environment,
     resolve_environment, save_environment,
 };
+pub use behavior::{
+    BehaviorExecutor, CommandQueue, ComponentEntry, ComponentMeta, EntityNameIndex, EntityTagIndex,
+    FieldMeta, FieldType, GameStore, GameplayRegistry, LookupError, Phase, QueryError, Schedule,
+    ScheduleError, SceneOwnership, Sequence, SequenceBuilder, SequenceStep, StableId, StableIdIndex,
+    StoreEvent, SystemContext, SystemMeta, TempEntity, build_schedule, children_of, descendants_of,
+    deserialize_entity, find_path, find_tagged, parent_of, root_of, serialize_entity,
+};
+pub use behavior::game_value::GameValue as BehaviorGameValue;
+pub use behavior::game_value::GameValueTypeError;
 pub use game_manager::{GameEvent, GameManager, GameState, GameValue};
 pub use main_camera::{EnvironmentZone, MainCamera};
 pub use save_system::{

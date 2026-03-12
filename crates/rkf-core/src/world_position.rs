@@ -17,6 +17,8 @@
 //! assert!((disp.x - 7.5_f32).abs() < 1e-5);
 //! ```
 
+use std::ops::{Add, AddAssign, Sub};
+
 use glam::{DVec3, IVec3, Vec3};
 
 /// Size of one chunk in metres.
@@ -160,6 +162,50 @@ impl Default for WorldPosition {
             chunk: IVec3::ZERO,
             local: Vec3::ZERO,
         }
+    }
+}
+
+// ─── operator impls ─────────────────────────────────────────────────────────
+
+impl From<Vec3> for WorldPosition {
+    /// Convert a plain `Vec3` (absolute metres) into a `WorldPosition` by
+    /// computing the chunk from floor-division and keeping the remainder as local.
+    #[inline]
+    fn from(v: Vec3) -> Self {
+        WorldPosition::new(IVec3::ZERO, v)
+    }
+}
+
+impl Add<Vec3> for WorldPosition {
+    type Output = WorldPosition;
+
+    /// Offset a world position by a `Vec3` displacement (in metres).
+    #[inline]
+    fn add(self, rhs: Vec3) -> WorldPosition {
+        self.translate(rhs)
+    }
+}
+
+impl AddAssign<Vec3> for WorldPosition {
+    /// In-place offset by a `Vec3` displacement.
+    #[inline]
+    fn add_assign(&mut self, rhs: Vec3) {
+        self.local += rhs;
+        self.normalize();
+    }
+}
+
+impl Sub for WorldPosition {
+    type Output = Vec3;
+
+    /// Compute the displacement `self - rhs` as a `Vec3`, using `f64`
+    /// arithmetic internally to avoid precision loss at large distances.
+    ///
+    /// The result is cast to `f32` at the end — this is fine because
+    /// displacement vectors between interacting objects are typically small.
+    #[inline]
+    fn sub(self, rhs: WorldPosition) -> Vec3 {
+        self.relative_to(&rhs)
     }
 }
 
@@ -372,5 +418,130 @@ mod tests {
         let pos = WorldPosition::default();
         assert_eq!(pos.chunk, IVec3::ZERO);
         assert_eq!(pos.local, Vec3::ZERO);
+    }
+
+    // ── From<Vec3> ────────────────────────────────────────────────────────
+
+    #[test]
+    fn from_vec3_within_one_chunk() {
+        let v = Vec3::new(3.0, 5.0, 7.0);
+        let pos: WorldPosition = v.into();
+        assert_eq!(pos.chunk, IVec3::ZERO);
+        assert!((pos.local.x - 3.0).abs() < 1e-5);
+        assert!((pos.local.y - 5.0).abs() < 1e-5);
+        assert!((pos.local.z - 7.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn from_vec3_spanning_multiple_chunks() {
+        // 25.0 / 8.0 = 3 chunks + 1.0 remainder
+        let v = Vec3::new(25.0, 50.0, 100.0);
+        let pos: WorldPosition = v.into();
+        assert_eq!(pos.chunk.x, 3);
+        assert!((pos.local.x - 1.0).abs() < 1e-4);
+        assert_eq!(pos.chunk.y, 6);  // 50/8 = 6.25 → chunk 6, local 2.0
+        assert!((pos.local.y - 2.0).abs() < 1e-4);
+        assert_eq!(pos.chunk.z, 12); // 100/8 = 12.5 → chunk 12, local 4.0
+        assert!((pos.local.z - 4.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn from_vec3_negative_values() {
+        // -5.0 → chunk -1, local 3.0 (since -5 = -1*8 + 3)
+        let v = Vec3::new(-5.0, -0.5, -16.0);
+        let pos: WorldPosition = v.into();
+        assert_eq!(pos.chunk.x, -1);
+        assert!((pos.local.x - 3.0).abs() < 1e-4);
+        assert_eq!(pos.chunk.y, -1);
+        assert!((pos.local.y - 7.5).abs() < 1e-4);
+        assert_eq!(pos.chunk.z, -2); // -16/8 = -2, local 0
+        assert!(pos.local.z.abs() < 1e-4);
+    }
+
+    // ── Add<Vec3> ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn add_vec3_within_chunk() {
+        let pos = WorldPosition::new(IVec3::ZERO, Vec3::new(1.0, 2.0, 3.0));
+        let result = pos + Vec3::new(2.0, 1.0, 0.5);
+        assert_eq!(result.chunk, IVec3::ZERO);
+        assert!((result.local.x - 3.0).abs() < 1e-5);
+        assert!((result.local.y - 3.0).abs() < 1e-5);
+        assert!((result.local.z - 3.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn add_vec3_across_chunk_boundary() {
+        let pos = WorldPosition::new(IVec3::ZERO, Vec3::new(6.0, 6.0, 6.0));
+        let result = pos + Vec3::new(4.0, 4.0, 4.0);
+        // 6+4 = 10 → chunk 1, local 2
+        assert_eq!(result.chunk, IVec3::new(1, 1, 1));
+        assert!((result.local.x - 2.0).abs() < 1e-5);
+        assert!((result.local.y - 2.0).abs() < 1e-5);
+        assert!((result.local.z - 2.0).abs() < 1e-5);
+    }
+
+    // ── Sub ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn sub_same_chunk() {
+        let a = WorldPosition::new(IVec3::new(5, 5, 5), Vec3::new(6.0, 3.0, 1.0));
+        let b = WorldPosition::new(IVec3::new(5, 5, 5), Vec3::new(2.0, 1.0, 0.5));
+        let diff = a - b;
+        assert!((diff.x - 4.0).abs() < 1e-5);
+        assert!((diff.y - 2.0).abs() < 1e-5);
+        assert!((diff.z - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn sub_far_apart_via_f64() {
+        // Two positions ~8 million metres apart
+        let a = WorldPosition::new(IVec3::new(1_000_000, 0, 0), Vec3::new(3.0, 0.0, 0.0));
+        let b = WorldPosition::new(IVec3::ZERO, Vec3::new(1.0, 0.0, 0.0));
+        let diff = a - b;
+        // Expected: 1_000_000 * 8 + 3 - 1 = 8_000_002
+        // f32 can represent this approximately
+        let expected = 8_000_002.0_f32;
+        assert!(
+            (diff.x - expected).abs() < 1.0,
+            "diff.x = {}, expected = {}",
+            diff.x,
+            expected
+        );
+    }
+
+    // ── AddAssign<Vec3> ───────────────────────────────────────────────────
+
+    #[test]
+    fn add_assign_matches_add() {
+        let pos = WorldPosition::new(IVec3::new(3, -1, 7), Vec3::new(5.5, 2.0, 6.5));
+        let offset = Vec3::new(4.0, -3.0, 10.0);
+
+        let added = pos + offset;
+        let mut assigned = pos;
+        assigned += offset;
+
+        assert_eq!(added.chunk, assigned.chunk);
+        assert!((added.local.x - assigned.local.x).abs() < 1e-5);
+        assert!((added.local.y - assigned.local.y).abs() < 1e-5);
+        assert!((added.local.z - assigned.local.z).abs() < 1e-5);
+    }
+
+    // ── roundtrip ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn roundtrip_vec3_sub_add() {
+        let origin = WorldPosition::new(IVec3::new(10, 20, 30), Vec3::new(1.0, 2.0, 3.0));
+        let target = WorldPosition::new(IVec3::new(10, 20, 30), Vec3::new(5.0, 6.0, 7.0));
+
+        // Get displacement
+        let disp = target - origin;
+        // Apply displacement back to origin
+        let recovered = origin + disp;
+
+        assert_eq!(recovered.chunk, target.chunk);
+        assert!((recovered.local.x - target.local.x).abs() < 1e-4);
+        assert!((recovered.local.y - target.local.y).abs() < 1e-4);
+        assert!((recovered.local.z - target.local.z).abs() < 1e-4);
     }
 }

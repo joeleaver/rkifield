@@ -24,3 +24,9 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 bytemuck = { workspace = true }
 notify = { workspace = true }
+uuid = { workspace = true }
+inventory = { workspace = true }
+rkf-macros = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

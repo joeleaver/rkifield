@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/rkf-macros",
     "crates/rkf-core",
     "crates/rkf-render",
     "crates/rkf-animation",
@@ -77,6 +78,7 @@ base64 = "0.22"
 pollster = "0.4"
 crossbeam = "0.8"
 arc-swap = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
 
 # Rinch workspace dependencies (vendored)
 rinch = { path = "vendor/rinch/crates/rinch", default-features = false }
@@ -117,12 +119,14 @@ servo_arc = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 notify = "7"
+inventory = "0.3"
 peniko = "0.6"
 keyboard-types = "0.7"
 png = "0.17"
 futures-util = "0.3"
 
 # Internal crate cross-references
+rkf-macros = { path = "crates/rkf-macros" }
 rkf-core = { path = "crates/rkf-core" }
 rkf-render = { path = "crates/rkf-render" }
 rkf-animation = { path = "crates/rkf-animation" }
