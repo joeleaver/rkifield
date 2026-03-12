@@ -8,19 +8,23 @@ use crate::automation::SharedState;
 use crate::editor_command::EditorCommand;
 use crate::editor_state::{EditorMode, EditorState, UiSignals};
 use crate::engine::EditorEngine;
+use crate::engine_loop_commands::{apply_editor_command, compute_material_usage};
+use crate::engine_loop_edits;
+use crate::engine_loop_io;
+use crate::engine_loop_ui;
 use crate::engine_viewport::{DISPLAY_HEIGHT, DISPLAY_WIDTH};
 
 /// Data bundle passed to the engine thread.
 pub(crate) struct EngineThreadData {
     pub(crate) editor_state: Arc<Mutex<EditorState>>,
     pub(crate) shared_state: Arc<Mutex<SharedState>>,
-    /// Receiver for UI→engine commands.
+    /// Receiver for UI->engine commands.
     pub(crate) cmd_rx: crossbeam::channel::Receiver<EditorCommand>,
     /// Lock-free layout config shared between UI and engine threads.
     pub(crate) layout_backing: crate::layout::state::LayoutBacking,
     /// CPU pixel writer for submitting rendered frames to the compositor.
     pub(crate) surface_writer: SurfaceWriter,
-    /// GPU texture registrar — provides layout size and texture submission.
+    /// GPU texture registrar -- provides layout size and texture submission.
     pub(crate) gpu_registrar: GpuTextureRegistrar,
     /// CPU pixel writer for the material preview surface.
     pub(crate) preview_writer: SurfaceWriter,
@@ -29,15 +33,15 @@ pub(crate) struct EngineThreadData {
 /// Tracks which categories of data changed this frame, so we only
 /// push signals that actually need updating.
 #[derive(Default)]
-struct DirtyFlags {
+pub(crate) struct DirtyFlags {
     /// Scene objects added/removed/renamed/reparented/transformed.
-    scene: bool,
+    pub(crate) scene: bool,
     /// Light list changed (add/remove/modify).
-    lights: bool,
+    pub(crate) lights: bool,
     /// Material table changed.
-    materials: bool,
+    pub(crate) materials: bool,
     /// Shader registry changed.
-    shaders: bool,
+    pub(crate) shaders: bool,
 }
 
 /// Map a user-facing primitive name to an SdfPrimitive.
@@ -93,7 +97,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         for rl in &engine.world_lights {
             use crate::light_editor::{SceneLight, SceneLightType};
             if rl.light_type == 0 {
-                continue; // Skip directional — driven by environment
+                continue; // Skip directional -- driven by environment
             }
             let light_type = match rl.light_type {
                 2 => SceneLightType::Spot,
@@ -126,14 +130,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                     Ok(pf) => {
                         let project_path = std::path::Path::new(project_path_str);
                         let project_root = rkf_runtime::project::project_root(project_path);
-                        let default_scene_path = if let Some(ref ds) = pf.default_scene {
-                            pf.scenes.iter()
-                                .find(|s| &s.name == ds)
-                                .map(|s| project_root.join(&s.path))
-                        } else {
-                            pf.scenes.first()
-                                .map(|s| project_root.join(&s.path))
-                        };
+                        let default_scene_path = engine_loop_io::resolve_default_scene_path(&pf, &project_root);
 
                         if let Some(scene_path) = default_scene_path {
                             let sp = scene_path.to_string_lossy().to_string();
@@ -145,32 +142,12 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                                     engine.clear_scene();
                                     let scene_dir = scene_path.parent()
                                         .unwrap_or(std::path::Path::new("."));
-                                    for (i, entry) in sf.objects.iter().enumerate() {
-                                        if let Some(asset_path) = &entry.asset_path {
-                                            let rkf_path = scene_dir.join(asset_path);
-                                            let rkf_str = rkf_path.to_string_lossy().to_string();
-                                            match crate::engine::load_rkf_into_pool(
-                                                &rkf_str,
-                                                &mut engine.cpu_brick_pool,
-                                                &mut engine.cpu_brick_map_alloc,
-                                            ) {
-                                                Ok((handle, voxel_size, grid_aabb, _count)) => {
-                                                    if let Some(obj) = new_scene.objects.get_mut(i) {
-                                                        obj.root_node.sdf_source =
-                                                            rkf_core::SdfSource::Voxelized {
-                                                                brick_map_handle: handle,
-                                                                voxel_size,
-                                                                aabb: grid_aabb,
-                                                            };
-                                                        obj.aabb = grid_aabb;
-                                                    }
-                                                }
-                                                Err(e) => {
-                                                    log::error!("Failed to load .rkf '{}': {e}", asset_path);
-                                                }
-                                            }
-                                        }
-                                    }
+                                    engine_loop_io::load_scene_rkf_assets(
+                                        &mut engine, &sf, &mut new_scene, scene_dir,
+                                    );
+
+                                    // Upload brick pool + brick map data to GPU.
+                                    engine.reupload_brick_data();
 
                                     if let Ok(mut es) = editor_state.lock() {
                                         *es.world.scene_mut() = new_scene;
@@ -189,33 +166,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                                         es.world.resync_entity_tracking();
 
                                         // Restore subsystem state from property bag.
-                                        if let Some(s) = sf.properties.get("camera") {
-                                            if let Ok(cam) = ron::from_str::<crate::scene_io::CameraSnapshot>(s) {
-                                                es.editor_camera.position = cam.position;
-                                                es.editor_camera.fly_yaw = cam.yaw;
-                                                es.editor_camera.fly_pitch = cam.pitch;
-                                                es.editor_camera.fov_y = cam.fov_y;
-                                                let dir = glam::Vec3::new(
-                                                    -cam.yaw.sin() * cam.pitch.cos(),
-                                                    cam.pitch.sin(),
-                                                    -cam.yaw.cos() * cam.pitch.cos(),
-                                                );
-                                                es.editor_camera.target = es.editor_camera.position
-                                                    + dir * es.editor_camera.orbit_distance;
-                                            }
-                                        }
-                                        if let Some(s) = sf.properties.get("environment") {
-                                            if let Ok(env) = ron::from_str::<crate::environment::EnvironmentState>(s) {
-                                                es.environment = env;
-                                                es.environment.mark_dirty();
-                                            }
-                                        }
-                                        if let Some(s) = sf.properties.get("lights") {
-                                            if let Ok(lights) = ron::from_str::<Vec<crate::light_editor::SceneLight>>(s) {
-                                                es.light_editor.replace_lights(lights);
-                                            }
-                                        }
-
+                                        engine_loop_io::restore_scene_properties(&mut es, &sf);
                                     }
                                     log::info!("Last project restored: {project_path_str}");
                                 }
@@ -253,9 +204,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         let mut frame_spawned: Vec<u32> = Vec::new();
         let mut frame_despawned: Vec<u32> = Vec::new();
 
-        // a. Check viewport size from layout — the compositor updates
-        //    layout_size each frame with the physical pixel dimensions of
-        //    the RenderSurface element in the DOM.
+        // a. Check viewport size from layout.
         let desired_vp = {
             let (w, h) = gpu_registrar.layout_size();
             (w.max(64), h.max(64))
@@ -264,19 +213,13 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             if let Some(_view) = engine.resize_viewport(desired_vp.0, desired_vp.1) {
                 current_vp = desired_vp;
                 log::debug!("Engine: resized to {}x{}", desired_vp.0, desired_vp.1);
-
-                // Resize recreates all GPU passes with default uniforms.
-                // Mark environment dirty so apply_environment re-pushes
-                // all post-process settings (DOF, bloom, tone map, etc.)
-                // on the next frame.
                 if let Ok(mut es) = editor_state.lock() {
                     es.environment.mark_dirty();
                 }
             }
         }
 
-        // b. Drain pending MCP commands from shared_state (lock SS briefly,
-        //    then release before touching editor_state — avoids nested locks).
+        // b. Drain pending MCP commands from shared_state.
         let pending_camera;
         let pending_debug;
         let pending_voxel_slice;
@@ -302,9 +245,6 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         }
 
         // b2. Drain UI commands and apply to EditorState (brief lock).
-        //
-        // Process KeyDown AFTER KeyUp so that X11/Wayland synthetic
-        // key-repeat pairs (Release+Press) don't flicker keys_pressed.
         let mut dirty = DirtyFlags::default();
         {
             if let Ok(mut es) = editor_state.lock() {
@@ -316,9 +256,6 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                         | EditorCommand::SetObjectRotation { entity_id, .. }
                         | EditorCommand::SetObjectScale { entity_id, .. } => {
                             frame_dirty_objects.push(*entity_id as u32);
-                            // Don't set dirty.scene — slider signals already drive
-                            // the UI reactively.  Pushing the full objects list on
-                            // every mouse-move would freeze the UI.
                         }
                         // Structural scene changes.
                         EditorCommand::SpawnPrimitive { .. }
@@ -335,19 +272,16 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                             dirty.scene = true;
                             dirty.lights = true;
                         }
-                        // Light property edits — same as transforms, slider
-                        // signals are the UI source of truth during drags.
+                        // Light property edits.
                         EditorCommand::SetLightPosition { .. }
                         | EditorCommand::SetLightIntensity { .. }
                         | EditorCommand::SetLightRange { .. } => {
-                            // Don't set dirty.lights here.
                         }
                         _ => {}
                     }
                     // Handle SetMaterial directly with engine's MaterialLibrary.
                     if let EditorCommand::SetMaterial { slot, material } = cmd {
                         if let Ok(mut lib) = engine.material_library.lock() {
-                            // Record undo action before applying.
                             let old = lib.get_material(slot).copied().unwrap_or_default();
                             if old != material {
                                 es.undo.push(crate::undo::UndoAction {
@@ -391,19 +325,18 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         }
 
         // c. Single brief lock: read all data needed for this frame, then release.
-        //    We inline what was formerly `take_engine_snapshot()` to avoid the
-        //    intermediate `EngineSnapshot` struct.
         let (
             camera, f_debug_mode, f_convert_to_voxel, f_remap_material,
             f_set_prim_mat,
             f_environment, f_lights,
             mut scene_clone, f_selected, f_gizmo_mode, f_gizmo_axis,
-            f_show_grid, f_editor_mode, f_brush_radius,
+            f_show_grid, f_editor_mode, f_brush_radius, f_brush_falloff,
             f_sculpt_edits, f_sculpt_undo, f_sculpting_active,
+            f_paint_edits, f_paint_undo,
         ) = {
             let mut es = match editor_state.lock() {
                 Ok(es) => es,
-                Err(_) => continue, // poisoned — skip frame
+                Err(_) => continue, // poisoned -- skip frame
             };
 
             // Apply pending MCP commands (mutate before read).
@@ -435,18 +368,16 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             let remap_material = es.pending_remap_material.take();
             let set_prim_mat = es.pending_set_primitive_material.take();
 
-            // Consume undo/redo — classify by action kind.
+            // Consume undo/redo -- classify by action kind.
             if es.pending_undo {
                 es.pending_undo = false;
                 if let Some(action) = es.undo.undo() {
                     es.apply_undo_action(&action, true);
                     match &action.kind {
                         crate::undo::UndoActionKind::SpawnEntity { entity_id } => {
-                            // Undo spawn = despawn.
                             frame_despawned.push(*entity_id as u32);
                         }
                         crate::undo::UndoActionKind::DespawnEntity { entity_id } => {
-                            // Undo despawn = respawn.
                             frame_spawned.push(*entity_id as u32);
                         }
                         crate::undo::UndoActionKind::Transform { entity_id, .. } => {
@@ -455,7 +386,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                         crate::undo::UndoActionKind::SculptStroke { object_id, .. } => {
                             frame_dirty_objects.push(*object_id as u32);
                         }
-                        _ => {} // MaterialChange, PropertyChange, etc. — no GPU scene change.
+                        _ => {}
                     }
                 }
             }
@@ -465,11 +396,9 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                     es.apply_undo_action(&action, false);
                     match &action.kind {
                         crate::undo::UndoActionKind::SpawnEntity { entity_id } => {
-                            // Redo spawn = spawn.
                             frame_spawned.push(*entity_id as u32);
                         }
                         crate::undo::UndoActionKind::DespawnEntity { entity_id } => {
-                            // Redo despawn = despawn.
                             frame_despawned.push(*entity_id as u32);
                         }
                         crate::undo::UndoActionKind::Transform { entity_id, .. } => {
@@ -561,457 +490,60 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                 }
             }
 
-            // ── Scene Save ────────────────────────────────────────
+            // -- Scene/Project I/O (delegated to engine_loop_io) --------
             if es.pending_save {
                 es.pending_save = false;
-                let save_path = es.pending_save_path.take().or_else(|| {
-                    es.current_scene_path.clone()
-                });
-                if let Some(path) = save_path {
-                    let scene = es.world.scene().clone();
-                    let cam_snap = crate::scene_io::CameraSnapshot {
-                        position: es.editor_camera.position,
-                        yaw: es.editor_camera.fly_yaw,
-                        pitch: es.editor_camera.fly_pitch,
-                        fov_y: es.editor_camera.fov_y,
-                    };
-                    let props = crate::scene_io::SceneProperties {
-                        camera: Some(&cam_snap),
-                        environment: Some(&es.environment),
-                        lights: Some(es.light_editor.all_lights()),
-                    };
-                    match crate::scene_io::save_v2_scene_full(
-                        &scene, &path,
-                        &engine.cpu_brick_pool, &engine.cpu_brick_map_alloc,
-                        &props,
-                    ) {
-                        Ok(()) => {
-                            es.current_scene_path = Some(path.clone());
-                            es.unsaved_changes.mark_saved();
-                            log::info!("Scene saved to {path}");
-                        }
-                        Err(e) => log::error!("Failed to save scene: {e}"),
-                    }
-                } else {
-                    // No path known — fall through to Save As.
-                    es.pending_save_as = true;
-                }
+                engine_loop_io::handle_scene_save(&mut es, &engine);
             }
             if es.pending_save_as {
                 es.pending_save_as = false;
-                let scene = es.world.scene().clone();
-                let cam_snap = crate::scene_io::CameraSnapshot {
-                    position: es.editor_camera.position,
-                    yaw: es.editor_camera.fly_yaw,
-                    pitch: es.editor_camera.fly_pitch,
-                    fov_y: es.editor_camera.fov_y,
-                };
-                let env_clone = es.environment.clone();
-                let lights_clone: Vec<_> = es.light_editor.all_lights().to_vec();
-                drop(es);
-
-                let dialog_result = rfd::FileDialog::new()
-                    .add_filter("Scene", &["rkscene"])
-                    .set_file_name("scene.rkscene")
-                    .save_file();
-
-                if let Some(file_path) = dialog_result {
-                    let path = file_path.to_string_lossy().to_string();
-                    let props = crate::scene_io::SceneProperties {
-                        camera: Some(&cam_snap),
-                        environment: Some(&env_clone),
-                        lights: Some(&lights_clone),
-                    };
-                    match crate::scene_io::save_v2_scene_full(
-                        &scene, &path,
-                        &engine.cpu_brick_pool, &engine.cpu_brick_map_alloc,
-                        &props,
-                    ) {
-                        Ok(()) => {
-                            let mut es = editor_state.lock().unwrap();
-                            es.current_scene_path = Some(path.clone());
-                            es.unsaved_changes.mark_saved();
-                            log::info!("Scene saved to {path}");
-                        }
-                        Err(e) => log::error!("Failed to save scene: {e}"),
-                    }
-                }
+                engine_loop_io::handle_scene_save_as(es, &editor_state, &engine);
                 continue;
             }
 
-            // ── Scene Open ───────────────────────────────────────
             if es.pending_open {
                 es.pending_open = false;
                 let open_path = es.pending_open_path.take();
-
-                let file_path = if let Some(p) = open_path {
-                    Some(std::path::PathBuf::from(p))
-                } else {
-                    // Drop the lock before blocking on file dialog.
-                    drop(es);
-                    let result = rfd::FileDialog::new()
-                        .add_filter("Scene", &["rkscene"])
-                        .pick_file();
-                    if result.is_none() {
-                        continue; // User cancelled — skip rest of frame.
-                    }
-                    result
+                let mut io_ctx = engine_loop_io::IoContext {
+                    engine: &mut engine,
+                    editor_state: &editor_state,
+                    layout_backing: &layout_backing,
                 };
-
-                if let Some(file_path) = file_path {
-                    let path_str = file_path.to_string_lossy().to_string();
-                    match crate::scene_io::load_v2_scene(&path_str) {
-                        Ok(sf) => {
-                            // Reconstruct the base scene (analytical objects).
-                            let mut new_scene = crate::scene_io::reconstruct_v2_scene(&sf);
-
-                            // Clear old scene data from the engine.
-                            engine.clear_scene();
-
-                            // Load voxelized objects from .rkf files.
-                            let scene_dir = file_path.parent()
-                                .unwrap_or(std::path::Path::new("."));
-                            for (i, entry) in sf.objects.iter().enumerate() {
-                                if let Some(asset_path) = &entry.asset_path {
-                                    let rkf_path = scene_dir.join(asset_path);
-                                    let rkf_str = rkf_path.to_string_lossy().to_string();
-                                    match crate::engine::load_rkf_into_pool(
-                                        &rkf_str,
-                                        &mut engine.cpu_brick_pool,
-                                        &mut engine.cpu_brick_map_alloc,
-                                    ) {
-                                        Ok((handle, voxel_size, grid_aabb, _count)) => {
-                                            if let Some(obj) = new_scene.objects.get_mut(i) {
-                                                obj.root_node.sdf_source =
-                                                    rkf_core::SdfSource::Voxelized {
-                                                        brick_map_handle: handle,
-                                                        voxel_size,
-                                                        aabb: grid_aabb,
-                                                    };
-                                                obj.aabb = grid_aabb;
-                                            }
-                                        }
-                                        Err(e) => {
-                                            log::error!(
-                                                "Failed to load .rkf '{}': {e}",
-                                                asset_path
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Replace the scene in EditorState.
-                            let mut es = editor_state.lock().unwrap();
-                            *es.world.scene_mut() = new_scene;
-                            es.current_scene_path = Some(path_str.clone());
-                            es.unsaved_changes.mark_saved();
-                            es.selected_entity = None;
-                            es.undo.clear();
-
-                            // Restore subsystem state from property bag.
-                            if let Some(s) = sf.properties.get("camera") {
-                                if let Ok(cam) = ron::from_str::<crate::scene_io::CameraSnapshot>(s) {
-                                    es.editor_camera.position = cam.position;
-                                    es.editor_camera.fly_yaw = cam.yaw;
-                                    es.editor_camera.fly_pitch = cam.pitch;
-                                    es.editor_camera.fov_y = cam.fov_y;
-                                    let dir = glam::Vec3::new(
-                                        -cam.yaw.sin() * cam.pitch.cos(),
-                                        cam.pitch.sin(),
-                                        -cam.yaw.cos() * cam.pitch.cos(),
-                                    );
-                                    es.editor_camera.target = es.editor_camera.position
-                                        + dir * es.editor_camera.orbit_distance;
-                                }
-                            }
-                            if let Some(s) = sf.properties.get("environment") {
-                                if let Ok(env) = ron::from_str::<crate::environment::EnvironmentState>(s) {
-                                    es.environment = env;
-                                    es.environment.mark_dirty();
-                                }
-                            }
-                            if let Some(s) = sf.properties.get("lights") {
-                                if let Ok(lights) = ron::from_str::<Vec<crate::light_editor::SceneLight>>(s) {
-                                    es.light_editor.replace_lights(lights);
-                                }
-                            }
-
-                            log::info!("Scene loaded from {path_str}");
-                        }
-                        Err(e) => {
-                            log::error!("Failed to load scene '{}': {e}", path_str);
-                        }
-                    }
-                }
-                continue; // Skip rest of frame processing after load.
-            }
-
-            // ── New Project ──────────────────────────────────────
-            if es.pending_new_project {
-                es.pending_new_project = false;
-                drop(es);
-
-                let dialog_result = rfd::FileDialog::new()
-                    .set_title("Choose parent folder for new project")
-                    .pick_folder();
-
-                if let Some(parent_dir) = dialog_result {
-                    // Ask for project name via a simple default.
-                    let project_name = parent_dir
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| "NewProject".to_string());
-
-                    match rkf_runtime::project::create_project(&parent_dir, &project_name) {
-                        Ok(project_path) => {
-                            let project_path_str = project_path.to_string_lossy().to_string();
-                            match rkf_runtime::load_project(&project_path_str) {
-                                Ok(pf) => {
-                                    // Load the default scene from the new project.
-                                    let project_root = rkf_runtime::project::project_root(&project_path);
-                                    let default_scene_path = if let Some(ref ds) = pf.default_scene {
-                                        pf.scenes.iter()
-                                            .find(|s| &s.name == ds)
-                                            .map(|s| project_root.join(&s.path))
-                                    } else {
-                                        pf.scenes.first()
-                                            .map(|s| project_root.join(&s.path))
-                                    };
-
-                                    // Clear old scene and load default.
-                                    engine.clear_scene();
-                                    let mut es = editor_state.lock().unwrap();
-                                    if let Some(scene_path) = default_scene_path {
-                                        let sp = scene_path.to_string_lossy().to_string();
-                                        match crate::scene_io::load_v2_scene(&sp) {
-                                            Ok(sf) => {
-                                                let new_scene = crate::scene_io::reconstruct_v2_scene(&sf);
-                                                *es.world.scene_mut() = new_scene;
-                                                es.current_scene_path = Some(sp);
-
-                                                // Restore camera from scene properties.
-                                                if let Some(s) = sf.properties.get("camera") {
-                                                    if let Ok(cam) = ron::from_str::<crate::scene_io::CameraSnapshot>(s) {
-                                                        es.editor_camera.position = cam.position;
-                                                        es.editor_camera.fly_yaw = cam.yaw;
-                                                        es.editor_camera.fly_pitch = cam.pitch;
-                                                        es.editor_camera.fov_y = cam.fov_y;
-                                                    }
-                                                }
-                                            }
-                                            Err(e) => log::error!("Failed to load default scene: {e}"),
-                                        }
-                                    } else {
-                                        // No scene — just clear.
-                                        *es.world.scene_mut() = rkf_core::scene::Scene::new("default");
-                                        es.current_scene_path = None;
-                                    }
-                                    es.current_project = Some(pf);
-                                    es.current_project_path = Some(project_path_str.clone());
-                                    es.selected_entity = None;
-                                    es.undo.clear();
-                                    es.unsaved_changes.mark_saved();
-                                    es.world.resync_entity_tracking();
-                                    frame_topology_changed = true;
-                                    crate::editor_config::set_last_project(Some(&project_path_str));
-                                    log::info!("New project created at {project_path_str}");
-                                }
-                                Err(e) => log::error!("Failed to load new project file: {e}"),
-                            }
-                        }
-                        Err(e) => log::error!("Failed to create project: {e}"),
-                    }
-                }
+                engine_loop_io::handle_scene_open_impl(es, open_path, &mut io_ctx);
                 continue;
             }
 
-            // ── Open Project ─────────────────────────────────────
+            if es.pending_new_project {
+                es.pending_new_project = false;
+                drop(es);
+                let mut io_ctx = engine_loop_io::IoContext {
+                    engine: &mut engine,
+                    editor_state: &editor_state,
+                    layout_backing: &layout_backing,
+                };
+                engine_loop_io::handle_new_project(&mut io_ctx, &mut frame_topology_changed);
+                continue;
+            }
+
             if es.pending_open_project {
                 es.pending_open_project = false;
                 let open_path = es.pending_open_project_path.take();
                 drop(es);
-
-                let file_path = if let Some(p) = open_path {
-                    Some(std::path::PathBuf::from(p))
-                } else {
-                    rfd::FileDialog::new()
-                        .add_filter("Project", &["rkproject"])
-                        .pick_file()
+                let mut io_ctx = engine_loop_io::IoContext {
+                    engine: &mut engine,
+                    editor_state: &editor_state,
+                    layout_backing: &layout_backing,
                 };
-
-                if let Some(file_path) = file_path {
-                    let path_str = file_path.to_string_lossy().to_string();
-                    match rkf_runtime::load_project(&path_str) {
-                        Ok(pf) => {
-                            let project_root = rkf_runtime::project::project_root(&file_path);
-                            let default_scene_path = if let Some(ref ds) = pf.default_scene {
-                                pf.scenes.iter()
-                                    .find(|s| &s.name == ds)
-                                    .map(|s| project_root.join(&s.path))
-                            } else {
-                                pf.scenes.first()
-                                    .map(|s| project_root.join(&s.path))
-                            };
-
-                            engine.clear_scene();
-                            let mut es = editor_state.lock().unwrap();
-
-                            if let Some(scene_path) = default_scene_path {
-                                let sp = scene_path.to_string_lossy().to_string();
-                                match crate::scene_io::load_v2_scene(&sp) {
-                                    Ok(sf) => {
-                                        let mut new_scene = crate::scene_io::reconstruct_v2_scene(&sf);
-
-                                        // Load voxelized objects from .rkf files.
-                                        let scene_dir = scene_path.parent()
-                                            .unwrap_or(std::path::Path::new("."));
-                                        for (i, entry) in sf.objects.iter().enumerate() {
-                                            if let Some(asset_path) = &entry.asset_path {
-                                                let rkf_path = scene_dir.join(asset_path);
-                                                let rkf_str = rkf_path.to_string_lossy().to_string();
-                                                match crate::engine::load_rkf_into_pool(
-                                                    &rkf_str,
-                                                    &mut engine.cpu_brick_pool,
-                                                    &mut engine.cpu_brick_map_alloc,
-                                                ) {
-                                                    Ok((handle, voxel_size, grid_aabb, _count)) => {
-                                                        if let Some(obj) = new_scene.objects.get_mut(i) {
-                                                            obj.root_node.sdf_source =
-                                                                rkf_core::SdfSource::Voxelized {
-                                                                    brick_map_handle: handle,
-                                                                    voxel_size,
-                                                                    aabb: grid_aabb,
-                                                                };
-                                                            obj.aabb = grid_aabb;
-                                                        }
-                                                    }
-                                                    Err(e) => {
-                                                        log::error!("Failed to load .rkf '{}': {e}", asset_path);
-                                                    }
-                                                }
-                                            }
-                                        }
-
-                                        *es.world.scene_mut() = new_scene;
-                                        es.current_scene_path = Some(sp);
-
-                                        // Restore subsystem state from property bag.
-                                        if let Some(s) = sf.properties.get("camera") {
-                                            if let Ok(cam) = ron::from_str::<crate::scene_io::CameraSnapshot>(s) {
-                                                es.editor_camera.position = cam.position;
-                                                es.editor_camera.fly_yaw = cam.yaw;
-                                                es.editor_camera.fly_pitch = cam.pitch;
-                                                es.editor_camera.fov_y = cam.fov_y;
-                                                let dir = glam::Vec3::new(
-                                                    -cam.yaw.sin() * cam.pitch.cos(),
-                                                    cam.pitch.sin(),
-                                                    -cam.yaw.cos() * cam.pitch.cos(),
-                                                );
-                                                es.editor_camera.target = es.editor_camera.position
-                                                    + dir * es.editor_camera.orbit_distance;
-                                            }
-                                        }
-                                        if let Some(s) = sf.properties.get("environment") {
-                                            if let Ok(env) = ron::from_str::<crate::environment::EnvironmentState>(s) {
-                                                es.environment = env;
-                                                es.environment.mark_dirty();
-                                            }
-                                        }
-                                        if let Some(s) = sf.properties.get("lights") {
-                                            if let Ok(lights) = ron::from_str::<Vec<crate::light_editor::SceneLight>>(s) {
-                                                es.light_editor.replace_lights(lights);
-                                            }
-                                        }
-                                    }
-                                    Err(e) => log::error!("Failed to load scene: {e}"),
-                                }
-                            } else {
-                                *es.world.scene_mut() = rkf_core::scene::Scene::new("default");
-                                es.current_scene_path = None;
-                            }
-
-                            // Restore editor layout if saved in project.
-                            if let Some(ref layout_ron) = pf.editor_layout {
-                                layout_backing.from_ron(layout_ron);
-                                let lb = layout_backing.clone();
-                                rinch::shell::rinch_runtime::run_on_main_thread(move || {
-                                    let layout = rinch::core::use_context::<crate::layout::state::LayoutState>();
-                                    layout.load_from_backing(&lb);
-                                });
-                            }
-                            es.current_project = Some(pf);
-                            es.current_project_path = Some(path_str.clone());
-                            es.selected_entity = None;
-                            es.undo.clear();
-                            es.unsaved_changes.mark_saved();
-                            es.world.resync_entity_tracking();
-                            frame_topology_changed = true;
-                            crate::editor_config::set_last_project(Some(&path_str));
-                            log::info!("Project opened from {path_str}");
-                        }
-                        Err(e) => log::error!("Failed to load project '{}': {e}", path_str),
-                    }
-                }
+                engine_loop_io::handle_open_project(open_path, &mut io_ctx, &mut frame_topology_changed);
                 continue;
             }
 
-            // ── Save Project ─────────────────────────────────────
             if es.pending_save_project {
                 es.pending_save_project = false;
-
-                // Save the scene first (reuse existing save logic).
-                if es.current_project.is_some() {
-                    // Save scene.
-                    let save_path = es.current_scene_path.clone();
-                    if let Some(path) = save_path {
-                        let scene = es.world.scene().clone();
-                        let cam_snap = crate::scene_io::CameraSnapshot {
-                            position: es.editor_camera.position,
-                            yaw: es.editor_camera.fly_yaw,
-                            pitch: es.editor_camera.fly_pitch,
-                            fov_y: es.editor_camera.fov_y,
-                        };
-                        let props = crate::scene_io::SceneProperties {
-                            camera: Some(&cam_snap),
-                            environment: Some(&es.environment),
-                            lights: Some(es.light_editor.all_lights()),
-                        };
-                        match crate::scene_io::save_v2_scene_full(
-                            &scene, &path,
-                            &engine.cpu_brick_pool, &engine.cpu_brick_map_alloc,
-                            &props,
-                        ) {
-                            Ok(()) => {
-                                es.unsaved_changes.mark_saved();
-                                log::info!("Scene saved to {path}");
-                            }
-                            Err(e) => log::error!("Failed to save scene: {e}"),
-                        }
-                    } else {
-                        // No scene path — trigger Save As.
-                        es.pending_save_as = true;
-                    }
-
-                    // Save .rkproject file (with layout config).
-                    if let Some(pp) = es.current_project_path.clone() {
-                        if let Some(ref mut pf) = es.current_project {
-                            pf.engine_version = env!("CARGO_PKG_VERSION").to_string();
-                            pf.editor_layout = layout_backing.to_ron();
-                            match rkf_runtime::save_project(&pp, pf) {
-                                Ok(()) => log::info!("Project saved to {pp}"),
-                                Err(e) => log::error!("Failed to save project: {e}"),
-                            }
-                        }
-                    }
-                } else {
-                    // No project loaded — just save the scene.
-                    es.pending_save = true;
-                }
+                engine_loop_io::handle_save_project(&mut es, &engine, &layout_backing);
             }
 
-            // Detect gizmo-driven transform changes: if gizmo is dragging,
-            // the selected object's transform is being modified by the UI thread.
+            // Detect gizmo-driven transform changes.
             if es.gizmo.dragging {
                 if let Some(crate::editor_state::SelectedEntity::Object(eid)) = es.selected_entity {
                     frame_dirty_objects.push(eid as u32);
@@ -1059,9 +591,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                 None
             };
 
-            // Build a merged scene from all scenes (multi-scene rendering).
-            // Recompute AABBs on the clone — character animation mutates
-            // the clone anyway, so we discard it after render.
+            // Build a merged scene from all scenes.
             let scene = {
                 let mut merged = rkf_core::scene::Scene::new("merged");
                 merged.objects = es.world.all_objects().cloned().collect();
@@ -1082,6 +612,11 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                 crate::editor_state::EditorMode::Paint => es.paint.current_settings.radius,
                 _ => 1.0,
             };
+            let brush_falloff = match es.mode {
+                crate::editor_state::EditorMode::Paint => es.paint.current_settings.falloff,
+                crate::editor_state::EditorMode::Sculpt => es.sculpt.current_settings.falloff,
+                _ => 0.0,
+            };
 
             let cam = es.editor_camera;
             let sel = es.selected_entity;
@@ -1094,296 +629,103 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             let sculpt_edits = std::mem::take(&mut es.pending_sculpt_edits);
             let sculpt_undo = es.pending_sculpt_undo.take();
 
+            // Drain pending paint edits and undo.
+            let paint_edits = std::mem::take(&mut es.pending_paint_edits);
+            let paint_undo = es.pending_paint_undo.take();
+
             // Reset per-frame deltas last.
             es.reset_frame_deltas();
 
             (cam, debug_mode, convert_to_voxel, remap_material,
              set_prim_mat,
              environment, lights,
-             scene, sel, gm, gizmo_axis, grid, emode, brush_radius,
-             sculpt_edits, sculpt_undo, sculpting_active)
+             scene, sel, gm, gizmo_axis, grid, emode, brush_radius, brush_falloff,
+             sculpt_edits, sculpt_undo, sculpting_active,
+             paint_edits, paint_undo)
         };
 
-        // d. Apply extracted data to engine (no lock held — UI thread runs freely).
+        // d. Apply extracted data to engine (no lock held).
         engine.sync_camera(&camera);
         if let Some(mode) = f_debug_mode {
             engine.set_debug_mode(mode);
         }
         if let Some(ref env) = f_environment {
             engine.apply_environment_snapshot(env);
-            engine.lights_dirty = true; // sun direction/color changed
+            engine.lights_dirty = true;
         }
         if let Some(lights) = f_lights {
             engine.world_lights = lights;
             engine.lights_dirty = true;
         }
 
-        // e0. Process pending convert-to-voxel (analytical → geometry-first).
+        // e0. Process pending convert-to-voxel.
         if let Some(obj_id) = f_convert_to_voxel {
-            if let Ok(mut es) = editor_state.lock() {
-                let scene = es.world.scene_mut();
-                if let Some(obj) = scene.objects.iter_mut().find(|o| o.id == obj_id) {
-                    if let rkf_core::SdfSource::Analytical { primitive, material_id } =
-                        obj.root_node.sdf_source.clone()
-                    {
-                        let diameter = crate::engine::primitive_diameter(&primitive);
-                        let voxel_size = (diameter / 32.0).max(0.01); // ~32 voxels across
-                        if let Some((handle, vs, grid_aabb, _count)) =
-                            engine.convert_to_geometry_first(&primitive, material_id as u8, voxel_size, obj_id)
-                        {
-                            obj.root_node.sdf_source = rkf_core::SdfSource::Voxelized {
-                                brick_map_handle: handle,
-                                voxel_size: vs,
-                                aabb: grid_aabb,
-                            };
-                            obj.aabb = grid_aabb;
-                            engine.reupload_brick_data();
-                            let map_data = engine.cpu_brick_map_alloc.as_slice();
-                            if !map_data.is_empty() {
-                                engine.gpu_scene.upload_brick_maps(
-                                    &engine.ctx.device, &engine.ctx.queue, map_data,
-                                );
-                            }
-                            log::info!("Converted object {} to voxel (vs={voxel_size})", obj.name);
-                        }
-                    }
-                }
-            }
-            frame_dirty_objects.push(obj_id);
+            engine_loop_edits::process_convert_to_voxel(
+                obj_id, &mut engine, &editor_state, &mut scene_clone, &mut frame_dirty_objects,
+            );
         }
 
-        // e1b. Process pending material remap (no lock needed — reads scene from extracted clone).
+        // e1b. Process pending material remap.
         if let Some((object_id, from_material, to_material)) = f_remap_material {
-            use rkf_core::scene_node::SdfSource;
-            if let Some(obj) = scene_clone.objects.iter().find(|o| o.id as u64 == object_id) {
-                if let SdfSource::Voxelized { brick_map_handle, .. } = &obj.root_node.sdf_source {
-                    let handle = *brick_map_handle;
-                    let dims = handle.dims;
-                    for bz in 0..dims.z {
-                        for by in 0..dims.y {
-                            for bx in 0..dims.x {
-                                if let Some(slot) = engine.cpu_brick_map_alloc.get_entry(&handle, bx, by, bz) {
-                                    if EditorEngine::is_unallocated(slot) {
-                                        continue;
-                                    }
-                                    let brick = engine.cpu_brick_pool.get_mut(slot);
-                                    for vz in 0..8u32 {
-                                        for vy in 0..8u32 {
-                                            for vx in 0..8u32 {
-                                                let mut sample = brick.sample(vx, vy, vz);
-                                                if sample.material_id() == from_material {
-                                                    sample.set_material_id(to_material);
-                                                    brick.set(vx, vy, vz, sample);
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    engine.reupload_brick_data();
-                    frame_dirty_objects.push(object_id as u32);
-                }
-            }
+            engine_loop_edits::process_remap_material(
+                object_id, from_material, to_material,
+                &mut engine, &scene_clone, &mut frame_dirty_objects,
+            );
         }
 
         // e1c. Process pending primitive material change.
         if let Some((object_id, new_mat_id)) = f_set_prim_mat {
-            if let Ok(mut es) = editor_state.lock() {
-                let scene = es.world.scene_mut();
-                if let Some(obj) = scene.objects.iter_mut().find(|o| o.id as u64 == object_id) {
-                    if let rkf_core::SdfSource::Analytical { ref mut material_id, .. } =
-                        obj.root_node.sdf_source
-                    {
-                        *material_id = new_mat_id;
-                    }
-                }
-            }
-            // Update scene_clone so the render pass sees the new material_id.
-            if let Some(obj) = scene_clone.objects.iter_mut().find(|o| o.id as u64 == object_id) {
-                if let rkf_core::SdfSource::Analytical { ref mut material_id, .. } =
-                    obj.root_node.sdf_source
-                {
-                    *material_id = new_mat_id;
-                }
-            }
-            frame_dirty_objects.push(object_id as u32);
+            engine_loop_edits::process_set_primitive_material(
+                object_id, new_mat_id, &editor_state, &mut scene_clone, &mut frame_dirty_objects,
+            );
         }
 
-        // e2. Process sculpt undo (restore brick snapshots to CPU pool + GPU).
+        // e2. Process sculpt undo.
         if let Some((undo_object_id, snapshots)) = f_sculpt_undo {
             engine.apply_sculpt_undo(&snapshots);
             frame_dirty_objects.push(undo_object_id as u32);
         }
 
-        // e3. Process sculpt edits (CPU-side CSG, targeted GPU upload).
+        // e2b. Process paint undo.
+        if let Some((undo_object_id, snapshots)) = f_paint_undo {
+            engine.apply_sculpt_undo(&snapshots);
+            frame_dirty_objects.push(undo_object_id as u32);
+        }
+
+        // e3. Process sculpt edits.
         if !f_sculpt_edits.is_empty() {
-            if let Ok(mut es) = editor_state.lock() {
-                // Ensure undo accumulator exists for this stroke.
-                if es.sculpt_undo_accumulator.is_none() {
-                    let obj_id = f_sculpt_edits[0].object_id as u64;
-                    es.sculpt_undo_accumulator = Some(
-                        crate::editor_state::SculptUndoAccumulator {
-                            object_id: obj_id,
-                            captured_slots: std::collections::HashSet::new(),
-                            snapshots: Vec::new(),
-                        },
-                    );
-                }
-
-                let mut undo_acc = es.sculpt_undo_accumulator.take();
-                let scene = es.world.scene_mut();
-                let _modified = engine.apply_sculpt_edits(
-                    scene,
-                    &f_sculpt_edits,
-                    undo_acc.as_mut(),
-                );
-                es.sculpt_undo_accumulator = undo_acc;
-
-                // Rebuild the render clone since scene may have changed.
-                scene_clone = {
-                    let mut merged = rkf_core::scene::Scene::new("merged");
-                    merged.objects = es.world.all_objects().cloned().collect();
-                    for obj in &mut merged.objects {
-                        obj.aabb = crate::placement::compute_object_local_aabb(obj);
-                    }
-                    merged
-                };
-            }
-            // Mark sculpted objects dirty for incremental GPU update.
-            for edit in &f_sculpt_edits {
-                frame_dirty_objects.push(edit.object_id);
-            }
+            engine_loop_edits::process_sculpt_edits(
+                &f_sculpt_edits, &mut engine, &editor_state, &mut scene_clone, &mut frame_dirty_objects,
+            );
         }
 
-        // e4. Process pending voxel_slice request (CPU-side brick pool lookup).
+        // e3b. Process paint edits.
+        if !f_paint_edits.is_empty() {
+            engine_loop_edits::process_paint_edits(
+                &f_paint_edits, &mut engine, &editor_state, &mut frame_dirty_objects, &mut dirty.scene,
+            );
+        }
+
+        // e4. Process pending voxel_slice request.
         if let Some(req) = pending_voxel_slice {
-            let result = engine.sample_voxel_slice(&scene_clone, req.object_id, req.y_coord);
-            if let Ok(mut ss) = shared_state.lock() {
-                match result {
-                    Ok(slice) => ss.voxel_slice_result = Some(slice),
-                    Err(e) => {
-                        ss.push_log(rkf_core::automation::LogLevel::Error,
-                            format!("voxel_slice error: {e}"));
-                        // Store an empty result so the polling doesn't hang.
-                        ss.voxel_slice_result = Some(rkf_core::automation::VoxelSliceResult {
-                            origin: [0.0, 0.0],
-                            spacing: 0.0,
-                            width: 0,
-                            height: 0,
-                            y_coord: req.y_coord,
-                            distances: vec![],
-                            slot_status: vec![],
-                        });
-                    }
-                }
-            }
+            engine_loop_edits::process_voxel_slice(req, &engine, &scene_clone, &shared_state);
         }
 
-        // e5. Process pending spatial_query request (CPU-side SDF evaluation).
+        // e5. Process pending spatial_query request.
         if let Some(req) = pending_spatial_query {
-            let result = engine.sample_spatial_query(&scene_clone, req.world_pos);
-            if let Ok(mut ss) = shared_state.lock() {
-                ss.spatial_query_result = Some(result);
-            }
+            engine_loop_edits::process_spatial_query(req, &engine, &scene_clone, &shared_state);
         }
 
-        // e6. Process pending MCP sculpt request (one-shot brush hit + undo).
+        // e6. Process pending MCP sculpt request.
         if let Some(req) = pending_mcp_sculpt {
-            let mcp_sculpt_obj_id = req.object_id;
-            let sculpt_result = (|| -> Result<(), String> {
-                let brush_type = match req.mode.as_str() {
-                    "add" => crate::sculpt::BrushType::Add,
-                    "subtract" => crate::sculpt::BrushType::Subtract,
-                    "smooth" => crate::sculpt::BrushType::Smooth,
-                    other => return Err(format!("invalid mode: {other}")),
-                };
-
-                let edit_request = crate::sculpt::SculptEditRequest {
-                    object_id: req.object_id,
-                    world_position: req.position,
-                    settings: crate::sculpt::BrushSettings {
-                        brush_type,
-                        shape: crate::sculpt::BrushShape::Sphere,
-                        radius: req.radius,
-                        strength: req.strength,
-                        material_id: req.material_id,
-                        falloff: 0.5,
-                    },
-                };
-
-                // Create one-shot undo accumulator.
-                let mut undo_acc = crate::editor_state::SculptUndoAccumulator {
-                    object_id: req.object_id as u64,
-                    captured_slots: std::collections::HashSet::new(),
-                    snapshots: Vec::new(),
-                };
-
-                if let Ok(mut es) = editor_state.lock() {
-                    let scene = es.world.scene_mut();
-                    engine.apply_sculpt_edits(
-                        scene,
-                        &[edit_request],
-                        Some(&mut undo_acc),
-                    );
-
-                    // Push undo entry immediately.
-                    if !undo_acc.snapshots.is_empty() {
-                        es.undo.push(crate::undo::UndoAction {
-                            kind: crate::undo::UndoActionKind::SculptStroke {
-                                object_id: req.object_id as u64,
-                                brick_snapshots: undo_acc.snapshots,
-                            },
-                            timestamp_ms: 0,
-                            description: format!("MCP sculpt ({}) on obj {}", req.mode, req.object_id),
-                        });
-                    }
-
-                    // Rebuild scene_clone since voxel data changed.
-                    scene_clone = {
-                        let mut merged = rkf_core::scene::Scene::new("merged");
-                        merged.objects = es.world.all_objects().cloned().collect();
-                        for obj in &mut merged.objects {
-                            obj.aabb = crate::placement::compute_object_local_aabb(obj);
-                        }
-                        merged
-                    };
-                }
-
-                Ok(())
-            })();
-
-            if let Ok(mut ss) = shared_state.lock() {
-                ss.mcp_sculpt_result = Some(sculpt_result);
-            }
-            frame_dirty_objects.push(mcp_sculpt_obj_id);
+            engine_loop_edits::process_mcp_sculpt(
+                req, &mut engine, &editor_state, &mut scene_clone, &shared_state, &mut frame_dirty_objects,
+            );
         }
 
-        // e7. Process pending object_shape request (CPU-side brick map lookup).
+        // e7. Process pending object_shape request.
         if let Some(obj_id) = pending_object_shape {
-            let result = engine.sample_object_shape(&scene_clone, obj_id);
-            if let Ok(mut ss) = shared_state.lock() {
-                match result {
-                    Ok(shape) => ss.object_shape_result = Some(shape),
-                    Err(e) => {
-                        ss.push_log(rkf_core::automation::LogLevel::Error,
-                            format!("object_shape error: {e}"));
-                        // Store a minimal result so polling doesn't hang.
-                        ss.object_shape_result = Some(rkf_core::automation::ObjectShapeResult {
-                            object_id: obj_id,
-                            dims: [0, 0, 0],
-                            voxel_size: 0.0,
-                            aabb_min: [0.0; 3],
-                            aabb_max: [0.0; 3],
-                            empty_count: 0,
-                            interior_count: 0,
-                            surface_count: 0,
-                            y_slices: vec![],
-                        });
-                    }
-                }
-            }
+            engine_loop_edits::process_object_shape(obj_id, &engine, &scene_clone, &shared_state);
         }
 
         // f. Apply incremental dirty tracking to the engine.
@@ -1396,151 +738,25 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         engine.spawned_objects.extend(frame_spawned);
         engine.despawned_objects.extend(frame_despawned);
 
-        // g. Build wireframe overlays (selection, gizmos, grid) — staged
-        //    so they are drawn in the same GPU submit as the main render.
-        {
-            let mut wf_verts: Vec<crate::wireframe::LineVertex> = Vec::new();
-            let cam_pos = camera.position;
-
-            // Light wireframe + translate gizmo for selected light.
-            if let Some(crate::editor_state::SelectedEntity::Light(lid)) = f_selected {
-                if let Ok(es) = editor_state.lock() {
-                    if let Some(light) = es.light_editor.get_light(lid) {
-                        let lc = [1.0, 0.9, 0.5, 1.0];
-                        match light.light_type {
-                            crate::light_editor::SceneLightType::Point => {
-                                wf_verts.extend(crate::wireframe::point_light_wireframe(
-                                    light.position, light.range, lc,
-                                ));
-                            }
-                            crate::light_editor::SceneLightType::Spot => {
-                                wf_verts.extend(crate::wireframe::spot_light_wireframe(
-                                    light.position, light.direction,
-                                    light.range, light.spot_outer_angle, lc,
-                                ));
-                            }
-                        }
-                        // Translate gizmo at light position.
-                        let gc = light.position;
-                        let cam_dist = (gc - cam_pos).length();
-                        let gizmo_size = cam_dist * 0.12;
-                        wf_verts.extend(crate::wireframe::translate_gizmo_wireframe(
-                            gc, gizmo_size, f_gizmo_axis, cam_pos,
-                        ));
-                    }
-                }
-            }
-
-            // Selection AABB + transform gizmo for selected objects.
-            // Hidden while actively sculpting to avoid visual clutter.
-            if let Some(crate::editor_state::SelectedEntity::Object(eid)) = f_selected.filter(|_| !f_sculpting_active) {
-                let color = [0.3, 0.7, 1.0, 1.0]; // Light blue
-                let mut gizmo_center: Option<glam::Vec3> = None;
-
-                for obj in &scene_clone.objects {
-                    let obj_id = obj.id as u64;
-                    let root_world = glam::Mat4::from_scale_rotation_translation(
-                        obj.scale,
-                        obj.rotation,
-                        obj.position,
-                    );
-
-                    if eid == obj_id {
-                        if let Some((lmin, lmax)) =
-                            crate::wireframe::compute_node_tree_aabb(&obj.root_node, glam::Mat4::IDENTITY)
-                        {
-                            wf_verts.extend(crate::wireframe::obb_wireframe(
-                                lmin, lmax, obj.position, obj.rotation, obj.scale, color,
-                            ));
-                            let center = obj.position + obj.rotation * ((lmin + lmax) * 0.5 * obj.scale);
-                            gizmo_center = Some(center);
-                        }
-                    } else if let Some((child_node, child_world)) =
-                        crate::wireframe::find_child_node_and_transform(
-                            eid, obj_id, &obj.root_node, root_world,
-                        )
-                    {
-                        if let Some((lmin, lmax)) =
-                            crate::wireframe::compute_node_tree_aabb(child_node, glam::Mat4::IDENTITY)
-                        {
-                            let (child_scale, child_rot, child_pos) =
-                                child_world.to_scale_rotation_translation();
-                            wf_verts.extend(crate::wireframe::obb_wireframe(
-                                lmin, lmax, child_pos, child_rot, child_scale, color,
-                            ));
-                            let center = child_pos + child_rot * ((lmin + lmax) * 0.5 * child_scale);
-                            gizmo_center = Some(center);
-                        }
-                    }
-                }
-
-                // Transform gizmo at the center of the selected object.
-                if let Some(gc) = gizmo_center {
-                    let cam_dist = (gc - cam_pos).length();
-                    let gizmo_size = cam_dist * 0.12;
-                    match f_gizmo_mode {
-                        crate::gizmo::GizmoMode::Translate => {
-                            wf_verts.extend(crate::wireframe::translate_gizmo_wireframe(
-                                gc, gizmo_size, f_gizmo_axis, cam_pos,
-                            ));
-                        }
-                        crate::gizmo::GizmoMode::Rotate => {
-                            wf_verts.extend(crate::wireframe::rotate_gizmo_wireframe(
-                                gc, gizmo_size, f_gizmo_axis, cam_pos,
-                            ));
-                        }
-                        crate::gizmo::GizmoMode::Scale => {
-                            wf_verts.extend(crate::wireframe::scale_gizmo_wireframe(
-                                gc, gizmo_size, f_gizmo_axis, cam_pos,
-                            ));
-                        }
-                    }
-                }
-            }
-
-            // Ground grid overlay.
-            if f_show_grid {
-                wf_verts.extend(crate::wireframe::ground_grid_wireframe(
-                    cam_pos,
-                    40.0,
-                    1.0,
-                    [0.3, 0.3, 0.3, 0.4],
-                ));
-            }
-
-            // Brush preview circle in Sculpt/Paint modes — view-facing circle
-            // showing the screen-space footprint of the brush.
-            if matches!(f_editor_mode, crate::editor_state::EditorMode::Sculpt | crate::editor_state::EditorMode::Paint) {
-                let brush_pos = shared_state.lock().ok()
-                    .and_then(|s| s.brush_preview_pos);
-                if let Some(pos) = brush_pos {
-                    let brush_color = match f_editor_mode {
-                        crate::editor_state::EditorMode::Sculpt => [0.0, 1.0, 1.0, 0.8],
-                        crate::editor_state::EditorMode::Paint  => [1.0, 0.8, 0.0, 0.8],
-                        _ => [1.0, 1.0, 1.0, 0.8],
-                    };
-                    let view_dir = (cam_pos - pos).normalize();
-                    wf_verts.extend(crate::wireframe::circle_wireframe(
-                        pos, view_dir, f_brush_radius, brush_color, 48,
-                    ));
-                }
-            }
-
-            engine.set_wireframe_vertices(wf_verts);
-        }
+        // g. Build wireframe overlays (delegated to engine_loop_ui).
+        engine_loop_ui::build_wireframe_overlays(
+            &mut engine, &editor_state, &shared_state, &scene_clone,
+            camera.position, f_selected, f_gizmo_mode, f_gizmo_axis,
+            f_show_grid, f_editor_mode, f_brush_radius, f_brush_falloff,
+            f_sculpting_active,
+        );
 
         // g2. Process file watcher events (material + shader hot-reload).
         engine.process_file_events();
         // g3. Sync material library to GPU if dirty.
         engine.sync_materials();
 
-        // h. Render frame to offscreen texture (wireframe drawn in same encoder).
-        //    The readback copy is appended to the same encoder — one GPU submit.
+        // h. Render frame to offscreen texture.
         let t_render_start = std::time::Instant::now();
         engine.render_frame_offscreen(&scene_clone);
         let t_render_end = std::time::Instant::now();
 
-        // i. Synchronous readback — wait for GPU, read pixels, submit to compositor.
+        // i. Synchronous readback -- wait for GPU, read pixels, submit to compositor.
         let (pixels, px_w, px_h) = engine.map_readback();
         let t_submit_start = std::time::Instant::now();
         surface_writer.submit_frame(&pixels, px_w, px_h);
@@ -1573,7 +789,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             }
         }
 
-        // i3. Material preview — dispatch + readback (after main viewport is done).
+        // i3. Material preview -- dispatch + readback.
         {
             let (preview_slot, preview_prim) = {
                 if let Ok(mut ss) = shared_state.lock() {
@@ -1587,8 +803,6 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                     (None, 0)
                 }
             };
-            // Render every frame when a material slot is active.
-            // The preview is tiny (128x128) so this is cheap.
             if let Some(slot) = preview_slot {
                 let materials = {
                     let lib = engine.material_library.lock().unwrap();
@@ -1604,7 +818,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             }
         }
 
-        // j. Update shared_state for MCP observation (no editor_state lock).
+        // j. Update shared_state for MCP observation.
         if let Ok(mut ss) = shared_state.lock() {
             ss.camera_position = camera.position;
             ss.camera_yaw = camera.fly_yaw;
@@ -1618,142 +832,15 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
 
         // k. GPU pick is handled inside render_frame_offscreen.
 
-        // l. Process GPU pick result — sets selected_entity, pushes to UI signals.
-        //    Suppressed while actively sculpting to prevent accidental selection changes.
-        {
-            let pick = shared_state.lock().ok()
-                .and_then(|mut ss| ss.pick_result.take());
-            if let Some(object_id) = pick {
-                if !f_sculpting_active {
-                    let picked_entity = if object_id > 0 {
-                        Some(crate::editor_state::SelectedEntity::Object(object_id as u64))
-                    } else {
-                        None
-                    };
-                    let mat_usage = if let Ok(mut es) = editor_state.lock() {
-                        es.selected_entity = picked_entity;
-                        if let Some(crate::editor_state::SelectedEntity::Object(eid)) = picked_entity {
-                            compute_material_usage(&es, &engine, eid)
-                        } else {
-                            Vec::new()
-                        }
-                    } else {
-                        Vec::new()
-                    };
-                    // Push selection + material usage to UI signals directly.
-                    rinch::shell::rinch_runtime::run_on_main_thread(move || {
-                        if let Some(ui) = rinch::core::context::try_use_context::<crate::editor_state::UiSignals>() {
-                            // Set material usage BEFORE selection — selection change
-                            // triggers ObjectProperties rebuild which reads this signal.
-                            ui.selected_object_materials.set(mat_usage);
-                            let sliders = rinch::core::context::try_use_context::<crate::editor_state::SliderSignals>();
-                            let tree_state = rinch::core::context::try_use_context::<rinch::prelude::UseTreeReturn>();
-                            if let (Some(sliders), Some(tree_state)) = (sliders, tree_state) {
-                                ui.set_selection(picked_entity, &sliders, &tree_state);
-                                if picked_entity.is_some() {
-                                    ui.properties_tab.set(0);
-                                }
-                            }
-                        }
-                    });
-                }
-            }
-        }
+        // l. Process GPU pick result.
+        engine_loop_ui::process_gpu_pick(
+            &shared_state, &editor_state, &engine, f_sculpting_active,
+        );
 
-        // m. Process GPU brush hit result — drive sculpt/paint stroke lifecycle.
-        {
-            let brush_hit = shared_state.lock().ok()
-                .and_then(|mut ss| ss.brush_hit_result.take());
-            if let Some(hit) = brush_hit {
-                log::info!("brush_hit: pos={:?}, object_id={}", hit.position, hit.object_id);
-                let (left_down, mode, selected_obj_id) = editor_state.lock().ok()
-                    .map(|es| {
-                        let sel_id = match es.selected_entity {
-                            Some(crate::editor_state::SelectedEntity::Object(eid)) => Some(eid as u32),
-                            _ => None,
-                        };
-                        (es.editor_input.mouse_buttons[0], es.mode, sel_id)
-                    })
-                    .unwrap_or((false, crate::editor_state::EditorMode::Default, None));
+        // m. Process GPU brush hit result.
+        engine_loop_ui::process_brush_hit(&shared_state, &editor_state);
 
-                // Only allow sculpt/paint on the currently selected object.
-                let hit_on_selected = selected_obj_id == Some(hit.object_id);
-                log::info!("brush dispatch: left_down={}, mode={:?}, selected={:?}, hit_on_selected={}", left_down, mode, selected_obj_id, hit_on_selected);
-
-                if left_down {
-                    if let Ok(mut es) = editor_state.lock() {
-                        match mode {
-                            crate::editor_state::EditorMode::Sculpt if hit_on_selected => {
-                                if es.sculpt.active_stroke.is_some() {
-                                    es.sculpt.continue_stroke(hit.position);
-                                } else {
-                                    es.sculpt.begin_stroke(hit.position);
-                                }
-                                // Queue a real-time sculpt edit for this point.
-                                let settings = es.sculpt.current_settings.clone();
-                                es.pending_sculpt_edits.push(
-                                    crate::sculpt::SculptEditRequest {
-                                        object_id: hit.object_id,
-                                        world_position: hit.position,
-                                        settings,
-                                    },
-                                );
-                            }
-                            crate::editor_state::EditorMode::Sculpt => {
-                                // Hit a non-selected object — ignore.
-                            }
-                            crate::editor_state::EditorMode::Paint if hit_on_selected => {
-                                if es.paint.active_stroke.is_some() {
-                                    es.paint.continue_stroke(hit.position);
-                                } else {
-                                    es.paint.begin_stroke(hit.position);
-                                }
-                            }
-                            crate::editor_state::EditorMode::Paint => {
-                                // Hit a non-selected object — ignore.
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-
-                if let Ok(mut ss) = shared_state.lock() {
-                    ss.brush_preview_pos = Some(hit.position);
-                }
-            } else {
-                let (left_down, mode) = editor_state.lock().ok()
-                    .map(|es| (es.editor_input.mouse_buttons[0], es.mode))
-                    .unwrap_or((false, crate::editor_state::EditorMode::Default));
-
-                if !left_down && matches!(mode, crate::editor_state::EditorMode::Sculpt | crate::editor_state::EditorMode::Paint) {
-                    if let Ok(mut es) = editor_state.lock() {
-                        match mode {
-                            crate::editor_state::EditorMode::Sculpt => {
-                                es.sculpt.end_stroke();
-                                // Finalize sculpt undo: push accumulated brick snapshots.
-                                if let Some(acc) = es.sculpt_undo_accumulator.take() {
-                                    if !acc.snapshots.is_empty() {
-                                        es.undo.push(crate::undo::UndoAction {
-                                            kind: crate::undo::UndoActionKind::SculptStroke {
-                                                object_id: acc.object_id,
-                                                brick_snapshots: acc.snapshots,
-                                            },
-                                            timestamp_ms: 0,
-                                            description: "Sculpt stroke".into(),
-                                        });
-                                    }
-                                }
-                            }
-                            crate::editor_state::EditorMode::Paint => es.paint.end_stroke(),
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
-
-        // n0. Push dirty data into UI signals via run_on_main_thread.
-        //     Only push categories that actually changed this frame.
+        // n0. Push dirty data into UI signals.
         if first_frame {
             dirty.scene = true;
             dirty.lights = true;
@@ -1761,122 +848,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             dirty.shaders = true;
             first_frame = false;
         }
-
-        if dirty.scene || dirty.lights || dirty.materials || dirty.shaders {
-            if let Ok(es) = editor_state.lock() {
-                // Scene objects.
-                if dirty.scene {
-                    let objects = es.build_object_summaries();
-                    let scene_name = es.world.scene().name.clone();
-                    let scene_path = es.current_scene_path.clone();
-                    // Also compute material usage for selected object.
-                    let mat_usage = if let Some(crate::editor_state::SelectedEntity::Object(eid)) = es.selected_entity {
-                        compute_material_usage(&es, &engine, eid)
-                    } else {
-                        Vec::new()
-                    };
-                    rinch::shell::rinch_runtime::run_on_main_thread(move || {
-                        if let Some(ui) = rinch::core::context::try_use_context::<UiSignals>() {
-                            // Set material usage BEFORE objects — objects.set() triggers
-                            // ObjectProperties rebuild which reads selected_object_materials.
-                            ui.selected_object_materials.set(mat_usage);
-                            ui.objects.set(objects);
-                            ui.scene_name.set(scene_name);
-                            ui.scene_path.set(scene_path);
-                        }
-                    });
-                }
-                // Lights.
-                if dirty.lights {
-                    let lights = es.build_light_summaries();
-                    rinch::shell::rinch_runtime::run_on_main_thread(move || {
-                        if let Some(ui) = rinch::core::context::try_use_context::<UiSignals>() {
-                            ui.lights.set(lights);
-                        }
-                    });
-                }
-            }
-        }
-
-
-        // Materials (from engine's MaterialLibrary).
-        if dirty.materials {
-            if let Ok(lib) = engine.material_library.lock() {
-                use crate::ui_snapshot::MaterialSummary;
-                let mut materials: Vec<MaterialSummary> = lib.occupied_slots().map(|(slot, mat, info)| {
-                    MaterialSummary {
-                        slot,
-                        name: info.name.clone(),
-                        category: info.category.clone(),
-                        albedo: mat.albedo,
-                        roughness: mat.roughness,
-                        metallic: mat.metallic,
-                        emission_strength: mat.emission_strength,
-                        emission_color: mat.emission_color,
-                        subsurface: mat.subsurface,
-                        subsurface_color: mat.subsurface_color,
-                        opacity: mat.opacity,
-                        ior: mat.ior,
-                        noise_scale: mat.noise_scale,
-                        noise_strength: mat.noise_strength,
-                        noise_channels: mat.noise_channels,
-                        shader_name: info.shader_name.clone(),
-                    }
-                }).collect();
-                // Also include slot 0 (fallback) if not already present.
-                for i in 0..lib.slot_count() {
-                    if lib.slot_info(i as u16).is_none() {
-                        if i == 0 && materials.iter().all(|m| m.slot != 0) {
-                            if let Some(mat) = lib.get_material(0) {
-                                materials.push(MaterialSummary {
-                                    slot: 0,
-                                    name: "Material 0".to_string(),
-                                    category: "Other".to_string(),
-                                    albedo: mat.albedo,
-                                    roughness: mat.roughness,
-                                    metallic: mat.metallic,
-                                    emission_strength: mat.emission_strength,
-                                    emission_color: mat.emission_color,
-                                    subsurface: mat.subsurface,
-                                    subsurface_color: mat.subsurface_color,
-                                    opacity: mat.opacity,
-                                    ior: mat.ior,
-                                    noise_scale: mat.noise_scale,
-                                    noise_strength: mat.noise_strength,
-                                    noise_channels: mat.noise_channels,
-                                    shader_name: "pbr".to_string(),
-                                });
-                            }
-                        }
-                        break; // Only check slot 0
-                    }
-                }
-                materials.sort_by_key(|m| m.slot);
-                rinch::shell::rinch_runtime::run_on_main_thread(move || {
-                    if let Some(ui) = rinch::core::context::try_use_context::<UiSignals>() {
-                        ui.materials.set(materials);
-                    }
-                });
-            }
-        }
-
-        // Shaders (from engine's ShaderComposer).
-        if dirty.shaders {
-            let shaders: Vec<crate::ui_snapshot::ShaderSummary> = engine.shader_composer.shader_summaries()
-                .into_iter()
-                .map(|s| crate::ui_snapshot::ShaderSummary {
-                    name: s.name,
-                    id: s.id,
-                    built_in: s.built_in,
-                    file_path: s.file_path,
-                })
-                .collect();
-            rinch::shell::rinch_runtime::run_on_main_thread(move || {
-                if let Some(ui) = rinch::core::context::try_use_context::<UiSignals>() {
-                    ui.shaders.set(shaders);
-                }
-            });
-        }
+        engine_loop_ui::push_dirty_ui_signals(&dirty, &editor_state, &engine);
 
         // n. Periodically push FPS + camera position to the main thread.
         if last_fps_push.elapsed() >= std::time::Duration::from_millis(500) {
@@ -1902,358 +874,5 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
 
         // o. Yield to let OS schedule other threads between frames.
         std::thread::yield_now();
-    }
-}
-
-/// Apply a single UI command to the editor state.
-///
-/// Called by the engine thread while holding the EditorState lock.
-/// This is the command consumer for the UI→engine channel.
-/// Compute per-material voxel counts for the selected object.
-fn compute_material_usage(
-    es: &EditorState,
-    engine: &EditorEngine,
-    eid: u64,
-) -> Vec<crate::ui_snapshot::ObjectMaterialUsage> {
-    use rkf_core::scene_node::SdfSource;
-    let scene = es.world.scene();
-    if let Some(obj) = scene.objects.iter().find(|o| o.id as u64 == eid) {
-        if let SdfSource::Analytical { material_id, .. } = &obj.root_node.sdf_source {
-            return vec![crate::ui_snapshot::ObjectMaterialUsage {
-                material_id: *material_id,
-                voxel_count: 0,
-            }];
-        }
-        if let SdfSource::Voxelized { brick_map_handle, .. } = &obj.root_node.sdf_source {
-            let handle = *brick_map_handle;
-            let dims = handle.dims;
-            let mut counts: std::collections::HashMap<u16, u32> = std::collections::HashMap::new();
-            for bz in 0..dims.z {
-                for by in 0..dims.y {
-                    for bx in 0..dims.x {
-                        if let Some(slot) = engine.cpu_brick_map_alloc.get_entry(&handle, bx, by, bz) {
-                            if EditorEngine::is_unallocated(slot) {
-                                continue;
-                            }
-                            let brick = engine.cpu_brick_pool.get(slot);
-                            for vz in 0..8u32 {
-                                for vy in 0..8u32 {
-                                    for vx in 0..8u32 {
-                                        let sample = brick.sample(vx, vy, vz);
-                                        if sample.distance_f32() <= 0.0 {
-                                            *counts.entry(sample.material_id()).or_insert(0) += 1;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            let mut usage: Vec<crate::ui_snapshot::ObjectMaterialUsage> = counts
-                .into_iter()
-                .map(|(material_id, voxel_count)| crate::ui_snapshot::ObjectMaterialUsage { material_id, voxel_count })
-                .collect();
-            usage.sort_by(|a, b| b.voxel_count.cmp(&a.voxel_count));
-            return usage;
-        }
-    }
-    Vec::new()
-}
-
-fn apply_editor_command(es: &mut EditorState, cmd: EditorCommand) {
-    use crate::editor_command::EditorCommand::*;
-    match cmd {
-        // ── Input ────────────────────────────────────────────────
-        MouseMove { x, y, dx, dy } => {
-            es.editor_input.mouse_pos = glam::Vec2::new(x, y);
-            es.editor_input.mouse_delta += glam::Vec2::new(dx, dy);
-        }
-        MouseDown { button, x, y } => {
-            if button < 3 {
-                es.editor_input.mouse_buttons[button] = true;
-            }
-            es.editor_input.mouse_pos = glam::Vec2::new(x, y);
-        }
-        MouseUp { button, .. } => {
-            if button < 3 {
-                es.editor_input.mouse_buttons[button] = false;
-            }
-        }
-        Scroll { delta } => {
-            es.editor_input.scroll_delta += delta;
-        }
-        KeyDown { key, modifiers } => {
-            es.editor_input.keys_pressed.insert(key);
-            es.editor_input.keys_just_pressed.insert(key);
-            es.editor_input.modifiers = modifiers;
-            // Gizmo mode switching: G/R/L keys.
-            if es.mode == crate::editor_state::EditorMode::Default {
-                use crate::input::KeyCode as KC;
-                match key {
-                    KC::G => es.gizmo.mode = crate::gizmo::GizmoMode::Translate,
-                    KC::R => es.gizmo.mode = crate::gizmo::GizmoMode::Rotate,
-                    KC::L => es.gizmo.mode = crate::gizmo::GizmoMode::Scale,
-                    _ => {}
-                }
-            }
-        }
-        KeyUp { key, modifiers } => {
-            es.editor_input.keys_pressed.remove(&key);
-            es.editor_input.modifiers = modifiers;
-        }
-
-        // ── Scene mutations ──────────────────────────────────────
-        SpawnPrimitive { name } => {
-            es.pending_spawn = Some(name);
-        }
-        DeleteSelected => {
-            es.pending_delete = true;
-        }
-        DuplicateSelected => {
-            es.pending_duplicate = true;
-        }
-        Undo => {
-            es.pending_undo = true;
-        }
-        Redo => {
-            es.pending_redo = true;
-        }
-        SelectEntity { entity } => {
-            es.selected_entity = entity;
-        }
-
-        // ── Gizmo ────────────────────────────────────────────────
-        SetGizmoMode { mode } => {
-            es.gizmo.mode = mode;
-        }
-
-        // ── Tool settings ────────────────────────────────────────
-        SetEditorMode { mode } => {
-            es.mode = mode;
-        }
-        SetSculptSettings { radius, strength, falloff } => {
-            es.sculpt.set_radius(radius);
-            es.sculpt.set_strength(strength);
-            es.sculpt.current_settings.falloff = falloff;
-        }
-        SetPaintSettings { radius, strength, falloff } => {
-            es.paint.current_settings.radius = radius;
-            es.paint.current_settings.strength = strength;
-            es.paint.current_settings.falloff = falloff;
-        }
-
-        // ── Camera settings ──────────────────────────────────────
-        SetCameraFov { fov } => {
-            es.editor_camera.fov_y = fov.to_radians();
-        }
-        SetCameraSpeed { speed } => {
-            es.editor_camera.fly_speed = speed;
-        }
-        SetCameraNearFar { near, far } => {
-            es.editor_camera.near = near;
-            es.editor_camera.far = far;
-        }
-
-        // ── Environment ──────────────────────────────────────────
-        SetAtmosphere { sun_direction, sun_intensity, rayleigh_scale, mie_scale } => {
-            es.environment.atmosphere.sun_direction = sun_direction;
-            es.environment.atmosphere.sun_intensity = sun_intensity;
-            es.environment.atmosphere.rayleigh_scale = rayleigh_scale;
-            es.environment.atmosphere.mie_scale = mie_scale;
-            es.environment.mark_dirty();
-        }
-        SetFog { density, height_falloff, dust_density, dust_asymmetry } => {
-            es.environment.fog.density = density;
-            es.environment.fog.height_falloff = height_falloff;
-            es.environment.fog.ambient_dust_density = dust_density;
-            es.environment.fog.dust_asymmetry = dust_asymmetry;
-            es.environment.mark_dirty();
-        }
-        SetClouds { coverage, density, altitude, thickness, wind_speed } => {
-            es.environment.clouds.coverage = coverage;
-            es.environment.clouds.density = density;
-            es.environment.clouds.altitude = altitude;
-            es.environment.clouds.thickness = thickness;
-            es.environment.clouds.wind_speed = wind_speed;
-            es.environment.mark_dirty();
-        }
-        SetPostProcess {
-            bloom_intensity, bloom_threshold, exposure, sharpen,
-            dof_focus_distance, dof_focus_range, dof_max_coc,
-            motion_blur, god_rays, vignette, grain, chromatic_aberration,
-        } => {
-            es.environment.post_process.bloom_intensity = bloom_intensity;
-            es.environment.post_process.bloom_threshold = bloom_threshold;
-            es.environment.post_process.exposure = exposure;
-            es.environment.post_process.sharpen_strength = sharpen;
-            es.environment.post_process.dof_focus_distance = dof_focus_distance;
-            es.environment.post_process.dof_focus_range = dof_focus_range;
-            es.environment.post_process.dof_max_coc = dof_max_coc;
-            es.environment.post_process.motion_blur_intensity = motion_blur;
-            es.environment.post_process.god_rays_intensity = god_rays;
-            es.environment.post_process.vignette_intensity = vignette;
-            es.environment.post_process.grain_intensity = grain;
-            es.environment.post_process.chromatic_aberration = chromatic_aberration;
-            es.environment.mark_dirty();
-        }
-        ToggleAtmosphere { enabled } => {
-            es.environment.atmosphere.enabled = enabled;
-            es.environment.mark_dirty();
-        }
-        ToggleFog { enabled } => {
-            es.environment.fog.enabled = enabled;
-            es.environment.mark_dirty();
-        }
-        ToggleClouds { enabled } => {
-            es.environment.clouds.enabled = enabled;
-            es.environment.mark_dirty();
-        }
-        ToggleBloom { enabled } => {
-            es.environment.post_process.bloom_enabled = enabled;
-            es.environment.mark_dirty();
-        }
-        ToggleDof { enabled } => {
-            es.environment.post_process.dof_enabled = enabled;
-            es.environment.mark_dirty();
-        }
-        SetToneMapMode { mode } => {
-            es.environment.post_process.tone_map_mode = mode;
-            es.environment.mark_dirty();
-        }
-
-        // ── Lights ───────────────────────────────────────────────
-        SetLightPosition { light_id, position } => {
-            if let Some(light) = es.light_editor.get_light_mut(light_id) {
-                light.position = position;
-            }
-            es.light_editor.mark_dirty();
-        }
-        SetLightIntensity { light_id, intensity } => {
-            if let Some(light) = es.light_editor.get_light_mut(light_id) {
-                light.intensity = intensity;
-            }
-            es.light_editor.mark_dirty();
-        }
-        SetLightRange { light_id, range } => {
-            if let Some(light) = es.light_editor.get_light_mut(light_id) {
-                light.range = range;
-            }
-            es.light_editor.mark_dirty();
-        }
-
-        // ── Debug / view ─────────────────────────────────────────
-        SetDebugMode { mode } => {
-            es.pending_debug_mode = Some(mode);
-        }
-        ToggleGrid => {
-            es.show_grid = !es.show_grid;
-        }
-        ToggleShortcuts => {
-            es.show_shortcuts = !es.show_shortcuts;
-        }
-
-        // ── Object properties ────────────────────────────────────
-        SetObjectPosition { entity_id, position } => {
-            let sc = es.world.scene_mut();
-            if let Some(obj) = sc.objects.iter_mut().find(|o| o.id as u64 == entity_id) {
-                obj.position = position;
-            }
-        }
-        SetObjectRotation { entity_id, rotation } => {
-            let sc = es.world.scene_mut();
-            if let Some(obj) = sc.objects.iter_mut().find(|o| o.id as u64 == entity_id) {
-                obj.rotation = glam::Quat::from_euler(
-                    glam::EulerRot::XYZ,
-                    rotation.x.to_radians(),
-                    rotation.y.to_radians(),
-                    rotation.z.to_radians(),
-                );
-            }
-        }
-        SetObjectScale { entity_id, scale } => {
-            let sc = es.world.scene_mut();
-            if let Some(obj) = sc.objects.iter_mut().find(|o| o.id as u64 == entity_id) {
-                obj.scale = scale;
-            }
-        }
-
-        // ── Scene I/O ────────────────────────────────────────────
-        OpenScene { path } => {
-            es.pending_open = true;
-            if !path.is_empty() {
-                es.pending_open_path = Some(path);
-            }
-        }
-        SaveScene { path } => {
-            if let Some(p) = path {
-                es.pending_save = true;
-                es.pending_save_path = Some(p);
-            } else {
-                es.pending_save = true;
-            }
-        }
-
-        // ── Project I/O ──────────────────────────────────────────
-        NewProject => {
-            es.pending_new_project = true;
-        }
-        OpenProject { path } => {
-            es.pending_open_project = true;
-            if !path.is_empty() {
-                es.pending_open_project_path = Some(path);
-            }
-        }
-        SaveProject => {
-            es.pending_save_project = true;
-        }
-
-        // ── Voxel ops ────────────────────────────────────────────
-        ConvertToVoxel { object_id } => {
-            es.pending_convert_to_voxel = Some(object_id);
-        }
-        // ── Animation ────────────────────────────────────────────
-        SetAnimationState { state } => {
-            es.animation.playback_state = match state {
-                1 => crate::animation_preview::PlaybackState::Playing,
-                2 => crate::animation_preview::PlaybackState::Paused,
-                _ => crate::animation_preview::PlaybackState::Stopped,
-            };
-        }
-        SetAnimationSpeed { speed } => {
-            es.animation.speed = speed;
-        }
-
-        // ── Materials ────────────────────────────────────────────
-        SelectMaterial { slot } => {
-            es.material_browser.selected_slot = Some(slot);
-            // In paint mode, also set the active paint material.
-            if es.mode == EditorMode::Paint {
-                es.paint.current_settings.material_id = slot;
-            }
-        }
-        RemapMaterial { object_id, from_material, to_material } => {
-            es.pending_remap_material = Some((object_id, from_material, to_material));
-        }
-        SetPrimitiveMaterial { object_id, material_id } => {
-            es.pending_set_primitive_material = Some((object_id, material_id));
-        }
-        SetMaterial { .. } | SetMaterialShader { .. } => {
-            // Handled separately in engine loop (needs MaterialLibrary / brick pool access).
-        }
-
-        // ── Window management ────────────────────────────────────
-        WindowDrag => {
-            es.pending_drag = true;
-        }
-        WindowMinimize => {
-            es.pending_minimize = true;
-        }
-        WindowMaximize => {
-            es.pending_maximize = true;
-        }
-        RequestExit => {
-            es.wants_exit = true;
-        }
     }
 }

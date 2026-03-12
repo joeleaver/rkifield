@@ -43,8 +43,8 @@ struct Material {
 // ---------- v2 Scene data types (must match ray_march.wgsl) ----------
 
 struct VoxelSample {
-    word0: u32, // lower 16 = f16 distance, upper 16 = u16 material_id
-    word1: u32,
+    word0: u32, // lower 16 = f16 distance, bits 16-21 = material_id, bits 22-27 = secondary_material_id
+    word1: u32, // byte 3 = blend_weight, bytes 0-2 reserved
 }
 
 struct GpuObject {
@@ -220,6 +220,24 @@ struct ShadeUniforms {
 @group(7) @binding(4) var radiance_sampler: sampler;
 @group(7) @binding(5) var<uniform> radiance_vol: RadianceVolumeUniforms;
 
+// Group 3 continued: Brush overlay — geodesic distance for cursor visualization
+@group(3) @binding(1) var<storage, read> brush_overlay_data: array<f32>;
+@group(3) @binding(2) var<storage, read> brush_overlay_map: array<u32>;
+
+struct BrushOverlayUniforms {
+    brush_radius: f32,
+    brush_falloff: f32,
+    brush_object_id: u32,
+    brush_active: u32,
+    brush_color: vec4<f32>,
+    brush_center_local: vec4<f32>,
+}
+@group(3) @binding(3) var<uniform> brush_overlay: BrushOverlayUniforms;
+
+// Group 3 continued: Color companion pool for per-voxel paint
+@group(3) @binding(4) var<storage, read> color_pool_data: array<u32>;
+@group(3) @binding(5) var<storage, read> color_companion_map: array<u32>;
+
 // ---------- Constants ----------
 
 const PI: f32 = 3.14159265359;
@@ -290,9 +308,9 @@ fn extract_distance(word0: u32) -> f32 {
     return unpack2x16float(word0).x;
 }
 
-/// Extract per-voxel RGBA color from word1 (geometry-first: surface voxel color).
+/// Extract per-voxel RGBA color from word1 — DEPRECATED, color now in companion pool.
 fn extract_voxel_color(word1: u32) -> vec4<f32> {
-    return unpack4x8unorm(word1);
+    return vec4<f32>(1.0);
 }
 
 // ---------- SDF Primitives ----------
@@ -400,8 +418,9 @@ fn sample_voxelized(local_pos: vec3<f32>, obj: GpuObject) -> f32 {
     return mix(c0, c1, t.z) + outside_dist;
 }
 
-/// Sample per-voxel RGBA color from a voxelized object at a local-space position.
-/// Returns vec4(1.0) (white) if the position is outside the grid or in an empty/interior slot.
+/// Sample per-voxel paint color from the companion color pool.
+/// Returns vec4(r, g, b, intensity) where intensity is the paint alpha (0 = no paint).
+/// If no color brick exists for this location, returns vec4(0.0) (no paint).
 fn sample_voxelized_color(local_pos: vec3<f32>, obj: GpuObject) -> vec4<f32> {
     let vs = obj.voxel_size;
     let brick_extent = vs * 8.0;
@@ -410,7 +429,7 @@ fn sample_voxelized_color(local_pos: vec3<f32>, obj: GpuObject) -> vec4<f32> {
     let grid_pos = local_pos + grid_size * 0.5;
 
     if any(grid_pos < vec3<f32>(0.0)) || any(grid_pos >= grid_size) {
-        return vec4<f32>(1.0);
+        return vec4<f32>(0.0);
     }
 
     let voxel_coord = grid_pos / vs;
@@ -420,10 +439,53 @@ fn sample_voxelized_color(local_pos: vec3<f32>, obj: GpuObject) -> vec4<f32> {
     let flat_brick = brick.x + brick.y * dims.x + brick.z * dims.x * dims.y;
     let slot = brick_maps[obj.brick_map_offset + flat_brick];
     if slot == EMPTY_SLOT || slot == INTERIOR_SLOT {
-        return vec4<f32>(1.0);
+        return vec4<f32>(0.0);
+    }
+
+    // Look up companion map: brick_slot → color_slot
+    let color_slot = color_companion_map[slot];
+    if color_slot == EMPTY_SLOT {
+        return vec4<f32>(0.0);  // no color brick for this slot
+    }
+
+    let voxel_idx = local.x + local.y * 8u + local.z * 64u;
+    let packed = color_pool_data[color_slot * 512u + voxel_idx];
+    let r = f32(packed & 0xFFu) / 255.0;
+    let g = f32((packed >> 8u) & 0xFFu) / 255.0;
+    let b = f32((packed >> 16u) & 0xFFu) / 255.0;
+    let intensity = f32((packed >> 24u) & 0xFFu) / 255.0;
+    return vec4<f32>(r, g, b, intensity);
+}
+
+/// Sample per-voxel blend data from a voxelized object at a local-space position.
+/// Returns vec4(secondary_material_id, blend_weight_0to1, 0, 0).
+/// secondary_material_id is from word0 bits 24-31, blend_weight from word1 byte3.
+fn sample_voxelized_blend(local_pos: vec3<f32>, obj: GpuObject) -> vec2<f32> {
+    let vs = obj.voxel_size;
+    let brick_extent = vs * 8.0;
+    let dims = vec3<u32>(obj.brick_map_dims_x, obj.brick_map_dims_y, obj.brick_map_dims_z);
+    let grid_size = vec3<f32>(dims) * brick_extent;
+    let grid_pos = local_pos + grid_size * 0.5;
+
+    if any(grid_pos < vec3<f32>(0.0)) || any(grid_pos >= grid_size) {
+        return vec2<f32>(0.0, 0.0);
+    }
+
+    let voxel_coord = grid_pos / vs;
+    let vc = clamp(vec3<i32>(floor(voxel_coord)), vec3<i32>(0), vec3<i32>(dims) * 8 - vec3<i32>(1));
+    let brick = vec3<u32>(vc / vec3<i32>(8));
+    let local = vec3<u32>(vc % vec3<i32>(8));
+    let flat_brick = brick.x + brick.y * dims.x + brick.z * dims.x * dims.y;
+    let slot = brick_maps[obj.brick_map_offset + flat_brick];
+    if slot == EMPTY_SLOT || slot == INTERIOR_SLOT {
+        return vec2<f32>(0.0, 0.0);
     }
     let idx = slot * 512u + local.x + local.y * 8u + local.z * 64u;
-    return extract_voxel_color(brick_pool[idx].word1);
+    let w0 = brick_pool[idx].word0;
+    let w1 = brick_pool[idx].word1;
+    let secondary_mat = f32((w0 >> 22u) & 0x3Fu);
+    let blend_weight = f32((w1 >> 24u) & 0xFFu) / 255.0;
+    return vec2<f32>(secondary_mat, blend_weight);
 }
 
 /// Evaluate a single object at a world-space position. Returns world-space distance.
@@ -515,382 +577,3 @@ fn sample_sdf(pos: vec3<f32>) -> f32 {
     return min_dist;
 }
 
-// ---------- SDF Soft Shadow ----------
-
-fn soft_shadow(origin: vec3<f32>, light_dir: vec3<f32>, max_dist: f32, k: f32) -> f32 {
-    var shadow = 1.0;
-    var t = SHADOW_EPSILON;
-    for (var i = 0u; i < MAX_SHADOW_STEPS; i++) {
-        let d = sample_sdf(origin + light_dir * t);
-        if d < SHADOW_EPSILON {
-            return 0.0;
-        }
-        shadow = min(shadow, k * d / t);
-        t += max(d, SHADOW_EPSILON);
-        if t > max_dist {
-            break;
-        }
-    }
-    return clamp(shadow, 0.0, 1.0);
-}
-
-// ---------- SDF Ambient Occlusion ----------
-
-fn sdf_ao(pos: vec3<f32>, normal: vec3<f32>) -> f32 {
-    var ao = 0.0;
-    var scale = 1.0;
-    for (var i = 1u; i <= 4u; i++) {
-        let dist = AO_STEP_SIZE * f32(i);
-        let d = sample_sdf(pos + normal * dist);
-        ao += scale * (dist - d);
-        scale *= 0.5;
-    }
-    return clamp(1.0 - AO_STRENGTH * ao, 0.0, 1.0);
-}
-
-// ---------- Subsurface Scattering ----------
-
-fn sss_contribution(pos: vec3<f32>, normal: vec3<f32>, light_dir: vec3<f32>,
-                    subsurface: f32, subsurface_color: vec3<f32>) -> vec3<f32> {
-    if subsurface <= 0.0 {
-        return vec3<f32>(0.0);
-    }
-    let interior_pos = pos - normal * SSS_MAX_THICKNESS;
-    let thickness = clamp(-sample_sdf(interior_pos), 0.0, SSS_MAX_THICKNESS);
-    let attenuation = exp(-thickness * SSS_SIGMA);
-    let wrap = max(0.0, dot(normal, light_dir) + SSS_WRAP) / (1.0 + SSS_WRAP);
-    return subsurface_color * attenuation * wrap * subsurface;
-}
-
-// ---------- Light Attenuation ----------
-
-fn distance_attenuation(dist: f32, range: f32) -> f32 {
-    let d2 = dist * dist;
-    let r2 = range * range;
-    let factor = d2 / r2;
-    let window = clamp(1.0 - factor, 0.0, 1.0);
-    return (window * window) / max(d2, 0.0001);
-}
-
-// ---------- PBR Functions ----------
-
-fn distribution_ggx(n_dot_h: f32, roughness: f32) -> f32 {
-    let a2 = roughness * roughness;
-    let denom = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
-    return a2 / (PI * denom * denom);
-}
-
-fn fresnel_schlick(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {
-    return f0 + (vec3<f32>(1.0) - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
-}
-
-fn visibility_smith_ggx(n_dot_v: f32, n_dot_l: f32, roughness: f32) -> f32 {
-    let a2 = roughness * roughness;
-    let ggxv = n_dot_l * sqrt(n_dot_v * n_dot_v * (1.0 - a2) + a2);
-    let ggxl = n_dot_v * sqrt(n_dot_l * n_dot_l * (1.0 - a2) + a2);
-    return 0.5 / max(ggxv + ggxl, 0.0001);
-}
-
-// ---------- 3D Simplex Noise (Ashima Arts webgl-noise) ----------
-
-fn mod289_3(x: vec3<f32>) -> vec3<f32> {
-    return x - floor(x * (1.0 / 289.0)) * 289.0;
-}
-
-fn mod289_4(x: vec4<f32>) -> vec4<f32> {
-    return x - floor(x * (1.0 / 289.0)) * 289.0;
-}
-
-fn permute(x: vec4<f32>) -> vec4<f32> {
-    return mod289_4(((x * 34.0) + 10.0) * x);
-}
-
-fn taylor_inv_sqrt(r: vec4<f32>) -> vec4<f32> {
-    return 1.79284291400159 - 0.85373472095314 * r;
-}
-
-fn simplex3d(v: vec3<f32>) -> f32 {
-    let C = vec2<f32>(1.0 / 6.0, 1.0 / 3.0);
-    let D = vec4<f32>(0.0, 0.5, 1.0, 2.0);
-
-    var i = floor(v + dot(v, vec3<f32>(C.y)));
-    let x0 = v - i + dot(i, vec3<f32>(C.x));
-
-    let g = step(x0.yzx, x0.xyz);
-    let l = 1.0 - g;
-    let i1 = min(g.xyz, l.zxy);
-    let i2 = max(g.xyz, l.zxy);
-
-    let x1 = x0 - i1 + vec3<f32>(C.x);
-    let x2 = x0 - i2 + vec3<f32>(C.y);
-    let x3 = x0 - D.yyy;
-
-    i = mod289_3(i);
-    let p = permute(permute(permute(
-        i.z + vec4<f32>(0.0, i1.z, i2.z, 1.0))
-      + i.y + vec4<f32>(0.0, i1.y, i2.y, 1.0))
-      + i.x + vec4<f32>(0.0, i1.x, i2.x, 1.0));
-
-    let n_ = 0.142857142857;
-    let ns = n_ * D.wyz - D.xzx;
-
-    let j = p - 49.0 * floor(p * ns.z * ns.z);
-
-    let x_ = floor(j * ns.z);
-    let y_ = floor(j - 7.0 * x_);
-
-    let x = x_ * ns.x + vec4<f32>(ns.y);
-    let y = y_ * ns.x + vec4<f32>(ns.y);
-    let h = 1.0 - abs(x) - abs(y);
-
-    let b0 = vec4<f32>(x.xy, y.xy);
-    let b1 = vec4<f32>(x.zw, y.zw);
-
-    let s0 = floor(b0) * 2.0 + 1.0;
-    let s1 = floor(b1) * 2.0 + 1.0;
-    let sh = -step(h, vec4<f32>(0.0));
-
-    let a0 = b0.xzyw + s0.xzyw * sh.xxyy;
-    let a1 = b1.xzyw + s1.xzyw * sh.zzww;
-
-    var p0 = vec3<f32>(a0.xy, h.x);
-    var p1 = vec3<f32>(a0.zw, h.y);
-    var p2 = vec3<f32>(a1.xy, h.z);
-    var p3 = vec3<f32>(a1.zw, h.w);
-
-    let norm = taylor_inv_sqrt(vec4<f32>(dot(p0, p0), dot(p1, p1), dot(p2, p2), dot(p3, p3)));
-    p0 *= norm.x;
-    p1 *= norm.y;
-    p2 *= norm.z;
-    p3 *= norm.w;
-
-    var m = max(vec4<f32>(0.5) - vec4<f32>(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)), vec4<f32>(0.0));
-    m = m * m;
-    return 105.0 * dot(m * m, vec4<f32>(dot(p0, x0), dot(p1, x1), dot(p2, x2), dot(p3, x3)));
-}
-
-// ---------- Material Blending ----------
-
-struct ResolvedMaterial {
-    albedo: vec3<f32>,
-    roughness: f32,
-    metallic: f32,
-    emission: vec3<f32>,
-    emission_strength: f32,
-    subsurface: f32,
-    subsurface_color: vec3<f32>,
-    opacity: f32,
-    ior: f32,
-    noise_scale: f32,
-    noise_strength: f32,
-    noise_channels: u32,
-}
-
-fn resolve_material_from(m: Material) -> ResolvedMaterial {
-    return ResolvedMaterial(
-        vec3<f32>(m.albedo_r, m.albedo_g, m.albedo_b),
-        m.roughness,
-        m.metallic,
-        vec3<f32>(m.emission_r, m.emission_g, m.emission_b),
-        m.emission_strength,
-        m.subsurface,
-        vec3<f32>(m.subsurface_r, m.subsurface_g, m.subsurface_b),
-        m.opacity,
-        m.ior,
-        m.noise_scale,
-        m.noise_strength,
-        m.noise_channels,
-    );
-}
-
-fn blend_materials(primary_id: u32, secondary_id: u32, weight: f32) -> ResolvedMaterial {
-    let a = resolve_material_from(materials[primary_id]);
-    if weight <= 0.0 {
-        return a;
-    }
-    let b = resolve_material_from(materials[secondary_id]);
-    return ResolvedMaterial(
-        mix(a.albedo, b.albedo, weight),
-        mix(a.roughness, b.roughness, weight),
-        mix(a.metallic, b.metallic, weight),
-        mix(a.emission, b.emission, weight),
-        mix(a.emission_strength, b.emission_strength, weight),
-        mix(a.subsurface, b.subsurface, weight),
-        mix(a.subsurface_color, b.subsurface_color, weight),
-        mix(a.opacity, b.opacity, weight),
-        mix(a.ior, b.ior, weight),
-        mix(a.noise_scale, b.noise_scale, weight),
-        mix(a.noise_strength, b.noise_strength, weight),
-        select(a.noise_channels, b.noise_channels, weight > 0.5),
-    );
-}
-
-// ---------- Radiance Volume Cone Tracing ----------
-
-/// Sample a single level of the radiance volume.
-/// `cam_rel_pos` is camera-relative (since volume center = camera world pos,
-/// this is the same as volume-center-relative).
-fn sample_radiance_level(cam_rel_pos: vec3<f32>, level: u32) -> vec4<f32> {
-    let inv_ext = radiance_vol.inv_extents[level];
-    let uvw = cam_rel_pos * inv_ext + 0.5;
-    if any(uvw < vec3<f32>(0.0)) || any(uvw > vec3<f32>(1.0)) {
-        return vec4<f32>(0.0);
-    }
-    switch level {
-        case 0u: { return textureSampleLevel(radiance_L0, radiance_sampler, uvw, 0.0); }
-        case 1u: { return textureSampleLevel(radiance_L1, radiance_sampler, uvw, 0.0); }
-        case 2u: { return textureSampleLevel(radiance_L2, radiance_sampler, uvw, 0.0); }
-        default: { return textureSampleLevel(radiance_L3, radiance_sampler, uvw, 0.0); }
-    }
-}
-
-/// Sample the radiance volume with continuous mip level (interpolate between levels).
-fn sample_radiance(cam_rel_pos: vec3<f32>, mip_f: f32) -> vec4<f32> {
-    let lo = u32(floor(mip_f));
-    let hi = u32(ceil(mip_f));
-    let lo_clamped = min(lo, 3u);
-    let hi_clamped = min(hi, 3u);
-    let s_lo = sample_radiance_level(cam_rel_pos, lo_clamped);
-    if lo_clamped == hi_clamped {
-        return s_lo;
-    }
-    let s_hi = sample_radiance_level(cam_rel_pos, hi_clamped);
-    return mix(s_lo, s_hi, fract(mip_f));
-}
-
-/// Trace a cone through the radiance volume using front-to-back compositing.
-/// `origin` is in world-space; positions are converted to camera-relative
-/// before sampling the radiance volume (which is centered at the camera).
-fn trace_cone(origin: vec3<f32>, dir: vec3<f32>, tan_half_angle: f32, max_dist: f32, jitter: f32) -> vec4<f32> {
-    var color = vec3<f32>(0.0);
-    var opacity = 0.0;
-    // Start past L0 voxel to avoid self-illumination, with jitter to break banding.
-    var t = radiance_vol.voxel_sizes.x * (2.0 + jitter);
-
-    for (var i = 0u; i < GI_CONE_STEPS; i++) {
-        if opacity > 0.95 || t > max_dist {
-            break;
-        }
-        let pos = origin + dir * t;
-        let cone_radius = t * tan_half_angle;
-        // Mip selection: *0.5 accounts for 4× (not 2×) clipmap ratio between levels.
-        let mip_f = log2(max(cone_radius / radiance_vol.voxel_sizes.x, 1.0)) * 0.5;
-
-        // Convert world-space position to camera-relative for radiance volume sampling.
-        let cam_rel_pos = pos - shade_uniforms.camera_pos.xyz;
-        let s = sample_radiance(cam_rel_pos, mip_f);
-        let step_opacity = s.a;
-
-        // Front-to-back compositing.
-        let w = (1.0 - opacity) * step_opacity;
-        color += s.rgb * w;
-        opacity += w;
-
-        // Step size increases with cone radius.
-        let step = max(cone_radius * 0.5, radiance_vol.voxel_sizes.x);
-        t += min(step, GI_MAX_STEP);
-    }
-
-    return vec4<f32>(color, opacity);
-}
-
-/// Trace 6 diffuse cones in a hemisphere around the surface normal.
-fn cone_trace_diffuse(pos: vec3<f32>, normal: vec3<f32>, jitter: f32) -> vec3<f32> {
-    // Build tangent frame.
-    let up = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(normal.y) > 0.9);
-    let tangent = normalize(cross(up, normal));
-    let bitangent = cross(normal, tangent);
-
-    let tan_half = 0.577; // tan(30°) for ~60° opening cones
-    var gi = vec3<f32>(0.0);
-
-    // 6 cones tilted 30° from normal, evenly spaced azimuthally.
-    let cos30 = 0.866;
-    let sin30 = 0.5;
-
-    for (var i = 0u; i < 6u; i++) {
-        let angle = f32(i) * PI / 3.0 + jitter * 0.5;
-        let dir = normalize(
-            normal * cos30
-            + (tangent * cos(angle) + bitangent * sin(angle)) * sin30
-        );
-        let result = trace_cone(pos, dir, tan_half, GI_DIFFUSE_MAX_DIST, jitter);
-        gi += result.rgb;
-    }
-
-    return gi / 6.0;
-}
-
-/// Trace 1 specular cone along the reflection direction.
-fn cone_trace_specular(pos: vec3<f32>, reflect_dir: vec3<f32>, roughness: f32, jitter: f32) -> vec3<f32> {
-    // Narrower cone for smoother surfaces.
-    let tan_half = max(roughness * 0.5, 0.02);
-    let result = trace_cone(pos, reflect_dir, tan_half, GI_SPECULAR_MAX_DIST, jitter);
-    return result.rgb;
-}
-
-// ---------- Analytic Atmosphere ----------
-
-/// Henyey-Greenstein phase function for sky Mie scattering.
-fn henyey_greenstein_sky(cos_theta: f32, g: f32) -> f32 {
-    let g2 = g * g;
-    let denom = 1.0 + g2 - 2.0 * g * cos_theta;
-    return (1.0 - g2) / (4.0 * PI * pow(max(denom, 1e-6), 1.5));
-}
-
-/// Compute sky color for a given view ray using analytic Rayleigh + Mie scattering.
-/// Returns linear HDR RGB.
-fn atmosphere_sky(ray_dir: vec3<f32>, sun_dir: vec3<f32>) -> vec3<f32> {
-    let cos_theta = ray_dir.y;  // elevation: dot(ray_dir, up)
-    let cos_sun = dot(ray_dir, sun_dir);
-
-    let rayleigh_scale = shade_uniforms.sky_params.x;
-    let mie_scale = shade_uniforms.sky_params.y;
-    let sun_intensity = shade_uniforms.sun_dir.w;
-    let sun_col = shade_uniforms.sun_color.xyz;
-
-    // Height-integrated optical depth coefficients (β × scale_height).
-    // Rayleigh: β_R(λ) × H_R(8400m), Mie: β_M × H_M(1200m).
-    let tau_r = vec3<f32>(0.032, 0.114, 0.278) * rayleigh_scale;
-    let tau_m = 0.025 * mie_scale;
-
-    // Path length through atmosphere (longer at horizon, ~1 at zenith).
-    let path = 1.0 / max(cos_theta + 0.025, 0.01);
-
-    // Extinction along the view ray.
-    let total_tau = tau_r + vec3<f32>(tau_m);
-    let extinction = exp(-total_tau * path);
-
-    // Phase functions.
-    let phase_r = 0.75 * (1.0 + cos_sun * cos_sun);
-    let g = 0.76;
-    let phase_m = henyey_greenstein_sky(cos_sun, g);
-
-    // In-scattered radiance (single scattering).
-    // inscatter_i = (β_i * phase_i / Σβ) * (1 - exp(-Σβ * path)) * L_sun
-    let scatter_r = tau_r * phase_r;
-    let scatter_m = vec3<f32>(tau_m * phase_m);
-    let safe_total = max(total_tau, vec3<f32>(1e-6));
-    let inscatter = (scatter_r + scatter_m) / safe_total * (vec3<f32>(1.0) - extinction);
-    let sky = inscatter * sun_col * sun_intensity;
-
-    // Sun disk + bloom.
-    let sun_angular_radius = 0.00465;  // ~0.267 degrees
-    let sun_disk = smoothstep(cos(sun_angular_radius * 3.0), cos(sun_angular_radius), cos_sun);
-    let sun_bloom = pow(max(cos_sun, 0.0), 256.0) * 2.0;
-    let sun_contribution = (sun_disk * 50.0 + sun_bloom) * sun_col * sun_intensity * extinction;
-
-    return sky + sun_contribution;
-}
-
-/// Compute view ray direction from pixel coordinates using camera basis.
-fn compute_view_ray(pixel: vec2<u32>, dims: vec2<u32>) -> vec3<f32> {
-    let uv = (vec2<f32>(pixel) + 0.5) / vec2<f32>(dims);
-    let ndc = uv * 2.0 - 1.0;
-    // cam_right and cam_up are pre-scaled by tan(fov/2)*aspect and tan(fov/2).
-    return normalize(
-        shade_uniforms.cam_forward.xyz
-        + ndc.x * shade_uniforms.cam_right.xyz
-        - ndc.y * shade_uniforms.cam_up.xyz  // -y: screen y is top-down
-    );
-}

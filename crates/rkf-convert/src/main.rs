@@ -323,7 +323,7 @@ fn voxelize_to_lod(
                             let sign = if winding < -0.5 { -1.0f32 } else { 1.0f32 };
                             let signed_dist = sign * unsigned_dist;
 
-                            samples[idx] = VoxelSample::new(signed_dist, material_id, 0, 0, 0);
+                            samples[idx] = VoxelSample::new(signed_dist, material_id, [255, 255, 255, 255]);
                             idx += 1;
                         }
                     }

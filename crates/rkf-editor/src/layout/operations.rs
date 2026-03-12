@@ -400,7 +400,8 @@ mod tests {
     #[test]
     fn cleanup_normalizes_fractions() {
         let mut layout = default_layout();
-        // Right has 2 zones, remove one's tabs
+        // Add a second zone to right, then empty it
+        layout.right.zones.push(ZoneConfig::single(PanelId::Console));
         layout.right.zones[1].tabs.clear();
         cleanup_empty_zones(&mut layout);
         assert_eq!(layout.right.zones.len(), 1);
@@ -462,6 +463,8 @@ mod tests {
     #[test]
     fn move_tab_within_same_container() {
         let mut layout = default_layout();
+        // Add a second zone to right so we can move a tab into it
+        layout.right.zones.push(ZoneConfig::single(PanelId::Console));
         // Move AssetProperties to right zone 1
         let result = move_tab(
             &mut layout,

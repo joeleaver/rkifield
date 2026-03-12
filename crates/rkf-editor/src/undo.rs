@@ -6,7 +6,6 @@
 #![allow(dead_code)]
 
 use glam::{IVec3, Quat, Vec3};
-use rkf_core::brick::Brick;
 
 /// The kind of action that can be undone/redone.
 #[derive(Debug, Clone)]
@@ -30,11 +29,17 @@ pub enum UndoActionKind {
         chunk: IVec3,
         description: String,
     },
-    /// A sculpt stroke — captures brick pool snapshots before modification.
-    /// Undo restores each `(slot, brick_data)` to the CPU pool + GPU upload.
+    /// A sculpt stroke — captures geometry-first snapshots before modification.
+    /// Undo restores geometry + SDF cache + re-derives Brick for GPU upload.
     SculptStroke {
         object_id: u64,
-        brick_snapshots: Vec<(u32, Brick)>,
+        geometry_snapshots: Vec<crate::editor_state::GeometryUndoEntry>,
+    },
+    /// A paint stroke — captures geometry-first snapshots before modification.
+    /// Undo restores surface voxel material/color via geometry + SDF cache.
+    PaintStroke {
+        object_id: u64,
+        geometry_snapshots: Vec<crate::editor_state::GeometryUndoEntry>,
     },
     /// A property was changed on an entity.
     PropertyChange {

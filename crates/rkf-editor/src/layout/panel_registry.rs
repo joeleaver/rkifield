@@ -26,14 +26,6 @@ pub fn render_panel(scope: &mut RenderScope, panel: PanelId) -> NodeHandle {
             let c = crate::ui::right_panel::AssetPropertiesPanel::default();
             c.render(scope, &[])
         }
-        PanelId::SculptSettings => {
-            let c = crate::ui::right_panel::SculptPanel::default();
-            c.render(scope, &[])
-        }
-        PanelId::PaintSettings => {
-            let c = crate::ui::right_panel::PaintPanel::default();
-            c.render(scope, &[])
-        }
         PanelId::Materials => {
             let c = crate::ui::materials_panel::MaterialsPanel::default();
             c.render(scope, &[])

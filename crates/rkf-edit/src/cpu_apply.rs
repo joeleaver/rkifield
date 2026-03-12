@@ -103,8 +103,7 @@ pub fn apply_edit_cpu(
                                 sample.material_id()
                             };
                             brick.set(vx, vy, vz, VoxelSample::new(
-                                new_d, mat,
-                                sample.blend_weight(), sample.secondary_id(), sample.flags(),
+                                new_d, mat, sample.word1.to_le_bytes(),
                             ));
                             any_changed |= (new_d - existing_d).abs() > change_threshold;
                         }
@@ -112,20 +111,15 @@ pub fn apply_edit_cpu(
                             let effective_shape_d = shape_d + (1.0 - strength) * max_extent;
                             let new_d = existing_d.max(-effective_shape_d);
                             brick.set(vx, vy, vz, VoxelSample::new(
-                                new_d, sample.material_id(),
-                                sample.blend_weight(), sample.secondary_id(), sample.flags(),
+                                new_d, sample.material_id(), sample.word1.to_le_bytes(),
                             ));
                             any_changed |= (new_d - existing_d).abs() > change_threshold;
                         }
                         EditType::CsgIntersect => {
-                            // Intersection: keep only what's inside the brush.
-                            // At strength=0: effective brush is pushed far out → no clipping.
-                            // At strength=1: full max(existing, shape_d) intersection.
                             let effective_shape_d = shape_d - (1.0 - strength) * max_extent;
                             let new_d = existing_d.max(effective_shape_d);
                             brick.set(vx, vy, vz, VoxelSample::new(
-                                new_d, sample.material_id(),
-                                sample.blend_weight(), sample.secondary_id(), sample.flags(),
+                                new_d, sample.material_id(), sample.word1.to_le_bytes(),
                             ));
                             any_changed |= (new_d - existing_d).abs() > change_threshold;
                         }
@@ -141,8 +135,7 @@ pub fn apply_edit_cpu(
                                 sample.material_id()
                             };
                             brick.set(vx, vy, vz, VoxelSample::new(
-                                new_d, mat,
-                                sample.blend_weight(), sample.secondary_id(), sample.flags(),
+                                new_d, mat, sample.word1.to_le_bytes(),
                             ));
                             any_changed |= (new_d - existing_d).abs() > change_threshold;
                         }
@@ -151,56 +144,36 @@ pub fn apply_edit_cpu(
                             let effective_shape_d = shape_d + (1.0 - strength) * max_extent;
                             let new_d = -smin(-existing_d, effective_shape_d, k);
                             brick.set(vx, vy, vz, VoxelSample::new(
-                                new_d, sample.material_id(),
-                                sample.blend_weight(), sample.secondary_id(), sample.flags(),
+                                new_d, sample.material_id(), sample.word1.to_le_bytes(),
                             ));
                             any_changed |= (new_d - existing_d).abs() > change_threshold;
                         }
                         EditType::Smooth => {
-                            // Pull toward zero (surface) — a simplified smooth that
-                            // reduces the absolute distance, softening geometry.
                             let new_d = existing_d * (1.0 - strength * 0.3);
                             brick.set(vx, vy, vz, VoxelSample::new(
-                                new_d, sample.material_id(),
-                                sample.blend_weight(), sample.secondary_id(), sample.flags(),
+                                new_d, sample.material_id(), sample.word1.to_le_bytes(),
                             ));
                             any_changed |= (new_d - existing_d).abs() > change_threshold;
                         }
                         EditType::Flatten => {
-                            // Pull SDF toward the reference plane at edit center Y.
-                            // The reference plane distance for this voxel is its signed
-                            // distance from the plane at op.position.y.
                             let plane_d = edit_local.y;
                             let new_d = lerp(existing_d, plane_d, strength * 0.5);
                             brick.set(vx, vy, vz, VoxelSample::new(
-                                new_d, sample.material_id(),
-                                sample.blend_weight(), sample.secondary_id(), sample.flags(),
+                                new_d, sample.material_id(), sample.word1.to_le_bytes(),
                             ));
                             any_changed |= (new_d - existing_d).abs() > change_threshold;
                         }
                         EditType::Paint => {
-                            // Only paint near-surface voxels.
                             if existing_d.abs() < op.dimensions.x * 2.0 {
+                                let color = op.color_packed.to_le_bytes();
                                 brick.set(vx, vy, vz, VoxelSample::new(
-                                    existing_d, op.material_id,
-                                    sample.blend_weight(), sample.secondary_id(), sample.flags(),
-                                ));
-                                any_changed = true;
-                            }
-                        }
-                        EditType::BlendPaint => {
-                            if existing_d.abs() < op.dimensions.x * 2.0 {
-                                let bw = (strength * 255.0) as u8;
-                                brick.set(vx, vy, vz, VoxelSample::new(
-                                    existing_d, sample.material_id(),
-                                    bw, op.secondary_id, sample.flags(),
+                                    existing_d, op.material_id, color,
                                 ));
                                 any_changed = true;
                             }
                         }
                         EditType::ColorPaint => {
                             // Color paint writes to companion color pool, not handled here.
-                            // Skip for now — requires color pool access.
                         }
                     }
                 }
@@ -247,7 +220,7 @@ pub fn fill_brick_with_brush_sdf(
                 let edit_local = inv_rot * (voxel_center - op.position);
                 let d = evaluate_shape(op.shape_type, &op.dimensions, edit_local).min(max_d);
                 let mat = if d < 0.0 { op.material_id } else { 0 };
-                brick.set(vx, vy, vz, VoxelSample::new(d, mat, 0, 0, 0));
+                brick.set(vx, vy, vz, VoxelSample::new(d, mat, [255, 255, 255, 255]));
             }
         }
     }
@@ -337,7 +310,7 @@ mod tests {
         for z in 0u32..8 {
             for y in 0u32..8 {
                 for x in 0u32..8 {
-                    brick.set(x, y, z, VoxelSample::new(1.0, 0, 0, 0, 0));
+                    brick.set(x, y, z, VoxelSample::new(1.0, 0, [255, 255, 255, 255]));
                 }
             }
         }
@@ -364,7 +337,6 @@ mod tests {
             blend_k: radius * 0.3,
             falloff: FalloffCurve::Smooth,
             material_id,
-            secondary_id: 0,
             color_packed: 0,
         }
     }
@@ -397,7 +369,7 @@ mod tests {
         for z in 0u32..8 {
             for y in 0u32..8 {
                 for x in 0u32..8 {
-                    brick.set(x, y, z, VoxelSample::new(-0.5, 2, 0, 0, 0));
+                    brick.set(x, y, z, VoxelSample::new(-0.5, 2, [255, 255, 255, 255]));
                 }
             }
         }
@@ -416,7 +388,6 @@ mod tests {
             blend_k: 0.05,
             falloff: FalloffCurve::Smooth,
             material_id: 0,
-            secondary_id: 0,
             color_packed: 0,
         };
 
@@ -436,7 +407,7 @@ mod tests {
         // Place some voxels near the surface (distance ~0).
         let brick = pool.get_mut(slot);
         for x in 0u32..8 {
-            brick.set(x, 4, 4, VoxelSample::new(0.01, 1, 0, 0, 0));
+            brick.set(x, 4, 4, VoxelSample::new(0.01, 1, [255, 255, 255, 255]));
         }
 
         let voxel_size = 0.05;
@@ -453,7 +424,6 @@ mod tests {
             blend_k: 0.0,
             falloff: FalloffCurve::Smooth,
             material_id: 42,
-            secondary_id: 0,
             color_packed: 0,
         };
 
@@ -513,7 +483,7 @@ mod tests {
             for y in 0u32..8 {
                 for x in 0u32..8 {
                     let d = (x as f32 - 3.5) * 0.1; // -0.35 to 0.35
-                    brick.set(x, y, z, VoxelSample::new(d, 1, 0, 0, 0));
+                    brick.set(x, y, z, VoxelSample::new(d, 1, [255, 255, 255, 255]));
                 }
             }
         }
@@ -532,7 +502,6 @@ mod tests {
             blend_k: 0.0,
             falloff: FalloffCurve::Smooth,
             material_id: 0,
-            secondary_id: 0,
             color_packed: 0,
         };
 

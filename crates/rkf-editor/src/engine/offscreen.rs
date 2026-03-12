@@ -4,9 +4,9 @@ use std::sync::{Arc, Mutex};
 use glam::Vec3;
 use rkf_core::Scene;
 use rkf_render::{
-    AutoExposurePass, BlitPass, BloomCompositePass, BloomPass, Camera, CloudShadowPass,
-    CoarseField, ColorGradePass, CosmeticsPass, DebugMode, DebugViewPass, DofPass,
-    GBuffer, GodRaysBlurPass, GpuSceneV2, Light, LightBuffer, MotionBlurPass,
+    AutoExposurePass, BlitPass, BloomCompositePass, BloomPass, BrushOverlay, Camera,
+    CloudShadowPass, CoarseField, ColorGradePass, CosmeticsPass, DebugMode, DebugViewPass,
+    DofPass, GBuffer, GodRaysBlurPass, GpuSceneV2, Light, LightBuffer, MotionBlurPass,
     RadianceVolume, RayMarchPass, RenderContext, SceneUniforms, ShadeUniforms, ShadingPass,
     SharpenPass, TileObjectCullPass, ToneMapPass, VolCompositePass, VolMarchPass,
     VolShadowPass, VolUpscalePass, COARSE_VOXEL_SIZE,
@@ -185,12 +185,20 @@ impl EditorEngine {
             lib.resolve_shader_ids(|name| composer.shader_id(name));
         }
 
+        // Brush overlay (empty placeholder until brush is active).
+        let brush_overlay = BrushOverlay::empty(&ctx.device);
+
+        // Color pool (empty placeholder until paint is used).
+        let gpu_color_pool = rkf_render::GpuColorPool::empty(&ctx.device);
+
         // Shading pass.
         let shading_pass = ShadingPass::new(
             &ctx.device, &gbuffer, &gpu_scene, &light_buffer,
             &coarse_field, &radiance_volume, &material_table.buffer,
             internal_w, internal_h,
             Some(&composed_source),
+            &brush_overlay,
+            &gpu_color_pool,
         );
 
         // Volumetric pipeline.
@@ -306,6 +314,7 @@ impl EditorEngine {
             &ctx.device, &ctx.queue,
         );
 
+        let brick_pool_capacity = demo.brick_pool.capacity();
         let engine = Self {
             ctx,
             surface: None,
@@ -322,6 +331,7 @@ impl EditorEngine {
             ray_march,
             debug_view,
             shading_pass,
+            brush_overlay,
             radiance_volume,
             radiance_inject,
             radiance_mip,
@@ -419,6 +429,9 @@ impl EditorEngine {
             shader_composer,
             shader_error: None,
             material_preview,
+            cpu_color_bricks: Vec::new(),
+            color_companion_map: vec![0xFFFFFFFF; brick_pool_capacity as usize],
+            gpu_color_pool,
         };
         (engine, scene)
     }

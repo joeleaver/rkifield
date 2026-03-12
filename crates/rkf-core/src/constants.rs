@@ -12,11 +12,11 @@ pub const BRICK_DIM: u32 = 8;
 /// Total voxels per brick
 pub const VOXELS_PER_BRICK: u32 = BRICK_DIM * BRICK_DIM * BRICK_DIM; // 512
 
-/// Maximum number of materials (u16 range)
-pub const MAX_MATERIALS: u32 = 65536;
+/// Maximum number of materials (6-bit material IDs, 0–63).
+pub const MAX_MATERIALS: u32 = 64;
 
-/// Maximum secondary material ID (u8 range)
-pub const MAX_SECONDARY_MATERIALS: u32 = 256;
+/// Maximum secondary material ID (6-bit, same as primary).
+pub const MAX_SECONDARY_MATERIALS: u32 = 64;
 
 /// A resolution tier defining voxel size and brick spatial extent.
 #[derive(Debug, Clone, Copy, PartialEq)]

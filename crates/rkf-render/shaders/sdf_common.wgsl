@@ -26,8 +26,8 @@ const MAX_FLOAT: f32 = 3.402823e+38;
 // ---------- GPU Structs ----------
 
 struct VoxelSample {
-    word0: u32, // lower 16 = f16 distance (from SdfCache), upper 8 = u8 material_id
-    word1: u32, // RGBA8 per-voxel color (from surface voxels, geometry-first)
+    word0: u32, // lower 16 = f16 distance, bits 16-21 = material_id, bits 22-27 = secondary_material_id
+    word1: u32, // byte 3 = blend_weight, bytes 0-2 reserved
 }
 
 struct GpuObject {
@@ -99,24 +99,12 @@ fn extract_distance(word0: u32) -> f32 {
 }
 
 fn extract_material_id(word0: u32) -> u32 {
-    return (word0 >> 16u) & 0xFFu;
+    return (word0 >> 16u) & 0x3Fu;
 }
 
 /// Extract per-voxel RGBA color from word1 (geometry-first: surface voxel color).
 fn extract_voxel_color(word1: u32) -> vec4<f32> {
     return unpack4x8unorm(word1);
-}
-
-fn extract_blend_weight(word1: u32) -> f32 {
-    return f32(word1 & 0xFFu) / 255.0;
-}
-
-fn extract_secondary_id(word1: u32) -> u32 {
-    return (word1 >> 8u) & 0xFFu;
-}
-
-fn extract_flags(word1: u32) -> u32 {
-    return (word1 >> 16u) & 0xFFu;
 }
 
 // ---------- SDF Primitives ----------

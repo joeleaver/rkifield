@@ -10,7 +10,7 @@
 //! | 0 | G-buffer read (position, normal, material, motion) |
 //! | 1 | Material table (storage buffer) |
 //! | 2 | HDR output (storage texture, write) |
-//! | 3 | Shade uniforms (debug mode, num_lights, camera_pos) |
+//! | 3 | Shade uniforms + brush overlay (uniforms, data, map, brush params) |
 //! | 4 | GpuSceneV2 (brick pool, brick maps, objects, camera, scene, BVH) |
 //! | 5 | Lights (storage buffer) |
 //! | 6 | Coarse field (3D texture + sampler + uniforms) |
@@ -18,8 +18,10 @@
 
 use bytemuck::{Pod, Zeroable};
 
+use crate::brush_overlay::BrushOverlay;
 use crate::coarse_field::CoarseField;
 use crate::gbuffer::GBuffer;
+use crate::gpu_color_pool::GpuColorPool;
 use crate::gpu_scene::GpuSceneV2;
 use crate::light::LightBuffer;
 use crate::radiance_volume::RadianceVolume;
@@ -84,10 +86,9 @@ pub struct ShadingPass {
 
     /// Shade uniforms buffer.
     uniform_buffer: wgpu::Buffer,
-    /// Shade uniforms bind group layout (group 3).
-    #[allow(dead_code)]
+    /// Combined bind group layout for group 3 (shade uniforms + brush overlay).
     uniform_bind_group_layout: wgpu::BindGroupLayout,
-    /// Shade uniforms bind group.
+    /// Combined bind group for group 3 (shade uniforms + brush overlay buffers).
     uniform_bind_group: wgpu::BindGroup,
 
     /// Light buffer bind group layout (group 5).
@@ -118,6 +119,8 @@ impl ShadingPass {
         width: u32,
         height: u32,
         shader_source: Option<&str>,
+        brush_overlay: &BrushOverlay,
+        color_pool: &GpuColorPool,
     ) -> Self {
         // HDR output texture
         let hdr_texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -191,28 +194,82 @@ impl ShadingPass {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        // Group 3: Shade uniforms (binding 0) + brush overlay (bindings 1-3).
         let uniform_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("shade_uniform_layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                entries: &[
+                    // binding 0: shade uniforms
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                }],
+                    // binding 1: brush overlay geodesic distance data (array<f32>)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // binding 2: brush overlay brick slot → overlay slot map (array<u32>)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // binding 3: brush overlay uniforms
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // binding 4: color pool data (array<u32>)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // binding 5: color companion map (array<u32>)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
             });
-        let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("shade_uniforms"),
-            layout: &uniform_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform_buffer.as_entire_binding(),
-            }],
-        });
+        let uniform_bind_group = Self::build_group3_bind_group(
+            device, &uniform_bind_group_layout, &uniform_buffer, brush_overlay, color_pool,
+        );
 
         // Group 5: Lights
         let light_bind_group_layout =
@@ -260,7 +317,7 @@ impl ShadingPass {
                 &gbuffer.read_bind_group_layout,         // group 0
                 &material_bind_group_layout,              // group 1
                 &hdr_bind_group_layout,                   // group 2
-                &uniform_bind_group_layout,               // group 3
+                &uniform_bind_group_layout,               // group 3 (uniforms + brush overlay)
                 &scene.bind_group_layout,                 // group 4
                 &light_bind_group_layout,                 // group 5
                 &coarse_field.bind_group_layout,          // group 6
@@ -295,6 +352,62 @@ impl ShadingPass {
             width,
             height,
         }
+    }
+
+    /// Build the combined group 3 bind group (shade uniforms + brush overlay + color pool).
+    fn build_group3_bind_group(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        uniform_buffer: &wgpu::Buffer,
+        brush_overlay: &BrushOverlay,
+        color_pool: &GpuColorPool,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shade_uniforms_and_brush"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: brush_overlay.data_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: brush_overlay.map_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: brush_overlay.uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: color_pool.color_data_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: color_pool.companion_map_buffer.as_entire_binding(),
+                },
+            ],
+        })
+    }
+
+    /// Rebuild group 3 bind group after brush overlay or color pool buffers change.
+    ///
+    /// Call this after `BrushOverlay::update()` since it recreates data/map buffers,
+    /// or after the color pool buffers are recreated.
+    pub fn rebuild_group3(
+        &mut self,
+        device: &wgpu::Device,
+        brush_overlay: &BrushOverlay,
+        color_pool: &GpuColorPool,
+    ) {
+        self.uniform_bind_group = Self::build_group3_bind_group(
+            device, &self.uniform_bind_group_layout, &self.uniform_buffer,
+            brush_overlay, color_pool,
+        );
     }
 
     /// Update shade uniforms.

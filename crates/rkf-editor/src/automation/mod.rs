@@ -80,6 +80,8 @@ pub struct SharedState {
     /// Brush preview position for wireframe sphere rendering.
     /// Set by engine thread after processing brush hit, read by wireframe builder.
     pub brush_preview_pos: Option<Vec3>,
+    /// Object ID that the brush is hovering over (for surface-conforming cursor).
+    pub brush_preview_object_id: Option<u32>,
     /// Ring buffer of recent log entries for MCP `read_log` tool.
     pub log_entries: VecDeque<LogEntry>,
     /// Engine start time for log timestamps.
@@ -159,6 +161,7 @@ impl SharedState {
             pending_brush_hit: None,
             brush_hit_result: None,
             brush_preview_pos: None,
+            brush_preview_object_id: None,
             log_entries: VecDeque::with_capacity(MAX_LOG_ENTRIES),
             start_time: Instant::now(),
             pending_voxel_slice: None,

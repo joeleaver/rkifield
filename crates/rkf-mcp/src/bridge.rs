@@ -341,6 +341,40 @@ impl AutomationApi for BridgeAutomationApi {
                     .unwrap_or("ok")
                     .to_string())
             }
+            ["voxelize", id_str] => {
+                let object_id: u64 = id_str.parse().map_err(|_| {
+                    AutomationError::InvalidParameter(format!("invalid object id: {id_str}"))
+                })?;
+                let result =
+                    self.call_tool("voxelize", serde_json::json!({"object_id": object_id}))?;
+                Ok(result["message"]
+                    .as_str()
+                    .unwrap_or("ok")
+                    .to_string())
+            }
+            ["save"] => {
+                let result = self.call_tool("scene_save", serde_json::json!({}))?;
+                Ok(result["message"]
+                    .as_str()
+                    .unwrap_or("ok")
+                    .to_string())
+            }
+            ["save", path] => {
+                let result =
+                    self.call_tool("scene_save", serde_json::json!({"path": path}))?;
+                Ok(result["message"]
+                    .as_str()
+                    .unwrap_or("ok")
+                    .to_string())
+            }
+            ["open", path] => {
+                let result =
+                    self.call_tool("scene_open", serde_json::json!({"path": path}))?;
+                Ok(result["message"]
+                    .as_str()
+                    .unwrap_or("ok")
+                    .to_string())
+            }
             _ => Err(AutomationError::InvalidParameter(format!(
                 "unknown command: {command}"
             ))),

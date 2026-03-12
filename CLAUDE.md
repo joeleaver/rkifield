@@ -9,7 +9,7 @@ This is a novel engine — not a wrapper around an existing renderer. Many subsy
 ## Critical Rules
 
 1. **No meshes, ever.** Every geometric primitive is an SDF stored in voxel bricks. If you're tempted to add a mesh path, you're solving the wrong problem.
-2. **No textures on surfaces.** Materials are volumetric — PBR properties come from a global material table indexed by `material_id` (u8, 256 max). Per-voxel RGBA color is stored in `SurfaceVoxel.color`, not UV-mapped textures.
+2. **No textures on surfaces.** Materials are volumetric — PBR properties come from a global material table indexed by `material_id` (6-bit, 64 max). Per-voxel RGB color is stored in `SurfaceVoxel.color`, not UV-mapped textures.
 3. **Non-uniform scale uses conservative correction.** Per-axis `Vec3` scale is supported. SDF distances are multiplied by `min(sx, sy, sz)` to keep ray marching safe (never overshoots). For voxelized objects, the editor offers a "Re-voxelize" button that resamples the brick volume at the current stretched dimensions and resets scale to `(1,1,1)`, eliminating the extra march-step overhead.
 4. **All rendering is compute shaders.** No rasterization pipeline except editor gizmo wireframes.
 5. **WorldPosition everywhere.** Never use raw `Vec3` for world-space positions. Always `WorldPosition { chunk: IVec3, local: Vec3 }` to avoid float precision loss. GPU receives camera-relative f32 only.
@@ -87,17 +87,21 @@ BrickMap { dims: UVec3, entries: Vec<u32> }  // EMPTY_SLOT = u32::MAX
 // Geometry-first data model (source of truth):
 // BrickGeometry { occupancy: [u64; 8], surface_voxels: Vec<SurfaceVoxel> }
 //   occupancy: 512-bit bitmask — bit N = voxel N is solid
-//   SurfaceVoxel { index: u16, color: [u8; 4], material_id: u8, _reserved: u8 }
+//   SurfaceVoxel { index_and_flags: u16, blend_weight: u8, material_id: u8, secondary_material_id: u8, _reserved: u8 }  // 6 bytes
+//     index_and_flags: bits 0-8 = voxel index (0-511), bits 9-15 = reserved
 // SdfCache { distances: [u16; 512] }  // f16 distances, DERIVED from geometry
+// ColorBrick { data: [ColorVoxel; 512] }  // 2KB companion brick for per-voxel paint
+//   ColorVoxel { packed: u32 }  // R|G|B|intensity, 4 bytes. intensity=0 means no paint.
+//   Companion map: brick_pool_slot → color_brick_index (EMPTY_SLOT = no color)
 
 // GPU format (bridge pattern — Brick::from_geometry converts geometry→GPU):
 // VoxelSample { word0: u32, word1: u32 }  // 8 bytes
-//   word0: lower 16 = f16 distance (from SdfCache), bits 16-23 = u8 material_id
-//   word1: RGBA8 per-voxel color (from SurfaceVoxel.color)
+//   word0: bits 0-15 = f16 distance, bits 16-21 = material_id (6), bits 22-27 = secondary_material_id (6), bits 28-31 = reserved
+//   word1: bytes 0-2 reserved | u8 blend_weight (byte 3, 0=primary only, 255=secondary only)
 // Brick: 8×8×8 = 512 VoxelSamples = 4KB (GPU upload format)
 
 // Material: 96 bytes — PBR + SSS + procedural noise
-// Max 256 materials (u8 index), stored in GPU storage buffer
+// Max 64 materials (6-bit index), stored in GPU storage buffer
 ```
 
 ## Render Pipeline (all compute)
@@ -251,7 +255,8 @@ MCP server is configured in `.mcp.json` at the project root:
 
 | Format | Extension | Purpose |
 |--------|-----------|---------|
-| RKIField Asset v2/v3 | `.rkf` | Per-object multi-LOD voxel data, LZ4 compressed; v3 = geometry-first (occupancy + surface voxels + optional SDF cache) |
+| RKIField Asset v3 (current) | `.rkf` | Per-object multi-LOD geometry-first data: occupancy bitmask + surface voxels (material blending) + optional SDF cache, LZ4 compressed. See `asset_file_v3.rs`. |
+| RKIField Asset v2 (DEPRECATED) | `.rkf` | Legacy GPU-format VoxelSample storage. No secondary material or blend weight. Loader still supported for backwards compatibility. See `asset_file.rs`. |
 | Scene v2 | `.rkscene` | RON-serialized scene (object hierarchy, cameras, lights, environment) |
 | Project | `.rkproject` | RON-serialized project descriptor (scene list, asset paths, quality) |
 | Environment | `.rkenv` | RON-serialized environment profile (sky, fog, ambient, volumetrics) |

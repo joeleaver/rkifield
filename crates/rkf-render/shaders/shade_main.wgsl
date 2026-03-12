@@ -47,9 +47,9 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
     var normal = normalize(normal_data.xyz);
 
     let packed_mat = textureLoad(gbuf_material, coord, 0).r;
-    let material_id = packed_mat & 0xFFu;
-    let secondary_id = (packed_mat >> 8u) & 0xFFu;
-    let blend_weight_u8 = (packed_mat >> 16u) & 0xFFu;
+    let material_id = packed_mat & 0x3Fu;
+    let secondary_id = (packed_mat >> 6u) & 0x3Fu;
+    let blend_weight_u8 = (packed_mat >> 12u) & 0xFFu;
     let object_id_bits = (packed_mat >> 24u) & 0xFFu;
 
     // Resolve primary material from table.
@@ -62,18 +62,15 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
         resolved = blend_resolved_materials(resolved, secondary, blend_weight);
     }
 
-    // Per-voxel color tint — still requires brick pool re-sample (RGB data not in G-buffer).
+    // Per-voxel paint color from companion pool — intensity acts as paint alpha.
     if object_id_bits > 0u {
         for (var oi = 0u; oi < v2_scene.num_objects; oi = oi + 1u) {
             let obj = objects[oi];
             if obj.object_id == object_id_bits && obj.sdf_type == SDF_TYPE_VOXELIZED {
                 let local_pos = (obj.inverse_world * vec4<f32>(world_pos, 1.0)).xyz;
-                let voxel_color = sample_voxelized_color(local_pos, obj);
-                // Only apply color tint if RGB channels have actual color data.
-                // byte3 of word1 is blend_weight (not alpha), so check RGB avg instead.
-                let color_intensity = (voxel_color.r + voxel_color.g + voxel_color.b) / 3.0;
-                if color_intensity < 0.99 {
-                    resolved.albedo = resolved.albedo * voxel_color.rgb;
+                let paint = sample_voxelized_color(local_pos, obj);
+                if paint.a > 0.0 {
+                    resolved.albedo = mix(resolved.albedo, paint.rgb, paint.a);
                 }
                 break;
             }
@@ -252,6 +249,47 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
         }
         default: {
             // Normal shading (already computed)
+        }
+    }
+
+    // Brush overlay cursor ring — Euclidean distance from brush center in local space.
+    // The G-buffer only contains surface pixels, so the ring naturally clips at edges.
+    if brush_overlay.brush_active != 0u && object_id_bits > 0u {
+        for (var oi_b = 0u; oi_b < v2_scene.num_objects; oi_b = oi_b + 1u) {
+            let obj_b = objects[oi_b];
+            if obj_b.object_id == brush_overlay.brush_object_id && obj_b.sdf_type == SDF_TYPE_VOXELIZED {
+                let local_pos_b = (obj_b.inverse_world * vec4<f32>(world_pos, 1.0)).xyz;
+                let diff = local_pos_b - brush_overlay.brush_center_local.xyz;
+                // Scale-aware distance (account for non-uniform object scale).
+                let scale = vec3<f32>(obj_b.accumulated_scale_x, obj_b.accumulated_scale_y, obj_b.accumulated_scale_z);
+                let dist = length(diff * scale);
+
+                let radius = brush_overlay.brush_radius;
+                let falloff_frac = brush_overlay.brush_falloff;
+
+                // Only draw within a reasonable range of the brush.
+                if dist < radius * 1.5 {
+                    // Outer ring: at brush_radius
+                    let ring_width = radius * 0.04;
+                    let outer_t = abs(dist - radius) / ring_width;
+                    let outer_ring = 1.0 - smoothstep(0.0, 1.0, outer_t);
+
+                    // Inner ring: at core radius (falloff boundary)
+                    var inner_ring = 0.0;
+                    if falloff_frac > 0.01 {
+                        let core_radius = radius * (1.0 - falloff_frac);
+                        let inner_t = abs(dist - core_radius) / ring_width;
+                        inner_ring = (1.0 - smoothstep(0.0, 1.0, inner_t)) * 0.4;
+                    }
+
+                    let ring_alpha = max(outer_ring, inner_ring);
+                    if ring_alpha > 0.01 {
+                        let ring_col = brush_overlay.brush_color.rgb;
+                        color = mix(color, ring_col, ring_alpha * brush_overlay.brush_color.a);
+                    }
+                }
+                break;
+            }
         }
     }
 

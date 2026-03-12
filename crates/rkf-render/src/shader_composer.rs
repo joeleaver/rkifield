@@ -62,7 +62,11 @@ pub struct ShaderComposer {
 impl ShaderComposer {
     /// Create a new composer with the built-in PBR shader.
     pub fn new() -> Self {
-        let common = include_str!("../shaders/shade_common.wgsl").to_string();
+        let common = format!(
+            "{}\n{}",
+            include_str!("../shaders/shade_common.wgsl"),
+            include_str!("../shaders/shade_common_shading.wgsl"),
+        );
         let main_template = include_str!("../shaders/shade_main.wgsl").to_string();
         let pbr_source = include_str!("../shaders/shade_pbr.wgsl").to_string();
 

@@ -96,8 +96,10 @@ Artist override via CLI flags (`--tier`, `--tier-face`). Multi-tier per asset su
 
 ### Decision: `.rkf` Binary File Format
 
+> **⚠ DEPRECATED — v1 format.** This layout was never implemented. The engine uses `.rkf` v3 (geometry-first) as the current format and v2 (VoxelSample-based) as a legacy fallback. See `crates/rkf-core/src/asset_file_v3.rs` for the current format and `crates/rkf-core/src/asset_file.rs` for the v2 format. The v1 spec below is retained for historical reference only.
+
 ```
-RKF File Layout:
+RKF File Layout (v1 — NEVER IMPLEMENTED):
 
   Header (64 bytes):
     magic: u32 ("RKF\0"), version: u32, flags: u32

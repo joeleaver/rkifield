@@ -20,6 +20,8 @@ pub mod camera;
 
 /// Blit pass — fullscreen copy to swapchain.
 pub mod blit;
+/// GPU brush overlay for cursor visualization on object surfaces.
+pub mod brush_overlay;
 /// G-buffer textures for deferred shading.
 pub mod gbuffer;
 /// GPU material table for PBR shading.
@@ -118,6 +120,7 @@ pub use gpu_brick_maps::GpuBrickMaps;
 pub use gpu_bvh::{GpuBvh, GpuBvhNode};
 pub use gpu_object::GpuObject;
 pub use gpu_scene::{GpuSceneV2, SceneUniforms};
+pub use brush_overlay::{BrushOverlay, BrushOverlayUniforms};
 pub use blit::BlitPass;
 pub use ray_march::RayMarchPass;
 pub use debug_view::{DebugViewPass, DebugMode, DebugUniforms, DEBUG_VIEW_FORMAT};

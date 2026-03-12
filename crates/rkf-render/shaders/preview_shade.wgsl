@@ -183,7 +183,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let normal_data = textureLoad(gbuf_normal, coord, 0);
     let N = normalize(normal_data.xyz);
     let packed_mat = textureLoad(gbuf_material, coord, 0).r;
-    let material_id = packed_mat & 0xFFu;
+    let material_id = packed_mat & 0x3Fu;
 
     // Material lookup
     let mat = materials[material_id];

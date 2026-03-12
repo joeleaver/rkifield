@@ -99,6 +99,10 @@ pub struct InputState {
     pub mouse_delta: glam::Vec2,
     /// Mouse button state: \[left, right, middle\].
     pub mouse_buttons: [bool; 3],
+    /// True when left mouse was pressed on the viewport surface (not a UI widget).
+    /// Cleared on mouse up. Used to prevent stuck button state from triggering
+    /// brush operations when the mouse was released on a UI element.
+    pub viewport_left_down: bool,
     pub scroll_delta: f32,
     pub keys_pressed: HashSet<KeyCode>,
     /// Keys pressed this frame (cleared each frame by reset_frame_deltas).
@@ -120,6 +124,7 @@ impl InputState {
             mouse_pos: glam::Vec2::ZERO,
             mouse_delta: glam::Vec2::ZERO,
             mouse_buttons: [false; 3],
+            viewport_left_down: false,
             scroll_delta: 0.0,
             keys_pressed: HashSet::new(),
             keys_just_pressed: HashSet::new(),

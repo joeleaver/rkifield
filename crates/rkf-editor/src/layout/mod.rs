@@ -21,8 +21,6 @@ pub enum PanelId {
     SceneTree,
     ObjectProperties,
     AssetProperties,
-    SculptSettings,
-    PaintSettings,
     Materials,
     Shaders,
     Console,
@@ -48,8 +46,6 @@ impl PanelId {
         Self::SceneTree,
         Self::ObjectProperties,
         Self::AssetProperties,
-        Self::SculptSettings,
-        Self::PaintSettings,
         Self::Materials,
         Self::Shaders,
         Self::Console,
@@ -73,8 +69,6 @@ impl PanelId {
             Self::SceneTree => "Scene Tree",
             Self::ObjectProperties => "Object Properties",
             Self::AssetProperties => "Asset Properties",
-            Self::SculptSettings => "Sculpt",
-            Self::PaintSettings => "Paint",
             Self::Materials => "Materials",
             Self::Shaders => "Shaders",
             Self::Console => "Console",
@@ -89,9 +83,7 @@ impl PanelId {
     pub fn default_container(self) -> ContainerKind {
         match self {
             Self::SceneTree => ContainerKind::Left,
-            Self::ObjectProperties | Self::AssetProperties | Self::SculptSettings | Self::PaintSettings => {
-                ContainerKind::Right
-            }
+            Self::ObjectProperties | Self::AssetProperties => ContainerKind::Right,
             Self::Materials | Self::Shaders | Self::Console | Self::DebugOverlay => ContainerKind::Bottom,
             Self::SceneView | Self::GameView | Self::AnimationEditor => ContainerKind::Center,
         }
@@ -286,19 +278,13 @@ impl Default for LayoutConfig {
 /// ```text
 /// Left: [SceneTree]
 /// Center: [SceneView]
-/// Right: zone0=[ObjectProperties, AssetProperties], zone1=[SculptSettings, PaintSettings]
+/// Right: [ObjectProperties, AssetProperties]
 /// Bottom: [Materials, Shaders]
 /// ```
 pub fn default_layout() -> LayoutConfig {
     LayoutConfig {
         left: ContainerConfig::single_zone(vec![PanelId::SceneTree]),
-        right: ContainerConfig {
-            zones: vec![
-                ZoneConfig::multi(vec![PanelId::ObjectProperties, PanelId::AssetProperties]),
-                ZoneConfig::multi(vec![PanelId::SculptSettings, PanelId::PaintSettings]),
-            ],
-            collapsed: false,
-        },
+        right: ContainerConfig::single_zone(vec![PanelId::ObjectProperties, PanelId::AssetProperties]),
         bottom: ContainerConfig::single_zone(vec![PanelId::Materials, PanelId::Shaders]),
         center: ContainerConfig::single_zone(vec![PanelId::SceneView]),
         floating: Vec::new(),
@@ -337,7 +323,8 @@ mod tests {
         let layout = default_layout();
         assert_eq!(layout.left.zones.len(), 1);
         assert_eq!(layout.left.zones[0].tabs, vec![PanelId::SceneTree]);
-        assert_eq!(layout.right.zones.len(), 2);
+        assert_eq!(layout.right.zones.len(), 1);
+        assert_eq!(layout.right.zones[0].tabs, vec![PanelId::ObjectProperties, PanelId::AssetProperties]);
         assert_eq!(layout.center.zones.len(), 1);
         assert_eq!(layout.center.zones[0].tabs, vec![PanelId::SceneView]);
         assert_eq!(layout.bottom.zones.len(), 1);
@@ -359,10 +346,6 @@ mod tests {
         assert_eq!(
             layout.find_panel(PanelId::AssetProperties),
             Some((ContainerKind::Right, 0, 1))
-        );
-        assert_eq!(
-            layout.find_panel(PanelId::SculptSettings),
-            Some((ContainerKind::Right, 1, 0))
         );
         assert_eq!(layout.find_panel(PanelId::Console), None);
     }

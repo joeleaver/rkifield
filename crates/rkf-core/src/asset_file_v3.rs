@@ -468,9 +468,9 @@ mod tests {
             }
         }
         geo.rebuild_surface_list();
-        // Paint some voxels
+        // Set material on some voxels
         if let Some(sv) = geo.surface_voxels.first_mut() {
-            sv.color = [200, 100, 50, 255];
+            sv.blend_weight = 255;
             sv.material_id = 3;
         }
 
@@ -511,9 +511,9 @@ mod tests {
         let geo = &lod_data.geometry[0];
         assert_eq!(geo.solid_count(), 256); // half solid (4 * 8 * 8)
         assert!(!geo.surface_voxels.is_empty());
-        // First surface voxel should have our painted color
+        // First surface voxel should have our material assignment
         let sv = geo.surface_voxels.first().unwrap();
-        assert_eq!(sv.color, [200, 100, 50, 255]);
+        assert_eq!(sv.blend_weight, 255);
         assert_eq!(sv.material_id, 3);
     }
 
@@ -612,4 +612,80 @@ mod tests {
         // Brick (0,0,0) should be allocated (local index 0)
         assert_eq!(data.brick_map.get(0, 0, 0), Some(0));
     }
+
+    #[test]
+    fn v3_brick_map_roundtrip_multi_brick() {
+        // Test with multiple bricks in different positions to catch index mapping bugs.
+        let dims = UVec3::new(3, 3, 3);
+        let mut brick_map = BrickMap::new(dims);
+        // Place bricks at specific coordinates with non-sequential slot IDs
+        brick_map.set(0, 0, 0, 42);
+        brick_map.set(2, 1, 0, 99);
+        brick_map.set(1, 2, 2, 7);
+        brick_map.set(1, 1, 1, INTERIOR_SLOT);
+
+        // Create 3 unique geometry bricks (one per non-interior, non-empty slot)
+        let mut geos = Vec::new();
+        for i in 0..3u8 {
+            let mut geo = BrickGeometry::new();
+            // Each brick has different solid pattern for verification
+            for z in 0..((i + 1) * 2) {
+                for y in 0..8 {
+                    for x in 0..8 {
+                        geo.set_solid(x, y, z, true);
+                    }
+                }
+            }
+            geo.rebuild_surface_list();
+            geos.push(geo);
+        }
+
+        let lod = SaveLodV3 {
+            voxel_size: 0.05,
+            brick_map,
+            geometry: geos.clone(),
+            sdf_cache: None,
+        };
+
+        let mut buf = Cursor::new(Vec::new());
+        save_object_v3(&mut buf, &unit_aabb(), None, &[], &[lod]).unwrap();
+
+        let mut cursor = Cursor::new(buf.into_inner());
+        let header = load_object_header_v3(&mut cursor).unwrap();
+        let data = load_object_lod_v3(&mut cursor, &header, 0).unwrap();
+
+        assert_eq!(data.brick_map.dims, dims);
+        assert_eq!(data.geometry.len(), 3);
+
+        // Verify brick map: non-empty non-interior entries should be local indices 0,1,2
+        // The order depends on iteration through entries (flat order)
+        // (0,0,0)=42 is first encountered → local 0
+        // (2,1,0)=99 is second → local 1
+        // (1,2,2)=7 is third → local 2
+        assert_eq!(data.brick_map.get(0, 0, 0), Some(0));
+        assert_eq!(data.brick_map.get(2, 1, 0), Some(1));
+        assert_eq!(data.brick_map.get(1, 2, 2), Some(2));
+        assert_eq!(data.brick_map.get(1, 1, 1), Some(INTERIOR_SLOT));
+
+        // Empty slots should be EMPTY_SLOT
+        assert_eq!(data.brick_map.get(0, 0, 1), Some(EMPTY_SLOT));
+
+        // Verify geometry data matches original ORDER
+        // local 0 = slot 42 = geos[?] ... but which original geometry goes with slot 42?
+        // In the save, geometry is [geos[0], geos[1], geos[2]] and
+        // pack_geometry iterates entries, encounters slot 42 first (gets local 0),
+        // then 99 (local 1), then 7 (local 2).
+        // The geometry array is written as-is: geos[0], geos[1], geos[2].
+        // So loaded geometry[0] = original geos[0], geometry[1] = geos[1], etc.
+        assert_eq!(data.geometry[0].solid_count(), geos[0].solid_count());
+        assert_eq!(data.geometry[1].solid_count(), geos[1].solid_count());
+        assert_eq!(data.geometry[2].solid_count(), geos[2].solid_count());
+
+        // Cross-check: local index 0 (at (0,0,0)) should map to geometry[0]
+        // which has 2*8*8 = 128 solid voxels
+        assert_eq!(data.geometry[0].solid_count(), 128);
+        assert_eq!(data.geometry[1].solid_count(), 256);
+        assert_eq!(data.geometry[2].solid_count(), 384);
+    }
+
 }

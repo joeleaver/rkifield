@@ -97,7 +97,9 @@ mod tests {
             for y in 0..BRICK_DIM {
                 for x in 0..BRICK_DIM {
                     let dist = x as f32 + y as f32 * 0.1 + z as f32 * 0.01;
-                    brick.set(x, y, z, VoxelSample::new(dist, (x + y * 8 + z * 64) as u16, 0, 0, 0));
+                    // Material id is 6-bit (0-63), VoxelSample::new masks to 0x3F.
+                    let mat = ((x + y * 8 + z * 64) % 256) as u16;
+                    brick.set(x, y, z, VoxelSample::new(dist, mat, [255, 255, 255, 255]));
                 }
             }
         }
@@ -110,7 +112,7 @@ mod tests {
         for z in 0..BRICK_DIM {
             for y in 0..BRICK_DIM {
                 for x in 0..BRICK_DIM {
-                    brick.set(x, y, z, VoxelSample::new(dist, mat, 0, 0, 0));
+                    brick.set(x, y, z, VoxelSample::new(dist, mat, [255, 255, 255, 255]));
                 }
             }
         }
@@ -177,7 +179,7 @@ mod tests {
             for y in 0..BRICK_DIM {
                 for x in 0..BRICK_DIM {
                     let dist = if x < 4 { 0.0 } else { 2.0 };
-                    brick.set(x, y, z, VoxelSample::new(dist, 1, 0, 0, 0));
+                    brick.set(x, y, z, VoxelSample::new(dist, 1, [255, 255, 255, 255]));
                 }
             }
         }
@@ -201,7 +203,7 @@ mod tests {
                 for x in 0..BRICK_DIM {
                     // Linearly increasing distance along x
                     let dist = x as f32;
-                    brick.set(x, y, z, VoxelSample::new(dist, 1, 0, 0, 0));
+                    brick.set(x, y, z, VoxelSample::new(dist, 1, [255, 255, 255, 255]));
                 }
             }
         }
@@ -239,7 +241,9 @@ mod tests {
                 for x in 0..BRICK_DIM {
                     let pos = voxel_center(x, y, z);
                     let mat = sample_brick_nearest_material(&brick, pos);
-                    let expected = (x + y * 8 + z * 64) as u16;
+                    // material_id is 6-bit (0-63), gradient_brick uses (flat_index % 256)
+                    // which gets masked to 6 bits by VoxelSample::new
+                    let expected = (((x + y * 8 + z * 64) % 256) & 0x3F) as u16;
                     assert_eq!(
                         mat, expected,
                         "material mismatch at ({x},{y},{z}): got {mat}, expected {expected}"
@@ -252,19 +256,19 @@ mod tests {
     #[test]
     fn nearest_material_snaps_to_closest() {
         let mut brick = Brick::default();
-        // Set voxel (3,3,3) to material 100, neighbors to material 200
+        // Set voxel (3,3,3) to material 10, neighbors to material 20
         for z in 0..BRICK_DIM {
             for y in 0..BRICK_DIM {
                 for x in 0..BRICK_DIM {
-                    let mat = if x == 3 && y == 3 && z == 3 { 100 } else { 200 };
-                    brick.set(x, y, z, VoxelSample::new(0.0, mat, 0, 0, 0));
+                    let mat = if x == 3 && y == 3 && z == 3 { 10 } else { 20 };
+                    brick.set(x, y, z, VoxelSample::new(0.0, mat, [255, 255, 255, 255]));
                 }
             }
         }
 
         // At the center of voxel (3,3,3)
         let pos = voxel_center(3, 3, 3);
-        assert_eq!(sample_brick_nearest_material(&brick, pos), 100);
+        assert_eq!(sample_brick_nearest_material(&brick, pos), 10);
 
         // Slightly offset — should still snap to (3,3,3) if closer
         let slightly_off = Vec3::new(
@@ -272,7 +276,7 @@ mod tests {
             (3.0 + 0.5) / BRICK_DIM as f32,
             (3.0 + 0.5) / BRICK_DIM as f32,
         );
-        assert_eq!(sample_brick_nearest_material(&brick, slightly_off), 100);
+        assert_eq!(sample_brick_nearest_material(&brick, slightly_off), 10);
     }
 
     #[test]

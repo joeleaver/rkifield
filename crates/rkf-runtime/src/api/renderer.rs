@@ -216,6 +216,8 @@ pub struct Renderer {
     ray_march: RayMarchPass,
     debug_view: DebugViewPass,
     shading_pass: ShadingPass,
+    brush_overlay: rkf_render::BrushOverlay,
+    gpu_color_pool: rkf_render::GpuColorPool,
     material_table: MaterialTable,
 
     // Global illumination
@@ -373,6 +375,11 @@ impl Renderer {
         );
         let radiance_mip = RadianceMipPass::new(&ctx.device, &radiance_volume);
 
+        // Brush overlay (empty placeholder — runtime doesn't use sculpting)
+        let brush_overlay = rkf_render::BrushOverlay::empty(&ctx.device);
+        // Color pool (empty placeholder — runtime doesn't use painting)
+        let gpu_color_pool = rkf_render::GpuColorPool::empty(&ctx.device);
+
         // Shading
         let shading_pass = ShadingPass::new(
             &ctx.device,
@@ -385,6 +392,8 @@ impl Renderer {
             iw,
             ih,
             None,
+            &brush_overlay,
+            &gpu_color_pool,
         );
 
         // Volumetrics
@@ -529,6 +538,8 @@ impl Renderer {
             ray_march,
             debug_view,
             shading_pass,
+            brush_overlay,
+            gpu_color_pool,
             material_table,
             radiance_volume,
             radiance_inject,
@@ -1484,6 +1495,8 @@ impl Renderer {
         self.gbuffer = GBuffer::new(device, width, height);
         self.tile_cull = TileObjectCullPass::new(device, &self.gpu_scene, width, height);
         self.debug_view = DebugViewPass::new(device, &self.gbuffer);
+        self.brush_overlay = rkf_render::BrushOverlay::empty(device);
+        self.gpu_color_pool = rkf_render::GpuColorPool::empty(device);
         self.shading_pass = ShadingPass::new(
             device,
             &self.gbuffer,
@@ -1495,6 +1508,8 @@ impl Renderer {
             width,
             height,
             None,
+            &self.brush_overlay,
+            &self.gpu_color_pool,
         );
 
         // Volumetric pipeline

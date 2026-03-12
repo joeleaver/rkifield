@@ -1,4 +1,9 @@
-//! .rkf v2 file format — serialization and deserialization for voxelized objects.
+//! .rkf v2 file format — DEPRECATED, retained for backwards-compatible loading.
+//!
+//! **Use `asset_file_v3` for all new saves.** The v2 format stores raw VoxelSample
+//! data (GPU format) and lacks support for secondary materials and blend weights.
+//! The v3 format stores geometry-first data (occupancy + surface voxels) and is
+//! the current/authoritative format.
 //!
 //! The .rkf v2 format stores a single voxelized object with multiple LOD levels.
 //! Each LOD level contains a brick map and the corresponding voxel brick data,
@@ -595,7 +600,7 @@ mod tests {
 
     /// Create a VoxelSample with a given f32 distance and material id.
     fn vs(dist: f32, mat: u16) -> VoxelSample {
-        VoxelSample::new(dist, mat, 0, 0, 0)
+        VoxelSample::new(dist, mat, [255, 255, 255, 255])
     }
 
     /// Build a 2×2×2 brick map with two allocated bricks (slots 10 and 20)

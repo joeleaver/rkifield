@@ -21,19 +21,26 @@ pub struct BrickGeometry {
     pub surface_voxels: Vec<SurfaceVoxel>,
 }
 
-/// Per-surface-voxel data: position within brick, RGBA color, material.
+/// Per-surface-voxel data: position within brick, material, blend weight.
 ///
-/// 8 bytes, naturally aligned. Only stored for voxels on the solid/empty boundary.
+/// 6 bytes. Only stored for voxels on the solid/empty boundary.
+/// Per-voxel color lives in a separate `ColorBrick` companion pool.
+///
+/// The `index_and_flags` field packs the voxel index (bits 0–8, 0–511) with
+/// per-voxel flags (bits 9–15). All flag bits are currently reserved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(C)]
 pub struct SurfaceVoxel {
-    /// Index within the 8×8×8 brick (0–511). Same layout as [`voxel_index`].
-    pub index: u16,
-    /// RGBA diffuse color. Alpha available for custom shader control.
-    pub color: [u8; 4],
+    /// Bits 0–8: index within the 8×8×8 brick (0–511).
+    /// Bits 9–15: reserved (must be zero).
+    pub index_and_flags: u16,
+    /// Material blend weight (0 = primary only, 255 = fully secondary material).
+    pub blend_weight: u8,
     /// Material table index for PBR properties (roughness, metallic, etc.).
     pub material_id: u8,
-    /// Reserved for future use.
+    /// Secondary material for blending at material boundaries.
+    pub secondary_material_id: u8,
+    /// Reserved for future use (must be zero).
     pub _reserved: u8,
 }
 
@@ -57,33 +64,50 @@ pub fn index_to_xyz(index: u16) -> (u8, u8, u8) {
 }
 
 impl SurfaceVoxel {
-    /// Create a new surface voxel.
-    pub fn new(index: u16, color: [u8; 4], material_id: u8) -> Self {
+    /// Create a new surface voxel with zero blend weight.
+    pub fn new(index: u16, material_id: u8) -> Self {
+        debug_assert!(index < 512, "voxel index out of range: {index}");
         Self {
-            index,
-            color,
+            index_and_flags: index,
+            blend_weight: 0,
             material_id,
+            secondary_material_id: 0,
             _reserved: 0,
         }
     }
 
-    /// Byte serialization (8 bytes).
-    pub fn to_bytes(&self) -> [u8; 8] {
-        let idx = self.index.to_le_bytes();
+    /// Get the voxel index (0–511) within the brick.
+    #[inline]
+    pub fn index(&self) -> u16 {
+        self.index_and_flags & 0x1FF
+    }
+
+    /// Set the voxel index (0–511).
+    #[inline]
+    pub fn set_index(&mut self, index: u16) {
+        debug_assert!(index < 512, "voxel index out of range: {index}");
+        self.index_and_flags = (self.index_and_flags & !0x1FF) | (index & 0x1FF);
+    }
+
+    /// Byte serialization (6 bytes).
+    /// `[index_lo, index_hi, blend_weight, material_id, secondary_material_id, reserved]`
+    pub fn to_bytes(&self) -> [u8; 6] {
+        let idx = self.index_and_flags.to_le_bytes();
         [
             idx[0], idx[1],
-            self.color[0], self.color[1], self.color[2], self.color[3],
-            self.material_id, self._reserved,
+            self.blend_weight, self.material_id, self.secondary_material_id,
+            self._reserved,
         ]
     }
 
-    /// Deserialize from 8 bytes.
-    pub fn from_bytes(bytes: &[u8; 8]) -> Self {
+    /// Deserialize from 6 bytes.
+    pub fn from_bytes(bytes: &[u8; 6]) -> Self {
         Self {
-            index: u16::from_le_bytes([bytes[0], bytes[1]]),
-            color: [bytes[2], bytes[3], bytes[4], bytes[5]],
-            material_id: bytes[6],
-            _reserved: bytes[7],
+            index_and_flags: u16::from_le_bytes([bytes[0], bytes[1]]),
+            blend_weight: bytes[2],
+            material_id: bytes[3],
+            secondary_material_id: bytes[4],
+            _reserved: bytes[5],
         }
     }
 }
@@ -207,7 +231,6 @@ impl BrickGeometry {
                     if self.is_surface_voxel(x, y, z) {
                         self.surface_voxels.push(SurfaceVoxel::new(
                             voxel_index(x, y, z),
-                            [255, 255, 255, 255],
                             0,
                         ));
                     }
@@ -221,7 +244,7 @@ impl BrickGeometry {
     pub fn rebuild_surface_list_preserving(&mut self) {
         // Build a lookup from old surface voxels
         let old: std::collections::HashMap<u16, SurfaceVoxel> =
-            self.surface_voxels.iter().map(|sv| (sv.index, *sv)).collect();
+            self.surface_voxels.iter().map(|sv| (sv.index(), *sv)).collect();
 
         self.surface_voxels.clear();
         for z in 0..8u8 {
@@ -234,7 +257,6 @@ impl BrickGeometry {
                         } else {
                             self.surface_voxels.push(SurfaceVoxel::new(
                                 idx,
-                                [255, 255, 255, 255],
                                 0,
                             ));
                         }
@@ -246,20 +268,20 @@ impl BrickGeometry {
 
     /// Look up surface voxel data at the given index, if it exists.
     pub fn get_surface_voxel(&self, index: u16) -> Option<&SurfaceVoxel> {
-        self.surface_voxels.iter().find(|sv| sv.index == index)
+        self.surface_voxels.iter().find(|sv| sv.index() == index)
     }
 
     /// Look up mutable surface voxel data at the given index.
     pub fn get_surface_voxel_mut(&mut self, index: u16) -> Option<&mut SurfaceVoxel> {
-        self.surface_voxels.iter_mut().find(|sv| sv.index == index)
+        self.surface_voxels.iter_mut().find(|sv| sv.index() == index)
     }
 
     // ── Serialization ──────────────────────────────────────────────────
 
-    /// Serialize to bytes: 64 bytes occupancy + 2 bytes surface_count + 8 bytes per surface voxel.
+    /// Serialize to bytes: 64 bytes occupancy + 2 bytes surface_count + 6 bytes per surface voxel.
     pub fn to_bytes(&self) -> Vec<u8> {
         let surface_count = self.surface_voxels.len() as u16;
-        let mut buf = Vec::with_capacity(64 + 2 + self.surface_voxels.len() * 8);
+        let mut buf = Vec::with_capacity(64 + 2 + self.surface_voxels.len() * 6);
 
         // Occupancy: 8 × u64 = 64 bytes
         for word in &self.occupancy {
@@ -290,7 +312,7 @@ impl BrickGeometry {
         }
 
         let surface_count = u16::from_le_bytes(data[64..66].try_into().ok()?) as usize;
-        let total_size = 66 + surface_count * 8;
+        let total_size = 66 + surface_count * 6;
 
         if data.len() < total_size {
             return None;
@@ -298,8 +320,8 @@ impl BrickGeometry {
 
         let mut surface_voxels = Vec::with_capacity(surface_count);
         for i in 0..surface_count {
-            let offset = 66 + i * 8;
-            let bytes: [u8; 8] = data[offset..offset + 8].try_into().ok()?;
+            let offset = 66 + i * 6;
+            let bytes: [u8; 6] = data[offset..offset + 6].try_into().ok()?;
             surface_voxels.push(SurfaceVoxel::from_bytes(&bytes));
         }
 
@@ -392,7 +414,7 @@ impl<'a> NeighborContext<'a> {
     pub fn rebuild_surface_list(&self) -> Vec<SurfaceVoxel> {
         // Preserve existing surface voxel data where possible
         let old: std::collections::HashMap<u16, SurfaceVoxel> =
-            self.center.surface_voxels.iter().map(|sv| (sv.index, *sv)).collect();
+            self.center.surface_voxels.iter().map(|sv| (sv.index(), *sv)).collect();
 
         let mut result = Vec::new();
         for z in 0..8u8 {
@@ -403,7 +425,7 @@ impl<'a> NeighborContext<'a> {
                         if let Some(old_sv) = old.get(&idx) {
                             result.push(*old_sv);
                         } else {
-                            result.push(SurfaceVoxel::new(idx, [255, 255, 255, 255], 0));
+                            result.push(SurfaceVoxel::new(idx, 0));
                         }
                     }
                 }
@@ -421,8 +443,8 @@ mod tests {
     use std::mem;
 
     #[test]
-    fn surface_voxel_size_is_8_bytes() {
-        assert_eq!(mem::size_of::<SurfaceVoxel>(), 8);
+    fn surface_voxel_size_is_6_bytes() {
+        assert_eq!(mem::size_of::<SurfaceVoxel>(), 6);
     }
 
     #[test]
@@ -610,27 +632,28 @@ mod tests {
     }
 
     #[test]
-    fn rebuild_preserving_keeps_old_colors() {
+    fn rebuild_preserving_keeps_old_material() {
         let mut geo = BrickGeometry::new();
         geo.set_solid(4, 4, 4, true);
         geo.rebuild_surface_list();
 
-        // Paint the solid voxel red
+        // Set material on the solid voxel
         let idx = voxel_index(4, 4, 4);
-        geo.get_surface_voxel_mut(idx).unwrap().color = [255, 0, 0, 255];
+        let sv_mut = geo.get_surface_voxel_mut(idx).unwrap();
+        sv_mut.material_id = 5;
 
         // Add another solid voxel and rebuild preserving
         geo.set_solid(4, 4, 5, true);
         geo.rebuild_surface_list_preserving();
 
-        // Old voxel should keep its red color
+        // Old voxel should keep its material
         let sv = geo.get_surface_voxel(idx).unwrap();
-        assert_eq!(sv.color, [255, 0, 0, 255]);
+        assert_eq!(sv.material_id, 5);
 
-        // New voxel should have default white
+        // New voxel should have default material 0
         let new_idx = voxel_index(4, 4, 5);
         let new_sv = geo.get_surface_voxel(new_idx).unwrap();
-        assert_eq!(new_sv.color, [255, 255, 255, 255]);
+        assert_eq!(new_sv.material_id, 0);
     }
 
     // ── Cross-brick neighbor context ──
@@ -721,10 +744,13 @@ mod tests {
 
     #[test]
     fn surface_voxel_bytes_roundtrip() {
-        let sv = SurfaceVoxel::new(42, [255, 128, 64, 200], 7);
+        let mut sv = SurfaceVoxel::new(42, 7);
+        sv.blend_weight = 200;
         let bytes = sv.to_bytes();
         let sv2 = SurfaceVoxel::from_bytes(&bytes);
         assert_eq!(sv, sv2);
+        assert_eq!(sv2.index(), 42);
+        assert_eq!(sv2.blend_weight, 200);
     }
 
     #[test]
@@ -734,10 +760,9 @@ mod tests {
         geo.set_solid(0, 0, 0, true);
         geo.rebuild_surface_list();
 
-        // Paint one surface voxel
         let idx = voxel_index(3, 4, 5);
-        geo.get_surface_voxel_mut(idx).unwrap().color = [100, 200, 50, 255];
-        geo.get_surface_voxel_mut(idx).unwrap().material_id = 3;
+        let sv_mut = geo.get_surface_voxel_mut(idx).unwrap();
+        sv_mut.material_id = 3;
 
         let bytes = geo.to_bytes();
         let (geo2, consumed) = BrickGeometry::from_bytes(&bytes).unwrap();

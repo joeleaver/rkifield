@@ -517,6 +517,50 @@ impl ToolHandler for SculptApplyHandler {
     }
 }
 
+// --- Voxelize / Save / Open tools ---
+
+struct VoxelizeHandler;
+
+impl ToolHandler for VoxelizeHandler {
+    fn call(&self, api: &dyn AutomationApi, params: serde_json::Value) -> Result<ToolResponse, ToolError> {
+        let object_id = params.get("object_id").and_then(|v| v.as_u64())
+            .ok_or_else(|| ToolError::InvalidParams("object_id is required".to_string()))? as u32;
+        match api.execute_command(&format!("voxelize {object_id}")) {
+            Ok(msg) => Ok(serde_json::json!({"status": "ok", "message": msg}).into()),
+            Err(e) => Err(ToolError::EngineError(e.to_string())),
+        }
+    }
+}
+
+struct SceneSaveHandler;
+
+impl ToolHandler for SceneSaveHandler {
+    fn call(&self, api: &dyn AutomationApi, params: serde_json::Value) -> Result<ToolResponse, ToolError> {
+        let cmd = if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
+            format!("save {path}")
+        } else {
+            "save".to_string()
+        };
+        match api.execute_command(&cmd) {
+            Ok(msg) => Ok(serde_json::json!({"status": "ok", "message": msg}).into()),
+            Err(e) => Err(ToolError::EngineError(e.to_string())),
+        }
+    }
+}
+
+struct SceneOpenHandler;
+
+impl ToolHandler for SceneOpenHandler {
+    fn call(&self, api: &dyn AutomationApi, params: serde_json::Value) -> Result<ToolResponse, ToolError> {
+        let path = params.get("path").and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidParams("path is required".to_string()))?;
+        match api.execute_command(&format!("open {path}")) {
+            Ok(msg) => Ok(serde_json::json!({"status": "ok", "message": msg}).into()),
+            Err(e) => Err(ToolError::EngineError(e.to_string())),
+        }
+    }
+}
+
 // --- Object Shape tool ---
 
 struct ObjectShapeHandler;
@@ -1255,6 +1299,77 @@ pub fn register_observation_tools(registry: &mut ToolRegistry) {
         },
         Arc::new(ShaderListHandler),
     );
+
+    // --- Scene management tools ---
+
+    registry.register(
+        ToolDefinition {
+            name: "voxelize".to_string(),
+            description: "Convert an analytical primitive object to voxelized geometry-first form. Object must currently be analytical (sphere, box, etc).".to_string(),
+            category: ToolCategory::Mutation,
+            parameters: vec![
+                ParameterDef {
+                    name: "object_id".to_string(),
+                    description: "Scene object ID (from scene_graph)".to_string(),
+                    param_type: ParamType::Integer,
+                    required: true,
+                    default: None,
+                },
+            ],
+            return_type: ReturnTypeDef {
+                description: "Confirmation of voxelization".to_string(),
+                return_type: ParamType::Object,
+            },
+            mode: ToolMode::Editor,
+        },
+        Arc::new(VoxelizeHandler),
+    );
+
+    registry.register(
+        ToolDefinition {
+            name: "scene_save".to_string(),
+            description: "Save the current scene to disk (.rkscene + .rkf files). If no path given, saves to the last-used path.".to_string(),
+            category: ToolCategory::Mutation,
+            parameters: vec![
+                ParameterDef {
+                    name: "path".to_string(),
+                    description: "Optional path to save the .rkscene file".to_string(),
+                    param_type: ParamType::String,
+                    required: false,
+                    default: None,
+                },
+            ],
+            return_type: ReturnTypeDef {
+                description: "Confirmation of save".to_string(),
+                return_type: ParamType::Object,
+            },
+            mode: ToolMode::Editor,
+        },
+        Arc::new(SceneSaveHandler),
+    );
+
+    registry.register(
+        ToolDefinition {
+            name: "scene_open".to_string(),
+            description: "Open a .rkscene file, replacing the current scene.".to_string(),
+            category: ToolCategory::Mutation,
+            parameters: vec![
+                ParameterDef {
+                    name: "path".to_string(),
+                    description: "Path to the .rkscene file to open".to_string(),
+                    param_type: ParamType::String,
+                    required: true,
+                    default: None,
+                },
+            ],
+            return_type: ReturnTypeDef {
+                description: "Confirmation of scene load".to_string(),
+                return_type: ParamType::Object,
+            },
+            mode: ToolMode::Editor,
+        },
+        Arc::new(SceneOpenHandler),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1953,6 +2068,70 @@ pub fn dispatch_tool_call(
             Ok(list) => Ok(tool_ok_json(serde_json::to_value(list).unwrap())),
             Err(e) => Ok(tool_err_json(&e.to_string())),
         },
+        "object_spawn" => {
+            let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("Object");
+            let primitive_type = match args.get("primitive_type").and_then(|v| v.as_str()) {
+                Some(p) => p,
+                None => return Ok(tool_err_json("primitive_type is required (sphere, box, capsule, etc.)")),
+            };
+            let params: Vec<f32> = args.get("params").and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect())
+                .unwrap_or_default();
+            let position = match args.get("position").and_then(|v| v.as_array()) {
+                Some(arr) if arr.len() >= 3 => [
+                    arr[0].as_f64().unwrap_or(0.0) as f32,
+                    arr[1].as_f64().unwrap_or(0.0) as f32,
+                    arr[2].as_f64().unwrap_or(0.0) as f32,
+                ],
+                _ => [0.0, 0.0, 0.0],
+            };
+            let material_id = args.get("material_id").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+            match api.object_spawn(name, primitive_type, &params, position, material_id) {
+                Ok(id) => Ok(tool_ok_json(serde_json::json!({"status": "ok", "object_id": id}))),
+                Err(e) => Ok(tool_err_json(&e)),
+            }
+        }
+        "object_despawn" => {
+            let object_id = match args.get("object_id").and_then(|v| v.as_u64()) {
+                Some(id) => id as u32,
+                None => return Ok(tool_err_json("object_id is required")),
+            };
+            match api.object_despawn(object_id) {
+                Ok(()) => Ok(tool_ok_json(serde_json::json!({"status": "ok"}))),
+                Err(e) => Ok(tool_err_json(&e)),
+            }
+        }
+        "voxelize" => {
+            let object_id = match args.get("object_id").and_then(|v| v.as_u64()) {
+                Some(id) => id as u32,
+                None => return Ok(tool_err_json("object_id is required")),
+            };
+            match api.execute_command(&format!("voxelize {object_id}")) {
+                Ok(msg) => Ok(tool_ok_json(serde_json::json!({"status": "ok", "message": msg}))),
+                Err(e) => Ok(tool_err_json(&e.to_string())),
+            }
+        }
+        "scene_save" => {
+            let cmd = if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                format!("save {path}")
+            } else {
+                "save".to_string()
+            };
+            match api.execute_command(&cmd) {
+                Ok(msg) => Ok(tool_ok_json(serde_json::json!({"status": "ok", "message": msg}))),
+                Err(e) => Ok(tool_err_json(&e.to_string())),
+            }
+        }
+        "scene_open" => {
+            let path = match args.get("path").and_then(|v| v.as_str()) {
+                Some(p) => p,
+                None => return Ok(tool_err_json("path is required")),
+            };
+            match api.execute_command(&format!("open {path}")) {
+                Ok(msg) => Ok(tool_ok_json(serde_json::json!({"status": "ok", "message": msg}))),
+                Err(e) => Ok(tool_err_json(&e.to_string())),
+            }
+        }
         _ => Err(AutomationError::NotImplemented("unknown tool")),
     }
 }
@@ -1966,7 +2145,7 @@ mod tests {
     fn register_all_observation_tools() {
         let mut registry = ToolRegistry::new();
         register_observation_tools(&mut registry);
-        assert_eq!(registry.len(), 31);
+        assert_eq!(registry.len(), 34);
     }
 
     #[test]
@@ -1983,7 +2162,7 @@ mod tests {
         let mut registry = ToolRegistry::new();
         register_observation_tools(&mut registry);
         let tools = registry.list_tools(ToolMode::Editor);
-        assert_eq!(tools.len(), 31);
+        assert_eq!(tools.len(), 34);
     }
 
     #[test]

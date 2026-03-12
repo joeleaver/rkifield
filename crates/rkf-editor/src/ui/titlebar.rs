@@ -83,7 +83,7 @@ pub fn TitleBar() -> NodeHandle {
             } else {
                 "rinch-app-menu-bar"
             }},
-            style: "position:relative;z-index:201;background:var(--rinch-titlebar-bg);",
+            style: "position:relative;z-index:201;height:36px;background:var(--rinch-titlebar-bg);",
         }
     };
 
@@ -524,7 +524,7 @@ pub fn TitleBar() -> NodeHandle {
 
     // ── Spacer (draggable empty region) ─────────────────────────────────
     let spacer = rsx! {
-        div { style: "flex:1;", }
+        div { style: "flex:1;align-self:stretch;", }
     };
     spacer.set_attribute("data-drag-window", "1");
     bar.append_child(&spacer);

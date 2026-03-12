@@ -4,7 +4,7 @@ use glam::Vec3;
 
 use rkf_core::Scene;
 use rkf_render::{
-    AutoExposurePass, BloomCompositePass, BloomPass, CloudShadowPass,
+    AutoExposurePass, BloomCompositePass, BloomPass, BrushOverlay, CloudShadowPass,
     CoarseField, ColorGradePass, CosmeticsPass, DebugViewPass, DofPass,
     GBuffer, GodRaysBlurPass, MotionBlurPass,
     RayMarchPass, RenderContext, ShadingPass, SharpenPass,
@@ -113,12 +113,16 @@ impl EditorEngine {
         self.gbuffer = GBuffer::new(device, width, height);
         self.tile_cull = TileObjectCullPass::new(device, &self.gpu_scene, width, height);
         self.debug_view = DebugViewPass::new(device, &self.gbuffer);
+        self.brush_overlay = BrushOverlay::empty(device);
         let composed = self.shader_composer.compose().to_string();
+        self.gpu_color_pool = rkf_render::GpuColorPool::empty(device);
         self.shading_pass = ShadingPass::new(
             device, &self.gbuffer, &self.gpu_scene, &self.light_buffer,
             &self.coarse_field, &self.radiance_volume, &self.material_buffer,
             width, height,
             Some(&composed),
+            &self.brush_overlay,
+            &self.gpu_color_pool,
         );
 
         // --- Volumetric pipeline (half-res march, full-res upscale) ---
@@ -260,11 +264,14 @@ impl EditorEngine {
                 &self.light_buffer, &self.radiance_volume, &self.coarse_field,
             );
             let composed = self.shader_composer.compose().to_string();
+            self.gpu_color_pool = rkf_render::GpuColorPool::empty(&self.ctx.device);
             self.shading_pass = ShadingPass::new(
                 &self.ctx.device, &self.gbuffer, &self.gpu_scene, &self.light_buffer,
                 &self.coarse_field, &self.radiance_volume, &self.material_buffer,
                 self.render_width, self.render_height,
                 Some(&composed),
+                &self.brush_overlay,
+                &self.gpu_color_pool,
             );
             self.vol_shadow = VolShadowPass::new(
                 &self.ctx.device, &self.ctx.queue, &self.coarse_field.bind_group_layout,

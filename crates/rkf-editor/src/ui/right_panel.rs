@@ -9,18 +9,16 @@ use std::sync::{Arc, Mutex};
 use rinch::prelude::*;
 use rinch::render_surface::RenderSurface;
 
-use crate::editor_state::{EditorMode, EditorState, SelectedEntity, SliderSignals, UiSignals};
+use crate::editor_state::{EditorState, SelectedEntity, UiSignals};
 use crate::PreviewSurfaceHandle;
-use crate::CommandSender;
 
 use super::camera_properties::CameraProperties;
 use super::environment_panel::EnvironmentPanel;
-use super::slider_helpers::build_slider_row;
 use super::light_properties::LightProperties;
 use super::material_properties::MaterialProperties;
 use super::object_properties::ObjectProperties;
 use super::shader_properties::ShaderProperties;
-use super::{LABEL_STYLE, SECTION_STYLE, VALUE_STYLE};
+use super::{SECTION_STYLE, VALUE_STYLE};
 
 // ── Right panel (legacy single-panel layout) ────────────────────────────────
 
@@ -57,16 +55,6 @@ pub fn RightPanel() -> NodeHandle {
                 },
             }
 
-            // ── Tool-specific settings (Sculpt/Paint) ──
-            if matches!(ui.editor_mode.get(), EditorMode::Sculpt) {
-                SculptPanel {}
-                div { style: {super::DIVIDER_STYLE} }
-            }
-            if matches!(ui.editor_mode.get(), EditorMode::Paint) {
-                PaintPanel {}
-                div { style: {super::DIVIDER_STYLE} }
-            }
-
             // ── Tab bar ──
             {build_tab_bar(__scope, ui)}
 
@@ -93,14 +81,6 @@ pub fn PropertiesPanel() -> NodeHandle {
 
     rsx! {
         div { style: "display:flex;flex-direction:column;",
-            if matches!(ui.editor_mode.get(), EditorMode::Sculpt) {
-                SculptPanel {}
-                div { style: {super::DIVIDER_STYLE} }
-            }
-            if matches!(ui.editor_mode.get(), EditorMode::Paint) {
-                PaintPanel {}
-                div { style: {super::DIVIDER_STYLE} }
-            }
             {build_entity_content(__scope, ui, &editor_state)}
         }
     }
@@ -135,80 +115,6 @@ pub fn AssetPropertiesPanel() -> NodeHandle {
             {build_asset_content(__scope, ui)}
         }
     }
-}
-
-/// Sculpt settings panel — brush type, radius, strength, falloff.
-#[component]
-pub fn SculptPanel() -> NodeHandle {
-    let sliders = use_context::<SliderSignals>();
-    let cmd = use_context::<CommandSender>();
-    let ui = use_context::<UiSignals>();
-
-    let root = __scope.create_element("div");
-    root.set_attribute("style", "padding:4px 0;");
-
-    let header = __scope.create_element("div");
-    header.set_attribute("style", LABEL_STYLE);
-    header.append_child(&__scope.create_text("Sculpt Brush"));
-    root.append_child(&header);
-
-    // Show brush type from UI signal.
-    let type_name = ui.brush_type.get();
-    let row = __scope.create_element("div");
-    row.set_attribute("style", VALUE_STYLE);
-    row.append_child(&__scope.create_text(&format!("Type: {type_name}")));
-    root.append_child(&row);
-
-    build_slider_row(
-        __scope, &root, "Radius", "",
-        sliders.brush_radius, 0.01, 10.0, 0.01, 2,
-        { let cmd = cmd.clone(); move |_v| { sliders.send_brush_commands(&cmd); } },
-    );
-    build_slider_row(
-        __scope, &root, "Strength", "",
-        sliders.brush_strength, 0.0, 1.0, 0.01, 2,
-        { let cmd = cmd.clone(); move |_v| { sliders.send_brush_commands(&cmd); } },
-    );
-    build_slider_row(
-        __scope, &root, "Falloff", "",
-        sliders.brush_falloff, 0.0, 1.0, 0.01, 2,
-        { let cmd = cmd.clone(); move |_v| { sliders.send_brush_commands(&cmd); } },
-    );
-
-    root.into()
-}
-
-/// Paint settings panel — material, radius, strength, falloff.
-#[component]
-pub fn PaintPanel() -> NodeHandle {
-    let sliders = use_context::<SliderSignals>();
-    let cmd = use_context::<CommandSender>();
-
-    let root = __scope.create_element("div");
-    root.set_attribute("style", "padding:4px 0;");
-
-    let header = __scope.create_element("div");
-    header.set_attribute("style", LABEL_STYLE);
-    header.append_child(&__scope.create_text("Paint Brush"));
-    root.append_child(&header);
-
-    build_slider_row(
-        __scope, &root, "Radius", "",
-        sliders.brush_radius, 0.01, 10.0, 0.01, 2,
-        { let cmd = cmd.clone(); move |_v| { sliders.send_brush_commands(&cmd); } },
-    );
-    build_slider_row(
-        __scope, &root, "Strength", "",
-        sliders.brush_strength, 0.0, 1.0, 0.01, 2,
-        { let cmd = cmd.clone(); move |_v| { sliders.send_brush_commands(&cmd); } },
-    );
-    build_slider_row(
-        __scope, &root, "Falloff", "",
-        sliders.brush_falloff, 0.0, 1.0, 0.01, 2,
-        { let cmd = cmd.clone(); move |_v| { sliders.send_brush_commands(&cmd); } },
-    );
-
-    root.into()
 }
 
 // ── Shared helpers ──────────────────────────────────────────────────────────

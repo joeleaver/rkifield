@@ -13,10 +13,10 @@ use glam::Vec3;
 pub enum PaintMode {
     /// Paint material IDs onto voxels.
     Material,
-    /// Paint per-voxel color onto voxels.
+    /// Paint per-voxel color onto voxels (overrides material albedo).
     Color,
-    /// Paint blend weight between two materials.
-    Blend,
+    /// Erase per-voxel color (resets to white = use material albedo).
+    Erase,
 }
 
 /// Settings for a paint brush.
@@ -28,10 +28,6 @@ pub struct PaintSettings {
     pub material_id: u16,
     /// RGB color to paint (each channel 0.0-1.0).
     pub color: Vec3,
-    /// Secondary material ID (used in Blend mode).
-    pub secondary_material_id: u16,
-    /// Blend gradient parameter for smooth transitions (0.0-1.0).
-    pub blend_gradient: f32,
     /// Radius of the paint brush in world units.
     pub radius: f32,
     /// Strength of the paint effect (0.0-1.0).
@@ -46,8 +42,6 @@ impl Default for PaintSettings {
             mode: PaintMode::Material,
             material_id: 0,
             color: Vec3::ONE, // white
-            secondary_material_id: 0,
-            blend_gradient: 0.5,
             radius: 1.0,
             strength: 1.0,
             falloff: 0.5,
@@ -180,11 +174,6 @@ impl PaintState {
         );
     }
 
-    /// Set the blend material IDs (primary and secondary).
-    pub fn set_blend_materials(&mut self, primary: u16, secondary: u16) {
-        self.current_settings.material_id = primary;
-        self.current_settings.secondary_material_id = secondary;
-    }
 }
 
 /// Transform a world-space position into a v2 object's local coordinate space.
@@ -209,6 +198,20 @@ pub fn world_to_object_local_v2(
     );
     let inv = world_matrix.inverse();
     inv.transform_point3(world_pos)
+}
+
+/// A paint edit request queued for processing by the engine.
+///
+/// Created per brush-hit point during an active paint stroke, consumed by the
+/// engine's render loop to apply material/color changes to surface voxels.
+#[derive(Debug, Clone)]
+pub struct PaintEditRequest {
+    /// Scene object ID to paint.
+    pub object_id: u32,
+    /// World-space hit position on the object's surface.
+    pub world_position: Vec3,
+    /// Paint settings for this edit point.
+    pub settings: PaintSettings,
 }
 
 /// Compute the paint weight at a given distance from the brush center.
@@ -272,8 +275,6 @@ mod tests {
         assert_eq!(settings.mode, PaintMode::Material);
         assert_eq!(settings.material_id, 0);
         assert!(vec3_approx_eq(settings.color, Vec3::ONE));
-        assert_eq!(settings.secondary_material_id, 0);
-        assert!(approx_eq(settings.blend_gradient, 0.5));
         assert!(approx_eq(settings.radius, 1.0));
         assert!(approx_eq(settings.strength, 1.0));
         assert!(approx_eq(settings.falloff, 0.5));
@@ -407,8 +408,8 @@ mod tests {
         state.set_mode(PaintMode::Color);
         assert_eq!(state.current_settings.mode, PaintMode::Color);
 
-        state.set_mode(PaintMode::Blend);
-        assert_eq!(state.current_settings.mode, PaintMode::Blend);
+        state.set_mode(PaintMode::Material);
+        assert_eq!(state.current_settings.mode, PaintMode::Material);
     }
 
     #[test]
@@ -430,14 +431,6 @@ mod tests {
         let mut state = PaintState::new();
         state.set_color(Vec3::new(2.0, -1.0, 0.5));
         assert!(vec3_approx_eq(state.current_settings.color, Vec3::new(1.0, 0.0, 0.5)));
-    }
-
-    #[test]
-    fn test_set_blend_materials() {
-        let mut state = PaintState::new();
-        state.set_blend_materials(5, 10);
-        assert_eq!(state.current_settings.material_id, 5);
-        assert_eq!(state.current_settings.secondary_material_id, 10);
     }
 
     // --- paint_weight_at tests ---
@@ -507,7 +500,6 @@ mod tests {
     fn test_paint_mode_eq() {
         assert_eq!(PaintMode::Material, PaintMode::Material);
         assert_ne!(PaintMode::Material, PaintMode::Color);
-        assert_ne!(PaintMode::Color, PaintMode::Blend);
     }
 
     // --- world_to_object_local_v2 tests (paint module) ---

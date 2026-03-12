@@ -28,10 +28,8 @@ pub enum BrushType {
     Smooth,
     /// Pull SDF toward a reference plane — flattens geometry.
     Flatten,
-    /// Set `material_id` on near-surface voxels (no geometry change).
+    /// Set `material_id` and per-voxel color on near-surface voxels (no geometry change).
     Paint,
-    /// Set `blend_weight` and `secondary_id` (no geometry change).
-    BlendPaint,
     /// Write to the companion color pool (no geometry change).
     ColorPaint,
 }
@@ -72,8 +70,6 @@ pub struct Brush {
     pub falloff: FalloffCurve,
     /// Primary material ID to apply.
     pub material_id: u16,
-    /// Secondary material ID (for blend paint).
-    pub secondary_id: u8,
     /// Smooth CSG blend radius (k parameter for smooth_min).
     pub blend_k: f32,
 }
@@ -88,7 +84,6 @@ impl Brush {
             strength: 1.0,
             falloff: FalloffCurve::Smooth,
             material_id,
-            secondary_id: 0,
             blend_k: radius * 0.3, // default blend radius = 30% of brush radius
         }
     }
@@ -102,7 +97,6 @@ impl Brush {
             strength: 1.0,
             falloff: FalloffCurve::Smooth,
             material_id: 0,
-            secondary_id: 0,
             blend_k: radius * 0.3,
         }
     }
@@ -116,7 +110,6 @@ impl Brush {
             strength: strength.clamp(0.0, 1.0),
             falloff: FalloffCurve::Smooth,
             material_id: 0,
-            secondary_id: 0,
             blend_k: 0.0, // smooth brush doesn't use blend_k
         }
     }
@@ -130,7 +123,6 @@ impl Brush {
             strength: 1.0,
             falloff: FalloffCurve::Smooth,
             material_id,
-            secondary_id: 0,
             blend_k: 0.0, // paint doesn't use blend_k
         }
     }
@@ -143,7 +135,6 @@ impl Brush {
             BrushType::Smooth => EditType::Smooth,
             BrushType::Flatten => EditType::Flatten,
             BrushType::Paint => EditType::Paint,
-            BrushType::BlendPaint => EditType::BlendPaint,
             BrushType::ColorPaint => EditType::ColorPaint,
         }
     }
@@ -204,7 +195,6 @@ impl Brush {
             blend_k: self.blend_k * inv_scale,
             falloff: self.falloff,
             material_id: self.material_id,
-            secondary_id: self.secondary_id,
             color_packed: 0,
         }
     }
@@ -250,7 +240,6 @@ mod tests {
         assert_eq!(b.radius, 0.5);
         assert_eq!(b.strength, 1.0);
         assert_eq!(b.material_id, 1);
-        assert_eq!(b.secondary_id, 0);
         assert_eq!(b.falloff, FalloffCurve::Smooth);
     }
 
@@ -339,7 +328,6 @@ mod tests {
             (BrushType::Smooth, EditType::Smooth),
             (BrushType::Flatten, EditType::Flatten),
             (BrushType::Paint, EditType::Paint),
-            (BrushType::BlendPaint, EditType::BlendPaint),
             (BrushType::ColorPaint, EditType::ColorPaint),
         ];
         for (bt, expected_et) in cases {

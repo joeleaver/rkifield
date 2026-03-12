@@ -174,7 +174,7 @@ where
                     );
 
                 let (dist, material_id) = sdf_fn(pos);
-                let sample = VoxelSample::new(dist, material_id, 0, 0, 0);
+                let sample = VoxelSample::new(dist, material_id, [255, 255, 255, 255]);
                 brick.set(vx, vy, vz, sample);
             }
         }
@@ -206,7 +206,7 @@ pub struct VoxelizeGeometryResult {
 ///
 /// # Arguments
 ///
-/// - `sdf_fn` — evaluates `(distance, material_id, color_rgba)` at a local-space position.
+/// - `sdf_fn` — evaluates `(distance, material_id, color_rgb)` at a local-space position.
 /// - `aabb` — local-space bounding box.
 /// - `voxel_size` — world-space size of one voxel edge.
 /// - `geo_pool` — geometry pool to allocate into.
@@ -223,7 +223,7 @@ pub fn voxelize_to_geometry<F>(
     map_alloc: &mut BrickMapAllocator,
 ) -> Option<VoxelizeGeometryResult>
 where
-    F: Fn(Vec3) -> (f32, u8, [u8; 4]),
+    F: Fn(Vec3) -> (f32, u8, [u8; 3]),
 {
     let brick_world_size = voxel_size * BRICK_DIM as f32;
 
@@ -246,8 +246,12 @@ where
     let narrow_band = brick_world_size * 1.8;
 
     // First pass: evaluate SDF at brick centers, determine which bricks need allocation.
+    // Bricks near the surface (|dist| < narrow_band) need full voxelization.
+    // Bricks deep inside (dist < -narrow_band) are fully solid → INTERIOR_SLOT.
+    // Bricks far outside (dist > narrow_band) stay EMPTY_SLOT.
     let total_bricks = (dims.x * dims.y * dims.z) as usize;
     let mut brick_needs_alloc = vec![false; total_bricks];
+    let mut brick_is_interior = vec![false; total_bricks];
     let mut needed_count = 0u32;
 
     for bz in 0..dims.z {
@@ -261,17 +265,31 @@ where
                     );
                 let brick_center = brick_min + Vec3::splat(brick_world_size * 0.5);
                 let (dist, _, _) = sdf_fn(brick_center);
+                let bi = (bx + by * dims.x + bz * dims.x * dims.y) as usize;
                 if dist.abs() < narrow_band {
-                    let bi = (bx + by * dims.x + bz * dims.x * dims.y) as usize;
                     brick_needs_alloc[bi] = true;
                     needed_count += 1;
+                } else if dist < -narrow_band {
+                    // Deep interior: all voxels are solid, no surface detail needed.
+                    brick_is_interior[bi] = true;
                 }
             }
         }
     }
 
     if needed_count == 0 {
-        let brick_map = BrickMap::new(dims);
+        // Even with no surface bricks, we may have interior bricks.
+        let mut brick_map = BrickMap::new(dims);
+        for bz in 0..dims.z {
+            for by in 0..dims.y {
+                for bx in 0..dims.x {
+                    let bi = (bx + by * dims.x + bz * dims.x * dims.y) as usize;
+                    if brick_is_interior[bi] {
+                        brick_map.set(bx, by, bz, INTERIOR_SLOT);
+                    }
+                }
+            }
+        }
         let handle = map_alloc.allocate(&brick_map);
         return Some(VoxelizeGeometryResult {
             handle,
@@ -287,6 +305,18 @@ where
     let sdf_slots_vec = sdf_pool.allocate_range(needed_count)?;
 
     let mut brick_map = BrickMap::new(dims);
+
+    // Pre-mark interior bricks before surface-brick processing.
+    for bz in 0..dims.z {
+        for by in 0..dims.y {
+            for bx in 0..dims.x {
+                let bi = (bx + by * dims.x + bz * dims.x * dims.y) as usize;
+                if brick_is_interior[bi] {
+                    brick_map.set(bx, by, bz, INTERIOR_SLOT);
+                }
+            }
+        }
+    }
     let mut slot_mappings = Vec::with_capacity(needed_count as usize);
     let mut slot_idx = 0usize;
 
@@ -372,10 +402,9 @@ where
                                         vy as f32 * voxel_size + half_voxel,
                                         vz as f32 * voxel_size + half_voxel,
                                     );
-                                let (_, mat_id, color) = sdf_fn(pos);
+                                let (_, mat_id, _color) = sdf_fn(pos);
                                 geo.surface_voxels.push(SurfaceVoxel::new(
                                     voxel_index(vx, vy, vz),
-                                    color,
                                     mat_id,
                                 ));
                             }

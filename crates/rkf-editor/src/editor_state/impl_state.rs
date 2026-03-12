@@ -80,6 +80,9 @@ impl EditorState {
             pending_sculpt_edits: Vec::new(),
             sculpt_undo_accumulator: None,
             pending_sculpt_undo: None,
+            pending_paint_edits: Vec::new(),
+            paint_undo_accumulator: None,
+            pending_paint_undo: None,
             world: World::new("editor"),
         }
     }
@@ -182,12 +185,18 @@ impl EditorState {
             UndoActionKind::DespawnEntity { entity_id: _ } => {
                 // Undo despawn would need stored object data — not supported yet.
             }
-            UndoActionKind::SculptStroke { object_id, brick_snapshots } => {
+            UndoActionKind::SculptStroke { object_id, geometry_snapshots } => {
                 if reverse {
-                    // Undo: queue brick restoration for the render loop.
-                    self.pending_sculpt_undo = Some((*object_id, brick_snapshots.clone()));
+                    // Undo: queue geometry restoration for the render loop.
+                    self.pending_sculpt_undo = Some((*object_id, geometry_snapshots.clone()));
                 }
                 // Redo is not supported for sculpt strokes.
+            }
+            UndoActionKind::PaintStroke { object_id, geometry_snapshots } => {
+                if reverse {
+                    // Undo: queue geometry restoration for the render loop (same as sculpt undo).
+                    self.pending_paint_undo = Some((*object_id, geometry_snapshots.clone()));
+                }
             }
             _ => {
                 // VoxelEdit, PropertyChange, EnvironmentChange — future work.

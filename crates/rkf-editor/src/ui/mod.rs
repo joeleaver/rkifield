@@ -15,6 +15,7 @@ pub mod scene_tree_panel;
 pub mod shader_properties;
 pub mod shaders_panel;
 mod slider_helpers;
+pub mod brush_palette;
 pub mod titlebar;
 pub mod right_panel;
 pub mod status_bar;
@@ -33,6 +34,7 @@ use titlebar::TitleBar;
 use crate::wireframe;
 use crate::layout::components::layout_root::LayoutRoot;
 use crate::layout::components::floating_host::FloatingPanelHost;
+use brush_palette::BrushPalette;
 
 // ── Style constants ─────────────────────────────────────────────────────────
 // All colors use rinch theme CSS variables for the dark theme.
@@ -153,7 +155,7 @@ pub fn editor_ui() -> NodeHandle {
                         state.editor_input.mouse_pos = glam::Vec2::new(x, y);
 
                         let mode = state.mode;
-                        let left_down = state.editor_input.mouse_buttons[0];
+                        let left_down = state.editor_input.viewport_left_down;
 
                         // Gizmo hover detection + drag continue (Default mode only).
                         if mode == EditorMode::Default {
@@ -261,8 +263,8 @@ pub fn editor_ui() -> NodeHandle {
                     };
                     // es lock released
 
-                    // Brush hit request in Sculpt/Paint mode.
-                    if left_down && matches!(mode, EditorMode::Sculpt | EditorMode::Paint) {
+                    // Brush hit request in Sculpt/Paint mode (hover + drag).
+                    if matches!(mode, EditorMode::Sculpt | EditorMode::Paint) {
                         if let Ok(mut state) = ss.lock() {
                             let scale = crate::engine_viewport::RENDER_SCALE;
                             let bx = (x * scale) as u32;
@@ -279,6 +281,9 @@ pub fn editor_ui() -> NodeHandle {
                     // Brief lock for gizmo drag start (needs camera + scene state).
                     let mode = if let Ok(mut state) = es.lock() {
                         state.editor_input.mouse_buttons[idx] = true;
+                        if button == Btn::Left {
+                            state.editor_input.viewport_left_down = true;
+                        }
                         let mode = state.mode;
 
                         // Gizmo drag start: left-click in Default mode with object or light selected.
@@ -385,6 +390,9 @@ pub fn editor_ui() -> NodeHandle {
                     // Brief lock for gizmo drag end + undo.
                     let (mode, gizmo_was_dragging, picked_after_drag) = if let Ok(mut state) = es.lock() {
                         state.editor_input.mouse_buttons[idx] = false;
+                        if button == Btn::Left {
+                            state.editor_input.viewport_left_down = false;
+                        }
                         let mode = state.mode;
                         let was_dragging = state.gizmo.dragging;
 
@@ -560,6 +568,9 @@ pub fn editor_ui() -> NodeHandle {
 
             // ── Floating panels (absolute overlay) ──
             FloatingPanelHost {}
+
+            // ── Brush palette (compact overlay in Sculpt/Paint modes) ──
+            BrushPalette {}
 
             // ── Titlebar (absolute, last child for z-ordering / hit testing) ──
             TitleBar {}

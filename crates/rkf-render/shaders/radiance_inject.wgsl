@@ -165,7 +165,7 @@ fn extract_distance(word0: u32) -> f32 {
 }
 
 fn extract_material_id(word0: u32) -> u32 {
-    return (word0 >> 16u) & 0xFFu;
+    return (word0 >> 16u) & 0x3Fu;
 }
 
 // ---------- SDF Primitives ----------

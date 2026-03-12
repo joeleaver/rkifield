@@ -111,29 +111,69 @@ impl Brick {
 
     /// Convert geometry-first data (BrickGeometry + SdfCache) to GPU-ready Brick.
     ///
-    /// Populates word0 with f16 distance + material_id and word1 with RGBA8 color.
-    /// Surface voxels get their material_id and color from the surface voxel list.
-    /// Non-surface voxels get material_id=0 and color=white (255,255,255,255).
+    /// Populates word0 with f16 distance + material_ids, word1 with blend_weight.
+    /// Per-voxel color is NOT included — it lives in a separate ColorBrick companion pool.
+    /// Surface voxels get their data from the surface voxel list.
+    /// Non-surface voxels get material_id=0, blend_weight=0.
     pub fn from_geometry(geo: &BrickGeometry, cache: &SdfCache) -> Self {
         let mut brick = Self::default();
 
         // Build per-voxel lookup from surface voxel list.
-        // Index 512 is small enough for a fixed array.
         let mut surface_mat: [u8; 512] = [0; 512];
-        let mut surface_color: [[u8; 4]; 512] = [[255, 255, 255, 255]; 512];
+        let mut surface_mat2: [u8; 512] = [0; 512];
+        let mut surface_blend: [u8; 512] = [0; 512];
+        let mut is_surface = [false; 512];
         for sv in &geo.surface_voxels {
-            let idx = sv.index as usize;
+            let idx = sv.index() as usize;
             if idx < 512 {
                 surface_mat[idx] = sv.material_id;
-                surface_color[idx] = sv.color;
+                surface_mat2[idx] = sv.secondary_material_id;
+                surface_blend[idx] = sv.blend_weight;
+                is_surface[idx] = true;
+            }
+        }
+
+        // Propagate surface material to non-surface solid voxels (1-voxel dilation).
+        // This prevents the ray marcher from sampling material_id=0 at interior
+        // voxels just behind the surface.
+        for z in 0u16..8 {
+            for y in 0u16..8 {
+                for x in 0u16..8 {
+                    let idx = (x + y * 8 + z * 64) as usize;
+                    if is_surface[idx] {
+                        continue; // already has surface data
+                    }
+                    if !geo.is_solid(x as u8, y as u8, z as u8) {
+                        continue; // empty voxel — leave as default
+                    }
+                    // Solid non-surface voxel: copy from nearest surface neighbor.
+                    static OFFSETS: [(i16, i16, i16); 6] = [
+                        (-1,0,0),(1,0,0),(0,-1,0),(0,1,0),(0,0,-1),(0,0,1)
+                    ];
+                    for &(dx, dy, dz) in &OFFSETS {
+                        let nx = x as i16 + dx;
+                        let ny = y as i16 + dy;
+                        let nz = z as i16 + dz;
+                        if nx >= 0 && nx < 8 && ny >= 0 && ny < 8 && nz >= 0 && nz < 8 {
+                            let nidx = (nx + ny * 8 + nz * 64) as usize;
+                            if is_surface[nidx] {
+                                surface_mat[idx] = surface_mat[nidx];
+                                surface_mat2[idx] = surface_mat2[nidx];
+                                surface_blend[idx] = surface_blend[nidx];
+                                break;
+                            }
+                        }
+                    }
+                }
             }
         }
 
         for i in 0..512 {
-            brick.voxels[i] = VoxelSample::from_geometry_data(
+            brick.voxels[i] = VoxelSample::from_geometry_data_blended(
                 cache.distances[i],
                 surface_mat[i],
-                surface_color[i],
+                surface_mat2[i],
+                surface_blend[i],
             );
         }
 
@@ -205,7 +245,7 @@ mod tests {
     #[test]
     fn sample_set_roundtrip() {
         let mut brick = Brick::default();
-        let v = VoxelSample::new(1.5, 42, 128, 7, 0b001);
+        let v = VoxelSample::new(1.5, 42, [0, 0, 0, 128]);
         brick.set(3, 5, 6, v);
         assert_eq!(brick.sample(3, 5, 6), v);
         // Other voxels remain at default (infinity distance)
@@ -245,10 +285,10 @@ mod tests {
             }
         }
         geo.rebuild_surface_list();
-        // Paint some surface voxels
+        // Set material on some surface voxels
         if let Some(sv) = geo.surface_voxels.first_mut() {
             sv.material_id = 5;
-            sv.color = [200, 100, 50, 255];
+            sv.blend_weight = 255;
         }
 
         // Create SDF cache with distances
@@ -267,16 +307,15 @@ mod tests {
         assert!((v777.distance_f32() - 2.0).abs() < 0.01, "distance at (7,7,7): {}", v777.distance_f32());
 
         // Verify painted surface voxel has correct material and color
-        let first_sv_idx = geo.surface_voxels.first().unwrap().index;
+        let first_sv_idx = geo.surface_voxels.first().unwrap().index();
         let (sx, sy, sz) = crate::brick_geometry::index_to_xyz(first_sv_idx);
         let sv_voxel = brick.sample(sx as u32, sy as u32, sz as u32);
         assert_eq!(sv_voxel.material_id(), 5);
-        assert_eq!(sv_voxel.color(), [200, 100, 50, 255]);
+        assert_eq!(sv_voxel.blend_weight(), 255);
 
-        // Non-surface voxel should have material 0 and white color
+        // Non-surface voxel should have material 0
         // (7,7,7) is exterior, should be default
         assert_eq!(v777.material_id(), 0);
-        assert_eq!(v777.color(), [255, 255, 255, 255]);
     }
 
     #[test]

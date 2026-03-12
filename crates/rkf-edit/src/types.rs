@@ -31,12 +31,10 @@ pub enum EditType {
     Smooth = 5,
     /// Flatten brush: pull SDF toward a reference plane.
     Flatten = 6,
-    /// Paint brush: sets `material_id` on near-surface voxels (no geometry change).
+    /// Paint brush: sets `material_id` and per-voxel color on near-surface voxels (no geometry change).
     Paint = 7,
-    /// Blend paint: sets `blend_weight` and `secondary_id` (no geometry change).
-    BlendPaint = 8,
     /// Color paint: writes to the companion color pool (no geometry change).
-    ColorPaint = 9,
+    ColorPaint = 8,
 }
 
 impl EditType {
@@ -51,8 +49,7 @@ impl EditType {
             5 => Some(Self::Smooth),
             6 => Some(Self::Flatten),
             7 => Some(Self::Paint),
-            8 => Some(Self::BlendPaint),
-            9 => Some(Self::ColorPaint),
+            8 => Some(Self::ColorPaint),
             _ => None,
         }
     }
@@ -161,7 +158,7 @@ impl FalloffCurve {
 /// | 16 | 16 | `rotation` | quaternion xyzw |
 /// | 32 | 16 | `dimensions` | xyz = half-extents/radius, w = unused |
 /// | 48 | 16 | `strength`, `blend_k`, `falloff`, `material_id` | |
-/// | 64 | 16 | `edit_type`, `shape_type`, `secondary_id`, `color_packed` | |
+/// | 64 | 16 | `edit_type`, `shape_type`, `color_packed`, `_pad` | |
 /// | 80 | 16 | `brick_base_index`, `brick_local_min[3]` | |
 /// | 96 | 16 | `voxel_size`, `_pad[3]` | |
 /// | 112 | 16 | `_pad2[4]` | padding to 128 bytes |
@@ -192,10 +189,10 @@ pub struct EditParams {
     pub edit_type: u32,
     /// SDF shape primitive type (see [`ShapeType`]).
     pub shape_type: u32,
-    /// Secondary material ID (for blend paint).
-    pub secondary_id: u32,
     /// Packed RGBA8 color (for color paint). `[R | G<<8 | B<<16 | A<<24]`.
     pub color_packed: u32,
+    /// Padding (was secondary_id, now unused).
+    pub _pad_type: u32,
 
     // -- Brick info (16 bytes, 1 x vec4) --
     /// Base index into the brick pool storage buffer for the target brick.
@@ -247,8 +244,8 @@ impl EditParams {
             material_id: material_id as u32,
             edit_type: edit_type.as_u32(),
             shape_type: shape_type.as_u32(),
-            secondary_id: 0,
             color_packed: 0,
+            _pad_type: 0,
             brick_base_index: 0,
             brick_local_min: [0.0; 3],
             voxel_size: 0.0,
@@ -274,8 +271,8 @@ impl EditParams {
             material_id: material_id as u32,
             edit_type: EditType::Paint.as_u32(),
             shape_type: ShapeType::Sphere.as_u32(),
-            secondary_id: 0,
             color_packed: 0,
+            _pad_type: 0,
             brick_base_index: 0,
             brick_local_min: [0.0; 3],
             voxel_size: 0.0,
@@ -321,12 +318,12 @@ mod tests {
 
     #[test]
     fn edit_type_round_trip() {
-        for v in 0u8..=9 {
+        for v in 0u8..=8 {
             let et = EditType::from_u8(v).unwrap();
             assert_eq!(et as u8, v);
             assert_eq!(et.as_u32(), v as u32);
         }
-        assert!(EditType::from_u8(10).is_none());
+        assert!(EditType::from_u8(9).is_none());
         assert!(EditType::from_u8(255).is_none());
     }
 

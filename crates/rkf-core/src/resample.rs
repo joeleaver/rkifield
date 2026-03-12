@@ -101,8 +101,8 @@ pub fn resample_geometry(
         }
     };
 
-    // Helper: find nearest old surface voxel color + material at a position
-    let sample_old_surface = |pos: Vec3| -> ([u8; 4], u8) {
+    // Helper: find nearest old surface voxel material at a position
+    let sample_old_surface = |pos: Vec3| -> u8 {
         let grid_pos = pos - old_grid_origin;
         let voxel_f = grid_pos / old_voxel_size;
 
@@ -112,7 +112,6 @@ pub fn resample_geometry(
 
         // Search in a small radius for the nearest surface voxel
         let search_radius = 2i32;
-        let mut best_color = [255u8, 255, 255, 255];
         let mut best_mat = 0u8;
         let mut best_dist_sq = f32::INFINITY;
 
@@ -146,7 +145,6 @@ pub fn resample_geometry(
                         let dist_sq = (dx * dx + dy * dy + dz * dz) as f32;
                         if dist_sq < best_dist_sq {
                             best_dist_sq = dist_sq;
-                            best_color = sv.color;
                             best_mat = sv.material_id;
                         }
                     }
@@ -154,7 +152,7 @@ pub fn resample_geometry(
             }
         }
 
-        (best_color, best_mat)
+        best_mat
     };
 
     let ratio = new_voxel_size / old_voxel_size;
@@ -276,10 +274,9 @@ pub fn resample_geometry(
                                         vy as f32 * new_voxel_size + half_voxel,
                                         vz as f32 * new_voxel_size + half_voxel,
                                     );
-                                let (color, mat_id) = sample_old_surface(center);
+                                let mat_id = sample_old_surface(center);
                                 geo.surface_voxels.push(SurfaceVoxel::new(
                                     voxel_index(vx, vy, vz),
-                                    color,
                                     mat_id,
                                 ));
                             }
@@ -372,7 +369,7 @@ mod tests {
 
         let sdf_fn = move |pos: Vec3| {
             let d = pos.length() - radius;
-            (d, 1u8, [200u8, 100, 50, 255])
+            (d, 1u8, [200u8, 100, 50])
         };
 
         let result = crate::voxelize_object::voxelize_to_geometry(
@@ -452,18 +449,18 @@ mod tests {
             &mut new_geo, &mut new_sdf, &mut new_alloc,
         ).unwrap();
 
-        // Check that at least some surface voxels have the expected color
-        let mut found_color = false;
+        // Check that at least some surface voxels have the expected material
+        let mut found_mat = false;
         for &gs in &result.geometry_slots {
             let geo = new_geo.get(gs);
             for sv in &geo.surface_voxels {
-                if sv.color == [200, 100, 50, 255] {
-                    found_color = true;
+                if sv.material_id == 5 {
+                    found_mat = true;
                     break;
                 }
             }
-            if found_color { break; }
+            if found_mat { break; }
         }
-        assert!(found_color, "should transfer colors from old surface voxels");
+        assert!(found_mat, "should transfer material from old surface voxels");
     }
 }

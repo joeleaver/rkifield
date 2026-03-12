@@ -1,7 +1,6 @@
 //! GPU color pool — uploads color brick data and companion slot mapping.
 //!
-//! The shading pass uses this to look up per-voxel color for objects with
-//! the `FLAG_HAS_COLOR_DATA` voxel flag set.
+//! The shading pass uses this to look up per-voxel color for voxelized objects.
 
 use wgpu::util::DeviceExt;
 
@@ -30,13 +29,13 @@ impl GpuColorPool {
         let color_data_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("color pool data"),
             contents: color_data,
-            usage: wgpu::BufferUsages::STORAGE,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
         let companion_map_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("color companion map"),
             contents: bytemuck::cast_slice(companion_slots),
-            usage: wgpu::BufferUsages::STORAGE,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
         let bind_group_layout = Self::create_bind_group_layout(device);
@@ -71,6 +70,34 @@ impl GpuColorPool {
         let empty_data: [u32; 1] = [0];
         let empty_map: [u32; 1] = [0xFFFFFFFF]; // EMPTY_SLOT
         Self::upload(device, bytemuck::cast_slice(&empty_data), &empty_map)
+    }
+
+    /// Write a single color brick's data to the GPU buffer.
+    ///
+    /// `color_slot` is the color brick index. `data` is 512 packed u32 ColorVoxels.
+    pub fn write_color_brick(&self, queue: &wgpu::Queue, color_slot: u32, data: &[u32; 512]) {
+        let offset = color_slot as u64 * 512 * 4;
+        if offset + 2048 <= self.color_data_buffer.size() {
+            queue.write_buffer(&self.color_data_buffer, offset, bytemuck::cast_slice(data));
+        }
+    }
+
+    /// Write a single companion map entry.
+    pub fn write_companion_entry(&self, queue: &wgpu::Queue, brick_slot: u32, color_slot: u32) {
+        let offset = brick_slot as u64 * 4;
+        if offset + 4 <= self.companion_map_buffer.size() {
+            queue.write_buffer(&self.companion_map_buffer, offset, bytemuck::bytes_of(&color_slot));
+        }
+    }
+
+    /// Get the current color data buffer capacity in number of color bricks.
+    pub fn color_brick_capacity(&self) -> u32 {
+        (self.color_data_buffer.size() / (512 * 4)) as u32
+    }
+
+    /// Get the current companion map capacity in number of entries.
+    pub fn companion_map_capacity(&self) -> u32 {
+        (self.companion_map_buffer.size() / 4) as u32
     }
 
     /// Create the bind group layout (2 read-only storage buffers).

@@ -6,18 +6,18 @@
 
 use std::sync::{Arc, Mutex};
 
-use glam::{Quat, Vec3};
+use glam::Vec3;
 
 use rkf_core::{
-    Aabb, BrickMapAllocator, BrickPool, Scene, SceneNode, SceneObject,
-    SdfPrimitive, SdfSource,
+    Aabb, BrickMapAllocator, BrickPool,
+    SdfPrimitive,
 };
 use rkf_core::brick::Brick;
 use rkf_core::brick_pool::{GeometryPool, SdfCachePool};
 use rkf_core::material_library::MaterialLibrary;
 use rkf_render::{
-    AutoExposurePass, BlitPass, BloomCompositePass, BloomPass, Camera, CloudShadowPass,
-    CoarseField, ColorGradePass, CosmeticsPass, DebugViewPass, DofPass,
+    AutoExposurePass, BlitPass, BloomCompositePass, BloomPass, BrushOverlay, Camera,
+    CloudShadowPass, CoarseField, ColorGradePass, CosmeticsPass, DebugViewPass, DofPass,
     GBuffer, GodRaysBlurPass, GpuObject, GpuSceneV2, Light, LightBuffer, MotionBlurPass,
     RadianceVolume, RayMarchPass, RenderContext, ShaderComposer, ShadingPass,
     SharpenPass, TileObjectCullPass, ToneMapPass, VolCompositePass, VolMarchPass,
@@ -33,9 +33,12 @@ mod init;
 mod environment;
 mod render;
 mod sculpt;
+mod paint;
 mod brick_ops;
 mod offscreen;
 mod query;
+pub(crate) mod file_loading;
+pub(crate) use file_loading::*;
 
 /// Internal render resolution width (used by the legacy surface-based path).
 pub const INTERNAL_WIDTH: u32 = 960;
@@ -70,183 +73,6 @@ pub(super) struct GeometryFirstData {
     pub voxel_size: f32,
 }
 
-/// Build result containing the scene and CPU brick data for GPU upload.
-pub(super) struct DemoScene {
-    pub(super) scene: Scene,
-    pub(super) brick_pool: BrickPool,
-    pub(super) brick_map_alloc: BrickMapAllocator,
-}
-
-/// Try to load a voxelized object from a .rkf file into the brick pool.
-///
-/// Returns `(BrickMapHandle, voxel_size, grid_aabb, brick_count)` on success.
-pub(crate) fn load_rkf_into_pool(
-    path: &str,
-    pool: &mut rkf_core::brick_pool::Pool<rkf_core::brick::Brick>,
-    alloc: &mut BrickMapAllocator,
-) -> Result<(rkf_core::scene_node::BrickMapHandle, f32, Aabb, u32), String> {
-    use rkf_core::asset_file::{load_object_header, load_object_lod};
-    use rkf_core::brick_map::EMPTY_SLOT;
-    use std::io::BufReader;
-
-    let file = std::fs::File::open(path).map_err(|e| format!("open {path}: {e}"))?;
-    let mut reader = BufReader::new(file);
-
-    let header = load_object_header(&mut reader).map_err(|e| format!("header: {e}"))?;
-    if header.lod_entries.is_empty() {
-        return Err("no LOD levels in .rkf".into());
-    }
-
-    // Load the finest LOD (last entry, since they're sorted coarsest-first).
-    let finest_idx = header.lod_entries.len() - 1;
-    let lod = load_object_lod(&mut reader, &header, finest_idx)
-        .map_err(|e| format!("lod: {e}"))?;
-
-    let voxel_size = header.lod_entries[finest_idx].voxel_size;
-    let brick_count = lod.brick_data.len() as u32;
-
-    // Allocate pool slots for all bricks.
-    let slots = pool.allocate_range(brick_count)
-        .ok_or_else(|| format!("pool full: need {brick_count} bricks"))?;
-
-    // Build a new BrickMap with real pool slot indices, and copy brick data.
-    let dims = lod.brick_map.dims;
-    let mut brick_map = rkf_core::brick_map::BrickMap::new(dims);
-    let mut slot_idx = 0usize;
-
-    for bz in 0..dims.z {
-        for by in 0..dims.y {
-            for bx in 0..dims.x {
-                let local_idx = lod.brick_map.get(bx, by, bz).unwrap_or(EMPTY_SLOT);
-                if local_idx == EMPTY_SLOT {
-                    continue;
-                }
-
-                let pool_slot = slots[slot_idx];
-                slot_idx += 1;
-                brick_map.set(bx, by, bz, pool_slot);
-
-                // Copy voxel data into the pool brick.
-                let src = &lod.brick_data[local_idx as usize];
-                let dst = pool.get_mut(pool_slot);
-                dst.voxels.copy_from_slice(src);
-            }
-        }
-    }
-
-    // Register the brick map in the allocator.
-    let handle = alloc.allocate(&brick_map);
-
-    // Compute grid-aligned AABB from dims.
-    let brick_world_size = voxel_size * 8.0;
-    let grid_half = Vec3::new(
-        dims.x as f32 * brick_world_size * 0.5,
-        dims.y as f32 * brick_world_size * 0.5,
-        dims.z as f32 * brick_world_size * 0.5,
-    );
-    let grid_aabb = Aabb::new(-grid_half, grid_half);
-
-    log::info!(
-        "Loaded {path}: {brick_count} bricks, dims={dims:?}, voxel_size={voxel_size}"
-    );
-
-    Ok((handle, voxel_size, grid_aabb, brick_count))
-}
-
-/// Build the demo scene.
-///
-/// If `scenes/test_cross.rkf` exists, loads it as the primary voxelized object.
-/// Otherwise falls back to an inline voxelized sphere.
-pub(super) fn build_demo_scene() -> DemoScene {
-    let mut scene = Scene::new("editor_demo");
-
-    // Ground plane
-    let ground = SceneNode::analytical("ground", SdfPrimitive::Box {
-        half_extents: Vec3::new(10.0, 0.1, 10.0),
-    }, 1);
-    let ground_obj = SceneObject {
-        id: 0,
-        name: "ground".into(),
-        parent_id: None,
-        position: Vec3::new(0.0, -0.8, 0.0),
-        rotation: Quat::IDENTITY,
-        scale: Vec3::ONE,
-        root_node: ground,
-        aabb: Aabb::new(Vec3::new(-10.0, -0.1, -10.0), Vec3::new(10.0, 0.1, 10.0)),
-    };
-    scene.add_object_full(ground_obj);
-
-    let mut brick_pool = BrickPool::new(4096);
-    let mut brick_map_alloc = BrickMapAllocator::new();
-
-    // Try loading from .rkf file on disk.
-    let rkf_path = "scenes/test_cross.rkf";
-    match load_rkf_into_pool(rkf_path, &mut brick_pool, &mut brick_map_alloc) {
-        Ok((handle, voxel_size, grid_aabb, _brick_count)) => {
-            let mut vox_node = SceneNode::new("vox_cross");
-            vox_node.sdf_source = SdfSource::Voxelized {
-                brick_map_handle: handle,
-                voxel_size,
-                aabb: grid_aabb,
-            };
-            let vox_obj = SceneObject {
-                id: 0,
-                name: "vox_cross".into(),
-                parent_id: None,
-                position: Vec3::new(0.0, 0.0, -2.0),
-                rotation: Quat::IDENTITY,
-                scale: Vec3::ONE,
-                root_node: vox_node,
-                aabb: grid_aabb,
-            };
-            scene.add_object_full(vox_obj);
-        }
-        Err(e) => {
-            log::warn!("Failed to load {rkf_path}: {e} — falling back to analytical sphere");
-
-            // Fallback: analytical sphere (voxelized on demand via convert_to_geometry_first).
-            let radius = 0.4;
-            let sphere_node = SceneNode::analytical("sphere", SdfPrimitive::Sphere { radius }, 6);
-            let sphere_aabb = Aabb::new(Vec3::splat(-radius), Vec3::splat(radius));
-            let sphere_obj = SceneObject {
-                id: 0,
-                name: "sphere".into(),
-                parent_id: None,
-                position: Vec3::new(0.0, 0.0, -2.0),
-                rotation: Quat::IDENTITY,
-                scale: Vec3::ONE,
-                root_node: sphere_node,
-                aabb: sphere_aabb,
-            };
-            scene.add_object_full(sphere_obj);
-        }
-    }
-
-    DemoScene {
-        scene,
-        brick_pool,
-        brick_map_alloc,
-    }
-}
-
-/// Compute the diameter of an analytical SDF primitive's bounding sphere.
-pub(super) fn primitive_diameter(prim: &rkf_core::SdfPrimitive) -> f32 {
-    use rkf_core::SdfPrimitive;
-    match *prim {
-        SdfPrimitive::Sphere { radius } => radius * 2.0,
-        SdfPrimitive::Box { half_extents } => half_extents.length() * 2.0,
-        SdfPrimitive::Capsule { radius, half_height } => {
-            (radius + half_height) * 2.0
-        }
-        SdfPrimitive::Torus { major_radius, minor_radius } => {
-            (major_radius + minor_radius) * 2.0
-        }
-        SdfPrimitive::Cylinder { radius, half_height } => {
-            Vec3::new(radius, half_height, radius).length() * 2.0
-        }
-        SdfPrimitive::Plane { .. } => 2.0, // planes get default size
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Editor engine
@@ -277,6 +103,7 @@ pub struct EditorEngine {
     #[allow(dead_code)]
     pub(super) debug_view: DebugViewPass,
     pub(super) shading_pass: ShadingPass,
+    pub(super) brush_overlay: BrushOverlay,
     pub(super) radiance_volume: RadianceVolume,
     pub(super) radiance_inject: RadianceInjectPass,
     pub(super) radiance_mip: RadianceMipPass,
@@ -397,6 +224,13 @@ pub struct EditorEngine {
     pub(crate) shader_error: Option<String>,
     /// Material preview renderer — renders a small preview of a single material on a primitive.
     pub(crate) material_preview: rkf_render::material_preview::MaterialPreviewRenderer,
+    // ── Color companion pool ──
+    /// CPU-side color bricks (per-voxel paint data).
+    pub(super) cpu_color_bricks: Vec<rkf_core::companion::ColorBrick>,
+    /// Companion map: brick_pool_slot → color_brick_index (EMPTY_SLOT = no color).
+    pub(super) color_companion_map: Vec<u32>,
+    /// GPU color pool (buffers for shading pass).
+    pub(super) gpu_color_pool: rkf_render::GpuColorPool,
 }
 
 impl EditorEngine {
@@ -456,21 +290,38 @@ impl EditorEngine {
     }
 
 
-    /// Restore brick pool data from undo snapshots.
+    /// Restore geometry-first data from undo snapshots and re-derive Bricks for GPU.
     ///
-    /// Writes each snapshot brick back to the CPU pool and uploads to GPU.
-    pub fn apply_sculpt_undo(&mut self, snapshots: &[(u32, rkf_core::brick::Brick)]) {
+    /// Writes each snapshot's BrickGeometry + SdfCache back to the geometry and SDF
+    /// cache pools, re-derives the Brick via `from_geometry`, and uploads to GPU.
+    pub fn apply_sculpt_undo(&mut self, snapshots: &[crate::editor_state::GeometryUndoEntry]) {
         let brick_byte_size = std::mem::size_of::<rkf_core::brick::Brick>() as u64;
-        for (slot, brick) in snapshots {
-            *self.cpu_brick_pool.get_mut(*slot) = brick.clone();
-            let offset = *slot as u64 * brick_byte_size;
-            let brick_data: &[u8] = bytemuck::bytes_of(self.cpu_brick_pool.get(*slot));
-            let gpu_buf_size = self.gpu_scene.brick_pool_buffer().size();
+        let gpu_buf_size = self.gpu_scene.brick_pool_buffer().size();
+
+        for entry in snapshots {
+            // Restore geometry source of truth.
+            *self.cpu_geometry_pool.get_mut(entry.geo_slot) = entry.geometry.clone();
+
+            // Restore SDF cache (find the sdf_slot from any object's slot_map).
+            // We need the sdf_slot — look it up from geometry_first_data.
+            let sdf_slot = self.geometry_first_data.values()
+                .find_map(|gfd| gfd.slot_map.get(&entry.geo_slot).map(|&(s, _)| s));
+
+            if let Some(sdf_slot) = sdf_slot {
+                *self.cpu_sdf_cache_pool.get_mut(sdf_slot) = entry.sdf_cache.clone();
+            }
+
+            // Re-derive Brick from restored geometry + SDF cache.
+            let brick = Brick::from_geometry(&entry.geometry, &entry.sdf_cache);
+            *self.cpu_brick_pool.get_mut(entry.brick_slot) = brick;
+
+            // Upload to GPU.
+            let offset = entry.brick_slot as u64 * brick_byte_size;
             if offset + brick_byte_size <= gpu_buf_size {
                 self.ctx.queue.write_buffer(
                     self.gpu_scene.brick_pool_buffer(),
                     offset,
-                    brick_data,
+                    bytemuck::bytes_of(self.cpu_brick_pool.get(entry.brick_slot)),
                 );
             }
         }
@@ -733,6 +584,12 @@ impl EditorEngine {
     /// Convert an analytical primitive object to a geometry-first voxelized object.
     ///
     /// Populates `geometry_first_data` for the given `object_id`.
+    ///
+    /// If `bake_scale` is `Some(scale)`, the primitive is voxelized at scaled
+    /// dimensions — the AABB is expanded by the per-axis scale factors and the
+    /// SDF is evaluated in un-scaled space with conservative distance correction.
+    /// The caller should reset the object's scale to `(1,1,1)` afterwards.
+    ///
     /// Returns the new BrickMapHandle and voxel_size, or None if conversion fails.
     pub fn convert_to_geometry_first(
         &mut self,
@@ -740,19 +597,52 @@ impl EditorEngine {
         material_id: u8,
         voxel_size: f32,
         object_id: u32,
+        bake_scale: Option<Vec3>,
     ) -> Option<(rkf_core::scene_node::BrickMapHandle, f32, Aabb, u32)> {
         use rkf_core::brick_map::{BrickMap, EMPTY_SLOT};
         use rkf_core::voxelize_object::voxelize_to_geometry;
 
-        let diameter = primitive_diameter(primitive);
+        let scale = bake_scale.unwrap_or(Vec3::ONE);
+        let half_extents = primitive_half_extents(primitive) * scale;
         let margin = voxel_size * 2.0;
-        let half = diameter * 0.5 + margin;
-        let aabb = Aabb::new(Vec3::splat(-half), Vec3::splat(half));
+        let aabb = Aabb::new(
+            -half_extents - Vec3::splat(margin),
+            half_extents + Vec3::splat(margin),
+        );
+
+        // Estimate brick count from AABB and voxel_size, grow pools if needed.
+        let brick_size = voxel_size * 8.0;
+        let dims_est = glam::UVec3::new(
+            ((aabb.max.x - aabb.min.x) / brick_size).ceil() as u32,
+            ((aabb.max.y - aabb.min.y) / brick_size).ceil() as u32,
+            ((aabb.max.z - aabb.min.z) / brick_size).ceil() as u32,
+        );
+        let max_bricks = dims_est.x * dims_est.y * dims_est.z;
+        if self.cpu_geometry_pool.free_count() < max_bricks {
+            let new_cap = (self.cpu_geometry_pool.capacity() * 2).max(
+                self.cpu_geometry_pool.capacity() + max_bricks,
+            );
+            self.cpu_geometry_pool.grow(new_cap);
+        }
+        if self.cpu_sdf_cache_pool.free_count() < max_bricks {
+            let new_cap = (self.cpu_sdf_cache_pool.capacity() * 2).max(
+                self.cpu_sdf_cache_pool.capacity() + max_bricks,
+            );
+            self.cpu_sdf_cache_pool.grow(new_cap);
+        }
 
         let prim = primitive.clone();
-        let sdf_fn = move |pos: Vec3| -> (f32, u8, [u8; 4]) {
-            let d = rkf_core::evaluate_primitive(&prim, pos);
-            (d, material_id, [255, 255, 255, 255])
+        let min_scale = scale.x.min(scale.y).min(scale.z).max(1e-6);
+        let inv_scale = Vec3::new(
+            1.0 / scale.x.max(1e-6),
+            1.0 / scale.y.max(1e-6),
+            1.0 / scale.z.max(1e-6),
+        );
+        let sdf_fn = move |pos: Vec3| -> (f32, u8, [u8; 3]) {
+            // Map from scaled local space back to original primitive space,
+            // then apply conservative distance correction.
+            let d = rkf_core::evaluate_primitive(&prim, pos * inv_scale) * min_scale;
+            (d, material_id, [255, 255, 255])
         };
 
         let result = voxelize_to_geometry(
@@ -864,6 +754,10 @@ impl EditorEngine {
         let sdf_cap = self.cpu_sdf_cache_pool.capacity();
         self.cpu_sdf_cache_pool = SdfCachePool::new(sdf_cap.max(256));
         self.geometry_first_data.clear();
+
+        // Clear color companion pool.
+        self.cpu_color_bricks.clear();
+        self.color_companion_map = vec![0xFFFFFFFF; capacity as usize];
 
         // Clear cached GPU state.
         self.cached_gpu_objects.clear();

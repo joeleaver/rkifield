@@ -40,6 +40,8 @@ pub enum EditorCommand {
     SetEditorMode { mode: EditorMode },
     SetSculptSettings { radius: f32, strength: f32, falloff: f32 },
     SetPaintSettings { radius: f32, strength: f32, falloff: f32 },
+    SetPaintMode { mode: crate::paint::PaintMode },
+    SetPaintColor { r: f32, g: f32, b: f32 },
 
     // ── Camera settings ──────────────────────────────────────────────────
     SetCameraFov { fov: f32 },

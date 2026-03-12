@@ -54,6 +54,8 @@ pub mod sdf_cache;
 pub mod sdf_compute;
 /// SDF generation utilities for testing and offline voxelization.
 pub mod sdf;
+/// Geodesic surface flood fill over voxel brick geometry.
+pub mod surface_flood;
 /// Transform baking — compute world transforms from parent-local hierarchy.
 pub mod transform_bake;
 /// v2 transform flattening — depth-first traversal producing GPU-ready flat nodes.

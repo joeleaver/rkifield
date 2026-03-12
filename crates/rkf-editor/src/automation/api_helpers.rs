@@ -93,6 +93,49 @@ impl EditorAutomationApi {
             ["env_get"] => Err(AutomationError::InvalidParameter(
                 "usage: env_get <property>".to_string(),
             )),
+            ["voxelize", id_str] => {
+                let object_id: u32 = id_str.parse().map_err(|_| {
+                    AutomationError::InvalidParameter(format!("invalid object id: {id_str}"))
+                })?;
+                let mut es = self
+                    .editor_state
+                    .lock()
+                    .map_err(|e| AutomationError::EngineError(format!("lock poisoned: {e}")))?;
+                es.pending_convert_to_voxel = Some(object_id);
+                Ok(format!("queued voxelization for object {object_id}"))
+            }
+            ["voxelize"] => Err(AutomationError::InvalidParameter(
+                "usage: voxelize <object_id>".to_string(),
+            )),
+            ["save"] => {
+                let mut es = self
+                    .editor_state
+                    .lock()
+                    .map_err(|e| AutomationError::EngineError(format!("lock poisoned: {e}")))?;
+                es.pending_save = true;
+                Ok("queued scene save".to_string())
+            }
+            ["save", path] => {
+                let mut es = self
+                    .editor_state
+                    .lock()
+                    .map_err(|e| AutomationError::EngineError(format!("lock poisoned: {e}")))?;
+                es.pending_save = true;
+                es.pending_save_path = Some(path.to_string());
+                Ok(format!("queued scene save to {path}"))
+            }
+            ["open", path] => {
+                let mut es = self
+                    .editor_state
+                    .lock()
+                    .map_err(|e| AutomationError::EngineError(format!("lock poisoned: {e}")))?;
+                es.pending_open = true;
+                es.pending_open_path = Some(path.to_string());
+                Ok(format!("queued scene open: {path}"))
+            }
+            ["open"] => Err(AutomationError::InvalidParameter(
+                "usage: open <scene_path>".to_string(),
+            )),
             _ => Err(AutomationError::InvalidParameter(format!(
                 "unknown command: {command}"
             ))),

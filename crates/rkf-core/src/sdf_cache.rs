@@ -13,6 +13,8 @@ use crate::constants::BRICK_DIM;
 /// 1024 bytes (512 × f16). Derived from geometry, not a source of truth.
 /// Can always be recomputed from [`super::brick_geometry::BrickGeometry`].
 #[derive(Clone)]
+// Note: Debug intentionally not derived — [u16; 512] would produce excessive output.
+// Use `SdfCache::get_distance()` for inspection.
 pub struct SdfCache {
     /// f16 signed distance at each voxel center, stored as u16 bits.
     /// Layout: `x + y*8 + z*64` (z-major), matching brick_index.

@@ -257,7 +257,7 @@ impl MaterialPreviewRenderer {
         });
 
         // ── Material buffer ──
-        let default_materials = vec![Material::default(); 256];
+        let default_materials = vec![Material::default(); rkf_core::constants::MAX_MATERIALS as usize];
         let material_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("preview_materials"),
             contents: bytemuck::cast_slice(&default_materials),
@@ -294,7 +294,7 @@ impl MaterialPreviewRenderer {
             hdr_view,
             shade_uniform_buffer,
             material_buffer,
-            material_capacity: 256,
+            material_capacity: rkf_core::constants::MAX_MATERIALS as usize,
             readback_buffer,
             readback_pending: false,
             size,

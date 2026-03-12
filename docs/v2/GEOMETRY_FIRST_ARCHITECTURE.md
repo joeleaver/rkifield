@@ -188,29 +188,59 @@ If the SDF cache is stale (geometry was edited), recompute before the physics st
 
 ## File Format
 
-The `.rkf` v3 format stores both geometry and cached SDF:
+The `.rkf` v3 format is the **current** asset format. It stores geometry-first data (occupancy + surface voxels) as the source of truth, with an optional SDF cache for fast loading.
+
+> The v2 format (`asset_file.rs`, magic `"RKF2"`) stores raw VoxelSample data directly. It lacks secondary material and blend weight support. The loader still reads v2 files for backwards compatibility, but all new saves use v3.
 
 ```
-[Header]
-    magic: "RKF3"
-    version: 3
-    lod_count, material_count, aabb
-    flags: has_sdf_cache (bit 0)
+.rkf v3 File Layout (CURRENT — see asset_file_v3.rs):
 
-[Per LOD level]
-    voxel_size, brick_dims
-    brick_map (u32 per entry: EMPTY / INTERIOR / allocated index)
-    geometry_data (LZ4 compressed):
+[RkfV3Header]                    128 bytes, fixed
+    magic: [u8; 4] = "RKF3"
+    version: u32 = 3
+    lod_count: u32
+    material_count: u32
+    aabb_min: [f32; 3]
+    aabb_max: [f32; 3]
+    flags: u32                    bit 0 = has_sdf_cache
+    analytical_type: u32
+    analytical_params: [f32; 4]
+    material_ids: [u8; 32]        up to 32 material IDs used by this object
+    _reserved: [u8; 32]
+
+[LodV3Entry × lod_count]         56 bytes each
+    voxel_size: f32
+    brick_count: u32
+    brick_dims: [u32; 3]
+    _pad: u32
+    geometry_offset: u64
+    geometry_compressed_size: u32
+    geometry_uncompressed_size: u32
+    sdf_offset: u64
+    sdf_compressed_size: u32
+    sdf_uncompressed_size: u32
+
+[LOD data 0..N-1] (each LZ4 compressed separately):
+    brick_map: [u32 × (dims.x × dims.y × dims.z)]
+        values: EMPTY_SLOT (u32::MAX), INTERIOR_SLOT (u32::MAX-1), or local index (0..brick_count-1)
+
+    geometry_data (per allocated brick):
+        occupancy: [u64; 8]       64 bytes — 512-bit bitmask (bit N = voxel N is solid)
+        surface_count: u16        number of surface voxels in this brick
+        surface_voxels: [SurfaceVoxel; surface_count]  8 bytes each:
+            index: u16            voxel position within brick (0–511)
+            color: [u8; 4]        RGBA per-voxel color
+            material_id: u8       primary material (index into material table)
+            secondary_material_id: u8  secondary material for blending (0 = no blend)
+
+    sdf_cache (optional, present when flags bit 0 set):
         per allocated brick:
-            occupancy: [u64; 8]
-            surface_count: u16
-            surface_voxels: [SurfaceVoxel; surface_count]
-    sdf_cache (LZ4 compressed, optional):
-        per allocated brick:
-            distances: [f16; 512]
+            distances: [u16; 512]  1024 bytes — f16 signed distances
 ```
 
 The SDF cache section is optional. If missing (flag cleared), the loader computes it from geometry on load. This allows stripping the cache for distribution (smaller files) while keeping it for fast iteration during development.
+
+Blend weight (0–255, controlling primary vs secondary material interpolation) is stored in the `color[3]` byte (alpha channel) of SurfaceVoxel when material blending is active. On the GPU side, `Brick::from_geometry` converts this to `VoxelSample::from_geometry_data_blended`, encoding both materials and blend weight into the packed GPU format.
 
 ## Design Decisions
 

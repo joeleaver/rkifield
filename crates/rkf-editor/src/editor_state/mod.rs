@@ -26,7 +26,7 @@ use std::collections::HashSet;
 
 use glam::Vec3;
 use rinch::prelude::{Signal, DragContext};
-use rkf_core::brick::Brick;
+
 use rkf_runtime::api::World;
 
 use crate::ui_snapshot::{
@@ -137,6 +137,10 @@ pub struct UiSignals {
     pub scene_path: Signal<Option<String>>,
     /// Sculpt brush type name — pushed by engine when brush type changes.
     pub brush_type: Signal<String>,
+    /// Paint mode (Material / Color).
+    pub paint_mode: Signal<crate::paint::PaintMode>,
+    /// Paint color (RGB, 0.0–1.0).
+    pub paint_color: Signal<Vec3>,
 }
 
 impl UiSignals {
@@ -182,6 +186,8 @@ impl UiSignals {
             scene_name: Signal::new("Untitled".into()),
             scene_path: Signal::new(None),
             brush_type: Signal::new("Add".to_string()),
+            paint_mode: Signal::new(crate::paint::PaintMode::Material),
+            paint_color: Signal::new(Vec3::ONE),
         }
     }
 
@@ -851,18 +857,41 @@ impl EditorMode {
     }
 }
 
-/// Accumulates brick snapshots during a sculpt stroke for undo support.
+/// Accumulates geometry-first snapshots during a sculpt stroke for undo support.
 ///
 /// Created when a sculpt stroke begins. Before each edit, any not-yet-captured
-/// brick slots are snapshot from the CPU brick pool. On stroke end, the
-/// accumulated snapshots are pushed as an undo action.
+/// geometry slots are snapshot from the geometry and SDF cache pools. On stroke
+/// end, the accumulated snapshots are pushed as an undo action.
 pub struct SculptUndoAccumulator {
     /// The object being sculpted.
     pub object_id: u64,
-    /// Brick pool slots that have already been captured.
+    /// Geometry pool slots that have already been captured.
     pub captured_slots: HashSet<u32>,
-    /// Pre-edit snapshots: (slot_index, brick_data_before_edit).
-    pub snapshots: Vec<(u32, Brick)>,
+    /// Pre-edit snapshots: (geo_slot, geometry, sdf_cache, brick_pool_slot).
+    pub snapshots: Vec<GeometryUndoEntry>,
+}
+
+/// A single geometry-first undo entry for one brick slot.
+#[derive(Clone)]
+pub struct GeometryUndoEntry {
+    /// Geometry pool slot index.
+    pub geo_slot: u32,
+    /// Snapshot of the BrickGeometry before modification.
+    pub geometry: rkf_core::brick_geometry::BrickGeometry,
+    /// Snapshot of the SdfCache before modification.
+    pub sdf_cache: rkf_core::sdf_cache::SdfCache,
+    /// Corresponding brick pool slot (for GPU re-upload after undo).
+    pub brick_slot: u32,
+}
+
+impl std::fmt::Debug for GeometryUndoEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GeometryUndoEntry")
+            .field("geo_slot", &self.geo_slot)
+            .field("brick_slot", &self.brick_slot)
+            .field("solid_count", &self.geometry.solid_count())
+            .finish()
+    }
 }
 
 /// State for the material browser panel.
@@ -1014,9 +1043,22 @@ pub struct EditorState {
     /// Created on stroke begin, finalized on stroke end.
     pub sculpt_undo_accumulator: Option<SculptUndoAccumulator>,
 
-    /// Pending sculpt undo: (object_id, brick_snapshots) to restore.
+    /// Pending sculpt undo: (object_id, geometry_snapshots) to restore.
     /// Set by apply_undo_action, consumed by the render loop.
-    pub pending_sculpt_undo: Option<(u64, Vec<(u32, Brick)>)>,
+    pub pending_sculpt_undo: Option<(u64, Vec<GeometryUndoEntry>)>,
+
+    // ── Paint pipeline (UI → render loop) ────────────────────
+    /// Queued paint edit requests — one per brush-hit point during a stroke.
+    /// Drained by the render loop each frame and applied to surface voxels.
+    pub pending_paint_edits: Vec<crate::paint::PaintEditRequest>,
+
+    /// Accumulates geometry-first snapshots during a paint stroke for undo.
+    /// Created on stroke begin, finalized on stroke end.
+    pub paint_undo_accumulator: Option<SculptUndoAccumulator>,
+
+    /// Pending paint undo: (object_id, geometry_snapshots) to restore.
+    /// Set by apply_undo_action, consumed by the render loop.
+    pub pending_paint_undo: Option<(u64, Vec<GeometryUndoEntry>)>,
 
     // ── World (unified game state) ──────────────────────────
     /// The unified world container. Wraps `Scene` (SDF objects) + ECS +

@@ -163,7 +163,7 @@ fn extract_distance(word0: u32) -> f32 {
 }
 
 fn extract_material_id(word0: u32) -> u32 {
-    return (word0 >> 16u) & 0xFFu;
+    return (word0 >> 16u) & 0x3Fu;
 }
 
 /// Extract per-voxel RGBA color from word1 (geometry-first: surface voxel color).
@@ -560,7 +560,7 @@ fn sample_voxelized_material(local_pos: vec3<f32>, obj: GpuObject) -> u32 {
 }
 
 /// Sample blend data (secondary_material_id, blend_weight) from a voxelized object.
-/// Returns vec2(secondary_material_id, blend_weight_0to255) as u32-compatible floats.
+/// Returns vec2(secondary_material_id, blend_weight_0to255).
 fn sample_voxelized_blend_data(local_pos: vec3<f32>, obj: GpuObject) -> vec2<u32> {
     let vs = obj.voxel_size;
     let brick_extent = vs * 8.0;
@@ -584,7 +584,7 @@ fn sample_voxelized_blend_data(local_pos: vec3<f32>, obj: GpuObject) -> vec2<u32
     let idx = slot * 512u + local.x + local.y * 8u + local.z * 64u;
     let w0 = brick_pool[idx].word0;
     let w1 = brick_pool[idx].word1;
-    let secondary_mat = (w0 >> 24u) & 0xFFu;
+    let secondary_mat = (w0 >> 22u) & 0x3Fu;
     let blend_weight = (w1 >> 24u) & 0xFFu;
     return vec2<u32>(secondary_mat, blend_weight);
 }
@@ -1055,17 +1055,17 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
             let local_hit = (hit_obj.inverse_world * vec4<f32>(hit_pos, 1.0)).xyz;
             let blend = sample_voxelized_blend_data(local_hit, hit_obj);
             secondary_mat = blend.x;
-            blend_weight = blend.y;
+            blend_weight = blend.y;  // 0-255
             sdf_at_hit = sample_voxelized(local_hit, hit_obj);
         }
 
         // Write G-buffer.
-        // gbuf_material packing: bits 0-7 = primary material_id,
-        //   bits 8-15 = secondary_material_id, bits 16-23 = blend_weight (0-255),
-        //   bits 24-31 = object_id.
-        let packed_mat = result.material_id
-            | (secondary_mat << 8u)
-            | (blend_weight << 16u)
+        // gbuf_material packing: bits 0-5 = material_id (6),
+        //   bits 6-11 = secondary_material_id (6), bits 12-19 = blend_weight (8),
+        //   bits 20-23 = reserved, bits 24-31 = object_id (8).
+        let packed_mat = (result.material_id & 0x3Fu)
+            | (secondary_mat << 6u)
+            | (blend_weight << 12u)
             | (result.object_id << 24u);
         textureStore(gbuf_position, coord, vec4<f32>(hit_pos, result.t));
         textureStore(gbuf_normal, coord, vec4<f32>(normal, 0.0));

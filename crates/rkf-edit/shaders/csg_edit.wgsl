@@ -8,8 +8,8 @@
 // ---------- Types ----------
 
 struct VoxelSample {
-    word0: u32, // lower 16 = f16 distance, upper 16 = u16 material_id
-    word1: u32, // byte0 = blend_weight, byte1 = secondary_id, byte2 = flags, byte3 = reserved
+    word0: u32, // lower 16 = f16 distance, upper 8 = u8 material_id
+    word1: u32, // RGBA8 per-voxel color
 }
 
 struct EditParams {
@@ -25,10 +25,10 @@ struct EditParams {
     material_id: u32,
 
     // Type info (1 x vec4 = 16 bytes)
-    edit_type:    u32,      // 0-9 (see EditType enum)
+    edit_type:    u32,      // 0-8 (see EditType enum)
     shape_type:   u32,      // 0-5 (see ShapeType enum)
-    secondary_id: u32,
-    color_packed:  u32,     // RGBA8 packed
+    color_packed: u32,      // RGBA8 packed
+    _pad_type:    u32,
 
     // Brick info (1 x vec4 = 16 bytes)
     brick_base_index: u32,
@@ -53,8 +53,7 @@ const EDIT_SMOOTH_SUBTRACT: u32   = 4u;
 const EDIT_SMOOTH: u32            = 5u;
 const EDIT_FLATTEN: u32           = 6u;
 const EDIT_PAINT: u32             = 7u;
-const EDIT_BLEND_PAINT: u32       = 8u;
-const EDIT_COLOR_PAINT: u32       = 9u;
+const EDIT_COLOR_PAINT: u32       = 8u;
 
 // Shape types
 const SHAPE_SPHERE: u32   = 0u;
@@ -86,27 +85,11 @@ fn extract_distance(word0: u32) -> f32 {
 }
 
 fn extract_material_id(word0: u32) -> u32 {
-    return word0 >> 16u;
-}
-
-fn extract_blend_weight(word1: u32) -> u32 {
-    return word1 & 0xFFu;
-}
-
-fn extract_secondary_id(word1: u32) -> u32 {
-    return (word1 >> 8u) & 0xFFu;
-}
-
-fn extract_flags(word1: u32) -> u32 {
-    return (word1 >> 16u) & 0xFFu;
+    return (word0 >> 16u) & 0x3Fu;
 }
 
 fn pack_word0(distance: f32, material_id: u32) -> u32 {
     return (material_id << 16u) | (pack2x16float(vec2<f32>(distance, 0.0)) & 0xFFFFu);
-}
-
-fn pack_word1(blend_weight: u32, secondary_id: u32, flags: u32, reserved: u32) -> u32 {
-    return (reserved << 24u) | (flags << 16u) | (secondary_id << 8u) | blend_weight;
 }
 
 // ---------- Quaternion rotation ----------
@@ -345,10 +328,7 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
     let voxel = brick_pool[global_idx];
     let existing_dist = extract_distance(voxel.word0);
     let existing_mat = extract_material_id(voxel.word0);
-    let existing_blend = extract_blend_weight(voxel.word1);
-    let existing_sec = extract_secondary_id(voxel.word1);
-    let existing_flags = extract_flags(voxel.word1);
-    let existing_reserved = (voxel.word1 >> 24u) & 0xFFu;
+    let existing_color = voxel.word1;
 
     // Compute object-local position of this voxel
     let voxel_pos = edit.brick_local_min + (vec3<f32>(f32(ix), f32(iy), f32(iz)) + 0.5) * edit.voxel_size;
@@ -372,9 +352,7 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
     // Apply the edit operation
     var new_dist = existing_dist;
     var new_mat = existing_mat;
-    var new_blend = existing_blend;
-    var new_sec = existing_sec;
-    var new_flags = existing_flags;
+    var new_color = existing_color;
 
     switch edit.edit_type {
         // CSG operations: modify distance and potentially material
@@ -409,23 +387,8 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
             }
         }
 
-        // Blend paint: set blend_weight and secondary_id
-        case EDIT_BLEND_PAINT: {
-            if abs(existing_dist) < PAINT_SURFACE_BAND + max_radius {
-                let str = edit.strength * falloff_weight;
-                let target_blend = u32(str * 255.0);
-                new_blend = target_blend;
-                new_sec = edit.secondary_id;
-            }
-        }
-
-        // Color paint: writes to companion color pool (handled externally)
-        // For now, set the HAS_COLOR_DATA flag on near-surface voxels.
-        case EDIT_COLOR_PAINT: {
-            if abs(existing_dist) < PAINT_SURFACE_BAND + max_radius {
-                new_flags = existing_flags | 4u; // FLAG_HAS_COLOR_DATA = bit 2
-            }
-        }
+        // Color paint: handled externally via companion color pool.
+        case EDIT_COLOR_PAINT: {}
 
         default: {}
     }
@@ -433,6 +396,6 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
     // Write back modified voxel
     var new_voxel: VoxelSample;
     new_voxel.word0 = pack_word0(new_dist, new_mat);
-    new_voxel.word1 = pack_word1(new_blend, new_sec, new_flags, existing_reserved);
+    new_voxel.word1 = new_color;
     brick_pool[global_idx] = new_voxel;
 }

@@ -33,9 +33,7 @@ pub struct EditOp {
     pub falloff: FalloffCurve,
     /// Primary material ID.
     pub material_id: u16,
-    /// Secondary material ID (for blend paint).
-    pub secondary_id: u8,
-    /// Packed RGBA color (for color paint).
+    /// Packed RGBA color (for paint operations).
     pub color_packed: u32,
 }
 
@@ -64,7 +62,6 @@ impl EditOp {
             self.falloff,
             self.material_id,
         );
-        params.secondary_id = self.secondary_id as u32;
         params.color_packed = self.color_packed;
         params = params.with_brick_info(brick.brick_base_index, brick.brick_local_min, brick.voxel_size);
         params
@@ -167,7 +164,6 @@ mod tests {
             blend_k: 0.05,
             falloff: FalloffCurve::Smooth,
             material_id: 1,
-            secondary_id: 0,
             color_packed: 0,
         }
     }
@@ -237,7 +233,6 @@ mod tests {
             blend_k: 0.0,
             falloff: FalloffCurve::Smooth,
             material_id: 1,
-            secondary_id: 0,
             color_packed: 0,
         };
 
@@ -266,7 +261,6 @@ mod tests {
             blend_k: 0.0,
             falloff: FalloffCurve::Smooth,
             material_id: 1,
-            secondary_id: 0,
             color_packed: 0,
         };
 
@@ -294,7 +288,6 @@ mod tests {
             blend_k: 0.0,
             falloff: FalloffCurve::Smooth,
             material_id: 1,
-            secondary_id: 0,
             color_packed: 0,
         };
 

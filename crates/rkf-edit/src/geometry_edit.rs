@@ -20,7 +20,7 @@ use rkf_core::brick_pool::Pool;
 use rkf_core::constants::BRICK_DIM;
 use rkf_core::scene_node::BrickMapHandle;
 
-use crate::cpu_apply::{evaluate_falloff, evaluate_shape};
+use crate::cpu_apply::evaluate_shape;
 use crate::edit_op::EditOp;
 use crate::types::EditType;
 
@@ -117,7 +117,6 @@ pub fn apply_geometry_edit(
     // ── Paint path (unchanged — operates on surface voxels) ─────────────
     if is_paint {
         let inv_rot = op.rotation.inverse();
-        let color = op.color_packed.to_le_bytes();
 
         for bz in bmin_z..bmax_z {
             for by in bmin_y..bmax_y {
@@ -137,7 +136,7 @@ pub fn apply_geometry_edit(
                     let mut any_changed = false;
 
                     for sv in &mut geo.surface_voxels {
-                        let (vx, vy, vz) = rkf_core::brick_geometry::index_to_xyz(sv.index);
+                        let (vx, vy, vz) = rkf_core::brick_geometry::index_to_xyz(sv.index());
                         let world_pos = brick_min + Vec3::new(
                             vx as f32 * voxel_size + half_voxel,
                             vy as f32 * voxel_size + half_voxel,
@@ -185,14 +184,14 @@ pub fn apply_geometry_edit(
                                     // into the primary so we free the secondary slot.
                                     if sv.secondary_material_id != 0
                                         && sv.secondary_material_id != new_mat
-                                        && sv.color[3] > 0
+                                        && sv.blend_weight > 0
                                     {
-                                        if sv.color[3] > 127 {
+                                        if sv.blend_weight > 127 {
                                             // Secondary was dominant — promote it.
                                             sv.material_id = sv.secondary_material_id;
                                         }
                                         sv.secondary_material_id = 0;
-                                        sv.color[3] = 0;
+                                        sv.blend_weight = 0;
                                     }
 
                                     // Step 2: Apply new paint.
@@ -200,22 +199,16 @@ pub fn apply_geometry_edit(
                                         // Already this material — clear any stale
                                         // secondary so the voxel is cleanly new_mat.
                                         sv.secondary_material_id = 0;
-                                        sv.color[3] = 0;
+                                        sv.blend_weight = 0;
                                     } else {
                                         sv.secondary_material_id = new_mat;
-                                        sv.color[3] = sv.color[3].max(desired_blend);
+                                        sv.blend_weight = sv.blend_weight.max(desired_blend);
                                     }
                                     any_changed = true;
                                 }
                                 EditType::ColorPaint => {
-                                    // Color paint uses strength × distance-based falloff.
-                                    let falloff = evaluate_falloff(op.falloff, center_dist, radius);
-                                    let t = op.strength * falloff;
-                                    for i in 0..3 {
-                                        sv.color[i] = (sv.color[i] as f32 * (1.0 - t)
-                                            + color[i] as f32 * t) as u8;
-                                    }
-                                    // Don't touch color[3] (blend_weight) during color paint.
+                                    // TODO: Color paint needs to write to ColorBrick companion pool.
+                                    // Per-voxel color no longer lives in SurfaceVoxel.
                                     any_changed = true;
                                 }
                                 _ => {}
@@ -383,8 +376,6 @@ pub fn apply_geometry_edit(
 
     // ── Post-process: rebuild surface lists, assign materials, compact ───
 
-    let color = op.color_packed.to_le_bytes();
-
     for brick_coord in &changed_bricks {
         let (bx, by, bz) = (brick_coord.x, brick_coord.y, brick_coord.z);
         let slot = brick_map.get(bx, by, bz).unwrap_or(EMPTY_SLOT);
@@ -397,13 +388,10 @@ pub fn apply_geometry_edit(
         // Rebuild surface voxel list preserving existing colors
         geo.rebuild_surface_list_preserving();
 
-        // Assign color/material to new surface voxels
+        // Assign material to new surface voxels (default material check)
         for sv in &mut geo.surface_voxels {
-            if sv.color == [255, 255, 255, 255] && sv.material_id == 0 {
+            if sv.material_id == 0 {
                 sv.material_id = op.material_id as u8;
-                if op.color_packed != 0 {
-                    sv.color = color;
-                }
             }
         }
 

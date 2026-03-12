@@ -24,7 +24,7 @@ impl EditorEngine {
         scene: &mut Scene,
         object_id: u32,
     ) -> Option<(f32, Aabb, rkf_core::scene_node::BrickMapHandle)> {
-        use super::primitive_diameter;
+        use super::primitive_half_extents;
         let obj = scene.objects.iter_mut().find(|o| o.id == object_id)?;
 
         let (primitive, material_id) = match &obj.root_node.sdf_source {
@@ -33,11 +33,20 @@ impl EditorEngine {
             SdfSource::None => return None,
         };
 
-        let diameter = primitive_diameter(&primitive);
-        let voxel_size = (diameter / 48.0).clamp(0.005, 0.5);
+        // Bake current scale into the voxel volume.
+        let obj_scale = obj.scale;
+        let scaled_half = primitive_half_extents(&primitive) * obj_scale;
+        let min_extent = scaled_half.x.min(scaled_half.y).min(scaled_half.z).max(0.001);
+        let max_extent = scaled_half.x.max(scaled_half.y).max(scaled_half.z);
+        let vs_from_short = min_extent * 2.0 / 8.0;
+        let vs_from_long  = max_extent * 2.0 / 128.0;
+        let voxel_size = vs_from_short.min(vs_from_long).clamp(0.005, 0.5);
 
         if let Some((handle, vs, grid_aabb, _count)) =
-            self.convert_to_geometry_first(&primitive, material_id as u8, voxel_size, object_id)
+            self.convert_to_geometry_first(
+                &primitive, material_id as u8, voxel_size, object_id,
+                Some(obj_scale),
+            )
         {
             let obj = scene.objects.iter_mut().find(|o| o.id == object_id)?;
             obj.root_node.sdf_source = SdfSource::Voxelized {
@@ -46,10 +55,11 @@ impl EditorEngine {
                 aabb: grid_aabb,
             };
             obj.aabb = grid_aabb;
+            obj.scale = glam::Vec3::ONE;
             self.reupload_brick_data();
             log::info!(
-                "Auto-voxelized object {} to geometry-first: vs={:.4}",
-                object_id, vs
+                "Auto-voxelized object {} to geometry-first: vs={:.4}, scale {:?} baked in",
+                object_id, vs, obj_scale,
             );
             Some((vs, grid_aabb, handle))
         } else {
@@ -149,7 +159,6 @@ impl EditorEngine {
                 blend_k,
                 falloff: FalloffCurve::Smooth,
                 material_id: sampled_material,
-                secondary_id: 0,
                 color_packed: 0,
             };
 
@@ -171,16 +180,21 @@ impl EditorEngine {
                 _ => continue,
             };
 
-            // 8. Undo: snapshot brick pool data before modification.
+            // 8. Undo: snapshot geometry-first data before modification.
             {
                 let gfd = match self.geometry_first_data.get(&req.object_id) {
                     Some(d) => d,
                     None => continue,
                 };
                 if let Some(ref mut acc) = undo_acc {
-                    for (_, &(_, brick_slot)) in &gfd.slot_map {
-                        if acc.captured_slots.insert(brick_slot) {
-                            acc.snapshots.push((brick_slot, self.cpu_brick_pool.get(brick_slot).clone()));
+                    for (&geo_slot, &(sdf_slot, brick_slot)) in &gfd.slot_map {
+                        if acc.captured_slots.insert(geo_slot) {
+                            acc.snapshots.push(crate::editor_state::GeometryUndoEntry {
+                                geo_slot,
+                                geometry: self.cpu_geometry_pool.get(geo_slot).clone(),
+                                sdf_cache: self.cpu_sdf_cache_pool.get(sdf_slot).clone(),
+                                brick_slot,
+                            });
                         }
                     }
                 }
@@ -276,10 +290,15 @@ impl EditorEngine {
                     // Update the GPU brick map allocator.
                     self.cpu_brick_map_alloc.set_entry(&handle, bc.x, bc.y, bc.z, brick_slot);
 
-                    // Snapshot new brick for undo.
+                    // Snapshot new geometry slot for undo (empty state before edit fills it).
                     if let Some(ref mut acc) = undo_acc {
-                        if acc.captured_slots.insert(brick_slot) {
-                            acc.snapshots.push((brick_slot, self.cpu_brick_pool.get(brick_slot).clone()));
+                        if acc.captured_slots.insert(*geo_slot) {
+                            acc.snapshots.push(crate::editor_state::GeometryUndoEntry {
+                                geo_slot: *geo_slot,
+                                geometry: self.cpu_geometry_pool.get(*geo_slot).clone(),
+                                sdf_cache: self.cpu_sdf_cache_pool.get(sdf_slot).clone(),
+                                brick_slot,
+                            });
                         }
                     }
                 }
