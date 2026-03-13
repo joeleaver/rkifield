@@ -37,6 +37,11 @@ pub struct ProjectFile {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub editor_layout: Option<String>,
+    /// Name of the game crate directory (relative to project root).
+    /// If set, the editor will build and load this crate's cdylib on project open.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub game_crate: Option<String>,
 }
 
 fn default_quality() -> String {
@@ -68,6 +73,7 @@ impl ProjectFile {
             default_quality: "medium".to_string(),
             material_palette: None,
             editor_layout: None,
+            game_crate: None,
         }
     }
 }
@@ -249,21 +255,41 @@ pub fn create_project(parent_dir: &Path, name: &str) -> Result<PathBuf> {
         }
     }
 
-    // Create default scene.
+    // Create default scene (v3 format).
     {
-        use crate::scene_file::{CameraEntry, SceneFile as V2SceneFile};
-        let mut sf = V2SceneFile::new("default");
-        sf.cameras.push(CameraEntry {
-            name: "Main Camera".to_string(),
-            position: [0.0, 2.5, 5.0],
+        use crate::scene_file_v3::{SceneFileV3, EntityRecord, component_names, serialize_scene_v3};
+        use crate::components::CameraComponent;
+
+        let mut scene = SceneFileV3::new();
+        let mut cam_record = EntityRecord::new(uuid::Uuid::new_v4());
+        let cam = CameraComponent {
+            label: "Main Camera".to_string(),
+            fov_degrees: 70.0,
+            active: false,
             yaw: 0.0,
             pitch: -0.15,
-            fov: 70.0,
-        });
-        crate::scene_file::save_scene_file(
-            &scenes_dir.join("default.rkscene").to_string_lossy(),
-            &sf,
-        )?;
+            ..Default::default()
+        };
+        let _ = cam_record.insert_component(component_names::CAMERA, &cam);
+        let meta = crate::components::EditorMetadata {
+            name: "Main Camera".to_string(),
+            tags: Vec::new(),
+            locked: false,
+        };
+        let _ = cam_record.insert_component(component_names::EDITOR_METADATA, &meta);
+        let transform = crate::components::Transform {
+            position: rkf_core::WorldPosition::new(
+                glam::IVec3::ZERO,
+                glam::Vec3::new(0.0, 2.5, 5.0),
+            ),
+            rotation: glam::Quat::IDENTITY,
+            scale: glam::Vec3::ONE,
+        };
+        let _ = cam_record.insert_component(component_names::TRANSFORM, &transform);
+        scene.entities.push(cam_record);
+
+        let ron_str = serialize_scene_v3(&scene)?;
+        std::fs::write(scenes_dir.join("default.rkscene"), ron_str)?;
     }
 
     // Create default environment.
@@ -271,6 +297,13 @@ pub fn create_project(parent_dir: &Path, name: &str) -> Result<PathBuf> {
         use crate::environment::EnvironmentProfile;
         let env = EnvironmentProfile::default();
         crate::save_environment(&envs_dir.join("default.rkenv").to_string_lossy(), &env)?;
+    }
+
+    // Scaffold the game crate with starter content.
+    let game_crate_name = "game";
+    match crate::behavior::scaffold::scaffold_game_crate(&project_root, game_crate_name, workspace_root) {
+        Ok(_) => log::info!("Scaffolded game crate at {}/{game_crate_name}", project_root.display()),
+        Err(e) => log::warn!("Failed to scaffold game crate: {e}"),
     }
 
     // Write .rkproject file.
@@ -281,6 +314,7 @@ pub fn create_project(parent_dir: &Path, name: &str) -> Result<PathBuf> {
         persistent: false,
     });
     project.default_scene = Some("default".to_string());
+    project.game_crate = Some(game_crate_name.to_string());
 
     let project_file_path = project_root.join(format!("{}.rkproject", name));
     save_project(&project_file_path.to_string_lossy(), &project)?;
@@ -640,6 +674,12 @@ mod tests {
             .count();
         assert!(shader_count > 0, "expected shaders to be copied");
 
+        // Game crate was scaffolded.
+        assert!(root.join("game/Cargo.toml").exists(), "game crate Cargo.toml should exist");
+        assert!(root.join("game/src/lib.rs").exists(), "game crate lib.rs should exist");
+        assert!(root.join("game/src/components/health.rs").exists(), "game crate health.rs should exist");
+        assert!(root.join("game/src/systems/patrol.rs").exists(), "game crate patrol.rs should exist");
+
         // Load the project file and verify contents.
         let loaded =
             load_project(&project_path.to_string_lossy()).expect("load created project");
@@ -648,6 +688,7 @@ mod tests {
         assert_eq!(loaded.scenes[0].name, "default");
         assert_eq!(loaded.scenes[0].path, "scenes/default.rkscene");
         assert_eq!(loaded.default_scene, Some("default".to_string()));
+        assert_eq!(loaded.game_crate, Some("game".to_string()));
 
         // Clean up.
         let _ = std::fs::remove_dir_all(&tmp);

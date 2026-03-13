@@ -11,23 +11,20 @@ use crate::engine::EditorEngine;
 use crate::engine_loop_commands::{apply_editor_command, compute_material_usage};
 use crate::engine_loop_edits;
 use crate::engine_loop_io;
+use crate::engine_loop_play;
 use crate::engine_loop_ui;
 use crate::engine_viewport::{DISPLAY_HEIGHT, DISPLAY_WIDTH};
 
-/// Data bundle passed to the engine thread.
 pub(crate) struct EngineThreadData {
     pub(crate) editor_state: Arc<Mutex<EditorState>>,
     pub(crate) shared_state: Arc<Mutex<SharedState>>,
-    /// Receiver for UI->engine commands.
     pub(crate) cmd_rx: crossbeam::channel::Receiver<EditorCommand>,
-    /// Lock-free layout config shared between UI and engine threads.
     pub(crate) layout_backing: crate::layout::state::LayoutBacking,
-    /// CPU pixel writer for submitting rendered frames to the compositor.
     pub(crate) surface_writer: SurfaceWriter,
-    /// GPU texture registrar -- provides layout size and texture submission.
     pub(crate) gpu_registrar: GpuTextureRegistrar,
-    /// CPU pixel writer for the material preview surface.
     pub(crate) preview_writer: SurfaceWriter,
+    pub(crate) gameplay_registry: Arc<Mutex<rkf_runtime::behavior::GameplayRegistry>>,
+    pub(crate) game_store: Arc<Mutex<rkf_runtime::behavior::GameStore>>,
 }
 
 /// Tracks which categories of data changed this frame, so we only
@@ -77,6 +74,8 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         surface_writer,
         gpu_registrar,
         preview_writer,
+        gameplay_registry,
+        game_store,
     } = data;
 
     log::info!("Engine thread: creating dedicated GPU device");
@@ -90,8 +89,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
 
     // 4. Store demo scene in editor_state (set world's scene directly).
     if let Ok(mut es) = editor_state.lock() {
-        *es.world.scene_mut() = demo_scene;
-        es.world.resync_entity_tracking();
+        es.world.load_from_scene(&demo_scene);
 
         // Seed editor light list from render lights (point/spot only).
         for rl in &engine.world_lights {
@@ -120,6 +118,10 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         es.light_editor.clear_dirty();
     }
 
+    // Game plugin dylib handle — must outlive the GameplayRegistry since system
+    // fn_ptrs point into the loaded library. Dropping unloads the dylib.
+    let mut game_dylib_loader: Option<rkf_runtime::behavior::DylibLoader> = None;
+
     // Auto-open last project if configured.
     {
         let config = crate::editor_config::load_editor_config();
@@ -130,28 +132,25 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                     Ok(pf) => {
                         let project_path = std::path::Path::new(project_path_str);
                         let project_root = rkf_runtime::project::project_root(project_path);
+
+                        // Build and load game dylib if project has one.
+                        if let Some(ref game_crate) = pf.game_crate {
+                            game_dylib_loader = engine_loop_io::build_and_load_game_dylib(
+                                &project_root, game_crate, &gameplay_registry, game_dylib_loader.take(),
+                            );
+                        }
+
                         let default_scene_path = engine_loop_io::resolve_default_scene_path(&pf, &project_root);
 
                         if let Some(scene_path) = default_scene_path {
                             let sp = scene_path.to_string_lossy().to_string();
-                            match crate::scene_io::load_v2_scene(&sp) {
-                                Ok(sf) => {
-                                    let mut new_scene = crate::scene_io::reconstruct_v2_scene(&sf);
-
-                                    // Load voxelized objects from .rkf files.
-                                    engine.clear_scene();
-                                    let scene_dir = scene_path.parent()
-                                        .unwrap_or(std::path::Path::new("."));
-                                    engine_loop_io::load_scene_rkf_assets(
-                                        &mut engine, &sf, &mut new_scene, scene_dir,
-                                    );
-
-                                    // Upload brick pool + brick map data to GPU.
-                                    engine.reupload_brick_data();
-
-                                    if let Ok(mut es) = editor_state.lock() {
-                                        *es.world.scene_mut() = new_scene;
-                                        es.current_scene_path = Some(sp);
+                            let reg = gameplay_registry.lock().unwrap();
+                            if let Ok(mut es) = editor_state.lock() {
+                                match engine_loop_io::load_scene_v3(
+                                    &sp, &mut engine, &mut es, &reg,
+                                ) {
+                                    Ok(()) => {
+                                        es.current_scene_path = Some(sp.clone());
                                         // Restore editor layout if saved in project.
                                         if let Some(ref layout_ron) = pf.editor_layout {
                                             layout_backing.from_ron(layout_ron);
@@ -163,14 +162,10 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                                         }
                                         es.current_project = Some(pf);
                                         es.current_project_path = Some(project_path_str.clone());
-                                        es.world.resync_entity_tracking();
-
-                                        // Restore subsystem state from property bag.
-                                        engine_loop_io::restore_scene_properties(&mut es, &sf);
+                                        log::info!("Last project restored: {project_path_str}");
                                     }
-                                    log::info!("Last project restored: {project_path_str}");
+                                    Err(e) => log::error!("Failed to load last project's scene: {e}"),
                                 }
-                                Err(e) => log::error!("Failed to load last project's scene: {e}"),
                             }
                         }
                     }
@@ -183,6 +178,18 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
     }
 
     log::info!("Engine thread: engine ready, entering render loop");
+
+    // ── Behavior system initialization ───────────────────────────────────
+    let mut behavior_executor = {
+        let reg = gameplay_registry.lock().expect("gameplay registry lock");
+        rkf_runtime::behavior::BehaviorExecutor::new(&reg)
+            .expect("failed to build behavior schedule")
+    };
+    let game_store_arc = game_store;
+    // The game store lock is held briefly per-frame for behavior ticks.
+    // Clone Arc for passing to play state functions.
+    let mut stable_ids = rkf_runtime::behavior::StableIdIndex::new();
+    let mut play_state = engine_loop_play::PlayState::new();
 
     let mut last_frame = std::time::Instant::now();
     let mut last_fps_push = std::time::Instant::now();
@@ -220,29 +227,14 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         }
 
         // b. Drain pending MCP commands from shared_state.
-        let pending_camera;
-        let pending_debug;
-        let pending_voxel_slice;
-        let pending_spatial_query;
-        let pending_mcp_sculpt;
-        let pending_object_shape;
-        {
+        let (pending_camera, pending_debug, pending_voxel_slice, pending_spatial_query, pending_mcp_sculpt, pending_object_shape) =
             if let Ok(mut ss) = shared_state.lock() {
-                pending_camera = ss.pending_camera.take();
-                pending_debug = ss.pending_debug_mode.take();
-                pending_voxel_slice = ss.pending_voxel_slice.take();
-                pending_spatial_query = ss.pending_spatial_query.take();
-                pending_mcp_sculpt = ss.pending_mcp_sculpt.take();
-                pending_object_shape = ss.pending_object_shape.take();
+                (ss.pending_camera.take(), ss.pending_debug_mode.take(),
+                 ss.pending_voxel_slice.take(), ss.pending_spatial_query.take(),
+                 ss.pending_mcp_sculpt.take(), ss.pending_object_shape.take())
             } else {
-                pending_camera = None;
-                pending_debug = None;
-                pending_voxel_slice = None;
-                pending_spatial_query = None;
-                pending_mcp_sculpt = None;
-                pending_object_shape = None;
-            }
-        }
+                (None, None, None, None, None, None)
+            };
 
         // b2. Drain UI commands and apply to EditorState (brief lock).
         let mut dirty = DirtyFlags::default();
@@ -255,7 +247,12 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                         EditorCommand::SetObjectPosition { entity_id, .. }
                         | EditorCommand::SetObjectRotation { entity_id, .. }
                         | EditorCommand::SetObjectScale { entity_id, .. } => {
-                            frame_dirty_objects.push(*entity_id as u32);
+                            // Look up SDF object ID from UUID for GPU dirty tracking.
+                            if let Some((_, record)) = es.world.entity_records().find(|(uid, _)| **uid == *entity_id) {
+                                if let Some(obj_id) = record.sdf_object_id {
+                                    frame_dirty_objects.push(obj_id);
+                                }
+                            }
                         }
                         // Structural scene changes.
                         EditorCommand::SpawnPrimitive { .. }
@@ -313,6 +310,21 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                         dirty.materials = true;
                         continue;
                     }
+                    // Handle component inspector commands (need registry).
+                    if matches!(
+                        cmd,
+                        EditorCommand::SetComponentField { .. }
+                        | EditorCommand::AddComponent { .. }
+                        | EditorCommand::RemoveComponent { .. }
+                    ) {
+                        if let Ok(reg) = gameplay_registry.lock() {
+                            crate::engine_loop_commands::apply_component_command(
+                                &mut es, &cmd, &reg,
+                            );
+                        }
+                        dirty.scene = true; // trigger inspector refresh
+                        continue;
+                    }
                     match cmd {
                         EditorCommand::KeyDown { .. } => key_downs.push(cmd),
                         _ => apply_editor_command(&mut es, cmd),
@@ -333,6 +345,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             f_show_grid, f_editor_mode, f_brush_radius, f_brush_falloff,
             f_sculpt_edits, f_sculpt_undo, f_sculpting_active,
             f_paint_edits, f_paint_undo,
+            f_play_start, f_play_stop,
         ) = {
             let mut es = match editor_state.lock() {
                 Ok(es) => es,
@@ -373,18 +386,24 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                 es.pending_undo = false;
                 if let Some(action) = es.undo.undo() {
                     es.apply_undo_action(&action, true);
+                    // Helper: look up SDF object ID from UUID.
+                    let sdf_id = |uuid: &uuid::Uuid| -> Option<u32> {
+                        es.world.entity_records()
+                            .find(|(uid, _)| *uid == uuid)
+                            .and_then(|(_, r)| r.sdf_object_id)
+                    };
                     match &action.kind {
                         crate::undo::UndoActionKind::SpawnEntity { entity_id } => {
-                            frame_despawned.push(*entity_id as u32);
+                            if let Some(oid) = sdf_id(entity_id) { frame_despawned.push(oid); }
                         }
                         crate::undo::UndoActionKind::DespawnEntity { entity_id } => {
-                            frame_spawned.push(*entity_id as u32);
+                            if let Some(oid) = sdf_id(entity_id) { frame_spawned.push(oid); }
                         }
                         crate::undo::UndoActionKind::Transform { entity_id, .. } => {
-                            frame_dirty_objects.push(*entity_id as u32);
+                            if let Some(oid) = sdf_id(entity_id) { frame_dirty_objects.push(oid); }
                         }
                         crate::undo::UndoActionKind::SculptStroke { object_id, .. } => {
-                            frame_dirty_objects.push(*object_id as u32);
+                            if let Some(oid) = sdf_id(object_id) { frame_dirty_objects.push(oid); }
                         }
                         _ => {}
                     }
@@ -394,18 +413,23 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                 es.pending_redo = false;
                 if let Some(action) = es.undo.redo() {
                     es.apply_undo_action(&action, false);
+                    let sdf_id = |uuid: &uuid::Uuid| -> Option<u32> {
+                        es.world.entity_records()
+                            .find(|(uid, _)| *uid == uuid)
+                            .and_then(|(_, r)| r.sdf_object_id)
+                    };
                     match &action.kind {
                         crate::undo::UndoActionKind::SpawnEntity { entity_id } => {
-                            frame_spawned.push(*entity_id as u32);
+                            if let Some(oid) = sdf_id(entity_id) { frame_spawned.push(oid); }
                         }
                         crate::undo::UndoActionKind::DespawnEntity { entity_id } => {
-                            frame_despawned.push(*entity_id as u32);
+                            if let Some(oid) = sdf_id(entity_id) { frame_despawned.push(oid); }
                         }
                         crate::undo::UndoActionKind::Transform { entity_id, .. } => {
-                            frame_dirty_objects.push(*entity_id as u32);
+                            if let Some(oid) = sdf_id(entity_id) { frame_dirty_objects.push(oid); }
                         }
                         crate::undo::UndoActionKind::SculptStroke { object_id, .. } => {
-                            frame_dirty_objects.push(*object_id as u32);
+                            if let Some(oid) = sdf_id(object_id) { frame_dirty_objects.push(oid); }
                         }
                         _ => {}
                     }
@@ -416,37 +440,48 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             if let Some(prim_name) = es.pending_spawn.take() {
                 let pos = es.editor_camera.target;
                 let primitive = primitive_from_name(&prim_name);
-                let entity = es.world.spawn(&prim_name)
+                let uuid = es.world.spawn(&prim_name)
                     .position_vec3(pos)
                     .sdf(primitive)
                     .material(0)
                     .build();
-                es.selected_entity = Some(crate::editor_state::SelectedEntity::Object(entity.to_u64()));
+                es.selected_entity = Some(crate::editor_state::SelectedEntity::Object(uuid));
                 es.undo.push(crate::undo::UndoAction {
                     kind: crate::undo::UndoActionKind::SpawnEntity {
-                        entity_id: entity.to_u64(),
+                        entity_id: uuid,
                     },
                     timestamp_ms: 0,
                     description: format!("Spawn {prim_name}"),
                 });
-                frame_spawned.push(entity.to_u64() as u32);
+                // Look up SDF object ID for the new entity.
+                if let Some((_, record)) = es.world.entity_records().find(|(uid, _)| **uid == uuid) {
+                    if let Some(obj_id) = record.sdf_object_id {
+                        frame_spawned.push(obj_id);
+                    }
+                }
             }
 
             // Consume pending delete.
             if es.pending_delete {
                 es.pending_delete = false;
-                if let Some(crate::editor_state::SelectedEntity::Object(eid)) = es.selected_entity {
-                    if let Some(entity) = es.world.find_entity_by_id(eid) {
+                if let Some(crate::editor_state::SelectedEntity::Object(uuid)) = es.selected_entity {
+                    if es.world.is_alive(uuid) {
+                        // Get SDF object ID before despawning.
+                        let sdf_oid = es.world.entity_records()
+                            .find(|(uid, _)| **uid == uuid)
+                            .and_then(|(_, r)| r.sdf_object_id);
                         es.undo.push(crate::undo::UndoAction {
                             kind: crate::undo::UndoActionKind::DespawnEntity {
-                                entity_id: eid,
+                                entity_id: uuid,
                             },
                             timestamp_ms: 0,
                             description: "Delete object".into(),
                         });
-                        let _ = es.world.despawn(entity);
+                        let _ = es.world.despawn(uuid);
                         es.selected_entity = None;
-                        frame_despawned.push(eid as u32);
+                        if let Some(oid) = sdf_oid {
+                            frame_despawned.push(oid);
+                        }
                     }
                 }
             }
@@ -454,36 +489,40 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             // Consume pending duplicate.
             if es.pending_duplicate {
                 es.pending_duplicate = false;
-                if let Some(crate::editor_state::SelectedEntity::Object(eid)) = es.selected_entity {
-                    if let Some(src_entity) = es.world.find_entity_by_id(eid) {
+                if let Some(crate::editor_state::SelectedEntity::Object(src_uuid)) = es.selected_entity {
+                    if es.world.is_alive(src_uuid) {
                         if let (Ok(pos), Ok(rot), Ok(scale)) = (
-                            es.world.position(src_entity),
-                            es.world.rotation(src_entity),
-                            es.world.scale(src_entity),
+                            es.world.position(src_uuid),
+                            es.world.rotation(src_uuid),
+                            es.world.scale(src_uuid),
                         ) {
-                            let root = es.world.root_node(src_entity).ok().cloned();
+                            let root = es.world.root_node(src_uuid).ok().cloned();
                             if let Some(root_node) = root {
                                 let offset = rkf_core::WorldPosition::new(
                                     glam::IVec3::ZERO,
                                     pos.to_vec3() + glam::Vec3::new(1.0, 0.0, 0.0),
                                 );
-                                let new_entity = es.world.spawn(&root_node.name)
+                                let new_uuid = es.world.spawn(&root_node.name)
                                     .position(offset)
                                     .rotation(rot)
                                     .scale(scale)
                                     .sdf_tree(root_node)
                                     .build();
                                 es.selected_entity = Some(
-                                    crate::editor_state::SelectedEntity::Object(new_entity.to_u64()),
+                                    crate::editor_state::SelectedEntity::Object(new_uuid),
                                 );
                                 es.undo.push(crate::undo::UndoAction {
                                     kind: crate::undo::UndoActionKind::SpawnEntity {
-                                        entity_id: new_entity.to_u64(),
+                                        entity_id: new_uuid,
                                     },
                                     timestamp_ms: 0,
                                     description: "Duplicate object".into(),
                                 });
-                                frame_spawned.push(new_entity.to_u64() as u32);
+                                if let Some((_, record)) = es.world.entity_records().find(|(uid, _)| **uid == new_uuid) {
+                                    if let Some(obj_id) = record.sdf_object_id {
+                                        frame_spawned.push(obj_id);
+                                    }
+                                }
                             }
                         }
                     }
@@ -493,11 +532,14 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             // -- Scene/Project I/O (delegated to engine_loop_io) --------
             if es.pending_save {
                 es.pending_save = false;
-                engine_loop_io::handle_scene_save(&mut es, &engine);
+                let reg = gameplay_registry.lock().expect("registry lock");
+                engine_loop_io::handle_scene_save(&mut es, &engine, &reg);
+                drop(reg);
             }
             if es.pending_save_as {
                 es.pending_save_as = false;
-                engine_loop_io::handle_scene_save_as(es, &editor_state, &engine);
+                let reg = gameplay_registry.lock().expect("registry lock");
+                engine_loop_io::handle_scene_save_as(es, &editor_state, &engine, &reg);
                 continue;
             }
 
@@ -508,6 +550,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                     engine: &mut engine,
                     editor_state: &editor_state,
                     layout_backing: &layout_backing,
+                    gameplay_registry: &gameplay_registry,
                 };
                 engine_loop_io::handle_scene_open_impl(es, open_path, &mut io_ctx);
                 continue;
@@ -520,8 +563,25 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                     engine: &mut engine,
                     editor_state: &editor_state,
                     layout_backing: &layout_backing,
+                    gameplay_registry: &gameplay_registry,
                 };
                 engine_loop_io::handle_new_project(&mut io_ctx, &mut frame_topology_changed);
+
+                // Build and load game dylib for the new project.
+                if let Ok(es_guard) = editor_state.lock() {
+                    if let (Some(pf), Some(pp)) = (&es_guard.current_project, &es_guard.current_project_path) {
+                        if let Some(ref game_crate) = pf.game_crate {
+                            let project_root = rkf_runtime::project::project_root(std::path::Path::new(pp));
+                            game_dylib_loader = engine_loop_io::build_and_load_game_dylib(
+                                &project_root, game_crate, &gameplay_registry, game_dylib_loader.take(),
+                            );
+                            // Rebuild schedule after loading new components/systems.
+                            let reg = gameplay_registry.lock().expect("registry lock");
+                            behavior_executor = rkf_runtime::behavior::BehaviorExecutor::new(&reg)
+                                .expect("failed to rebuild behavior schedule");
+                        }
+                    }
+                }
                 continue;
             }
 
@@ -533,20 +593,43 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                     engine: &mut engine,
                     editor_state: &editor_state,
                     layout_backing: &layout_backing,
+                    gameplay_registry: &gameplay_registry,
                 };
                 engine_loop_io::handle_open_project(open_path, &mut io_ctx, &mut frame_topology_changed);
+
+                // Build and load game dylib for the opened project.
+                if let Ok(es_guard) = editor_state.lock() {
+                    if let (Some(pf), Some(pp)) = (&es_guard.current_project, &es_guard.current_project_path) {
+                        if let Some(ref game_crate) = pf.game_crate {
+                            let project_root = rkf_runtime::project::project_root(std::path::Path::new(pp));
+                            game_dylib_loader = engine_loop_io::build_and_load_game_dylib(
+                                &project_root, game_crate, &gameplay_registry, game_dylib_loader.take(),
+                            );
+                            // Rebuild schedule after loading new components/systems.
+                            let reg = gameplay_registry.lock().expect("registry lock");
+                            behavior_executor = rkf_runtime::behavior::BehaviorExecutor::new(&reg)
+                                .expect("failed to rebuild behavior schedule");
+                        }
+                    }
+                }
                 continue;
             }
 
             if es.pending_save_project {
                 es.pending_save_project = false;
-                engine_loop_io::handle_save_project(&mut es, &engine, &layout_backing);
+                let reg = gameplay_registry.lock().expect("registry lock");
+                engine_loop_io::handle_save_project(&mut es, &engine, &layout_backing, &reg);
+                drop(reg);
             }
 
             // Detect gizmo-driven transform changes.
             if es.gizmo.dragging {
-                if let Some(crate::editor_state::SelectedEntity::Object(eid)) = es.selected_entity {
-                    frame_dirty_objects.push(eid as u32);
+                if let Some(crate::editor_state::SelectedEntity::Object(uuid)) = es.selected_entity {
+                    if let Some((_, record)) = es.world.entity_records().find(|(uid, _)| **uid == uuid) {
+                        if let Some(obj_id) = record.sdf_object_id {
+                            frame_dirty_objects.push(obj_id);
+                        }
+                    }
                 }
             }
 
@@ -591,10 +674,9 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                 None
             };
 
-            // Build a merged scene from all scenes.
+            // Build a render scene from hecs (authoritative source of truth).
             let scene = {
-                let mut merged = rkf_core::scene::Scene::new("merged");
-                merged.objects = es.world.all_objects().cloned().collect();
+                let mut merged = es.world.build_render_scene();
                 for obj in &mut merged.objects {
                     obj.aabb = crate::placement::compute_object_local_aabb(obj);
                 }
@@ -633,6 +715,10 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             let paint_edits = std::mem::take(&mut es.pending_paint_edits);
             let paint_undo = es.pending_paint_undo.take();
 
+            // Drain play mode requests.
+            let f_play_start = std::mem::take(&mut es.pending_play_start);
+            let f_play_stop = std::mem::take(&mut es.pending_play_stop);
+
             // Reset per-frame deltas last.
             es.reset_frame_deltas();
 
@@ -641,7 +727,8 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
              environment, lights,
              scene, sel, gm, gizmo_axis, grid, emode, brush_radius, brush_falloff,
              sculpt_edits, sculpt_undo, sculpting_active,
-             paint_edits, paint_undo)
+             paint_edits, paint_undo,
+             f_play_start, f_play_stop)
         };
 
         // d. Apply extracted data to engine (no lock held).
@@ -669,7 +756,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         if let Some((object_id, from_material, to_material)) = f_remap_material {
             engine_loop_edits::process_remap_material(
                 object_id, from_material, to_material,
-                &mut engine, &scene_clone, &mut frame_dirty_objects,
+                &mut engine, &editor_state, &scene_clone, &mut frame_dirty_objects,
             );
         }
 
@@ -681,15 +768,28 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         }
 
         // e2. Process sculpt undo.
-        if let Some((undo_object_id, snapshots)) = f_sculpt_undo {
+        if let Some((undo_uuid, snapshots)) = f_sculpt_undo {
             engine.apply_sculpt_undo(&snapshots);
-            frame_dirty_objects.push(undo_object_id as u32);
+            // Look up SDF object ID from UUID.
+            if let Ok(es_ref) = editor_state.lock() {
+                if let Some((_, record)) = es_ref.world.entity_records().find(|(uid, _)| **uid == undo_uuid) {
+                    if let Some(obj_id) = record.sdf_object_id {
+                        frame_dirty_objects.push(obj_id);
+                    }
+                }
+            }
         }
 
         // e2b. Process paint undo.
-        if let Some((undo_object_id, snapshots)) = f_paint_undo {
+        if let Some((undo_uuid, snapshots)) = f_paint_undo {
             engine.apply_sculpt_undo(&snapshots);
-            frame_dirty_objects.push(undo_object_id as u32);
+            if let Ok(es_ref) = editor_state.lock() {
+                if let Some((_, record)) = es_ref.world.entity_records().find(|(uid, _)| **uid == undo_uuid) {
+                    if let Some(obj_id) = record.sdf_object_id {
+                        frame_dirty_objects.push(obj_id);
+                    }
+                }
+            }
         }
 
         // e3. Process sculpt edits.
@@ -751,6 +851,25 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         // g3. Sync material library to GPU if dirty.
         engine.sync_materials();
 
+        // g4. Play mode transitions and behavior tick.
+        {
+            let mut game_store = game_store_arc.lock().expect("game_store lock");
+            engine_loop_play::tick_play_mode(
+                &mut play_state,
+                f_play_start,
+                f_play_stop,
+                &mut scene_clone,
+                &mut engine,
+                &shared_state,
+                &gameplay_registry,
+                &mut behavior_executor,
+                &mut game_store,
+                &editor_state,
+                &stable_ids,
+                dt,
+            );
+        }
+
         // h. Render frame to offscreen texture.
         let t_render_start = std::time::Instant::now();
         engine.render_frame_offscreen(&scene_clone);
@@ -775,46 +894,31 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         }
 
         // i2. If screenshot was requested, store the pixels in shared_state.
-        {
-            let do_screenshot = shared_state.lock()
-                .map(|s| s.screenshot_requested)
-                .unwrap_or(false);
-            if do_screenshot {
-                if let Ok(mut ss) = shared_state.lock() {
-                    ss.frame_pixels = pixels;
-                    ss.frame_width = px_w;
-                    ss.frame_height = px_h;
-                    ss.screenshot_requested = false;
-                }
+        if let Ok(mut ss) = shared_state.lock() {
+            if ss.screenshot_requested {
+                ss.frame_pixels = pixels;
+                ss.frame_width = px_w;
+                ss.frame_height = px_h;
+                ss.screenshot_requested = false;
             }
         }
 
         // i3. Material preview -- dispatch + readback.
-        {
-            let (preview_slot, preview_prim) = {
-                if let Ok(mut ss) = shared_state.lock() {
-                    let slot = ss.preview_material_slot;
-                    let prim = ss.preview_primitive_type;
-                    if ss.preview_dirty {
-                        ss.preview_dirty = false;
-                    }
-                    (slot, prim)
-                } else {
-                    (None, 0)
-                }
-            };
-            if let Some(slot) = preview_slot {
-                let materials = {
-                    let lib = engine.material_library.lock().unwrap();
-                    lib.all_materials().to_vec()
-                };
-                engine.material_preview.dispatch_render(
-                    &engine.ctx.device, &engine.ctx.queue,
-                    &materials, slot, preview_prim,
-                );
-                if let Some((pixels, pw, ph)) = engine.material_preview.read_pixels(&engine.ctx.device) {
-                    preview_writer.submit_frame(&pixels, pw, ph);
-                }
+        let (preview_slot, preview_prim) = if let Ok(mut ss) = shared_state.lock() {
+            let slot = ss.preview_material_slot;
+            let prim = ss.preview_primitive_type;
+            if ss.preview_dirty { ss.preview_dirty = false; }
+            (slot, prim)
+        } else {
+            (None, 0)
+        };
+        if let Some(slot) = preview_slot {
+            let materials = engine.material_library.lock().unwrap().all_materials().to_vec();
+            engine.material_preview.dispatch_render(
+                &engine.ctx.device, &engine.ctx.queue, &materials, slot, preview_prim,
+            );
+            if let Some((pixels, pw, ph)) = engine.material_preview.read_pixels(&engine.ctx.device) {
+                preview_writer.submit_frame(&pixels, pw, ph);
             }
         }
 
@@ -834,7 +938,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
 
         // l. Process GPU pick result.
         engine_loop_ui::process_gpu_pick(
-            &shared_state, &editor_state, &engine, f_sculpting_active,
+            &shared_state, &editor_state, &engine, f_sculpting_active, &gameplay_registry,
         );
 
         // m. Process GPU brush hit result.
@@ -848,7 +952,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             dirty.shaders = true;
             first_frame = false;
         }
-        engine_loop_ui::push_dirty_ui_signals(&dirty, &editor_state, &engine);
+        engine_loop_ui::push_dirty_ui_signals(&dirty, &editor_state, &engine, &gameplay_registry);
 
         // n. Periodically push FPS + camera position to the main thread.
         if last_fps_push.elapsed() >= std::time::Duration::from_millis(500) {

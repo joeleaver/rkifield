@@ -32,10 +32,12 @@ mod engine_loop;
 mod engine_loop_commands;
 mod engine_loop_edits;
 mod engine_loop_io;
+mod engine_loop_play;
 mod engine_loop_ui;
 pub(crate) mod layout;
 mod ui;
 mod ui_snapshot;
+mod tool_routing_bridge;
 mod undo;
 mod wireframe;
 
@@ -149,12 +151,26 @@ fn main() -> anyhow::Result<()> {
         Arc::new(Mutex::new(lib))
     };
 
+    // 1d. Create shared gameplay registry.
+    // Only engine components are registered at startup. Gameplay components
+    // come from the project's game crate dylib, loaded on project open.
+    let gameplay_registry = {
+        let mut reg = rkf_runtime::behavior::GameplayRegistry::new();
+        rkf_runtime::behavior::engine_components::engine_register(&mut reg);
+        Arc::new(Mutex::new(reg))
+    };
+
+    // 1e. Create shared game store for behavior state.
+    let game_store = Arc::new(Mutex::new(rkf_runtime::behavior::GameStore::new()));
+
     // 2. Create tokio runtime and start IPC server.
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-    let api = automation::EditorAutomationApi::new(
+    let api = automation::EditorAutomationApi::with_game_store(
         Arc::clone(&shared_state),
         Arc::clone(&editor_state),
         Arc::clone(&material_library),
+        Arc::clone(&gameplay_registry),
+        Arc::clone(&game_store),
     );
     let api: Arc<dyn rkf_core::automation::AutomationApi> = Arc::new(api);
     let (_ipc_handle, socket_path) = start_ipc_server(&rt, api);
@@ -169,6 +185,8 @@ fn main() -> anyhow::Result<()> {
     // 4. Clones for the engine thread.
     let editor_state_for_thread = Arc::clone(&editor_state);
     let shared_state_for_thread = Arc::clone(&shared_state);
+    let gameplay_registry_for_thread = Arc::clone(&gameplay_registry);
+    let game_store_for_thread = Arc::clone(&game_store);
     let layout_backing_for_thread = layout_backing.clone();
     let surface_writer = surface_handle.writer();
     let gpu_registrar = surface_handle.gpu_registrar();
@@ -186,6 +204,8 @@ fn main() -> anyhow::Result<()> {
             surface_writer,
             gpu_registrar,
             preview_writer,
+            gameplay_registry: gameplay_registry_for_thread,
+            game_store: game_store_for_thread,
         });
     });
 
