@@ -71,6 +71,8 @@ impl EditorState {
             pending_redo: false,
             show_grid: false,
             show_shortcuts: false,
+            pending_play_start: false,
+            pending_play_stop: false,
             pending_drag: false,
             pending_minimize: false,
             pending_maximize: false,
@@ -166,18 +168,18 @@ impl EditorState {
                 } else {
                     (*new_pos, *new_rot, *new_scale)
                 };
-                if let Some(entity) = self.world.find_entity_by_id(*entity_id) {
+                if self.world.is_alive(*entity_id) {
                     let wp = rkf_core::WorldPosition::new(glam::IVec3::ZERO, pos);
-                    let _ = self.world.set_position(entity, wp);
-                    let _ = self.world.set_rotation(entity, rot);
-                    let _ = self.world.set_scale(entity, scale);
+                    let _ = self.world.set_position(*entity_id, wp);
+                    let _ = self.world.set_rotation(*entity_id, rot);
+                    let _ = self.world.set_scale(*entity_id, scale);
                 }
             }
             UndoActionKind::SpawnEntity { entity_id } => {
                 if reverse {
                     // Undo spawn = despawn
-                    if let Some(entity) = self.world.find_entity_by_id(*entity_id) {
-                        let _ = self.world.despawn(entity);
+                    if self.world.is_alive(*entity_id) {
+                        let _ = self.world.despawn(*entity_id);
                     }
                 }
                 // Redo spawn would need stored object data — not supported yet.
@@ -215,7 +217,7 @@ impl EditorState {
         pixel_y: f32,
         vp_width: f32,
         vp_height: f32,
-    ) -> Option<u64> {
+    ) -> Option<uuid::Uuid> {
         let (ray_o, ray_d) = crate::camera::screen_to_ray(
             &self.editor_camera,
             pixel_x,
@@ -224,14 +226,14 @@ impl EditorState {
             vp_height,
         );
 
-        let scene = self.world.scene();
-        let world_transforms = rkf_core::transform_bake::bake_world_transforms(&scene.objects);
+        let render_scene = self.world.build_render_scene();
+        let world_transforms = rkf_core::transform_bake::bake_world_transforms(&render_scene.objects);
         let default_wt = rkf_core::transform_bake::WorldTransform::default();
 
         let mut best_t = f32::MAX;
         let mut best_id = None;
 
-        for obj in &scene.objects {
+        for obj in &render_scene.objects {
             let wt = world_transforms.get(&obj.id).unwrap_or(&default_wt);
             let smin = obj.aabb.min * wt.scale;
             let smax = obj.aabb.max * wt.scale;
@@ -251,7 +253,7 @@ impl EditorState {
             if let Some(t) = ray_aabb_distance(ray_o, ray_d, wmin, wmax) {
                 if t < best_t {
                     best_t = t;
-                    best_id = Some(obj.id as u64);
+                    best_id = self.world.find_by_sdf_id(obj.id);
                 }
             }
         }
@@ -259,204 +261,104 @@ impl EditorState {
         best_id
     }
 
-    /// Load a scene file and populate the editor state from it.
+    /// Load a v3 scene file and populate the editor state from it.
     ///
-    /// Populates `world.scene()` with SDF objects from the file, lights into
-    /// the light editor, and applies environment settings. Returns the loaded
-    /// `SceneFile` for further processing (e.g. setting up engine geometry).
-    pub fn load_scene(&mut self, path: &str) -> Result<crate::scene_io::SceneFile, String> {
-        use crate::scene_io::{load_scene_from_path, ComponentData};
+    /// Spawns entities into hecs via `scene_file_v3::load_scene()`,
+    /// rebuilds World entity tracking, and restores editor state
+    /// (camera, environment, lights) from properties.
+    pub fn load_scene(&mut self, path: &str) -> Result<(), String> {
+        use rkf_runtime::behavior::{GameplayRegistry, StableIdIndex};
+        use rkf_runtime::scene_file_v3;
 
-        let scene_file = load_scene_from_path(path)?;
+        let ron_str = std::fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read scene file '{path}': {e}"))?;
+        let scene_v3 = scene_file_v3::deserialize_scene_v3(&ron_str)
+            .map_err(|e| format!("Failed to parse scene file: {e}"))?;
 
-        // Clear existing world scene.
-        let world_scene = self.world.scene_mut();
-        world_scene.objects.clear();
+        self.world.clear();
 
-        // Populate world scene from non-light entities.
-        for entity in &scene_file.entities {
-            let is_light_only = !entity.components.is_empty()
-                && entity
-                    .components
-                    .iter()
-                    .all(|c| matches!(c, ComponentData::Light { .. }));
-            if is_light_only {
-                continue;
-            }
+        let registry = GameplayRegistry::new();
+        let mut stable_index = StableIdIndex::new();
+        scene_file_v3::load_scene(&scene_v3, self.world.ecs_mut(), &mut stable_index, &registry);
+        self.world.rebuild_entity_tracking_from_ecs();
 
-            let root_node = rkf_core::scene_node::SceneNode::new(&entity.name);
-            let mut obj = rkf_core::scene::SceneObject {
-                id: entity.entity_id as u32,
-                name: entity.name.clone(),
-                parent_id: entity.parent_id.map(|p| p as u32),
-                position: entity.position,
-                rotation: entity.rotation,
-                scale: entity.scale,
-                root_node,
-                aabb: rkf_core::aabb::Aabb::new(Vec3::ZERO, Vec3::ZERO),
-            };
-            // Store asset path in the root node's name for roundtrip.
-            for comp in &entity.components {
-                if let ComponentData::SdfObject { asset_path } = comp {
-                    obj.root_node.name = asset_path.clone();
-                }
-            }
-            world_scene.objects.push(obj);
-        }
-
-        // Update next_id to avoid collisions with loaded objects.
-        if let Some(max_id) = world_scene.objects.iter().map(|o| o.id).max() {
-            world_scene.next_id = max_id + 1;
-        }
-
-        // Populate light editor from Light components.
-        self.light_editor = crate::light_editor::LightManager::new();
-        for entity in &scene_file.entities {
-            for comp in &entity.components {
-                if let ComponentData::Light {
-                    light_type,
-                    color,
-                    intensity,
-                    range,
-                } = comp
-                {
-                    use crate::light_editor::SceneLightType;
-                    let lt = match light_type.as_str() {
-                        "spot" => SceneLightType::Spot,
-                        _ => SceneLightType::Point,
-                    };
-                    let id = self.light_editor.add_light(lt);
-                    self.light_editor.set_position(id, entity.position);
-                    self.light_editor.set_color(
-                        id,
-                        Vec3::new(color[0], color[1], color[2]),
-                    );
-                    self.light_editor.set_intensity(id, *intensity);
-                    if *range > 0.0 {
-                        self.light_editor.set_range(id, *range);
-                    }
-                }
-            }
-        }
-
-        // Apply environment settings if present.
-        if !scene_file.environment_ron.is_empty() {
-            if let Ok(env) =
-                crate::environment::EnvironmentState::deserialize_from_ron(&scene_file.environment_ron)
-            {
+        // Restore editor state from properties.
+        if let Some(s) = scene_v3.properties.get("environment") {
+            if let Ok(env) = ron::from_str::<crate::environment::EnvironmentState>(s) {
                 self.environment = env;
                 self.environment.mark_dirty();
             }
         }
+        if let Some(s) = scene_v3.properties.get("lights") {
+            if let Ok(lights) = ron::from_str::<Vec<crate::light_editor::SceneLight>>(s) {
+                self.light_editor.replace_lights(lights);
+            }
+        }
 
-        // Resync entity tracking to register all loaded objects.
-        self.world.resync_entity_tracking();
-
-        // Track the current scene path.
         self.current_scene_path = Some(path.to_string());
         self.unsaved_changes.mark_saved();
 
-        Ok(scene_file)
+        Ok(())
     }
 
-    /// Construct a [`SceneFile`] from the current editor state.
+    /// Save the current editor state to a v3 scene file.
     ///
-    /// Reads SDF objects directly from `world.scene()`, then appends light
-    /// entities from the light editor. The environment is serialized via RON.
-    /// The resulting `SceneFile` can be passed to
-    /// [`crate::scene_io::save_scene_to_path`].
-    pub fn save_current_scene(&self) -> crate::scene_io::SceneFile {
-        use crate::light_editor::SceneLightType;
-        use crate::scene_io::{ComponentData, SceneEntity, SceneFile};
-        use glam::Quat;
+    /// Serializes all hecs entities plus editor state (camera, environment,
+    /// lights) into a `SceneFileV3`.
+    pub fn save_current_scene(&self) -> rkf_runtime::scene_file_v3::SceneFileV3 {
+        use rkf_runtime::behavior::{GameplayRegistry, StableIdIndex};
+        use rkf_runtime::scene_file_v3;
 
-        let mut entities: Vec<SceneEntity> = Vec::new();
-
-        // Collect SDF objects from world scene.
-        let scene = self.world.scene();
-        for obj in &scene.objects {
-            let mut components = Vec::new();
-            // If the root node name looks like an asset path, store it.
-            if !obj.root_node.name.is_empty() && obj.root_node.name.contains("://") {
-                components.push(ComponentData::SdfObject {
-                    asset_path: obj.root_node.name.clone(),
-                });
+        // Build a stable index from current hecs entities.
+        let mut stable_index = StableIdIndex::new();
+        for entity_ref in self.world.ecs_ref().iter() {
+            let e = entity_ref.entity();
+            if let Ok(sid) = self.world.ecs_ref().get::<&rkf_runtime::behavior::StableId>(e) {
+                stable_index.insert(sid.0, e);
             }
-            entities.push(SceneEntity {
-                entity_id: obj.id as u64,
-                name: obj.name.clone(),
-                parent_id: obj.parent_id.map(|p| p as u64),
-                position: obj.position,
-                rotation: obj.rotation,
-                scale: obj.scale,
-                components,
-            });
         }
 
-        // Append light entities from the light editor.
-        for (idx, light) in self.light_editor.all_lights().iter().enumerate() {
-            let light_type_str = match light.light_type {
-                SceneLightType::Point => "point",
-                SceneLightType::Spot => "spot",
-            };
-            let name = format!(
-                "{} Light {}",
-                match light.light_type {
-                    SceneLightType::Point => "Point",
-                    SceneLightType::Spot => "Spot",
-                },
-                idx + 1
-            );
-            let range = if light.range.is_infinite() {
-                0.0
-            } else {
-                light.range
-            };
-            entities.push(SceneEntity {
-                entity_id: light.id,
-                name,
-                parent_id: None,
-                position: light.position,
-                rotation: Quat::IDENTITY,
-                scale: Vec3::ONE,
-                components: vec![ComponentData::Light {
-                    light_type: light_type_str.to_string(),
-                    color: [light.color.x, light.color.y, light.color.z],
-                    intensity: light.intensity,
-                    range,
-                }],
-            });
+        let registry = GameplayRegistry::new();
+        let mut scene_v3 = scene_file_v3::save_scene(self.world.ecs_ref(), &stable_index, &registry);
+
+        // Store editor state in properties.
+        if let Ok(s) = ron::to_string(&self.environment) {
+            scene_v3.properties.insert("environment".into(), s);
+        }
+        if let Ok(s) = ron::to_string(self.light_editor.all_lights()) {
+            scene_v3.properties.insert("lights".into(), s);
         }
 
-        let environment_ron = self.environment.serialize_to_ron().unwrap_or_default();
-
+        // Set scene name from path.
         let name = self
             .current_scene_path
             .as_ref()
             .and_then(|p| std::path::Path::new(p).file_stem())
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "Untitled".to_string());
+        scene_v3.properties.insert("name".into(), name);
 
-        SceneFile {
-            version: 1,
-            name,
-            entities,
-            environment_ron,
-        }
+        scene_v3
     }
 
-    /// Build object summaries from the current scene.
+    /// Build object summaries from hecs (authoritative source of truth).
     pub fn build_object_summaries(&self) -> Vec<crate::ui_snapshot::ObjectSummary> {
         use crate::ui_snapshot::{ObjectSummary, ObjectType};
-        self.world.scene().objects.iter().map(|obj| {
+        let render_scene = self.world.build_render_scene();
+        render_scene.objects.iter().map(|obj| {
             let (yaw, pitch, roll) = obj.rotation.to_euler(glam::EulerRot::XYZ);
+            // Resolve SDF object ID → entity UUID.
+            let entity_uuid = self.world.find_by_sdf_id(obj.id)
+                .unwrap_or(uuid::Uuid::nil());
+            // Resolve parent SDF object ID → parent UUID.
+            let parent_uuid = obj.parent_id.and_then(|pid| self.world.find_by_sdf_id(pid));
             ObjectSummary {
-                id: obj.id as u64,
+                id: entity_uuid,
                 name: obj.name.clone(),
                 position: obj.position,
                 rotation_degrees: Vec3::new(yaw.to_degrees(), pitch.to_degrees(), roll.to_degrees()),
                 scale: obj.scale,
-                parent_id: obj.parent_id,
+                parent_id: parent_uuid,
                 object_type: match &obj.root_node.sdf_source {
                     rkf_core::scene_node::SdfSource::None => ObjectType::None,
                     rkf_core::scene_node::SdfSource::Analytical { .. } => ObjectType::Analytical,

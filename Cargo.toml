@@ -124,6 +124,8 @@ peniko = "0.6"
 keyboard-types = "0.7"
 png = "0.17"
 futures-util = "0.3"
+tempfile = "3"
+libloading = "0.8"
 
 # Internal crate cross-references
 rkf-macros = { path = "crates/rkf-macros" }

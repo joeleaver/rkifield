@@ -7,12 +7,19 @@
 //! - `#[system(phase = Update)]` — annotate a function to register it as an ECS system
 //!   with phase scheduling and dependency ordering.
 
+mod component_helpers;
+
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::{
     parse::{Parse, ParseStream},
     parse_macro_input, Ident, ItemEnum, ItemFn, ItemStruct, LitStr, Token,
+};
+
+use component_helpers::{
+    classify_type, gen_get_field_arm, gen_set_field_arm,
+    has_persist, has_serde_skip, is_option_entity,
 };
 
 /// Attribute macro for ECS components.
@@ -94,158 +101,6 @@ pub fn component(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-// ─── Component macro implementation ─────────────────────────────────────
-
-/// Classify a type path segment to a FieldType variant name.
-fn classify_type(ty: &syn::Type) -> &'static str {
-    match ty {
-        syn::Type::Path(type_path) => {
-            let segments = &type_path.path.segments;
-            let last = match segments.last() {
-                Some(s) => s.ident.to_string(),
-                None => return "String", // fallback
-            };
-            match last.as_str() {
-                "f32" | "f64" => "Float",
-                "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "usize"
-                | "isize" => "Int",
-                "bool" => "Bool",
-                "Vec3" => "Vec3",
-                "WorldPosition" => "WorldPosition",
-                "Quat" => "Quat",
-                "String" => "String",
-                "Entity" => "Entity",
-                "Option" => {
-                    // Check if Option<Entity> or Option<hecs::Entity>
-                    if let syn::PathArguments::AngleBracketed(args) = &segments.last().unwrap().arguments {
-                        if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
-                            let inner_class = classify_type(inner_ty);
-                            if inner_class == "Entity" {
-                                return "Entity";
-                            }
-                        }
-                    }
-                    "String" // fallback for Option<Other>
-                }
-                "Vec" => "List",
-                _ => "String", // fallback
-            }
-        }
-        _ => "String",
-    }
-}
-
-/// Check if a field has `#[serde(skip)]` among its attributes.
-fn has_serde_skip(attrs: &[syn::Attribute]) -> bool {
-    for attr in attrs {
-        if attr.path().is_ident("serde") {
-            // Parse the attribute tokens to look for `skip`
-            if let Ok(nested) = attr.parse_args_with(
-                syn::punctuated::Punctuated::<syn::Meta, Token![,]>::parse_terminated,
-            ) {
-                for meta in &nested {
-                    if meta.path().is_ident("skip") {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    false
-}
-
-/// Get the last segment ident string from a type, for matching in get_field/set_field.
-fn type_last_ident(ty: &syn::Type) -> String {
-    match ty {
-        syn::Type::Path(type_path) => {
-            type_path.path.segments.last()
-                .map(|s| s.ident.to_string())
-                .unwrap_or_default()
-        }
-        _ => String::new(),
-    }
-}
-
-/// Generate the get_field match arm for a given field.
-fn gen_get_field_arm(field_name: &str, field_ident: &Ident, ty: &syn::Type) -> Option<TokenStream2> {
-    let last = type_last_ident(ty);
-    let expr = match last.as_str() {
-        "f32" => quote! { rkf_runtime::behavior::GameValue::Float(c.#field_ident as f64) },
-        "f64" => quote! { rkf_runtime::behavior::GameValue::Float(c.#field_ident) },
-        "i8" | "i16" | "i32" => quote! { rkf_runtime::behavior::GameValue::Int(c.#field_ident as i64) },
-        "i64" => quote! { rkf_runtime::behavior::GameValue::Int(c.#field_ident) },
-        "u8" | "u16" | "u32" => quote! { rkf_runtime::behavior::GameValue::Int(c.#field_ident as i64) },
-        "u64" | "usize" | "isize" => quote! { rkf_runtime::behavior::GameValue::Int(c.#field_ident as i64) },
-        "bool" => quote! { rkf_runtime::behavior::GameValue::Bool(c.#field_ident) },
-        "String" => quote! { rkf_runtime::behavior::GameValue::String(c.#field_ident.clone()) },
-        "Vec3" => quote! { rkf_runtime::behavior::GameValue::Vec3(c.#field_ident) },
-        "Quat" => quote! { rkf_runtime::behavior::GameValue::Quat(c.#field_ident) },
-        "WorldPosition" => quote! { rkf_runtime::behavior::GameValue::WorldPosition(c.#field_ident.clone()) },
-        _ => return None,
-    };
-    Some(quote! { #field_name => Ok(#expr), })
-}
-
-/// Generate the set_field match arm for a given field.
-fn gen_set_field_arm(field_name: &str, field_ident: &Ident, ty: &syn::Type) -> Option<TokenStream2> {
-    let last = type_last_ident(ty);
-    let expr = match last.as_str() {
-        "f32" => quote! {
-            rkf_runtime::behavior::GameValue::Float(f) => { c.#field_ident = f as f32; }
-        },
-        "f64" => quote! {
-            rkf_runtime::behavior::GameValue::Float(f) => { c.#field_ident = f; }
-        },
-        "i8" => quote! {
-            rkf_runtime::behavior::GameValue::Int(i) => { c.#field_ident = i as i8; }
-        },
-        "i16" => quote! {
-            rkf_runtime::behavior::GameValue::Int(i) => { c.#field_ident = i as i16; }
-        },
-        "i32" => quote! {
-            rkf_runtime::behavior::GameValue::Int(i) => { c.#field_ident = i as i32; }
-        },
-        "i64" => quote! {
-            rkf_runtime::behavior::GameValue::Int(i) => { c.#field_ident = i; }
-        },
-        "u8" => quote! {
-            rkf_runtime::behavior::GameValue::Int(i) => { c.#field_ident = i as u8; }
-        },
-        "u16" => quote! {
-            rkf_runtime::behavior::GameValue::Int(i) => { c.#field_ident = i as u16; }
-        },
-        "u32" => quote! {
-            rkf_runtime::behavior::GameValue::Int(i) => { c.#field_ident = i as u32; }
-        },
-        "u64" => quote! {
-            rkf_runtime::behavior::GameValue::Int(i) => { c.#field_ident = i as u64; }
-        },
-        "usize" => quote! {
-            rkf_runtime::behavior::GameValue::Int(i) => { c.#field_ident = i as usize; }
-        },
-        "isize" => quote! {
-            rkf_runtime::behavior::GameValue::Int(i) => { c.#field_ident = i as isize; }
-        },
-        "bool" => quote! {
-            rkf_runtime::behavior::GameValue::Bool(b) => { c.#field_ident = b; }
-        },
-        "String" => quote! {
-            rkf_runtime::behavior::GameValue::String(s) => { c.#field_ident = s; }
-        },
-        "Vec3" => quote! {
-            rkf_runtime::behavior::GameValue::Vec3(v) => { c.#field_ident = v; }
-        },
-        "Quat" => quote! {
-            rkf_runtime::behavior::GameValue::Quat(q) => { c.#field_ident = q; }
-        },
-        "WorldPosition" => quote! {
-            rkf_runtime::behavior::GameValue::WorldPosition(wp) => { c.#field_ident = wp; }
-        },
-        _ => return None,
-    };
-    Some(quote! { #field_name => match value { #expr _ => return Err(format!("type mismatch for field '{}'", field_name)), }, })
-}
-
 fn component_impl_struct(attrs: ComponentAttrs, mut input: ItemStruct) -> syn::Result<TokenStream2> {
     let struct_name = &input.ident;
     let struct_name_str = struct_name.to_string();
@@ -272,6 +127,7 @@ fn component_impl_struct(attrs: ComponentAttrs, mut input: ItemStruct) -> syn::R
         ident: Ident,
         field_type_variant: Ident,
         transient: bool,
+        persist: bool,
         ty: syn::Type,
     }
 
@@ -281,14 +137,28 @@ fn component_impl_struct(attrs: ComponentAttrs, mut input: ItemStruct) -> syn::R
         let ident = field.ident.as_ref().unwrap().clone();
         let name = ident.to_string();
         let transient = has_serde_skip(&field.attrs);
+        let persist = has_persist(&field.attrs);
         let field_type_str = classify_type(&field.ty);
         let field_type_variant = Ident::new(field_type_str, proc_macro2::Span::call_site());
+
+        // Reject #[persist] on transient fields — they should not be saved.
+        if persist && transient {
+            return Err(syn::Error::new_spanned(
+                field,
+                format!(
+                    "field `{}` has both #[serde(skip)] and #[persist]; \
+                     transient fields cannot be persisted",
+                    name
+                ),
+            ));
+        }
 
         field_infos.push(FieldInfo {
             name,
             ident,
             field_type_variant,
             transient,
+            persist,
             ty: field.ty.clone(),
         });
     }
@@ -302,6 +172,7 @@ fn component_impl_struct(attrs: ComponentAttrs, mut input: ItemStruct) -> syn::R
             let name = &fi.name;
             let ft = &fi.field_type_variant;
             let transient = fi.transient;
+            let persist = fi.persist;
             quote! {
                 rkf_runtime::behavior::FieldMeta {
                     name: #name,
@@ -309,6 +180,7 @@ fn component_impl_struct(attrs: ComponentAttrs, mut input: ItemStruct) -> syn::R
                     transient: #transient,
                     range: None,
                     default: None,
+                    persist: #persist,
                 }
             }
         })
@@ -318,14 +190,14 @@ fn component_impl_struct(attrs: ComponentAttrs, mut input: ItemStruct) -> syn::R
     let get_field_arms: Vec<TokenStream2> = field_infos
         .iter()
         .filter(|fi| !fi.transient)
-        .filter_map(|fi| gen_get_field_arm(&fi.name, &fi.ident, &fi.ty))
+        .filter_map(|fi| gen_get_field_arm(&fi.name, &fi.ident, &fi.ty, struct_name))
         .collect();
 
     // Generate set_field match arms.
     let set_field_arms: Vec<TokenStream2> = field_infos
         .iter()
         .filter(|fi| !fi.transient)
-        .filter_map(|fi| gen_set_field_arm(&fi.name, &fi.ident, &fi.ty))
+        .filter_map(|fi| gen_set_field_arm(&fi.name, &fi.ident, &fi.ty, struct_name))
         .collect();
 
     // Determine derives to add.
@@ -351,6 +223,36 @@ fn component_impl_struct(attrs: ComponentAttrs, mut input: ItemStruct) -> syn::R
         if attr.path().is_ident("derive") {
             // We can't easily modify derive contents, so we'll leave them.
             // The user shouldn't manually add these derives on a #[component] struct.
+        }
+    }
+
+    // Strip #[persist] attributes from fields — they've been consumed above.
+    // Also inject serde attributes on Entity/Option<Entity> fields so they can
+    // serialize as raw u64 bits (hecs::Entity does not implement Serialize).
+    if let syn::Fields::Named(ref mut fields) = input.fields {
+        for field in fields.named.iter_mut() {
+            field.attrs.retain(|attr| !attr.path().is_ident("persist"));
+
+            let class = classify_type(&field.ty);
+            if class == "Entity" {
+                if is_option_entity(&field.ty) {
+                    // Option<Entity>
+                    field.attrs.push(syn::parse_quote! {
+                        #[serde(
+                            serialize_with = "rkf_runtime::behavior::entity_serde::ser_opt_entity",
+                            deserialize_with = "rkf_runtime::behavior::entity_serde::de_opt_entity"
+                        )]
+                    });
+                } else {
+                    // Plain Entity
+                    field.attrs.push(syn::parse_quote! {
+                        #[serde(
+                            serialize_with = "rkf_runtime::behavior::entity_serde::ser_entity",
+                            deserialize_with = "rkf_runtime::behavior::entity_serde::de_entity"
+                        )]
+                    });
+                }
+            }
         }
     }
 

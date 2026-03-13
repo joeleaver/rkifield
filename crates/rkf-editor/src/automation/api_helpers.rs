@@ -101,7 +101,11 @@ impl EditorAutomationApi {
                     .editor_state
                     .lock()
                     .map_err(|e| AutomationError::EngineError(format!("lock poisoned: {e}")))?;
-                es.pending_convert_to_voxel = Some(object_id);
+                let entity_uuid = es.world.find_by_sdf_id(object_id)
+                    .ok_or_else(|| AutomationError::EngineError(
+                        format!("object {object_id} not found")
+                    ))?;
+                es.pending_convert_to_voxel = Some(entity_uuid);
                 Ok(format!("queued voxelization for object {object_id}"))
             }
             ["voxelize"] => Err(AutomationError::InvalidParameter(
@@ -209,7 +213,7 @@ impl EditorAutomationApi {
             .lock()
             .map_err(|e| format!("lock poisoned: {e}"))?;
 
-        let entity = es.world.find_entity_by_id(object_id as u64)
+        let entity = es.world.find_by_sdf_id(object_id)
             .ok_or_else(|| format!("object {object_id} not found"))?;
 
         es.world.add_child_node(entity, parent_node, child)
@@ -340,20 +344,27 @@ impl EditorAutomationApi {
             .lock()
             .map_err(|e| AutomationError::EngineError(format!("lock poisoned: {e}")))?;
 
-        // Read directly from world.scene() — the authoritative source.
-        let scene = es.world.scene();
+        // Read from hecs — the authoritative source.
+        let render_scene = es.world.build_render_scene();
         let mut entities = Vec::new();
-        for obj in &scene.objects {
+        for obj in &render_scene.objects {
             let p = obj.position;
             let r = obj.rotation;
             let entity_type = match &obj.root_node.sdf_source {
                 rkf_core::scene_node::SdfSource::None => "entity",
                 _ => "sdf_object",
             };
+            // Look up UUID for this SDF object.
+            let uuid_str = es.world.find_by_sdf_id(obj.id)
+                .map(|u| u.to_string())
+                .unwrap_or_else(|| format!("sdf:{}", obj.id));
+            let parent_uuid_str = obj.parent_id.and_then(|pid| {
+                es.world.find_by_sdf_id(pid).map(|u| u.to_string())
+            });
             entities.push(EntityNode {
-                id: obj.id as u64,
+                id: uuid_str,
                 name: obj.name.clone(),
-                parent: obj.parent_id.map(|pid| pid as u64),
+                parent: parent_uuid_str,
                 entity_type: entity_type.to_string(),
                 transform: [p.x, p.y, p.z, r.x, r.y, r.z, r.w, obj.scale.x, obj.scale.y, obj.scale.z],
             });
@@ -368,7 +379,7 @@ impl EditorAutomationApi {
             };
             let p = light.position;
             entities.push(EntityNode {
-                id: light.id,
+                id: format!("light:{}", light.id),
                 name: format!("{} Light {}", type_name, idx + 1),
                 parent: None,
                 entity_type: light_type.to_string(),

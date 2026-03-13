@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Serialize};
 
 use super::game_value::GameValue;
 
@@ -193,6 +193,7 @@ mod tests {
     use super::*;
     use glam::{IVec3, Quat, Vec3};
     use rkf_core::WorldPosition;
+    use serde::Deserialize;
 
     // ── behavior-1.1: core get/set ───────────────────────────────────────
 

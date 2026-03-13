@@ -36,6 +36,7 @@ mod sculpt;
 mod paint;
 mod brick_ops;
 mod offscreen;
+mod offscreen_render;
 mod query;
 pub(crate) mod file_loading;
 pub(crate) use file_loading::*;
@@ -216,8 +217,10 @@ pub struct EditorEngine {
     pub(super) last_vol_shadow_cam_pos: Vec3,
     /// Last sun direction used for vol_shadow dispatch (skip when static).
     pub(super) last_vol_shadow_sun_dir: [f32; 3],
-    /// File watcher for material and shader hot-reload.
+    /// File watcher for material, shader, and source hot-reload.
     pub(super) file_watcher: Option<rkf_runtime::FileWatcher>,
+    /// Build watcher for auto-building on .rs source changes.
+    pub(super) build_watcher: Option<rkf_runtime::BuildWatcher>,
     /// Shader composer — manages the uber-shader composition and shader registry.
     pub(crate) shader_composer: ShaderComposer,
     /// Last shader compile error for status bar display (cleared on success).
@@ -368,7 +371,7 @@ impl EditorEngine {
         }
     }
 
-    /// Process file watcher events (material + shader hot-reload).
+    /// Process file watcher events (material + shader + source hot-reload).
     pub fn process_file_events(&mut self) {
         let events = match self.file_watcher {
             Some(ref watcher) => watcher.poll_events(),
@@ -389,7 +392,18 @@ impl EditorEngine {
                 rkf_runtime::FileEvent::ShaderChanged(path) => {
                     self.try_reload_shader(&path);
                 }
+                rkf_runtime::FileEvent::SourceChanged(path) => {
+                    if let Some(ref mut bw) = self.build_watcher {
+                        log::info!("Source changed: {} — triggering build", path.display());
+                        bw.trigger_build();
+                    }
+                }
             }
+        }
+
+        // Poll build watcher for completion.
+        if let Some(ref mut bw) = self.build_watcher {
+            bw.poll();
         }
     }
 

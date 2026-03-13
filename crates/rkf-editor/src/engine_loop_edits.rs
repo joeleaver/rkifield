@@ -8,10 +8,9 @@ use crate::automation::SharedState;
 use crate::editor_state::EditorState;
 use crate::engine::EditorEngine;
 
-/// Rebuild a merged scene clone from all objects in EditorState.
+/// Rebuild a render scene clone from hecs (authoritative source of truth).
 pub(crate) fn rebuild_scene_clone(es: &EditorState) -> rkf_core::scene::Scene {
-    let mut merged = rkf_core::scene::Scene::new("merged");
-    merged.objects = es.world.all_objects().cloned().collect();
+    let mut merged = es.world.build_render_scene();
     for obj in &mut merged.objects {
         obj.aabb = crate::placement::compute_object_local_aabb(obj);
     }
@@ -20,78 +19,100 @@ pub(crate) fn rebuild_scene_clone(es: &EditorState) -> rkf_core::scene::Scene {
 
 /// e0: Process pending convert-to-voxel (analytical -> geometry-first).
 pub(crate) fn process_convert_to_voxel(
-    obj_id: u32,
+    entity_uuid: uuid::Uuid,
     engine: &mut EditorEngine,
     editor_state: &Arc<Mutex<EditorState>>,
     scene_clone: &mut rkf_core::scene::Scene,
     frame_dirty_objects: &mut Vec<u32>,
 ) {
     if let Ok(mut es) = editor_state.lock() {
-        let scene = es.world.scene_mut();
-        if let Some(obj) = scene.objects.iter_mut().find(|o| o.id == obj_id) {
-            if let rkf_core::SdfSource::Analytical { primitive, material_id } =
-                obj.root_node.sdf_source.clone()
-            {
-                // Bake non-uniform scale into the voxelized volume so the
-                // resulting object is the same world-space size as the scaled
-                // primitive, with uniform voxel density and scale reset to 1.
-                let obj_scale = obj.scale;
-                let scaled_half = crate::engine::primitive_half_extents(&primitive) * obj_scale;
-                // Size voxels so the shortest axis still gets reasonable resolution
-                // (at least ~8 voxels = 1 brick), capped so the longest axis doesn't
-                // exceed ~128 voxels (16 bricks) to keep brick count manageable.
-                let min_extent = scaled_half.x.min(scaled_half.y).min(scaled_half.z).max(0.001);
-                let max_extent = scaled_half.x.max(scaled_half.y).max(scaled_half.z);
-                let vs_from_short = min_extent * 2.0 / 8.0;   // ≥8 voxels on shortest axis
-                let vs_from_long  = max_extent * 2.0 / 128.0; // ≤128 voxels on longest axis
-                let voxel_size = vs_from_short.min(vs_from_long).max(0.005);
-                if let Some((handle, vs, grid_aabb, _count)) =
-                    engine.convert_to_geometry_first(
-                        &primitive, material_id as u8, voxel_size, obj_id,
-                        Some(obj_scale),
-                    )
-                {
-                    obj.root_node.sdf_source = rkf_core::SdfSource::Voxelized {
-                        brick_map_handle: handle,
-                        voxel_size: vs,
-                        aabb: grid_aabb,
-                    };
-                    obj.aabb = grid_aabb;
-                    // Reset scale — shape is now baked into the voxel volume.
-                    obj.scale = glam::Vec3::ONE;
-                    engine.reupload_brick_data();
-                    let map_data = engine.cpu_brick_map_alloc.as_slice();
-                    if !map_data.is_empty() {
-                        engine.gpu_scene.upload_brick_maps(
-                            &engine.ctx.device, &engine.ctx.queue, map_data,
-                        );
-                    }
-                    log::info!(
-                        "Converted object {} to voxel (vs={}, scale {:?} baked in)",
-                        obj.name, voxel_size, obj_scale,
-                    );
+        // Resolve entity UUID → SDF object ID.
+        let obj_id = match es.world.entity_records()
+            .find(|(uid, _)| **uid == entity_uuid)
+            .and_then(|(_, r)| r.sdf_object_id)
+        {
+            Some(id) => id,
+            None => return,
+        };
+        let (primitive, material_id, obj_scale) = {
+            let sdf_tree = match es.world.get::<rkf_runtime::components::SdfTree>(entity_uuid) {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            match sdf_tree.root.sdf_source.clone() {
+                rkf_core::SdfSource::Analytical { primitive, material_id } => {
+                    let scale = es.world.scale(entity_uuid).unwrap_or(glam::Vec3::ONE);
+                    (primitive, material_id, scale)
                 }
+                _ => return, // Already voxelized or none.
             }
+        };
+
+        // Bake non-uniform scale into the voxelized volume.
+        let scaled_half = crate::engine::primitive_half_extents(&primitive) * obj_scale;
+        let min_extent = scaled_half.x.min(scaled_half.y).min(scaled_half.z).max(0.001);
+        let max_extent = scaled_half.x.max(scaled_half.y).max(scaled_half.z);
+        let vs_from_short = min_extent * 2.0 / 8.0;
+        let vs_from_long  = max_extent * 2.0 / 128.0;
+        let voxel_size = vs_from_short.min(vs_from_long).max(0.005);
+
+        if let Some((handle, vs, grid_aabb, _count)) =
+            engine.convert_to_geometry_first(
+                &primitive, material_id as u8, voxel_size, obj_id,
+                Some(obj_scale),
+            )
+        {
+            // Write hecs (authoritative source of truth).
+            if let Ok(mut sdf_tree) = es.world.get_mut::<rkf_runtime::components::SdfTree>(entity_uuid) {
+                sdf_tree.root.sdf_source = rkf_core::SdfSource::Voxelized {
+                    brick_map_handle: handle,
+                    voxel_size: vs,
+                    aabb: grid_aabb,
+                };
+                sdf_tree.aabb = grid_aabb;
+            }
+            let _ = es.world.set_scale(entity_uuid, glam::Vec3::ONE);
+
+            engine.reupload_brick_data();
+            let map_data = engine.cpu_brick_map_alloc.as_slice();
+            if !map_data.is_empty() {
+                engine.gpu_scene.upload_brick_maps(
+                    &engine.ctx.device, &engine.ctx.queue, map_data,
+                );
+            }
+            log::info!(
+                "Converted object {} to voxel (vs={}, scale {:?} baked in)",
+                obj_id, voxel_size, obj_scale,
+            );
         }
 
-        // Rebuild scene_clone so the dirty path sees the Voxelized SdfSource
-        // this frame (not the stale Analytical one captured before conversion).
+        // Rebuild scene_clone from hecs.
         *scene_clone = rebuild_scene_clone(&es);
+        frame_dirty_objects.push(obj_id);
     }
-    frame_dirty_objects.push(obj_id);
 }
 
 /// e1b: Process pending material remap.
 pub(crate) fn process_remap_material(
-    object_id: u64,
+    entity_uuid: uuid::Uuid,
     from_material: u16,
     to_material: u16,
     engine: &mut EditorEngine,
+    editor_state: &Arc<Mutex<EditorState>>,
     scene_clone: &rkf_core::scene::Scene,
     frame_dirty_objects: &mut Vec<u32>,
 ) {
     use rkf_core::scene_node::SdfSource;
-    if let Some(obj) = scene_clone.objects.iter().find(|o| o.id as u64 == object_id) {
+    // Resolve UUID -> SDF object ID.
+    let sdf_obj_id = if let Ok(es) = editor_state.lock() {
+        es.world.entity_records()
+            .find(|(uid, _)| **uid == entity_uuid)
+            .and_then(|(_, r)| r.sdf_object_id)
+    } else {
+        None
+    };
+    let Some(object_id) = sdf_obj_id else { return; };
+    if let Some(obj) = scene_clone.objects.iter().find(|o| o.id == object_id) {
         if let SdfSource::Voxelized { brick_map_handle, .. } = &obj.root_node.sdf_source {
             let handle = *brick_map_handle;
             let dims = handle.dims;
@@ -119,38 +140,39 @@ pub(crate) fn process_remap_material(
                 }
             }
             engine.reupload_brick_data();
-            frame_dirty_objects.push(object_id as u32);
+            frame_dirty_objects.push(object_id);
         }
     }
 }
 
 /// e1c: Process pending primitive material change.
 pub(crate) fn process_set_primitive_material(
-    object_id: u64,
+    entity_uuid: uuid::Uuid,
     new_mat_id: u16,
     editor_state: &Arc<Mutex<EditorState>>,
     scene_clone: &mut rkf_core::scene::Scene,
     frame_dirty_objects: &mut Vec<u32>,
 ) {
-    if let Ok(mut es) = editor_state.lock() {
-        let scene = es.world.scene_mut();
-        if let Some(obj) = scene.objects.iter_mut().find(|o| o.id as u64 == object_id) {
+    let sdf_obj_id = if let Ok(es) = editor_state.lock() {
+        // Write hecs (authoritative source of truth).
+        if let Ok(mut sdf_tree) = es.world.get_mut::<rkf_runtime::components::SdfTree>(entity_uuid) {
             if let rkf_core::SdfSource::Analytical { ref mut material_id, .. } =
-                obj.root_node.sdf_source
+                sdf_tree.root.sdf_source
             {
                 *material_id = new_mat_id;
             }
         }
+        // Rebuild scene_clone from hecs.
+        *scene_clone = rebuild_scene_clone(&es);
+        es.world.entity_records()
+            .find(|(uid, _)| **uid == entity_uuid)
+            .and_then(|(_, r)| r.sdf_object_id)
+    } else {
+        None
+    };
+    if let Some(oid) = sdf_obj_id {
+        frame_dirty_objects.push(oid);
     }
-    // Update scene_clone so the render pass sees the new material_id.
-    if let Some(obj) = scene_clone.objects.iter_mut().find(|o| o.id as u64 == object_id) {
-        if let rkf_core::SdfSource::Analytical { ref mut material_id, .. } =
-            obj.root_node.sdf_source
-        {
-            *material_id = new_mat_id;
-        }
-    }
-    frame_dirty_objects.push(object_id as u32);
 }
 
 /// e3: Process sculpt edits (CPU-side CSG, targeted GPU upload).
@@ -164,26 +186,42 @@ pub(crate) fn process_sculpt_edits(
     if let Ok(mut es) = editor_state.lock() {
         // Ensure undo accumulator exists for this stroke.
         if es.sculpt_undo_accumulator.is_none() {
-            let obj_id = sculpt_edits[0].object_id as u64;
+            let entity_uuid = es.world.find_by_sdf_id(sculpt_edits[0].object_id)
+                .unwrap_or(uuid::Uuid::nil());
             es.sculpt_undo_accumulator = Some(
                 crate::editor_state::SculptUndoAccumulator {
-                    object_id: obj_id,
+                    object_id: entity_uuid,
                     captured_slots: std::collections::HashSet::new(),
                     snapshots: Vec::new(),
                 },
             );
         }
 
+        // Build temporary Scene from hecs for the sculpt engine.
+        let mut temp_scene = es.world.build_render_scene();
         let mut undo_acc = es.sculpt_undo_accumulator.take();
-        let scene = es.world.scene_mut();
         let _modified = engine.apply_sculpt_edits(
-            scene,
+            &mut temp_scene,
             sculpt_edits,
             undo_acc.as_mut(),
         );
         es.sculpt_undo_accumulator = undo_acc;
 
-        // Rebuild the render clone since scene may have changed.
+        // Sync sculpt results (temp_scene) back to hecs (authoritative).
+        for edit in sculpt_edits {
+            if let Some(obj) = temp_scene.objects.iter().find(|o| o.id == edit.object_id) {
+                if let Some(entity_uuid) = es.world.find_by_sdf_id(edit.object_id) {
+                    if let Ok(mut sdf_tree) = es.world.get_mut::<rkf_runtime::components::SdfTree>(entity_uuid) {
+                        sdf_tree.root = obj.root_node.clone();
+                        sdf_tree.aabb = obj.aabb;
+                    }
+                    // Scale may have been reset by auto-voxelization.
+                    let _ = es.world.set_scale(entity_uuid, obj.scale);
+                }
+            }
+        }
+
+        // Rebuild the render clone from hecs.
         *scene_clone = rebuild_scene_clone(&es);
     }
     // Mark sculpted objects dirty for incremental GPU update.
@@ -203,10 +241,11 @@ pub(crate) fn process_paint_edits(
     if let Ok(mut es) = editor_state.lock() {
         // Ensure undo accumulator exists for this stroke.
         if es.paint_undo_accumulator.is_none() {
-            let obj_id = paint_edits[0].object_id as u64;
+            let entity_uuid = es.world.find_by_sdf_id(paint_edits[0].object_id)
+                .unwrap_or(uuid::Uuid::nil());
             es.paint_undo_accumulator = Some(
                 crate::editor_state::SculptUndoAccumulator {
-                    object_id: obj_id,
+                    object_id: entity_uuid,
                     captured_slots: std::collections::HashSet::new(),
                     snapshots: Vec::new(),
                 },
@@ -214,9 +253,10 @@ pub(crate) fn process_paint_edits(
         }
 
         let mut undo_acc = es.paint_undo_accumulator.take();
-        let scene = es.world.scene_mut();
+        // Build temporary Scene from hecs for the paint engine.
+        let mut temp_scene = es.world.build_render_scene();
         engine.apply_paint_edits(
-            scene,
+            &mut temp_scene,
             paint_edits,
             undo_acc.as_mut(),
         );
@@ -304,16 +344,22 @@ pub(crate) fn process_mcp_sculpt(
         };
 
         // Create one-shot undo accumulator.
+        let entity_uuid_for_undo = if let Ok(es_ref) = editor_state.lock() {
+            es_ref.world.find_by_sdf_id(req.object_id).unwrap_or(uuid::Uuid::nil())
+        } else {
+            uuid::Uuid::nil()
+        };
         let mut undo_acc = crate::editor_state::SculptUndoAccumulator {
-            object_id: req.object_id as u64,
+            object_id: entity_uuid_for_undo,
             captured_slots: std::collections::HashSet::new(),
             snapshots: Vec::new(),
         };
 
         if let Ok(mut es) = editor_state.lock() {
-            let scene = es.world.scene_mut();
+            // Build temporary Scene from hecs for the sculpt engine.
+            let mut temp_scene = es.world.build_render_scene();
             engine.apply_sculpt_edits(
-                scene,
+                &mut temp_scene,
                 &[edit_request],
                 Some(&mut undo_acc),
             );
@@ -322,7 +368,7 @@ pub(crate) fn process_mcp_sculpt(
             if !undo_acc.snapshots.is_empty() {
                 es.undo.push(crate::undo::UndoAction {
                     kind: crate::undo::UndoActionKind::SculptStroke {
-                        object_id: req.object_id as u64,
+                        object_id: entity_uuid_for_undo,
                         geometry_snapshots: undo_acc.snapshots,
                     },
                     timestamp_ms: 0,
@@ -330,7 +376,18 @@ pub(crate) fn process_mcp_sculpt(
                 });
             }
 
-            // Rebuild scene_clone since voxel data changed.
+            // Sync sculpt results back to hecs (authoritative).
+            if let Some(obj) = temp_scene.objects.iter().find(|o| o.id == req.object_id) {
+                if let Some(entity_uuid) = es.world.find_by_sdf_id(req.object_id) {
+                    if let Ok(mut sdf_tree) = es.world.get_mut::<rkf_runtime::components::SdfTree>(entity_uuid) {
+                        sdf_tree.root = obj.root_node.clone();
+                        sdf_tree.aabb = obj.aabb;
+                    }
+                    let _ = es.world.set_scale(entity_uuid, obj.scale);
+                }
+            }
+
+            // Rebuild scene_clone from hecs.
             *scene_clone = rebuild_scene_clone(&es);
         }
 

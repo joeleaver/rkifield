@@ -519,6 +519,191 @@ mod tests {
         );
     }
 
+    // ─── #[persist] attribute tests ────────────────────────────────────
+
+    /// Component with #[persist] on some fields.
+    #[component]
+    pub struct PersistExample {
+        /// Persisted — saved to GameStore on save/load.
+        #[persist]
+        pub score: i32,
+        /// Persisted — also saved.
+        #[persist]
+        pub name: String,
+        /// Not persisted — design-time constant.
+        pub max_score: i32,
+    }
+
+    #[test]
+    fn persist_attribute_sets_field_meta() {
+        let fields = PersistExample::fields();
+        assert_eq!(fields.len(), 3);
+
+        // score: persist = true
+        assert_eq!(fields[0].name, "score");
+        assert!(fields[0].persist, "score should be persist: true");
+
+        // name: persist = true
+        assert_eq!(fields[1].name, "name");
+        assert!(fields[1].persist, "name should be persist: true");
+
+        // max_score: persist = false (no #[persist] attribute)
+        assert_eq!(fields[2].name, "max_score");
+        assert!(!fields[2].persist, "max_score should be persist: false");
+    }
+
+    #[test]
+    fn persist_fields_work_with_auto_sync() {
+        use crate::behavior::persist::{
+            auto_sync_to_store, auto_sync_from_store, persist_component_key,
+        };
+        use crate::behavior::game_store::GameStore;
+
+        let mut world = hecs::World::new();
+        let entity = world.spawn((PersistExample {
+            score: 42,
+            name: "Player1".into(),
+            max_score: 1000,
+        },));
+
+        let entry = find_entry("PersistExample").unwrap();
+        let mut store = GameStore::new();
+
+        // Sync to store
+        let count = auto_sync_to_store(entry, &world, entity, "test-id", &mut store).unwrap();
+        assert_eq!(count, 2); // score + name
+
+        // Verify keys
+        let score_key = persist_component_key("test-id", "PersistExample", "score");
+        let name_key = persist_component_key("test-id", "PersistExample", "name");
+        let max_key = persist_component_key("test-id", "PersistExample", "max_score");
+        assert!(store.get_raw(&score_key).is_some());
+        assert!(store.get_raw(&name_key).is_some());
+        assert!(store.get_raw(&max_key).is_none()); // not persisted
+
+        // Mutate the component
+        {
+            let mut c = world.get::<&mut PersistExample>(entity).unwrap();
+            c.score = 0;
+            c.name = "Changed".into();
+            c.max_score = 9999;
+        }
+
+        // Restore from store
+        let restored = auto_sync_from_store(entry, &mut world, entity, "test-id", &store).unwrap();
+        assert_eq!(restored, 2);
+
+        let c = world.get::<&PersistExample>(entity).unwrap();
+        assert_eq!(c.score, 42);           // restored
+        assert_eq!(c.name, "Player1");     // restored
+        assert_eq!(c.max_score, 9999);     // NOT restored (persist: false)
+    }
+
+    #[test]
+    fn no_persist_fields_default_to_false() {
+        // Health has no #[persist] attributes
+        let fields = Health::fields();
+        for field in fields {
+            assert!(!field.persist, "field '{}' should default to persist: false", field.name);
+        }
+    }
+
+    #[test]
+    fn persist_example_registered_in_inventory() {
+        let names: Vec<&str> = inventory::iter::<ComponentEntry>()
+            .map(|e| e.name)
+            .collect();
+        assert!(
+            names.contains(&"PersistExample"),
+            "missing PersistExample, got: {:?}",
+            names
+        );
+    }
+
+    // ─── Entity field serde tests ────────────────────────────────────
+
+    /// Component with an Entity field — previously panicked on serialize because
+    /// hecs::Entity does not implement Serialize. The macro now injects serde
+    /// attributes to serialize Entity as raw u64 bits.
+    #[component(no_default)]
+    #[derive(Debug)]
+    pub struct FollowTarget {
+        pub target: hecs::Entity,
+        pub speed: f32,
+    }
+
+    #[component]
+    #[derive(Debug)]
+    pub struct OptionalTarget {
+        pub target: Option<hecs::Entity>,
+        pub label: String,
+    }
+
+    #[test]
+    fn entity_field_serialize_roundtrip() {
+        let mut world = hecs::World::new();
+        let target_entity = world.spawn(());
+        let entity = world.spawn((FollowTarget {
+            target: target_entity,
+            speed: 5.0,
+        },));
+
+        let entry = find_entry("FollowTarget").expect("FollowTarget registered");
+
+        // Serialize should succeed (not panic).
+        let ron_str = (entry.serialize)(&world, entity).expect("entity has FollowTarget");
+        assert!(ron_str.contains("5"));
+
+        // Deserialize into a new entity.
+        let entity2 = world.spawn(());
+        (entry.deserialize_insert)(&mut world, entity2, &ron_str).unwrap();
+
+        let c = world.get::<&FollowTarget>(entity2).unwrap();
+        assert_eq!(c.target, target_entity);
+        assert_eq!(c.speed, 5.0);
+    }
+
+    #[test]
+    fn option_entity_field_serialize_roundtrip_some() {
+        let mut world = hecs::World::new();
+        let target_entity = world.spawn(());
+        let entity = world.spawn((OptionalTarget {
+            target: Some(target_entity),
+            label: "test".into(),
+        },));
+
+        let entry = find_entry("OptionalTarget").expect("OptionalTarget registered");
+
+        let ron_str = (entry.serialize)(&world, entity).expect("entity has OptionalTarget");
+
+        let entity2 = world.spawn(());
+        (entry.deserialize_insert)(&mut world, entity2, &ron_str).unwrap();
+
+        let c = world.get::<&OptionalTarget>(entity2).unwrap();
+        assert_eq!(c.target, Some(target_entity));
+        assert_eq!(c.label, "test");
+    }
+
+    #[test]
+    fn option_entity_field_serialize_roundtrip_none() {
+        let mut world = hecs::World::new();
+        let entity = world.spawn((OptionalTarget {
+            target: None,
+            label: "empty".into(),
+        },));
+
+        let entry = find_entry("OptionalTarget").expect("OptionalTarget registered");
+
+        let ron_str = (entry.serialize)(&world, entity).expect("entity has OptionalTarget");
+
+        let entity2 = world.spawn(());
+        (entry.deserialize_insert)(&mut world, entity2, &ron_str).unwrap();
+
+        let c = world.get::<&OptionalTarget>(entity2).unwrap();
+        assert_eq!(c.target, None);
+        assert_eq!(c.label, "empty");
+    }
+
     // ─── Helper ─────────────────────────────────────────────────────────
 
     fn find_entry(name: &str) -> Option<&'static ComponentEntry> {

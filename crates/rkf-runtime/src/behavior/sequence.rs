@@ -8,12 +8,37 @@ use glam::{Quat, Vec3};
 use rkf_core::WorldPosition;
 use serde::{Deserialize, Serialize};
 
+// ─── Step start values (captured when an interpolated step begins) ────────
+
+/// Captured start values for interpolated sequence steps.
+///
+/// When a MoveTo/RotateTo/ScaleTo step begins, the entity's current transform
+/// values are captured here so we can lerp/slerp from start to target.
+#[derive(Debug, Clone, Default)]
+pub struct StepStartValues {
+    /// Start position (for MoveTo).
+    pub position: Option<WorldPosition>,
+    /// Start rotation (for RotateTo).
+    pub rotation: Option<Quat>,
+    /// Start scale (for ScaleTo).
+    pub scale: Option<Vec3>,
+    /// Start position (for MoveBy — we track the base position).
+    pub move_by_base: Option<WorldPosition>,
+    /// Start rotation (for RotateBy — we track the base rotation).
+    pub rotate_by_base: Option<Quat>,
+}
+
 use super::game_value::GameValue;
 
 // hecs::Entity doesn't implement Serialize/Deserialize. Entity references in
-// sequences (EmitFrom.source) are serialized as u64 bits for now — proper
-// StableId remapping is added in Phase 3 when the serialize infrastructure
-// handles Entity fields across the board.
+// sequences (EmitFrom.source) are serialized as raw u64 bits. This is fine for
+// in-memory use (clone_world_for_play) but means Entity refs in scene files are
+// ephemeral — they only survive within the same process lifetime.
+//
+// The ComponentEntry macro handles top-level Entity fields via StableId remapping,
+// but nested Entity refs inside enum variants (like EmitFrom.source) are beyond
+// the macro's reach. Use `Sequence::remap_entities()` for cross-world Entity
+// mapping (e.g., play-mode world cloning).
 mod entity_serde {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -293,6 +318,10 @@ pub struct Sequence {
     pub current: usize,
     /// Elapsed time within the current step.
     pub timer: f32,
+    /// Captured start values for the current interpolated step.
+    /// Not serialized — recaptured when a step begins executing.
+    #[serde(skip)]
+    pub start_values: StepStartValues,
 }
 
 impl Sequence {
@@ -310,6 +339,36 @@ impl Sequence {
     pub fn total_duration(&self) -> f32 {
         self.steps.iter().map(|s| s.duration()).sum()
     }
+
+    /// Remap all Entity references using the provided mapping.
+    ///
+    /// Used for cross-world entity mapping (e.g., when cloning the world for
+    /// play mode). Walks all steps recursively (including Repeat sub-sequences)
+    /// and replaces any `EmitFrom.source` entity found in `map`.
+    /// Entities not present in the map are left unchanged.
+    pub fn remap_entities(&mut self, map: &std::collections::HashMap<hecs::Entity, hecs::Entity>) {
+        fn remap_steps(
+            steps: &mut [SequenceStep],
+            map: &std::collections::HashMap<hecs::Entity, hecs::Entity>,
+        ) {
+            for step in steps.iter_mut() {
+                match step {
+                    SequenceStep::EmitFrom { source, .. } => {
+                        if let Some(old) = source {
+                            if let Some(&new) = map.get(old) {
+                                *old = new;
+                            }
+                        }
+                    }
+                    SequenceStep::Repeat { steps, .. } => {
+                        remap_steps(steps, map);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        remap_steps(&mut self.steps, map);
+    }
 }
 
 impl Default for Sequence {
@@ -318,6 +377,7 @@ impl Default for Sequence {
             steps: Vec::new(),
             current: 0,
             timer: 0.0,
+            start_values: StepStartValues::default(),
         }
     }
 }
@@ -479,6 +539,7 @@ impl SequenceBuilder {
             steps: self.steps,
             current: 0,
             timer: 0.0,
+            start_values: StepStartValues::default(),
         }
     }
 }
@@ -743,6 +804,52 @@ mod tests {
         match &seq.steps[0] {
             SequenceStep::SpawnBlueprint { name } => assert_eq!(name, "guard"),
             _ => panic!("expected SpawnBlueprint"),
+        }
+    }
+
+    #[test]
+    fn remap_entities() {
+        let mut world = hecs::World::new();
+        let e1 = world.spawn(());
+        let e2 = world.spawn(());
+        let e3 = world.spawn(());
+
+        let mut seq = Sequence::new()
+            .emit_from("evt1", Some(e1), None)
+            .emit("plain")
+            .emit_from("evt2", Some(e2), Some(GameValue::Bool(true)))
+            .emit_from("evt_none", None, None)
+            .repeat(2, |s| s.emit_from("inner", Some(e1), None))
+            .build();
+
+        let mut map = std::collections::HashMap::new();
+        map.insert(e1, e3);
+        // e2 is NOT in the map — should be left unchanged
+
+        seq.remap_entities(&map);
+
+        // Top-level EmitFrom with e1 → e3
+        match &seq.steps[0] {
+            SequenceStep::EmitFrom { source, .. } => assert_eq!(*source, Some(e3)),
+            _ => panic!("expected EmitFrom"),
+        }
+        // e2 unchanged
+        match &seq.steps[2] {
+            SequenceStep::EmitFrom { source, .. } => assert_eq!(*source, Some(e2)),
+            _ => panic!("expected EmitFrom"),
+        }
+        // None stays None
+        match &seq.steps[3] {
+            SequenceStep::EmitFrom { source, .. } => assert_eq!(*source, None),
+            _ => panic!("expected EmitFrom"),
+        }
+        // Nested in Repeat: e1 → e3
+        match &seq.steps[4] {
+            SequenceStep::Repeat { steps, .. } => match &steps[0] {
+                SequenceStep::EmitFrom { source, .. } => assert_eq!(*source, Some(e3)),
+                _ => panic!("expected EmitFrom inside Repeat"),
+            },
+            _ => panic!("expected Repeat"),
         }
     }
 

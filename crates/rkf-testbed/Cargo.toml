@@ -28,3 +28,4 @@ tokio = { workspace = true }
 image = { workspace = true }
 serde_json = { workspace = true }
 half = { workspace = true }
+uuid = { workspace = true }

@@ -14,7 +14,7 @@ use super::{DIVIDER_STYLE, LABEL_STYLE, SECTION_STYLE, VALUE_STYLE};
 /// convert-to-voxel button, and material usage for the selected object.
 #[component]
 pub fn ObjectProperties(
-    entity_id: u64,
+    entity_id: uuid::Uuid,
 ) -> NodeHandle {
     let sliders = use_context::<SliderSignals>();
     let cmd = use_context::<CommandSender>();
@@ -27,7 +27,7 @@ pub fn ObjectProperties(
         let name = o.name.clone();
         let child_count = objects
             .iter()
-            .filter(|c| c.parent_id.map(|p| p as u64) == Some(eid))
+            .filter(|c| c.parent_id == Some(eid))
             .count();
         let is_voxelized = o.object_type == crate::ui_snapshot::ObjectType::Voxelized;
         let is_analytical = o.object_type == crate::ui_snapshot::ObjectType::Analytical;
@@ -226,7 +226,7 @@ pub fn ObjectProperties(
             div { style: {SECTION_STYLE}, {name} }
 
             // Entity ID.
-            div { style: {VALUE_STYLE}, {format!("Entity ID: {eid}")} }
+            div { style: {VALUE_STYLE}, {format!("Entity ID: {}", &eid.to_string()[..8])} }
 
             // Children count (conditional).
             if child_count > 0 {
@@ -254,7 +254,7 @@ pub fn ObjectProperties(
                             let cmd = cmd.clone();
                             move || {
                                 let _ = cmd.0.send(EditorCommand::ConvertToVoxel {
-                                    object_id: eid as u32,
+                                    object_id: eid,
                                 });
                             }
                         },

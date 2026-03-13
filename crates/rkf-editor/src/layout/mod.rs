@@ -25,6 +25,7 @@ pub enum PanelId {
     Shaders,
     Console,
     DebugOverlay,
+    Systems,
     // Canvas panels (center only)
     SceneView,
     GameView,
@@ -50,6 +51,7 @@ impl PanelId {
         Self::Shaders,
         Self::Console,
         Self::DebugOverlay,
+        Self::Systems,
         Self::SceneView,
         Self::GameView,
         Self::AnimationEditor,
@@ -73,6 +75,7 @@ impl PanelId {
             Self::Shaders => "Shaders",
             Self::Console => "Console",
             Self::DebugOverlay => "Debug",
+            Self::Systems => "Systems",
             Self::SceneView => "Scene",
             Self::GameView => "Game",
             Self::AnimationEditor => "Animation",
@@ -84,7 +87,7 @@ impl PanelId {
         match self {
             Self::SceneTree => ContainerKind::Left,
             Self::ObjectProperties | Self::AssetProperties => ContainerKind::Right,
-            Self::Materials | Self::Shaders | Self::Console | Self::DebugOverlay => ContainerKind::Bottom,
+            Self::Materials | Self::Shaders | Self::Console | Self::DebugOverlay | Self::Systems => ContainerKind::Bottom,
             Self::SceneView | Self::GameView | Self::AnimationEditor => ContainerKind::Center,
         }
     }
@@ -285,7 +288,7 @@ pub fn default_layout() -> LayoutConfig {
     LayoutConfig {
         left: ContainerConfig::single_zone(vec![PanelId::SceneTree]),
         right: ContainerConfig::single_zone(vec![PanelId::ObjectProperties, PanelId::AssetProperties]),
-        bottom: ContainerConfig::single_zone(vec![PanelId::Materials, PanelId::Shaders]),
+        bottom: ContainerConfig::single_zone(vec![PanelId::Materials, PanelId::Shaders, PanelId::Systems]),
         center: ContainerConfig::single_zone(vec![PanelId::SceneView]),
         floating: Vec::new(),
         // 250px / 1280px ≈ 0.195
@@ -328,7 +331,7 @@ mod tests {
         assert_eq!(layout.center.zones.len(), 1);
         assert_eq!(layout.center.zones[0].tabs, vec![PanelId::SceneView]);
         assert_eq!(layout.bottom.zones.len(), 1);
-        assert_eq!(layout.bottom.zones[0].tabs, vec![PanelId::Materials, PanelId::Shaders]);
+        assert_eq!(layout.bottom.zones[0].tabs, vec![PanelId::Materials, PanelId::Shaders, PanelId::Systems]);
         assert!(layout.floating.is_empty());
     }
 

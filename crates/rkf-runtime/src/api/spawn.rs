@@ -1,7 +1,7 @@
 //! Fluent spawn builder for the World API.
 //!
 //! ```ignore
-//! let cube = world.spawn("my_cube")
+//! let cube_id = world.spawn("my_cube")
 //!     .position_vec3(Vec3::new(0.0, 1.0, -3.0))
 //!     .sdf(SdfPrimitive::Box { half_extents: Vec3::splat(0.5) })
 //!     .material(2)
@@ -9,12 +9,12 @@
 //! ```
 
 use glam::{IVec3, Quat, Vec3};
+use uuid::Uuid;
 
 use rkf_core::aabb::Aabb;
 use rkf_core::scene_node::{BlendMode, SceneNode, SdfPrimitive};
 use rkf_core::WorldPosition;
 
-use super::entity::Entity;
 use super::world::World;
 
 /// Describes the SDF geometry source for a new entity.
@@ -56,7 +56,7 @@ pub struct SpawnBuilder<'w> {
     scale: Vec3,
     sdf: SdfDesc,
     blend_mode: Option<BlendMode>,
-    parent: Option<Entity>,
+    parent: Option<Uuid>,
     pending_components: Vec<Box<dyn PendingComponent>>,
 }
 
@@ -147,7 +147,7 @@ impl<'w> SpawnBuilder<'w> {
     }
 
     /// Set the parent entity (establishes hierarchy).
-    pub fn parent(mut self, parent: Entity) -> Self {
+    pub fn parent(mut self, parent: Uuid) -> Self {
         self.parent = Some(parent);
         self
     }
@@ -160,9 +160,9 @@ impl<'w> SpawnBuilder<'w> {
         self
     }
 
-    /// Finalize the entity and return its handle.
-    pub fn build(self) -> Entity {
-        let entity = match self.sdf {
+    /// Finalize the entity and return its UUID.
+    pub fn build(self) -> Uuid {
+        let uuid = match self.sdf {
             SdfDesc::None => self.world.finalize_ecs_spawn(self.name),
             SdfDesc::Primitive(primitive, material_id) => {
                 let aabb = compute_primitive_aabb(&primitive);
@@ -197,14 +197,14 @@ impl<'w> SpawnBuilder<'w> {
 
         // Insert pending ECS components
         if !self.pending_components.is_empty() {
-            if let Some(ecs_entity) = self.world.ecs_entity_for(entity) {
+            if let Some(ecs_entity) = self.world.ecs_entity_for(uuid) {
                 for comp in self.pending_components {
                     comp.insert(self.world.ecs_mut(), ecs_entity);
                 }
             }
         }
 
-        entity
+        uuid
     }
 }
 

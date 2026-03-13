@@ -4,10 +4,13 @@
 //! [`CommandQueue`], and [`GameStore`] into a single `tick()` call that
 //! runs one frame of gameplay logic.
 
+use std::time::Instant;
+
 use super::command_queue::CommandQueue;
 use super::game_store::GameStore;
 use super::registry::GameplayRegistry;
 use super::scheduler::{Schedule, ScheduleError, build_schedule};
+use super::stable_id_index::StableIdIndex;
 use super::system_context::SystemContext;
 
 /// Runs one frame of gameplay systems in schedule order.
@@ -31,19 +34,57 @@ use super::system_context::SystemContext;
 /// registration must uphold the same contract.
 pub struct BehaviorExecutor {
     schedule: Schedule,
+    /// Set of system indices (into the registry's system list) that faulted
+    /// (panicked) during the most recent tick. Accumulates across frames
+    /// until explicitly cleared via [`clear_faults`].
+    faulted_systems: std::collections::HashSet<usize>,
+    /// Per-system frame timing in microseconds, indexed by system position
+    /// in the registry's system list. `None` if the system was skipped
+    /// (e.g. faulted) or has not run yet.
+    system_timings: Vec<Option<u64>>,
 }
 
 impl BehaviorExecutor {
     /// Build an executor from the registry's systems.
     pub fn new(registry: &GameplayRegistry) -> Result<Self, ScheduleError> {
         let schedule = build_schedule(registry.system_list())?;
-        Ok(Self { schedule })
+        let count = registry.system_list().len();
+        Ok(Self {
+            schedule,
+            faulted_systems: std::collections::HashSet::new(),
+            system_timings: vec![None; count],
+        })
     }
 
     /// Rebuild the schedule (e.g. after hot-reload changes systems).
     pub fn rebuild(&mut self, registry: &GameplayRegistry) -> Result<(), ScheduleError> {
         self.schedule = build_schedule(registry.system_list())?;
+        self.faulted_systems.clear();
+        self.system_timings = vec![None; registry.system_list().len()];
         Ok(())
+    }
+
+    /// Returns the set of system indices that have faulted (panicked).
+    pub fn faulted_systems(&self) -> &std::collections::HashSet<usize> {
+        &self.faulted_systems
+    }
+
+    /// Returns `true` if the system at the given index has faulted.
+    pub fn is_faulted(&self, system_index: usize) -> bool {
+        self.faulted_systems.contains(&system_index)
+    }
+
+    /// Clear all recorded faults, allowing faulted systems to run again.
+    pub fn clear_faults(&mut self) {
+        self.faulted_systems.clear();
+    }
+
+    /// Last recorded frame time for the system at `index`, in microseconds.
+    ///
+    /// Returns `None` if the index is out of range, the system was skipped
+    /// (faulted), or no tick has run yet.
+    pub fn system_timing(&self, index: usize) -> Option<u64> {
+        self.system_timings.get(index).copied().flatten()
     }
 
     /// Execute one frame: run all systems in schedule order, flush commands, drain events.
@@ -66,45 +107,77 @@ impl BehaviorExecutor {
     /// originally a `fn(&mut SystemContext)` — the `#[system]` macro
     /// guarantees this for generated registrations.
     pub fn tick(
-        &self,
+        &mut self,
         registry: &GameplayRegistry,
         world: &mut hecs::World,
         commands: &mut CommandQueue,
         store: &mut GameStore,
+        stable_ids: &mut StableIdIndex,
         delta_time: f32,
         total_time: f64,
         frame: u64,
     ) {
         let systems = registry.system_list();
 
+        // Reset timings for this frame.
+        for t in self.system_timings.iter_mut() {
+            *t = None;
+        }
+
         // ── Phase 1: Update ──────────────────────────────────────────────
         for &idx in &self.schedule.update {
+            if self.faulted_systems.contains(&idx) {
+                continue; // skip faulted systems until faults are cleared
+            }
             let meta = &systems[idx];
             // SAFETY: fn_ptr was produced by casting `fn(&mut SystemContext)` to
             // `*const ()` during system registration (see SystemMeta docs).
             // The #[system] proc macro guarantees this invariant.
             let system_fn: fn(&mut SystemContext) =
                 unsafe { std::mem::transmute(meta.fn_ptr) };
-            let mut ctx = SystemContext::new(world, commands, delta_time, total_time, frame);
-            system_fn(&mut ctx);
+            let mut ctx = SystemContext::new(world, commands, store, stable_ids, delta_time, total_time, frame);
+            let start = Instant::now();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                system_fn(&mut ctx);
+            }));
+            let elapsed_us = start.elapsed().as_micros() as u64;
+            if result.is_err() {
+                log::error!("system '{}' panicked during Update phase", meta.name);
+                self.faulted_systems.insert(idx);
+            } else if idx < self.system_timings.len() {
+                self.system_timings[idx] = Some(elapsed_us);
+            }
         }
 
         // Flush commands between phases — entities spawned in Update are
         // visible to LateUpdate systems.
-        commands.flush(world);
+        commands.flush_with_catalog(world, stable_ids, &registry.blueprint_catalog, registry);
 
         // ── Phase 2: LateUpdate ──────────────────────────────────────────
         for &idx in &self.schedule.late_update {
+            if self.faulted_systems.contains(&idx) {
+                continue;
+            }
             let meta = &systems[idx];
             // SAFETY: same invariant as above.
             let system_fn: fn(&mut SystemContext) =
                 unsafe { std::mem::transmute(meta.fn_ptr) };
-            let mut ctx = SystemContext::new(world, commands, delta_time, total_time, frame);
-            system_fn(&mut ctx);
+            let mut ctx = SystemContext::new(world, commands, store, stable_ids, delta_time, total_time, frame);
+            let start = Instant::now();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                system_fn(&mut ctx);
+            }));
+            let elapsed_us = start.elapsed().as_micros() as u64;
+            if result.is_err() {
+                log::error!("system '{}' panicked during LateUpdate phase", meta.name);
+                self.faulted_systems.insert(idx);
+            } else if idx < self.system_timings.len() {
+                self.system_timings[idx] = Some(elapsed_us);
+            }
         }
 
         // Final flush + drain events
-        commands.flush(world);
+        commands.flush_with_catalog(world, stable_ids, &registry.blueprint_catalog, registry);
         store.drain_events();
     }
 }
@@ -115,6 +188,7 @@ impl BehaviorExecutor {
 mod tests {
     use super::*;
     use crate::behavior::registry::{Phase, SystemMeta};
+    use crate::behavior::stable_id_index::StableIdIndex;
 
     /// Marker component for test systems to interact with.
     struct Counter(i32);
@@ -142,13 +216,13 @@ mod tests {
     #[test]
     fn empty_schedule_is_noop() {
         let registry = GameplayRegistry::new();
-        let executor = BehaviorExecutor::new(&registry).unwrap();
+        let mut executor = BehaviorExecutor::new(&registry).unwrap();
 
         let mut world = hecs::World::new();
         let mut commands = CommandQueue::new();
         let mut store = GameStore::new();
 
-        executor.tick(&registry, &mut world, &mut commands, &mut store, 0.016, 0.0, 0);
+        executor.tick(&registry, &mut world, &mut commands, &mut store, &mut StableIdIndex::new(), 0.016, 0.0, 0);
 
         // World should be unchanged
         assert_eq!(world.query::<()>().iter().count(), 0);
@@ -178,14 +252,14 @@ mod tests {
             increment_system,
         ));
 
-        let executor = BehaviorExecutor::new(&registry).unwrap();
+        let mut executor = BehaviorExecutor::new(&registry).unwrap();
 
         let mut world = hecs::World::new();
         world.spawn((Counter(0),));
         let mut commands = CommandQueue::new();
         let mut store = GameStore::new();
 
-        executor.tick(&registry, &mut world, &mut commands, &mut store, 0.016, 0.0, 0);
+        executor.tick(&registry, &mut world, &mut commands, &mut store, &mut StableIdIndex::new(), 0.016, 0.0, 0);
 
         // After tick, flush happened, so the insert should be applied
         let mut q = world.query::<&Counter>();
@@ -223,13 +297,13 @@ mod tests {
         registry.register_system(sys_meta("a", Phase::Update, &[], &["b"], system_a));
         registry.register_system(sys_meta("b", Phase::Update, &["a"], &["c"], system_b));
 
-        let executor = BehaviorExecutor::new(&registry).unwrap();
+        let mut executor = BehaviorExecutor::new(&registry).unwrap();
 
         let mut world = hecs::World::new();
         let mut commands = CommandQueue::new();
         let mut store = GameStore::new();
 
-        executor.tick(&registry, &mut world, &mut commands, &mut store, 0.016, 0.0, 0);
+        executor.tick(&registry, &mut world, &mut commands, &mut store, &mut StableIdIndex::new(), 0.016, 0.0, 0);
 
         EXEC_ORDER.with(|v| {
             let order = v.borrow();
@@ -268,13 +342,13 @@ mod tests {
             update_system,
         ));
 
-        let executor = BehaviorExecutor::new(&registry).unwrap();
+        let mut executor = BehaviorExecutor::new(&registry).unwrap();
 
         let mut world = hecs::World::new();
         let mut commands = CommandQueue::new();
         let mut store = GameStore::new();
 
-        executor.tick(&registry, &mut world, &mut commands, &mut store, 0.016, 0.0, 0);
+        executor.tick(&registry, &mut world, &mut commands, &mut store, &mut StableIdIndex::new(), 0.016, 0.0, 0);
 
         EXEC_ORDER.with(|v| {
             let order = v.borrow();
@@ -324,7 +398,7 @@ mod tests {
             count_spawned_in_late_update,
         ));
 
-        let executor = BehaviorExecutor::new(&registry).unwrap();
+        let mut executor = BehaviorExecutor::new(&registry).unwrap();
 
         let mut world = hecs::World::new();
         // Pre-spawn a result entity to hold the count
@@ -333,7 +407,7 @@ mod tests {
         commands.set_loaded_scenes(vec!["test".into()]);
         let mut store = GameStore::new();
 
-        executor.tick(&registry, &mut world, &mut commands, &mut store, 0.016, 0.0, 0);
+        executor.tick(&registry, &mut world, &mut commands, &mut store, &mut StableIdIndex::new(), 0.016, 0.0, 0);
 
         // The LateUpdate system should have seen the entity spawned in Update
         // (because commands flush between phases). The count should be 1.
@@ -347,7 +421,7 @@ mod tests {
     #[test]
     fn events_drained_at_end_of_tick() {
         let registry = GameplayRegistry::new();
-        let executor = BehaviorExecutor::new(&registry).unwrap();
+        let mut executor = BehaviorExecutor::new(&registry).unwrap();
 
         let mut world = hecs::World::new();
         let mut commands = CommandQueue::new();
@@ -358,7 +432,7 @@ mod tests {
         store.emit("test_event", None, None);
         assert_eq!(store.events("test_event").count(), 2);
 
-        executor.tick(&registry, &mut world, &mut commands, &mut store, 0.016, 0.0, 0);
+        executor.tick(&registry, &mut world, &mut commands, &mut store, &mut StableIdIndex::new(), 0.016, 0.0, 0);
 
         // Events should be drained after tick
         assert_eq!(store.events("test_event").count(), 0);
@@ -378,5 +452,126 @@ mod tests {
         registry.register_system(sys_meta("b", Phase::Update, &[], &[], system_b));
         executor.rebuild(&registry).unwrap();
         assert_eq!(executor.schedule.update.len(), 2);
+    }
+
+    // ── Test: fault tracking ────────────────────────────────────────────
+
+    fn panicking_system(_ctx: &mut SystemContext) {
+        panic!("intentional test panic");
+    }
+
+    #[test]
+    fn faulted_system_is_recorded_and_skipped() {
+        let mut registry = GameplayRegistry::new();
+        registry.register_system(sys_meta(
+            "panicker",
+            Phase::Update,
+            &[],
+            &[],
+            panicking_system,
+        ));
+
+        let mut executor = BehaviorExecutor::new(&registry).unwrap();
+        let mut world = hecs::World::new();
+        let mut commands = CommandQueue::new();
+        let mut store = GameStore::new();
+
+        // First tick: system panics, gets recorded as faulted.
+        executor.tick(
+            &registry, &mut world, &mut commands, &mut store,
+            &mut StableIdIndex::new(), 0.016, 0.0, 0,
+        );
+        assert!(executor.is_faulted(0));
+        assert_eq!(executor.faulted_systems().len(), 1);
+
+        // Second tick: faulted system is skipped (no panic propagation).
+        executor.tick(
+            &registry, &mut world, &mut commands, &mut store,
+            &mut StableIdIndex::new(), 0.016, 0.016, 1,
+        );
+        assert!(executor.is_faulted(0));
+    }
+
+    #[test]
+    fn clear_faults_allows_system_to_run_again() {
+        EXEC_ORDER.with(|v| v.borrow_mut().clear());
+
+        let mut registry = GameplayRegistry::new();
+        registry.register_system(sys_meta("a", Phase::Update, &[], &[], system_a));
+
+        let mut executor = BehaviorExecutor::new(&registry).unwrap();
+
+        // Manually mark system 0 as faulted.
+        executor.faulted_systems.insert(0);
+        assert!(executor.is_faulted(0));
+
+        // Tick: system_a should NOT run because it's faulted.
+        let mut world = hecs::World::new();
+        let mut commands = CommandQueue::new();
+        let mut store = GameStore::new();
+        executor.tick(
+            &registry, &mut world, &mut commands, &mut store,
+            &mut StableIdIndex::new(), 0.016, 0.0, 0,
+        );
+        EXEC_ORDER.with(|v| assert!(v.borrow().is_empty(), "faulted system should not run"));
+
+        // Clear faults.
+        executor.clear_faults();
+        assert!(!executor.is_faulted(0));
+        assert!(executor.faulted_systems().is_empty());
+
+        // Tick again: system_a should run now.
+        executor.tick(
+            &registry, &mut world, &mut commands, &mut store,
+            &mut StableIdIndex::new(), 0.016, 0.016, 1,
+        );
+        EXEC_ORDER.with(|v| assert_eq!(*v.borrow(), vec!["a"]));
+    }
+
+    #[test]
+    fn system_timing_recorded_after_tick() {
+        let mut registry = GameplayRegistry::new();
+        registry.register_system(sys_meta("a", Phase::Update, &[], &[], system_a));
+        registry.register_system(sys_meta(
+            "late",
+            Phase::LateUpdate,
+            &[],
+            &[],
+            late_update_system,
+        ));
+
+        let mut executor = BehaviorExecutor::new(&registry).unwrap();
+        let mut world = hecs::World::new();
+        let mut commands = CommandQueue::new();
+        let mut store = GameStore::new();
+
+        // Before tick, timings are None.
+        assert!(executor.system_timing(0).is_none());
+        assert!(executor.system_timing(1).is_none());
+
+        executor.tick(
+            &registry, &mut world, &mut commands, &mut store,
+            &mut StableIdIndex::new(), 0.016, 0.0, 0,
+        );
+
+        // After tick, timings should be recorded (non-None).
+        assert!(executor.system_timing(0).is_some());
+        assert!(executor.system_timing(1).is_some());
+
+        // Out-of-range returns None.
+        assert!(executor.system_timing(99).is_none());
+    }
+
+    #[test]
+    fn rebuild_clears_faults() {
+        let mut registry = GameplayRegistry::new();
+        registry.register_system(sys_meta("a", Phase::Update, &[], &[], system_a));
+
+        let mut executor = BehaviorExecutor::new(&registry).unwrap();
+        executor.faulted_systems.insert(0);
+        assert!(executor.is_faulted(0));
+
+        executor.rebuild(&registry).unwrap();
+        assert!(executor.faulted_systems().is_empty());
     }
 }

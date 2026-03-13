@@ -170,45 +170,64 @@ impl AutomationApi for EditorAutomationApi {
     fn scene_graph(&self) -> AutomationResult<SceneGraphSnapshot> {
         self.scene_graph_impl()
     }
-    fn entity_inspect(&self, entity_id: u64) -> AutomationResult<EntitySnapshot> {
+    fn entity_inspect(&self, entity_id: &str) -> AutomationResult<EntitySnapshot> {
         let es = self
             .editor_state
             .lock()
             .map_err(|e| AutomationError::EngineError(format!("lock poisoned: {e}")))?;
 
-        // Look up from world.scene() — the authoritative source.
-        let scene = es.world.scene();
-        let obj = scene.objects.iter()
-            .find(|o| o.id as u64 == entity_id)
-            .ok_or(AutomationError::EntityNotFound(entity_id))?;
+        let uuid = uuid::Uuid::parse_str(entity_id)
+            .map_err(|_| AutomationError::EntityNotFound(entity_id.to_string()))?;
 
-        let is_selected = matches!(
-            es.selected_entity,
-            Some(crate::editor_state::SelectedEntity::Object(eid)) if eid == entity_id
-        );
+        // Verify the entity exists and find its SDF object ID.
+        let _ecs = es.world.ecs_entity_for(uuid)
+            .ok_or_else(|| AutomationError::EntityNotFound(entity_id.to_string()))?;
 
-        let child_count = scene.objects.iter()
-            .filter(|o| o.parent_id == Some(obj.id))
-            .count();
+        let sdf_object_id = es.world.entity_records()
+            .find(|(uid, _)| **uid == uuid)
+            .and_then(|(_, r)| r.sdf_object_id);
+
+        // Build the render scene and find the matching object by sdf_id.
+        let render_scene = es.world.build_render_scene();
+        let obj = sdf_object_id
+            .and_then(|sid| render_scene.objects.iter().find(|o| o.id == sid));
+
+        let is_selected = match es.selected_entity {
+            Some(crate::editor_state::SelectedEntity::Object(eid)) => eid == uuid,
+            _ => false,
+        };
 
         let mut components = HashMap::new();
-        components.insert(
-            "scene_object".to_string(),
-            serde_json::json!({
-                "selected": is_selected,
-                "children": child_count,
-                "position": [obj.position.x, obj.position.y, obj.position.z],
-                "rotation": [obj.rotation.x, obj.rotation.y, obj.rotation.z, obj.rotation.w],
-                "scale": [obj.scale.x, obj.scale.y, obj.scale.z],
-                "sdf_type": format!("{:?}", obj.root_node.sdf_source),
-            }),
-        );
+        if let Some(obj) = obj {
+            let child_count = render_scene.objects.iter()
+                .filter(|o| o.parent_id == Some(obj.id))
+                .count();
 
-        Ok(EntitySnapshot {
-            id: entity_id,
-            name: obj.name.clone(),
-            components,
-        })
+            components.insert(
+                "scene_object".to_string(),
+                serde_json::json!({
+                    "selected": is_selected,
+                    "children": child_count,
+                    "position": [obj.position.x, obj.position.y, obj.position.z],
+                    "rotation": [obj.rotation.x, obj.rotation.y, obj.rotation.z, obj.rotation.w],
+                    "scale": [obj.scale.x, obj.scale.y, obj.scale.z],
+                    "sdf_type": format!("{:?}", obj.root_node.sdf_source),
+                }),
+            );
+
+            Ok(EntitySnapshot {
+                id: entity_id.to_string(),
+                name: obj.name.clone(),
+                components,
+            })
+        } else {
+            // ECS-only entity (e.g. camera) — no SDF object.
+            Ok(EntitySnapshot {
+                id: entity_id.to_string(),
+                name: String::new(),
+                components,
+            })
+        }
     }
 
     fn read_log(&self, lines: usize) -> AutomationResult<Vec<LogEntry>> {
@@ -222,17 +241,17 @@ impl AutomationApi for EditorAutomationApi {
         Ok(state.log_entries.iter().skip(skip).cloned().collect())
     }
 
-    fn entity_spawn(&self, _def: EntityDef) -> AutomationResult<u64> {
+    fn entity_spawn(&self, _def: EntityDef) -> AutomationResult<String> {
         Err(AutomationError::NotImplemented("entity_spawn"))
     }
 
-    fn entity_despawn(&self, _entity_id: u64) -> AutomationResult<()> {
+    fn entity_despawn(&self, _entity_id: &str) -> AutomationResult<()> {
         Err(AutomationError::NotImplemented("entity_despawn"))
     }
 
     fn entity_set_component(
         &self,
-        _entity_id: u64,
+        _entity_id: &str,
         _component: ComponentDef,
     ) -> AutomationResult<()> {
         Err(AutomationError::NotImplemented("entity_set_component"))
@@ -477,7 +496,12 @@ impl AutomationApi for EditorAutomationApi {
             .material(material_id)
             .build();
 
-        Ok(entity.to_u64() as u32)
+        // Return the SDF object ID for the spawned entity.
+        let sdf_id = es.world.entity_records()
+            .find(|(uid, _)| **uid == entity)
+            .and_then(|(_, r)| r.sdf_object_id)
+            .unwrap_or(0);
+        Ok(sdf_id)
     }
 
     fn object_despawn(&self, object_id: u32) -> Result<(), String> {
@@ -486,7 +510,7 @@ impl AutomationApi for EditorAutomationApi {
             .lock()
             .map_err(|e| format!("lock poisoned: {e}"))?;
 
-        let entity = es.world.find_entity_by_id(object_id as u64)
+        let entity = es.world.find_by_sdf_id(object_id)
             .ok_or_else(|| format!("object {object_id} not found"))?;
         es.world.despawn(entity)
             .map_err(|e| format!("{e}"))?;
@@ -506,7 +530,7 @@ impl AutomationApi for EditorAutomationApi {
             .lock()
             .map_err(|e| format!("lock poisoned: {e}"))?;
 
-        let entity = es.world.find_entity_by_id(object_id as u64)
+        let entity = es.world.find_by_sdf_id(object_id)
             .ok_or_else(|| format!("object {object_id} not found"))?;
 
         let pos = rkf_core::WorldPosition::new(
@@ -559,7 +583,7 @@ impl AutomationApi for EditorAutomationApi {
             .lock()
             .map_err(|e| format!("lock poisoned: {e}"))?;
 
-        let entity = es.world.find_entity_by_id(object_id as u64)
+        let entity = es.world.find_by_sdf_id(object_id)
             .ok_or_else(|| format!("object {object_id} not found"))?;
 
         let node = es.world.find_node(entity, node_name)
@@ -597,7 +621,7 @@ impl AutomationApi for EditorAutomationApi {
             .lock()
             .map_err(|e| format!("lock poisoned: {e}"))?;
 
-        let entity = es.world.find_entity_by_id(object_id as u64)
+        let entity = es.world.find_by_sdf_id(object_id)
             .ok_or_else(|| format!("object {object_id} not found"))?;
 
         es.world.remove_child_node(entity, node_name)
@@ -693,7 +717,7 @@ impl AutomationApi for EditorAutomationApi {
         yaw: f32,
         pitch: f32,
         fov: f32,
-    ) -> Result<u64, String> {
+    ) -> Result<String, String> {
         let mut es = self
             .editor_state
             .lock()
@@ -704,7 +728,7 @@ impl AutomationApi for EditorAutomationApi {
             Vec3::new(position[0], position[1], position[2]),
         );
         let entity = es.world.spawn_camera(label, wp, yaw, pitch, fov);
-        Ok(entity.to_u64())
+        Ok(entity.to_string())
     }
 
     fn camera_list(&self) -> Result<String, String> {
@@ -731,7 +755,7 @@ impl AutomationApi for EditorAutomationApi {
                 .map(|c| (c.label.clone(), c.fov_degrees, c.yaw, c.pitch, c.active))
                 .unwrap_or_else(|_| (String::new(), 60.0, 0.0, 0.0, false));
             result.push(serde_json::json!({
-                "entity_id": entity.to_u64(),
+                "entity_id": entity.to_string(),
                 "position": pos,
                 "label": label,
                 "fov_degrees": fov,
@@ -744,7 +768,7 @@ impl AutomationApi for EditorAutomationApi {
         Ok(serde_json::Value::Array(result).to_string())
     }
 
-    fn camera_snap_to(&self, entity_id: u64) -> Result<(), String> {
+    fn camera_snap_to(&self, entity_id: &str) -> Result<(), String> {
         // Read camera data while holding editor_state lock, then release it.
         let (pos_vec3, yaw_rad, pitch_rad) = {
             let es = self
@@ -752,19 +776,17 @@ impl AutomationApi for EditorAutomationApi {
                 .lock()
                 .map_err(|e| format!("lock poisoned: {e}"))?;
 
-            let entity = es
-                .world
-                .find_entity_by_id(entity_id)
-                .ok_or_else(|| format!("entity {entity_id} not found"))?;
+            let uuid = uuid::Uuid::parse_str(entity_id)
+                .map_err(|_| format!("invalid UUID: {entity_id}"))?;
 
             let pos = es
                 .world
-                .position(entity)
+                .position(uuid)
                 .map_err(|e| format!("cannot read position: {e}"))?;
 
             let cam = es
                 .world
-                .get::<rkf_runtime::components::CameraComponent>(entity)
+                .get::<rkf_runtime::components::CameraComponent>(uuid)
                 .map_err(|_| format!("entity {entity_id} has no CameraComponent"))?;
 
             (pos.to_vec3(), cam.yaw.to_radians(), cam.pitch.to_radians())
@@ -851,4 +873,35 @@ impl AutomationApi for EditorAutomationApi {
             "object_shape timed out waiting for engine".into(),
         ))
     }
+
+    fn play_start(&self) -> Result<(), String> { self.editor_state.lock().map_err(|e| e.to_string())?.pending_play_start = true; Ok(()) }
+    fn play_stop(&self) -> Result<(), String> { self.editor_state.lock().map_err(|e| e.to_string())?.pending_play_stop = true; Ok(()) }
+    fn play_state(&self) -> String {
+        self.state.lock().ok().map(|s| match s.play_mode_state {
+            super::PlayModeState::Playing => "playing", super::PlayModeState::Stopped => "stopped",
+        }).unwrap_or("stopped").into()
+    }
+    fn system_list(&self) -> Vec<SystemInfo> {
+        let Ok(reg) = self.gameplay_registry.lock() else { return vec![] };
+        reg.system_list().iter().map(|s| SystemInfo {
+            name: s.name.to_string(), faulted: false,
+            phase: match s.phase { rkf_runtime::behavior::Phase::Update => "update", rkf_runtime::behavior::Phase::LateUpdate => "late_update" }.into(),
+        }).collect()
+    }
+    fn blueprint_list(&self) -> Vec<BlueprintInfo> {
+        let Ok(reg) = self.gameplay_registry.lock() else { return vec![] };
+        reg.blueprint_catalog.names().map(|name| BlueprintInfo {
+            name: name.to_string(),
+            component_names: reg.blueprint_catalog.get(name).map(|bp| bp.components.keys().cloned().collect()).unwrap_or_default(),
+        }).collect()
+    }
+    fn component_list(&self) -> Vec<ComponentInfo> { self.component_list_impl() }
+    fn component_get(&self, id: &str, name: &str) -> Result<HashMap<String, String>, String> { self.component_get_impl(id, name) }
+    fn component_set(&self, id: &str, name: &str, fields: HashMap<String, String>) -> Result<(), String> { self.component_set_impl(id, name, fields) }
+    fn component_add(&self, id: &str, name: &str, fields: HashMap<String, String>) -> Result<(), String> { self.component_add_impl(id, name, fields) }
+    fn component_remove(&self, id: &str, name: &str) -> Result<(), String> { self.component_remove_impl(id, name) }
+    fn state_get(&self, key: &str) -> Result<Option<String>, String> { self.state_get_impl(key) }
+    fn state_set(&self, key: &str, value: &str, value_type: &str) -> Result<(), String> { self.state_set_impl(key, value, value_type) }
+    fn state_list(&self, prefix: &str) -> Vec<String> { self.state_list_impl(prefix) }
+    fn blueprint_spawn(&self, name: &str, pos: [f32; 3]) -> Result<String, String> { self.blueprint_spawn_impl(name, pos) }
 }

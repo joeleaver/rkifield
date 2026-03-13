@@ -3,6 +3,7 @@
 //! [`SharedState`] is updated by the render loop each frame. [`EditorAutomationApi`]
 //! reads it to serve MCP tool requests over IPC.
 
+mod api_behavior;
 mod api_helpers;
 mod api_impl;
 pub(crate) mod rinch_debug_client;
@@ -35,6 +36,15 @@ pub struct BrushHitResult {
     pub position: Vec3,
     /// Object ID at the hit pixel (bits 24-31 of material G-buffer).
     pub object_id: u32,
+}
+
+/// Whether the behavior system is currently in play mode.
+/// Written by the engine loop, read by MCP tools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PlayModeState {
+    #[default]
+    Stopped,
+    Playing,
 }
 
 /// Shared mutable state between the render loop and the automation API.
@@ -110,6 +120,8 @@ pub struct SharedState {
     pub preview_primitive_type: u32,
     /// Whether the preview needs re-rendering.
     pub preview_dirty: bool,
+    /// Current play mode state (written by engine loop, read by MCP).
+    pub play_mode_state: PlayModeState,
 }
 
 /// Request for a voxel slice diagnostic.
@@ -176,6 +188,7 @@ impl SharedState {
             preview_material_slot: None,
             preview_primitive_type: 0,
             preview_dirty: false,
+            play_mode_state: PlayModeState::Stopped,
         }
     }
 
@@ -198,6 +211,8 @@ pub struct EditorAutomationApi {
     state: Arc<Mutex<SharedState>>,
     editor_state: Arc<Mutex<EditorState>>,
     material_library: Arc<Mutex<MaterialLibrary>>,
+    gameplay_registry: Arc<Mutex<rkf_runtime::behavior::GameplayRegistry>>,
+    game_store: Arc<Mutex<rkf_runtime::behavior::GameStore>>,
 }
 
 impl EditorAutomationApi {
@@ -205,12 +220,36 @@ impl EditorAutomationApi {
         state: Arc<Mutex<SharedState>>,
         editor_state: Arc<Mutex<EditorState>>,
         material_library: Arc<Mutex<MaterialLibrary>>,
+        gameplay_registry: Arc<Mutex<rkf_runtime::behavior::GameplayRegistry>>,
+    ) -> Self {
+        Self::with_game_store(
+            state,
+            editor_state,
+            material_library,
+            gameplay_registry,
+            Arc::new(Mutex::new(rkf_runtime::behavior::GameStore::new())),
+        )
+    }
+
+    pub fn with_game_store(
+        state: Arc<Mutex<SharedState>>,
+        editor_state: Arc<Mutex<EditorState>>,
+        material_library: Arc<Mutex<MaterialLibrary>>,
+        gameplay_registry: Arc<Mutex<rkf_runtime::behavior::GameplayRegistry>>,
+        game_store: Arc<Mutex<rkf_runtime::behavior::GameStore>>,
     ) -> Self {
         Self {
             state,
             editor_state,
             material_library,
+            gameplay_registry,
+            game_store,
         }
+    }
+
+    /// Get a reference to the shared game store.
+    pub fn game_store(&self) -> &Arc<Mutex<rkf_runtime::behavior::GameStore>> {
+        &self.game_store
     }
 
     /// Parse a float value from a string, returning an AutomationError on failure.

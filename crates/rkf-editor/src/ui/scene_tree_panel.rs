@@ -70,7 +70,7 @@ fn build_snapshot_object_node(
         .with_icon(TablerIcon::Cube);
 
     for child in all_objects {
-        if child.parent_id.map(|p| p as u64) == Some(obj.id) {
+        if child.parent_id == Some(obj.id) {
             tree_node = tree_node.with_child(build_snapshot_object_node(child, all_objects));
         }
     }
@@ -92,7 +92,7 @@ fn selected_to_value(sel: &SelectedEntity) -> String {
 /// Parse a tree node value string into a `SelectedEntity`.
 fn parse_value(value: &str) -> Option<SelectedEntity> {
     if let Some(id_str) = value.strip_prefix("obj:") {
-        id_str.parse::<u64>().ok().map(SelectedEntity::Object)
+        uuid::Uuid::parse_str(id_str).ok().map(SelectedEntity::Object)
     } else if let Some(id_str) = value.strip_prefix("light:") {
         id_str.parse::<u64>().ok().map(SelectedEntity::Light)
     } else {

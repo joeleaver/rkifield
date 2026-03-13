@@ -66,7 +66,7 @@ pub fn StatusBar() -> NodeHandle {
                                 objects.iter()
                                     .find(|o| o.id == *eid)
                                     .map(|o| o.name.clone())
-                                    .unwrap_or_else(|| format!("Object {eid}"))
+                                    .unwrap_or_else(|| format!("Object {}", &eid.to_string()[..8]))
                             }
                             SelectedEntity::Light(lid) => {
                                 lights.iter()

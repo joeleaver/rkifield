@@ -12,6 +12,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 pub struct EntityNameIndex {
     name_to_entity: HashMap<String, hecs::Entity>,
     entity_to_name: HashMap<hecs::Entity, String>,
+    /// Monotonic counter for auto-generated entity names.
+    auto_name_counter: u64,
 }
 
 impl EntityNameIndex {
@@ -20,6 +22,7 @@ impl EntityNameIndex {
         Self {
             name_to_entity: HashMap::new(),
             entity_to_name: HashMap::new(),
+            auto_name_counter: 0,
         }
     }
 
@@ -42,6 +45,21 @@ impl EntityNameIndex {
 
         self.name_to_entity.insert(name.to_string(), entity);
         self.entity_to_name.insert(entity, name.to_string());
+    }
+
+    /// Assign an auto-generated name to an entity if it does not already have one.
+    ///
+    /// Names follow the pattern `"Entity_1"`, `"Entity_2"`, etc., using a
+    /// monotonic counter that never resets. If the entity already has a name,
+    /// this is a no-op and returns the existing name.
+    pub fn assign_auto_name(&mut self, entity: hecs::Entity) -> &str {
+        if self.entity_to_name.contains_key(&entity) {
+            return self.entity_to_name.get(&entity).map(|s| s.as_str()).unwrap();
+        }
+        self.auto_name_counter += 1;
+        let name = format!("Entity_{}", self.auto_name_counter);
+        self.set_name(entity, &name);
+        self.entity_to_name.get(&entity).map(|s| s.as_str()).unwrap()
     }
 
     /// Look up an entity by name.
@@ -237,6 +255,64 @@ pub fn descendants_of(world: &hecs::World, root: hecs::Entity) -> Vec<hecs::Enti
     result
 }
 
+/// Collect the names of all siblings of `entity` in `world`.
+///
+/// Siblings are entities that share the same `Parent` (or all root entities if
+/// `entity` has no parent). The returned set does NOT include `entity`'s own
+/// name.
+fn sibling_names(world: &hecs::World, entity: hecs::Entity) -> HashSet<String> {
+    let my_parent = parent_of(world, entity);
+    let mut names = HashSet::new();
+
+    for (e, meta) in world.query::<&crate::components::EditorMetadata>().iter() {
+        if e == entity {
+            continue;
+        }
+        let their_parent = parent_of(world, e);
+        if their_parent == my_parent && !meta.name.is_empty() {
+            names.insert(meta.name.clone());
+        }
+    }
+    names
+}
+
+/// Return a name guaranteed to be unique among the siblings of `entity`.
+///
+/// If `name` is not taken by any sibling, it is returned unchanged.
+/// Otherwise, suffixes `_2`, `_3`, ... are tried until a unique variant is
+/// found.
+pub fn ensure_unique_name(world: &hecs::World, entity: hecs::Entity, name: &str) -> String {
+    let taken = sibling_names(world, entity);
+    if !taken.contains(name) {
+        return name.to_string();
+    }
+
+    // Strip an existing numeric suffix so "Guard_2" re-entering gets "Guard_3"
+    // rather than "Guard_2_2".
+    let base = strip_numeric_suffix(name);
+
+    let mut counter = 2u64;
+    loop {
+        let candidate = format!("{}_{}", base, counter);
+        if !taken.contains(&candidate) {
+            return candidate;
+        }
+        counter += 1;
+    }
+}
+
+/// Strip a trailing `_N` numeric suffix, returning the base name.
+/// e.g. `"Guard_3"` → `"Guard"`, `"Guard"` → `"Guard"`.
+fn strip_numeric_suffix(name: &str) -> &str {
+    if let Some(pos) = name.rfind('_') {
+        let suffix = &name[pos + 1..];
+        if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
+            return &name[..pos];
+        }
+    }
+    name
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -338,6 +414,66 @@ mod tests {
     fn name_index_default() {
         let index = EntityNameIndex::default();
         assert!(index.is_empty());
+    }
+
+    // ─── Auto-naming ────────────────────────────────────────────────────
+
+    #[test]
+    fn auto_name_generates_sequential_names() {
+        let mut world = hecs::World::new();
+        let e1 = world.spawn(());
+        let e2 = world.spawn(());
+        let e3 = world.spawn(());
+        let mut index = EntityNameIndex::new();
+
+        index.assign_auto_name(e1);
+        index.assign_auto_name(e2);
+        index.assign_auto_name(e3);
+
+        assert_eq!(index.get_name(e1), Some("Entity_1"));
+        assert_eq!(index.get_name(e2), Some("Entity_2"));
+        assert_eq!(index.get_name(e3), Some("Entity_3"));
+        assert_eq!(index.len(), 3);
+    }
+
+    #[test]
+    fn auto_name_skips_already_named_entity() {
+        let mut world = hecs::World::new();
+        let e = world.spawn(());
+        let mut index = EntityNameIndex::new();
+
+        index.set_name(e, "custom_name");
+        let name = index.assign_auto_name(e);
+
+        assert_eq!(name, "custom_name");
+        assert_eq!(index.get_name(e), Some("custom_name"));
+        // Counter should not have been incremented.
+        assert_eq!(index.auto_name_counter, 0);
+    }
+
+    #[test]
+    fn auto_name_counter_is_monotonic() {
+        let mut world = hecs::World::new();
+        let e1 = world.spawn(());
+        let e2 = world.spawn(());
+        let mut index = EntityNameIndex::new();
+
+        index.assign_auto_name(e1);
+        // Remove e1's name — counter should NOT go back.
+        index.remove(e1);
+        index.assign_auto_name(e2);
+
+        assert_eq!(index.get_name(e2), Some("Entity_2"));
+    }
+
+    #[test]
+    fn auto_name_is_findable_by_name() {
+        let mut world = hecs::World::new();
+        let e = world.spawn(());
+        let mut index = EntityNameIndex::new();
+
+        index.assign_auto_name(e);
+        assert_eq!(index.get_by_name("Entity_1"), Some(e));
     }
 
     // ─── EntityTagIndex ──────────────────────────────────────────────────
@@ -609,5 +745,73 @@ mod tests {
         let desc = descendants_of(&world, root);
         assert_eq!(desc, vec![child]);
         assert!(!desc.contains(&root));
+    }
+
+    // ─── Name uniqueness (spec 4.3) ─────────────────────────────────────
+
+    use crate::components::EditorMetadata;
+
+    #[test]
+    fn ensure_unique_name_no_collision() {
+        let mut world = hecs::World::new();
+        let e = world.spawn((EditorMetadata {
+            name: "Guard".into(),
+            tags: vec![],
+            locked: false,
+        },));
+
+        assert_eq!(super::ensure_unique_name(&world, e, "Guard"), "Guard");
+    }
+
+    #[test]
+    fn ensure_unique_name_collision_adds_suffix() {
+        let mut world = hecs::World::new();
+        // Existing sibling (root level)
+        world.spawn((EditorMetadata {
+            name: "Guard".into(),
+            tags: vec![],
+            locked: false,
+        },));
+
+        // New entity to check
+        let e2 = world.spawn((EditorMetadata {
+            name: "Guard".into(),
+            tags: vec![],
+            locked: false,
+        },));
+
+        assert_eq!(super::ensure_unique_name(&world, e2, "Guard"), "Guard_2");
+    }
+
+    #[test]
+    fn ensure_unique_name_increments_suffix() {
+        let mut world = hecs::World::new();
+        world.spawn((EditorMetadata {
+            name: "Guard".into(),
+            tags: vec![],
+            locked: false,
+        },));
+        world.spawn((EditorMetadata {
+            name: "Guard_2".into(),
+            tags: vec![],
+            locked: false,
+        },));
+
+        let e3 = world.spawn((EditorMetadata {
+            name: "Guard".into(),
+            tags: vec![],
+            locked: false,
+        },));
+
+        assert_eq!(super::ensure_unique_name(&world, e3, "Guard"), "Guard_3");
+    }
+
+    #[test]
+    fn strip_numeric_suffix_works() {
+        assert_eq!(super::strip_numeric_suffix("Guard_3"), "Guard");
+        assert_eq!(super::strip_numeric_suffix("Guard"), "Guard");
+        assert_eq!(super::strip_numeric_suffix("A_B_42"), "A_B");
+        assert_eq!(super::strip_numeric_suffix("_2"), "");
+        assert_eq!(super::strip_numeric_suffix("NoSuffix_abc"), "NoSuffix_abc");
     }
 }

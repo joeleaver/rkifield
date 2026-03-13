@@ -5,7 +5,10 @@
 //! all world interaction.
 
 use super::command_queue::{CommandQueue, TempEntity};
+use super::game_store::GameStore;
+use super::persist::Persistable;
 use super::registry::QueryError;
+use super::stable_id_index::StableIdIndex;
 
 /// The single parameter passed to every gameplay system function.
 ///
@@ -33,7 +36,8 @@ use super::registry::QueryError;
 pub struct SystemContext<'a> {
     world: &'a mut hecs::World,
     commands: &'a mut CommandQueue,
-    // game_store: &'a mut GameStore,  // Skip for now — will wire when GameStore merges
+    store: &'a mut GameStore,
+    stable_ids: &'a StableIdIndex,
     delta_time: f32,
     total_time: f64,
     frame: u64,
@@ -44,6 +48,8 @@ impl<'a> SystemContext<'a> {
     pub fn new(
         world: &'a mut hecs::World,
         commands: &'a mut CommandQueue,
+        store: &'a mut GameStore,
+        stable_ids: &'a StableIdIndex,
         delta_time: f32,
         total_time: f64,
         frame: u64,
@@ -51,6 +57,8 @@ impl<'a> SystemContext<'a> {
         Self {
             world,
             commands,
+            store,
+            stable_ids,
             delta_time,
             total_time,
             frame,
@@ -151,6 +159,61 @@ impl<'a> SystemContext<'a> {
         self.commands.insert(entity, component);
     }
 
+    // ─── Game store ────────────────────────────────────────────────────────
+
+    /// Access the game state store for reading and writing gameplay state.
+    pub fn store(&mut self) -> &mut GameStore {
+        self.store
+    }
+
+    /// Read-only access to the game state store.
+    pub fn store_ref(&self) -> &GameStore {
+        self.store
+    }
+
+    // ─── Persistence sync ────────────────────────────────────────────────
+
+    /// Sync a `Persistable` component's fields from the entity into the store.
+    ///
+    /// Looks up the entity's `StableId` component and calls
+    /// `T::sync_to_store()` with the entity's stable ID string.
+    ///
+    /// No-op if the entity lacks a `StableId` or the component `T`.
+    pub fn sync_to_store<T: Persistable + hecs::Component>(&mut self, entity: hecs::Entity) {
+        // Look up the StableId via the index (avoids borrow conflict with world)
+        let stable_uuid = match self.stable_ids.get_stable(entity) {
+            Some(uuid) => uuid,
+            None => return,
+        };
+        let stable_str = stable_uuid.to_string();
+
+        // Read the component and call sync_to_store. The Ref borrow from world
+        // is compatible with the &mut store borrow since sync_to_store takes
+        // &self (immutable component reference).
+        if let Ok(c) = self.world.get::<&T>(entity) {
+            c.sync_to_store(&stable_str, self.store);
+        }
+    }
+
+    /// Sync a `Persistable` component's fields from the store into the entity.
+    ///
+    /// Looks up the entity's `StableId` component and calls
+    /// `T::sync_from_store()` with the entity's stable ID string.
+    ///
+    /// No-op if the entity lacks a `StableId` or the component `T`.
+    pub fn sync_from_store<T: Persistable + hecs::Component>(&mut self, entity: hecs::Entity) {
+        let stable_uuid = match self.stable_ids.get_stable(entity) {
+            Some(uuid) => uuid,
+            None => return,
+        };
+        let stable_str = stable_uuid.to_string();
+
+        // Get mutable access to the component
+        if let Ok(mut c) = self.world.get::<&mut T>(entity) {
+            c.sync_from_store(&stable_str, self.store);
+        }
+    }
+
     // ─── Time ────────────────────────────────────────────────────────────
 
     /// Seconds elapsed since the previous frame (variable timestep).
@@ -174,14 +237,20 @@ impl<'a> SystemContext<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::behavior::game_store::GameStore;
+    use crate::behavior::persist::{Persistable, persist_key};
+    use crate::behavior::stable_id::StableId;
+    use crate::behavior::stable_id_index::StableIdIndex;
     use crate::components::{EditorMetadata, Transform};
 
     /// Helper: create a world + command queue + context for testing.
     fn make_ctx<'a>(
         world: &'a mut hecs::World,
         commands: &'a mut CommandQueue,
+        store: &'a mut GameStore,
+        stable_ids: &'a StableIdIndex,
     ) -> SystemContext<'a> {
-        SystemContext::new(world, commands, 1.0 / 60.0, 10.5, 630)
+        SystemContext::new(world, commands, store, stable_ids, 1.0 / 60.0, 10.5, 630)
     }
 
     // ─── World access ────────────────────────────────────────────────────
@@ -194,7 +263,9 @@ mod tests {
         world.spawn((EditorMetadata::default(),));
 
         let mut commands = CommandQueue::new();
-        let ctx = make_ctx(&mut world, &mut commands);
+        let mut store = GameStore::new();
+        let mut stable_ids = StableIdIndex::new();
+        let ctx = make_ctx(&mut world, &mut commands, &mut store, &stable_ids);
 
         // Query for Transform — should match 2 entities
         let count = ctx.query::<&Transform>().iter().count();
@@ -215,7 +286,9 @@ mod tests {
         },));
 
         let mut commands = CommandQueue::new();
-        let ctx = make_ctx(&mut world, &mut commands);
+        let mut store = GameStore::new();
+        let mut stable_ids = StableIdIndex::new();
+        let ctx = make_ctx(&mut world, &mut commands, &mut store, &stable_ids);
 
         let meta = ctx.get::<EditorMetadata>(entity).unwrap();
         assert_eq!(meta.name, "TestEntity");
@@ -227,7 +300,9 @@ mod tests {
         let entity = world.spawn((Transform::default(),));
 
         let mut commands = CommandQueue::new();
-        let ctx = make_ctx(&mut world, &mut commands);
+        let mut store = GameStore::new();
+        let mut stable_ids = StableIdIndex::new();
+        let ctx = make_ctx(&mut world, &mut commands, &mut store, &stable_ids);
 
         assert!(ctx.get::<EditorMetadata>(entity).is_err());
     }
@@ -238,7 +313,9 @@ mod tests {
         let entity = world.spawn((Transform::default(),));
 
         let mut commands = CommandQueue::new();
-        let ctx = make_ctx(&mut world, &mut commands);
+        let mut store = GameStore::new();
+        let mut stable_ids = StableIdIndex::new();
+        let ctx = make_ctx(&mut world, &mut commands, &mut store, &stable_ids);
 
         assert!(ctx.has::<Transform>(entity));
         assert!(!ctx.has::<EditorMetadata>(entity));
@@ -252,7 +329,9 @@ mod tests {
         world.despawn(dead).unwrap();
 
         let mut commands = CommandQueue::new();
-        let ctx = make_ctx(&mut world, &mut commands);
+        let mut store = GameStore::new();
+        let mut stable_ids = StableIdIndex::new();
+        let ctx = make_ctx(&mut world, &mut commands, &mut store, &stable_ids);
 
         assert!(ctx.entity_exists(alive));
         assert!(!ctx.entity_exists(dead));
@@ -270,7 +349,9 @@ mod tests {
         world.spawn((Transform::default(),)); // not a Player
 
         let mut commands = CommandQueue::new();
-        let ctx = make_ctx(&mut world, &mut commands);
+        let mut store = GameStore::new();
+        let mut stable_ids = StableIdIndex::new();
+        let ctx = make_ctx(&mut world, &mut commands, &mut store, &stable_ids);
 
         let found = ctx.find_one_entity::<&Player>().unwrap();
         assert_eq!(found, expected);
@@ -282,7 +363,9 @@ mod tests {
         world.spawn((Transform::default(),));
 
         let mut commands = CommandQueue::new();
-        let ctx = make_ctx(&mut world, &mut commands);
+        let mut store = GameStore::new();
+        let mut stable_ids = StableIdIndex::new();
+        let ctx = make_ctx(&mut world, &mut commands, &mut store, &stable_ids);
 
         let result = ctx.find_one_entity::<&Player>();
         assert!(matches!(result, Err(QueryError::NotFound)));
@@ -295,7 +378,9 @@ mod tests {
         world.spawn((Player,));
 
         let mut commands = CommandQueue::new();
-        let ctx = make_ctx(&mut world, &mut commands);
+        let mut store = GameStore::new();
+        let mut stable_ids = StableIdIndex::new();
+        let ctx = make_ctx(&mut world, &mut commands, &mut store, &stable_ids);
 
         let result = ctx.find_one_entity::<&Player>();
         assert!(matches!(result, Err(QueryError::Multiple)));
@@ -308,16 +393,18 @@ mod tests {
         let mut world = hecs::World::new();
         let mut commands = CommandQueue::new();
         commands.set_loaded_scenes(vec!["test_scene".into()]);
+        let mut store = GameStore::new();
+        let mut stable_ids = StableIdIndex::new();
 
         {
-            let mut ctx = make_ctx(&mut world, &mut commands);
+            let mut ctx = make_ctx(&mut world, &mut commands, &mut store, &stable_ids);
             let mut builder = hecs::EntityBuilder::new();
             builder.add(Transform::default());
             let _temp = ctx.spawn(builder);
         }
 
         // Flush and verify
-        commands.flush(&mut world);
+        commands.flush(&mut world, &mut stable_ids);
         assert_eq!(world.query::<&Transform>().iter().count(), 1);
     }
 
@@ -326,13 +413,15 @@ mod tests {
         let mut world = hecs::World::new();
         let entity = world.spawn((Transform::default(),));
         let mut commands = CommandQueue::new();
+        let mut store = GameStore::new();
+        let mut stable_ids = StableIdIndex::new();
 
         {
-            let mut ctx = make_ctx(&mut world, &mut commands);
+            let mut ctx = make_ctx(&mut world, &mut commands, &mut store, &stable_ids);
             ctx.despawn(entity);
         }
 
-        commands.flush(&mut world);
+        commands.flush(&mut world, &mut stable_ids);
         assert!(!world.contains(entity));
     }
 
@@ -341,9 +430,11 @@ mod tests {
         let mut world = hecs::World::new();
         let entity = world.spawn((Transform::default(),));
         let mut commands = CommandQueue::new();
+        let mut store = GameStore::new();
+        let mut stable_ids = StableIdIndex::new();
 
         {
-            let mut ctx = make_ctx(&mut world, &mut commands);
+            let mut ctx = make_ctx(&mut world, &mut commands, &mut store, &stable_ids);
             ctx.insert(entity, EditorMetadata {
                 name: "Inserted".into(),
                 tags: vec![],
@@ -351,7 +442,7 @@ mod tests {
             });
         }
 
-        commands.flush(&mut world);
+        commands.flush(&mut world, &mut stable_ids);
         let meta = world.get::<&EditorMetadata>(entity).unwrap();
         assert_eq!(meta.name, "Inserted");
     }
@@ -362,7 +453,9 @@ mod tests {
     fn time_accessors() {
         let mut world = hecs::World::new();
         let mut commands = CommandQueue::new();
-        let ctx = SystemContext::new(&mut world, &mut commands, 0.016, 42.5, 2550);
+        let mut store = GameStore::new();
+        let mut stable_ids = StableIdIndex::new();
+        let ctx = SystemContext::new(&mut world, &mut commands, &mut store, &stable_ids, 0.016, 42.5, 2550);
 
         assert!((ctx.delta_time() - 0.016).abs() < 1e-6);
         assert!((ctx.total_time() - 42.5).abs() < 1e-12);
@@ -376,14 +469,112 @@ mod tests {
         let mut world = hecs::World::new();
         let entity = world.spawn((Transform::default(),));
         let mut commands = CommandQueue::new();
+        let mut store = GameStore::new();
+        let mut stable_ids = StableIdIndex::new();
 
         {
-            let mut ctx = make_ctx(&mut world, &mut commands);
+            let mut ctx = make_ctx(&mut world, &mut commands, &mut store, &stable_ids);
             // Use the raw commands() accessor to queue a remove
             ctx.commands().remove::<Transform>(entity);
         }
 
-        commands.flush(&mut world);
+        commands.flush(&mut world, &mut stable_ids);
         assert!(world.get::<&Transform>(entity).is_err());
+    }
+
+    // ─── Persistence sync ────────────────────────────────────────────────
+
+    /// Test component implementing Persistable.
+    struct Score {
+        value: i64,
+        label: String,
+    }
+
+    impl Persistable for Score {
+        fn sync_to_store(&self, stable_id: &str, store: &mut GameStore) {
+            store.set(&persist_key(stable_id, "value"), self.value);
+            store.set(&persist_key(stable_id, "label"), self.label.as_str());
+        }
+        fn sync_from_store(&mut self, stable_id: &str, store: &GameStore) {
+            if let Some(v) = store.get::<i64>(&persist_key(stable_id, "value")) {
+                self.value = v;
+            }
+            if let Some(v) = store.get::<String>(&persist_key(stable_id, "label")) {
+                self.label = v;
+            }
+        }
+    }
+
+    #[test]
+    fn context_sync_to_store() {
+        let mut world = hecs::World::new();
+        let stable_id = StableId::new();
+        let entity = world.spawn((
+            stable_id,
+            Score { value: 42, label: "high".into() },
+        ));
+
+        let mut commands = CommandQueue::new();
+        let mut store = GameStore::new();
+        let mut stable_ids = StableIdIndex::new();
+        stable_ids.insert(stable_id.uuid(), entity);
+
+        {
+            let mut ctx = make_ctx(&mut world, &mut commands, &mut store, &stable_ids);
+            ctx.sync_to_store::<Score>(entity);
+        }
+
+        let key = persist_key(&stable_id.to_string(), "value");
+        assert_eq!(store.get::<i64>(&key), Some(42));
+        let key2 = persist_key(&stable_id.to_string(), "label");
+        assert_eq!(store.get::<String>(&key2), Some("high".into()));
+    }
+
+    #[test]
+    fn context_sync_from_store() {
+        let mut world = hecs::World::new();
+        let stable_id = StableId::new();
+        let entity = world.spawn((
+            stable_id,
+            Score { value: 0, label: "none".into() },
+        ));
+
+        let mut commands = CommandQueue::new();
+        let mut store = GameStore::new();
+        let mut stable_ids = StableIdIndex::new();
+        stable_ids.insert(stable_id.uuid(), entity);
+
+        // Pre-populate store
+        store.set(&persist_key(&stable_id.to_string(), "value"), 99_i64);
+        store.set(&persist_key(&stable_id.to_string(), "label"), "restored");
+
+        {
+            let mut ctx = make_ctx(&mut world, &mut commands, &mut store, &stable_ids);
+            ctx.sync_from_store::<Score>(entity);
+        }
+
+        let score = world.get::<&Score>(entity).unwrap();
+        assert_eq!(score.value, 99);
+        assert_eq!(score.label, "restored");
+    }
+
+    #[test]
+    fn context_sync_noop_without_stable_id() {
+        let mut world = hecs::World::new();
+        let entity = world.spawn((Score { value: 10, label: "x".into() },));
+
+        let mut commands = CommandQueue::new();
+        let mut store = GameStore::new();
+        let mut stable_ids = StableIdIndex::new(); // entity not registered
+
+        {
+            let mut ctx = make_ctx(&mut world, &mut commands, &mut store, &stable_ids);
+            // Should be a no-op — no panic
+            ctx.sync_to_store::<Score>(entity);
+            ctx.sync_from_store::<Score>(entity);
+        }
+
+        // Store should be empty
+        assert_eq!(store.list("").count(), 0);
     }
 }

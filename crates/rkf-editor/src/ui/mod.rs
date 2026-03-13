@@ -5,6 +5,7 @@
 
 pub mod asset_browser;
 pub mod camera_properties;
+pub mod component_inspector;
 pub mod components;
 pub mod environment_panel;
 pub mod light_properties;
@@ -14,6 +15,7 @@ pub mod object_properties;
 pub mod scene_tree_panel;
 pub mod shader_properties;
 pub mod shaders_panel;
+pub mod systems_panel;
 mod slider_helpers;
 pub mod brush_palette;
 pub mod titlebar;
@@ -195,13 +197,13 @@ pub fn editor_ui() -> NodeHandle {
                                         }
                                     };
 
-                                    if let Some(entity) = state.world.find_entity_by_id(eid) {
+                                    if state.world.is_alive(eid) {
                                         let wp = rkf_core::WorldPosition::new(
                                             glam::IVec3::ZERO, new_pos,
                                         );
-                                        let _ = state.world.set_position(entity, wp);
-                                        let _ = state.world.set_rotation(entity, new_rot);
-                                        let _ = state.world.set_scale(entity, new_scale);
+                                        let _ = state.world.set_position(eid, wp);
+                                        let _ = state.world.set_rotation(eid, new_rot);
+                                        let _ = state.world.set_scale(eid, new_scale);
 
                                         // Push to slider signals so right panel tracks gizmo drag.
                                         let (rx, ry, rz) = new_rot.to_euler(glam::EulerRot::XYZ);
@@ -228,14 +230,18 @@ pub fn editor_ui() -> NodeHandle {
                                 // Hover detection: update hovered_axis.
                                 let gc = match state.selected_entity {
                                     Some(SelectedEntity::Object(eid)) => {
-                                        let scene = state.world.scene();
-                                        scene.objects.iter().find(|o| o.id as u64 == eid)
-                                            .and_then(|obj| {
-                                                let (lmin, lmax) = wireframe::compute_node_tree_aabb(
-                                                    &obj.root_node, glam::Mat4::IDENTITY,
-                                                )?;
-                                                Some(obj.position + obj.rotation * ((lmin + lmax) * 0.5 * obj.scale))
-                                            })
+                                        // Read from hecs (authoritative).
+                                        (|| -> Option<_> {
+                                            let pos = state.world.position(eid).ok()?.to_vec3();
+                                            let rot = state.world.rotation(eid).ok()?;
+                                            let scale = state.world.scale(eid).ok()?;
+                                            let hecs_e = state.world.ecs_entity_for(eid)?;
+                                            let sdf = state.world.ecs_ref().get::<&rkf_runtime::components::SdfTree>(hecs_e).ok()?;
+                                            let (lmin, lmax) = wireframe::compute_node_tree_aabb(
+                                                &sdf.root, glam::Mat4::IDENTITY,
+                                            )?;
+                                            Some(pos + rot * ((lmin + lmax) * 0.5 * scale))
+                                        })()
                                     }
                                     Some(SelectedEntity::Light(lid)) => {
                                         state.light_editor.get_light(lid).map(|l| l.position)
@@ -295,16 +301,19 @@ pub fn editor_ui() -> NodeHandle {
                                 let gizmo_info: Option<(glam::Vec3, glam::Vec3, glam::Quat, glam::Vec3)> =
                                     match state.selected_entity {
                                         Some(SelectedEntity::Object(eid)) => {
-                                            let scene = state.world.scene();
-                                            scene.objects.iter().find(|o| o.id as u64 == eid)
-                                                .and_then(|obj| {
-                                                    let (lmin, lmax) = wireframe::compute_node_tree_aabb(
-                                                        &obj.root_node, glam::Mat4::IDENTITY,
-                                                    )?;
-                                                    let center = obj.position
-                                                        + obj.rotation * ((lmin + lmax) * 0.5 * obj.scale);
-                                                    Some((center, obj.position, obj.rotation, obj.scale))
-                                                })
+                                            // Read from hecs (authoritative).
+                                            (|| -> Option<_> {
+                                                let pos = state.world.position(eid).ok()?.to_vec3();
+                                                let rot = state.world.rotation(eid).ok()?;
+                                                let scale = state.world.scale(eid).ok()?;
+                                                let hecs_e = state.world.ecs_entity_for(eid)?;
+                                                let sdf = state.world.ecs_ref().get::<&rkf_runtime::components::SdfTree>(hecs_e).ok()?;
+                                                let (lmin, lmax) = wireframe::compute_node_tree_aabb(
+                                                    &sdf.root, glam::Mat4::IDENTITY,
+                                                )?;
+                                                let center = pos + rot * ((lmin + lmax) * 0.5 * scale);
+                                                Some((center, pos, rot, scale))
+                                            })()
                                         }
                                         Some(SelectedEntity::Light(lid)) => {
                                             state.light_editor.get_light(lid).map(|l| {
@@ -399,11 +408,12 @@ pub fn editor_ui() -> NodeHandle {
                         if button == Btn::Left && was_dragging {
                             // Gizmo drag end: push undo action.
                             if let Some(SelectedEntity::Object(eid)) = state.selected_entity {
-                                let final_transform = {
-                                    let scene = state.world.scene();
-                                    scene.objects.iter().find(|o| o.id as u64 == eid)
-                                        .map(|obj| (obj.position, obj.rotation, obj.scale))
-                                };
+                                let final_transform = (|| -> Option<_> {
+                                    let pos = state.world.position(eid).ok()?.to_vec3();
+                                    let rot = state.world.rotation(eid).ok()?;
+                                    let scale = state.world.scale(eid).ok()?;
+                                    Some((pos, rot, scale))
+                                })();
 
                                 if let Some((new_pos, new_rot, new_scale)) = final_transform {
                                     let desc = match state.gizmo.mode {
@@ -430,7 +440,7 @@ pub fn editor_ui() -> NodeHandle {
                                     let new_pos = light.position;
                                     state.undo.push(crate::undo::UndoAction {
                                         kind: crate::undo::UndoActionKind::Transform {
-                                            entity_id: lid,
+                                            entity_id: uuid::Uuid::from_u128(lid as u128),
                                             old_pos,
                                             old_rot: glam::Quat::IDENTITY,
                                             old_scale: glam::Vec3::ONE,

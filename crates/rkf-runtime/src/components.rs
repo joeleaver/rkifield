@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Position uses [`WorldPosition`] for float-precision safety.
 /// Scale is per-axis (non-uniform scale uses conservative `min(sx,sy,sz)` for SDF distances).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Transform {
     /// World-space position (chunk + local).
     pub position: WorldPosition,
@@ -67,7 +67,7 @@ pub struct Parent {
 /// [`Camera`] is the "viewport camera" that actually renders — use
 /// [`Renderer::snap_camera_to`] to copy an entity's camera state to
 /// the viewport camera.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CameraComponent {
     /// Vertical field of view in degrees.
     pub fov_degrees: f32,
@@ -100,7 +100,7 @@ impl Default for CameraComponent {
 }
 
 /// Fog volume component (links to volumetric fog system).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct FogVolumeComponent {
     /// Density scale multiplier.
     pub density: f32,
@@ -173,6 +173,36 @@ impl Default for SdfTree {
             asset_path: None,
             aabb: rkf_core::aabb::Aabb::new(glam::Vec3::ZERO, glam::Vec3::ZERO),
         }
+    }
+}
+
+/// Proxy type for SdfTree serialization — only persists asset_path + aabb.
+/// SceneNode contains non-serializable runtime handles (BrickMapHandle),
+/// so root is reconstructed as default on deserialize.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SdfTreeProxy {
+    asset_path: Option<String>,
+    aabb: rkf_core::aabb::Aabb,
+}
+
+impl serde::Serialize for SdfTree {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let proxy = SdfTreeProxy {
+            asset_path: self.asset_path.clone(),
+            aabb: self.aabb,
+        };
+        proxy.serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for SdfTree {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let proxy = SdfTreeProxy::deserialize(deserializer)?;
+        Ok(SdfTree {
+            root: rkf_core::scene_node::SceneNode::new("root"),
+            asset_path: proxy.asset_path,
+            aabb: proxy.aabb,
+        })
     }
 }
 

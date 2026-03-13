@@ -5,6 +5,7 @@
 //! no ArcSwap — data flows directly into the reactive system.
 
 use glam::Vec3;
+use uuid::Uuid;
 
 use crate::light_editor::SceneLightType;
 
@@ -29,12 +30,12 @@ pub enum ObjectType {
 /// Lightweight summary of a scene object for UI display.
 #[derive(Debug, Clone)]
 pub struct ObjectSummary {
-    pub id: u64,
+    pub id: Uuid,
     pub name: String,
     pub position: Vec3,
     pub rotation_degrees: Vec3,
     pub scale: Vec3,
-    pub parent_id: Option<u32>,
+    pub parent_id: Option<Uuid>,
     pub object_type: ObjectType,
 }
 
@@ -76,6 +77,21 @@ pub struct ShaderSummary {
     pub id: u32,
     pub built_in: bool,
     pub file_path: String,
+}
+
+/// Lightweight summary of a registered behavior system for UI display.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SystemSummary {
+    /// System function name (e.g., "patrol_system").
+    pub name: String,
+    /// Phase label ("Update" or "LateUpdate").
+    pub phase: String,
+    /// Execution order within its phase (0-based).
+    pub order: usize,
+    /// Whether the system faulted (panicked) during the last frame.
+    pub faulted: bool,
+    /// Last frame execution time in microseconds, if available.
+    pub last_frame_us: Option<u64>,
 }
 
 /// Helper for debug mode display.

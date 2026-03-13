@@ -6,13 +6,14 @@
 #![allow(dead_code)]
 
 use glam::{IVec3, Quat, Vec3};
+use uuid::Uuid;
 
 /// The kind of action that can be undone/redone.
 #[derive(Debug, Clone)]
 pub enum UndoActionKind {
     /// Entity transform change.
     Transform {
-        entity_id: u64,
+        entity_id: Uuid,
         old_pos: Vec3,
         old_rot: Quat,
         old_scale: Vec3,
@@ -21,9 +22,9 @@ pub enum UndoActionKind {
         new_scale: Vec3,
     },
     /// An entity was spawned (undo = despawn it).
-    SpawnEntity { entity_id: u64 },
+    SpawnEntity { entity_id: Uuid },
     /// An entity was despawned (undo = respawn it).
-    DespawnEntity { entity_id: u64 },
+    DespawnEntity { entity_id: Uuid },
     /// A voxel edit operation on a chunk (v1 legacy).
     VoxelEdit {
         chunk: IVec3,
@@ -32,18 +33,18 @@ pub enum UndoActionKind {
     /// A sculpt stroke — captures geometry-first snapshots before modification.
     /// Undo restores geometry + SDF cache + re-derives Brick for GPU upload.
     SculptStroke {
-        object_id: u64,
+        object_id: Uuid,
         geometry_snapshots: Vec<crate::editor_state::GeometryUndoEntry>,
     },
     /// A paint stroke — captures geometry-first snapshots before modification.
     /// Undo restores surface voxel material/color via geometry + SDF cache.
     PaintStroke {
-        object_id: u64,
+        object_id: Uuid,
         geometry_snapshots: Vec<crate::editor_state::GeometryUndoEntry>,
     },
     /// A property was changed on an entity.
     PropertyChange {
-        entity_id: u64,
+        entity_id: Uuid,
         property_name: String,
         old_value: String,
         new_value: String,
@@ -172,7 +173,7 @@ mod tests {
     fn make_action(desc: &str) -> UndoAction {
         UndoAction {
             kind: UndoActionKind::Transform {
-                entity_id: 1,
+                entity_id: Uuid::nil(),
                 old_pos: Vec3::ZERO,
                 old_rot: Quat::IDENTITY,
                 old_scale: Vec3::ONE,
@@ -185,7 +186,7 @@ mod tests {
         }
     }
 
-    fn make_spawn_action(id: u64) -> UndoAction {
+    fn make_spawn_action(id: Uuid) -> UndoAction {
         UndoAction {
             kind: UndoActionKind::SpawnEntity { entity_id: id },
             timestamp_ms: 100,
@@ -302,18 +303,19 @@ mod tests {
     fn test_spawn_despawn_action_kinds() {
         let mut stack = UndoStack::new(100);
 
-        stack.push(make_spawn_action(42));
+        let test_id = Uuid::from_u128(42);
+        stack.push(make_spawn_action(test_id));
         stack.push(UndoAction {
-            kind: UndoActionKind::DespawnEntity { entity_id: 42 },
+            kind: UndoActionKind::DespawnEntity { entity_id: test_id },
             timestamp_ms: 200,
-            description: "Despawn entity 42".to_string(),
+            description: "Despawn entity".to_string(),
         });
 
         assert_eq!(stack.undo_count(), 2);
         let undone = stack.undo().unwrap();
-        assert_eq!(undone.description, "Despawn entity 42");
+        assert_eq!(undone.description, "Despawn entity");
         if let UndoActionKind::DespawnEntity { entity_id } = undone.kind {
-            assert_eq!(entity_id, 42);
+            assert_eq!(entity_id, test_id);
         } else {
             panic!("Expected DespawnEntity kind");
         }
@@ -338,7 +340,7 @@ mod tests {
         let mut stack = UndoStack::new(100);
         stack.push(UndoAction {
             kind: UndoActionKind::PropertyChange {
-                entity_id: 5,
+                entity_id: Uuid::from_u128(5),
                 property_name: "intensity".to_string(),
                 old_value: "1.0".to_string(),
                 new_value: "2.5".to_string(),

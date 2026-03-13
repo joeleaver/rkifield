@@ -176,6 +176,15 @@ impl From<Vec3> for WorldPosition {
     }
 }
 
+impl From<DVec3> for WorldPosition {
+    /// Convert a `DVec3` (absolute metres, `f64`) into a `WorldPosition`,
+    /// preserving precision by computing chunk via floor-division in f64.
+    #[inline]
+    fn from(v: DVec3) -> Self {
+        WorldPosition::from_world_f64(v.x, v.y, v.z)
+    }
+}
+
 impl Add<Vec3> for WorldPosition {
     type Output = WorldPosition;
 
@@ -525,6 +534,48 @@ mod tests {
         assert!((added.local.x - assigned.local.x).abs() < 1e-5);
         assert!((added.local.y - assigned.local.y).abs() < 1e-5);
         assert!((added.local.z - assigned.local.z).abs() < 1e-5);
+    }
+
+    // ── From<DVec3> ─────────────────────────────────────────────────────
+
+    #[test]
+    fn from_dvec3_normalizes_large_values() {
+        // 1_000_000.5 metres on x → chunk 125000, local 0.5
+        let v = DVec3::new(1_000_000.5, -20.25, 0.0);
+        let pos: WorldPosition = v.into();
+        assert_eq!(pos.chunk.x, 125000);
+        assert!((pos.local.x - 0.5).abs() < 1e-3, "local.x = {}", pos.local.x);
+        assert_eq!(pos.chunk.y, -3); // -20.25 / 8 = -2.53 → floor = -3, local = 3.75
+        assert!((pos.local.y - 3.75).abs() < 1e-3, "local.y = {}", pos.local.y);
+        assert_eq!(pos.chunk.z, 0);
+        assert!(pos.local.z.abs() < 1e-5);
+    }
+
+    #[test]
+    fn from_dvec3_precision_preserved() {
+        // A position that would lose precision as f32: 10_000_000.123
+        let v = DVec3::new(10_000_000.123, 0.0, 0.0);
+        let pos: WorldPosition = v.into();
+        // chunk = floor(10_000_000.123 / 8) = 1_250_000, local = 0.123
+        assert_eq!(pos.chunk.x, 1_250_000);
+        assert!((pos.local.x - 0.123).abs() < 1e-3, "local.x = {}", pos.local.x);
+    }
+
+    // ── precision at large distances ──────────────────────────────────────
+
+    #[test]
+    fn sub_precision_at_large_distance() {
+        // Two positions very far apart, differing by a small amount
+        let far_chunk = 100_000_000; // ~800 million metres
+        let a = WorldPosition::new(IVec3::new(far_chunk, 0, 0), Vec3::new(1.0, 0.0, 0.0));
+        let b = WorldPosition::new(IVec3::new(far_chunk, 0, 0), Vec3::new(1.5, 0.0, 0.0));
+        let diff = b - a;
+        // Should be exactly 0.5 despite being 800M metres from origin
+        assert!(
+            (diff.x - 0.5).abs() < 1e-5,
+            "precision lost: diff.x = {}, expected 0.5",
+            diff.x
+        );
     }
 
     // ── roundtrip ─────────────────────────────────────────────────────────

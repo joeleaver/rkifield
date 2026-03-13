@@ -18,7 +18,8 @@ use winit::window::{Window, WindowAttributes, WindowId};
 
 use rkf_core::{Aabb, SdfPrimitive, SdfSource, SceneNode};
 use rkf_render::Light;
-use rkf_runtime::api::{Entity, Renderer, RendererConfig, World};
+use rkf_runtime::api::{Renderer, RendererConfig, World};
+use uuid::Uuid;
 use rkf_animation::character::{
     AnimatedCharacter, build_humanoid_skeleton, build_humanoid_visuals, build_walk_clip,
 };
@@ -43,7 +44,7 @@ const INTERNAL_HEIGHT: u32 = 540;
 /// Build the demo scene using the World API.
 ///
 /// Returns the character and its entity handle for per-frame animation.
-fn build_demo_scene(world: &mut World) -> (AnimatedCharacter, Entity) {
+fn build_demo_scene(world: &mut World) -> (AnimatedCharacter, Uuid) {
     // 1. Ground plane (large flat box)
     world.spawn("ground")
         .position_vec3(Vec3::new(0.0, -0.6, 0.0))
@@ -195,7 +196,7 @@ struct App {
     rt: tokio::runtime::Runtime,
     // Animation
     character: Option<AnimatedCharacter>,
-    character_entity: Option<Entity>,
+    character_entity: Option<Uuid>,
     last_anim_time: Instant,
     // Input state
     keys_held: std::collections::HashSet<KeyCode>,

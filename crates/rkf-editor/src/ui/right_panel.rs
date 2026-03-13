@@ -192,6 +192,13 @@ fn build_entity_content(
                 Some(SelectedEntity::Object(eid)) => {
                     let obj = ObjectProperties { entity_id: eid, ..Default::default() };
                     inner.append_child(&obj.render(scope, &[]));
+
+                    // Component inspector — shows ECS components with editable fields.
+                    let inspector = super::component_inspector::ComponentInspector {
+                        entity_id: eid,
+                        ..Default::default()
+                    };
+                    inner.append_child(&inspector.render(scope, &[]));
                 }
                 Some(SelectedEntity::Light(lid)) => {
                     let light = LightProperties { light_id: lid, ..Default::default() };

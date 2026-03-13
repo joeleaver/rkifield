@@ -27,6 +27,8 @@ notify = { workspace = true }
 uuid = { workspace = true }
 inventory = { workspace = true }
 rkf-macros = { workspace = true }
+libloading = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+tempfile = { workspace = true }

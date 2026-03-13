@@ -21,7 +21,7 @@ pub enum PlaybackState {
 #[derive(Debug, Clone)]
 pub struct AnimationPreview {
     /// The entity whose animation is being previewed, if any.
-    pub entity_id: Option<u64>,
+    pub entity_id: Option<uuid::Uuid>,
     /// Current playback state.
     pub playback_state: PlaybackState,
     /// Current playback time in seconds.
@@ -61,7 +61,7 @@ impl AnimationPreview {
 
     /// Bind an entity for preview, setting its duration and initializing
     /// blend shape weights (all at 0.0).
-    pub fn set_entity(&mut self, id: u64, duration: f32, blend_shape_names: Vec<String>) {
+    pub fn set_entity(&mut self, id: uuid::Uuid, duration: f32, blend_shape_names: Vec<String>) {
         self.entity_id = Some(id);
         self.duration = duration;
         self.current_time = 0.0;
@@ -217,8 +217,8 @@ mod tests {
     #[test]
     fn test_set_entity() {
         let mut preview = AnimationPreview::new();
-        preview.set_entity(42, 3.0, vec!["smile".into(), "blink".into()]);
-        assert_eq!(preview.entity_id, Some(42));
+        preview.set_entity(uuid::Uuid::from_u128(42), 3.0, vec!["smile".into(), "blink".into()]);
+        assert_eq!(preview.entity_id, Some(uuid::Uuid::from_u128(42)));
         assert!(approx_eq(preview.duration, 3.0));
         assert_eq!(preview.blend_shape_weights.len(), 2);
         assert_eq!(preview.blend_shape_weights[0].0, "smile");
@@ -228,11 +228,11 @@ mod tests {
     #[test]
     fn test_set_entity_resets_time() {
         let mut preview = AnimationPreview::new();
-        preview.set_entity(1, 5.0, vec![]);
+        preview.set_entity(uuid::Uuid::from_u128(1), 5.0, vec![]);
         preview.play();
         preview.advance(2.0);
         // Re-bind resets time.
-        preview.set_entity(2, 10.0, vec!["jaw".into()]);
+        preview.set_entity(uuid::Uuid::from_u128(2), 10.0, vec!["jaw".into()]);
         assert!(approx_eq(preview.current_time, 0.0));
         assert_eq!(preview.playback_state, PlaybackState::Stopped);
     }
@@ -240,7 +240,7 @@ mod tests {
     #[test]
     fn test_clear_entity() {
         let mut preview = AnimationPreview::new();
-        preview.set_entity(42, 3.0, vec!["smile".into()]);
+        preview.set_entity(uuid::Uuid::from_u128(42), 3.0, vec!["smile".into()]);
         preview.play();
         preview.advance(1.0);
         preview.clear_entity();
@@ -256,7 +256,7 @@ mod tests {
     #[test]
     fn test_play_pause_stop() {
         let mut preview = AnimationPreview::new();
-        preview.set_entity(1, 5.0, vec![]);
+        preview.set_entity(uuid::Uuid::from_u128(1), 5.0, vec![]);
         assert_eq!(preview.playback_state, PlaybackState::Stopped);
 
         preview.play();
@@ -277,7 +277,7 @@ mod tests {
     #[test]
     fn test_toggle_playback() {
         let mut preview = AnimationPreview::new();
-        preview.set_entity(1, 5.0, vec![]);
+        preview.set_entity(uuid::Uuid::from_u128(1), 5.0, vec![]);
 
         // Stopped -> Playing
         preview.toggle_playback();
@@ -297,7 +297,7 @@ mod tests {
     #[test]
     fn test_advance_basic() {
         let mut preview = AnimationPreview::new();
-        preview.set_entity(1, 5.0, vec![]);
+        preview.set_entity(uuid::Uuid::from_u128(1), 5.0, vec![]);
         preview.play();
         preview.advance(1.5);
         assert!(approx_eq(preview.current_time, 1.5));
@@ -306,7 +306,7 @@ mod tests {
     #[test]
     fn test_advance_with_speed() {
         let mut preview = AnimationPreview::new();
-        preview.set_entity(1, 10.0, vec![]);
+        preview.set_entity(uuid::Uuid::from_u128(1), 10.0, vec![]);
         preview.set_speed(2.0);
         preview.play();
         preview.advance(1.0);
@@ -316,7 +316,7 @@ mod tests {
     #[test]
     fn test_advance_no_loop_clamps_and_pauses() {
         let mut preview = AnimationPreview::new();
-        preview.set_entity(1, 3.0, vec![]);
+        preview.set_entity(uuid::Uuid::from_u128(1), 3.0, vec![]);
         preview.looping = false;
         preview.play();
         preview.advance(5.0);
@@ -327,7 +327,7 @@ mod tests {
     #[test]
     fn test_advance_with_loop_wraps() {
         let mut preview = AnimationPreview::new();
-        preview.set_entity(1, 3.0, vec![]);
+        preview.set_entity(uuid::Uuid::from_u128(1), 3.0, vec![]);
         preview.looping = true;
         preview.play();
         preview.advance(5.0); // 5.0 mod 3.0 = 2.0
@@ -338,7 +338,7 @@ mod tests {
     #[test]
     fn test_advance_while_paused_does_nothing() {
         let mut preview = AnimationPreview::new();
-        preview.set_entity(1, 5.0, vec![]);
+        preview.set_entity(uuid::Uuid::from_u128(1), 5.0, vec![]);
         preview.pause();
         preview.advance(2.0);
         assert!(approx_eq(preview.current_time, 0.0));
@@ -347,7 +347,7 @@ mod tests {
     #[test]
     fn test_advance_while_stopped_does_nothing() {
         let mut preview = AnimationPreview::new();
-        preview.set_entity(1, 5.0, vec![]);
+        preview.set_entity(uuid::Uuid::from_u128(1), 5.0, vec![]);
         preview.advance(2.0);
         assert!(approx_eq(preview.current_time, 0.0));
     }
@@ -355,7 +355,7 @@ mod tests {
     #[test]
     fn test_advance_zero_duration() {
         let mut preview = AnimationPreview::new();
-        preview.set_entity(1, 0.0, vec![]);
+        preview.set_entity(uuid::Uuid::from_u128(1), 0.0, vec![]);
         preview.play();
         preview.advance(1.0);
         // Should not panic or produce NaN.
@@ -367,7 +367,7 @@ mod tests {
     #[test]
     fn test_scrub_within_range() {
         let mut preview = AnimationPreview::new();
-        preview.set_entity(1, 5.0, vec![]);
+        preview.set_entity(uuid::Uuid::from_u128(1), 5.0, vec![]);
         preview.scrub_to(2.5);
         assert!(approx_eq(preview.current_time, 2.5));
     }
@@ -375,7 +375,7 @@ mod tests {
     #[test]
     fn test_scrub_clamps_above() {
         let mut preview = AnimationPreview::new();
-        preview.set_entity(1, 5.0, vec![]);
+        preview.set_entity(uuid::Uuid::from_u128(1), 5.0, vec![]);
         preview.scrub_to(10.0);
         assert!(approx_eq(preview.current_time, 5.0));
     }
@@ -383,7 +383,7 @@ mod tests {
     #[test]
     fn test_scrub_clamps_below() {
         let mut preview = AnimationPreview::new();
-        preview.set_entity(1, 5.0, vec![]);
+        preview.set_entity(uuid::Uuid::from_u128(1), 5.0, vec![]);
         preview.scrub_to(-2.0);
         assert!(approx_eq(preview.current_time, 0.0));
     }
@@ -393,7 +393,7 @@ mod tests {
     #[test]
     fn test_set_blend_weight() {
         let mut preview = AnimationPreview::new();
-        preview.set_entity(1, 5.0, vec!["smile".into(), "blink".into()]);
+        preview.set_entity(uuid::Uuid::from_u128(1), 5.0, vec!["smile".into(), "blink".into()]);
         preview.set_blend_weight("smile", 0.7);
         assert!(approx_eq(preview.get_blend_weight("smile").unwrap(), 0.7));
         assert!(approx_eq(preview.get_blend_weight("blink").unwrap(), 0.0));
@@ -402,7 +402,7 @@ mod tests {
     #[test]
     fn test_set_blend_weight_clamps() {
         let mut preview = AnimationPreview::new();
-        preview.set_entity(1, 5.0, vec!["smile".into()]);
+        preview.set_entity(uuid::Uuid::from_u128(1), 5.0, vec!["smile".into()]);
         preview.set_blend_weight("smile", 1.5);
         assert!(approx_eq(preview.get_blend_weight("smile").unwrap(), 1.0));
         preview.set_blend_weight("smile", -0.5);
@@ -418,7 +418,7 @@ mod tests {
     #[test]
     fn test_set_blend_weight_unknown_name_is_noop() {
         let mut preview = AnimationPreview::new();
-        preview.set_entity(1, 5.0, vec!["smile".into()]);
+        preview.set_entity(uuid::Uuid::from_u128(1), 5.0, vec!["smile".into()]);
         preview.set_blend_weight("unknown", 0.5);
         assert!(preview.get_blend_weight("unknown").is_none());
     }
@@ -440,7 +440,7 @@ mod tests {
     #[test]
     fn test_normalized_time() {
         let mut preview = AnimationPreview::new();
-        preview.set_entity(1, 4.0, vec![]);
+        preview.set_entity(uuid::Uuid::from_u128(1), 4.0, vec![]);
         preview.scrub_to(2.0);
         assert!(approx_eq(preview.normalized_time(), 0.5));
     }
@@ -448,14 +448,14 @@ mod tests {
     #[test]
     fn test_normalized_time_at_start() {
         let mut preview = AnimationPreview::new();
-        preview.set_entity(1, 4.0, vec![]);
+        preview.set_entity(uuid::Uuid::from_u128(1), 4.0, vec![]);
         assert!(approx_eq(preview.normalized_time(), 0.0));
     }
 
     #[test]
     fn test_normalized_time_at_end() {
         let mut preview = AnimationPreview::new();
-        preview.set_entity(1, 4.0, vec![]);
+        preview.set_entity(uuid::Uuid::from_u128(1), 4.0, vec![]);
         preview.scrub_to(4.0);
         assert!(approx_eq(preview.normalized_time(), 1.0));
     }
@@ -478,7 +478,7 @@ mod tests {
     #[test]
     fn test_half_speed_advance() {
         let mut preview = AnimationPreview::new();
-        preview.set_entity(1, 10.0, vec![]);
+        preview.set_entity(uuid::Uuid::from_u128(1), 10.0, vec![]);
         preview.set_speed(0.5);
         preview.play();
         preview.advance(2.0);

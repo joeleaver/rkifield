@@ -60,8 +60,8 @@ pub mod object_streaming;
 pub mod scene_manager;
 /// Project file format (.rkproject) — RON-serialized project descriptor.
 pub mod project;
-/// Scene file format v2 (.rkscene) — RON-serialized scene descriptor.
-pub mod scene_file;
+/// Scene file format v3 — entity-centric scene format with StableId UUIDs.
+pub mod scene_file_v3;
 /// Environment profiles (.rkenv) — sky, fog, ambient, volumetric, and post-process hints
 /// with blending, overrides, and RON serialisation.
 pub mod environment;
@@ -131,22 +131,23 @@ pub use project::{
     ProjectFile, SceneRef, load_project, save_project,
     create_project, project_root, resolve_scene_path, ENGINE_SHADERS,
 };
-pub use scene_file::{
-    CameraEntry, LightEntry, LightType, ObjectEntry, SceneFile,
-    load_scene_file, save_scene_file,
-};
 pub use environment::{
     AmbientConfig, EnvironmentOverrides, EnvironmentProfile, FogConfig, PostProcessHints,
     SkyMode, VolumetricHints, apply_overrides, lerp_profiles, load_environment,
     resolve_environment, save_environment,
 };
 pub use behavior::{
-    BehaviorExecutor, CommandQueue, ComponentEntry, ComponentMeta, EntityNameIndex, EntityTagIndex,
-    FieldMeta, FieldType, GameStore, GameplayRegistry, LookupError, Phase, QueryError, Schedule,
-    ScheduleError, SceneOwnership, Sequence, SequenceBuilder, SequenceStep, StableId, StableIdIndex,
-    StoreEvent, SystemContext, SystemMeta, TempEntity, build_schedule, children_of, descendants_of,
-    deserialize_entity, find_path, find_tagged, parent_of, root_of, serialize_entity,
+    BehaviorExecutor, Blueprint, BlueprintCatalog, BuildState, BuildWatcher, CommandQueue,
+    ComponentEntry, ComponentMeta, DylibError, DylibLoader, EditError, EditOp, EditPipeline,
+    EntityNameIndex, EntityTagIndex, FieldMeta, FieldType, GameStore, GameplayRegistry,
+    LookupError, Phase, PlayModeManager, PlayState, QueryError, ReloadQueue, ScaffoldError,
+    Schedule, ScheduleError, SceneOwnership, Sequence, SequenceBuilder, SequenceStep, StableId,
+    StableIdIndex, StoreEvent, SystemContext, SystemMeta, TempEntity, UndoAction, UndoStack,
+    build_schedule, children_of, clone_world_for_play, create_blueprint_from_entity, descendants_of,
+    deserialize_blueprint, deserialize_entity, find_path, find_tagged, parent_of, root_of,
+    scaffold_game_crate, serialize_blueprint, serialize_entity,
 };
+pub use behavior::engine_components::{engine_register, ENGINE_COMPONENT_NAMES};
 pub use behavior::game_value::GameValue as BehaviorGameValue;
 pub use behavior::game_value::GameValueTypeError;
 pub use game_manager::{GameEvent, GameManager, GameState, GameValue};

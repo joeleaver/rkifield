@@ -330,7 +330,9 @@ pub fn TitleBar() -> NodeHandle {
         let dropdown = __scope.create_element("div");
         {
             let dh = dropdown.clone();
-            rinch::reactive::Effect::new(move || {
+            // Reactive style toggle — use scope-owned effect (not detached Effect::new)
+            // so it's properly disposed with this component's lifecycle.
+            __scope.create_effect(move || {
                 if active_menu.get() == index {
                     dh.set_attribute("style",
                         "position:absolute;top:100%;left:0;min-width:220px;\
@@ -520,6 +522,45 @@ pub fn TitleBar() -> NodeHandle {
         }
 
         bar.append_child(&tool_container);
+    }
+
+    // ── Separator before play button ─────────────────────────────────────
+    let play_sep = rsx! {
+        div {
+            style: "width:1px;height:14px;background:var(--rinch-color-border);margin:0 8px;",
+        }
+    };
+    bar.append_child(&play_sep);
+
+    // ── Play / Stop button ───────────────────────────────────────────────
+    {
+        let cmd = cmd.clone();
+        let play_btn = rsx! {
+            div {
+                style: {move || {
+                    let playing = ui.play_state.get();
+                    if playing {
+                        "padding:2px 10px;cursor:pointer;border-radius:3px;\
+                         background:#c0392b;font-size:11px;color:#fff;user-select:none;\
+                         border:1px solid #a93226;font-weight:600;"
+                    } else {
+                        "padding:2px 10px;cursor:pointer;border-radius:3px;\
+                         background:#27ae60;font-size:11px;color:#fff;user-select:none;\
+                         border:1px solid #1e8449;font-weight:600;"
+                    }
+                }},
+                onclick: move || {
+                    let playing = ui.play_state.get();
+                    if playing {
+                        let _ = cmd.0.send(EditorCommand::PlayStop);
+                    } else {
+                        let _ = cmd.0.send(EditorCommand::PlayStart);
+                    }
+                },
+                {move || if ui.play_state.get() { "Stop" } else { "Play" }}
+            }
+        };
+        bar.append_child(&play_btn);
     }
 
     // ── Spacer (draggable empty region) ─────────────────────────────────

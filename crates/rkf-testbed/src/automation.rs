@@ -231,7 +231,7 @@ impl AutomationApi for TestbedAutomationApi {
         Err(AutomationError::NotImplemented("scene_graph"))
     }
 
-    fn entity_inspect(&self, _entity_id: u64) -> AutomationResult<EntitySnapshot> {
+    fn entity_inspect(&self, _entity_id: &str) -> AutomationResult<EntitySnapshot> {
         Err(AutomationError::NotImplemented("entity_inspect"))
     }
 
@@ -241,17 +241,17 @@ impl AutomationApi for TestbedAutomationApi {
 
     // --- Mutation methods (not supported in testbed) ---
 
-    fn entity_spawn(&self, _def: EntityDef) -> AutomationResult<u64> {
+    fn entity_spawn(&self, _def: EntityDef) -> AutomationResult<String> {
         Err(AutomationError::NotImplemented("entity_spawn"))
     }
 
-    fn entity_despawn(&self, _entity_id: u64) -> AutomationResult<()> {
+    fn entity_despawn(&self, _entity_id: &str) -> AutomationResult<()> {
         Err(AutomationError::NotImplemented("entity_despawn"))
     }
 
     fn entity_set_component(
         &self,
-        _entity_id: u64,
+        _entity_id: &str,
         _component: ComponentDef,
     ) -> AutomationResult<()> {
         Err(AutomationError::NotImplemented("entity_set_component"))
@@ -500,7 +500,7 @@ mod tests {
         let state = make_shared_state();
         let api = TestbedAutomationApi::new(state);
         assert!(api.entity_spawn(EntityDef { name: "test".into(), components: vec![] }).is_err());
-        assert!(api.entity_despawn(1).is_err());
+        assert!(api.entity_despawn("00000000-0000-0000-0000-000000000001").is_err());
         assert!(api.scene_load("foo").is_err());
     }
 

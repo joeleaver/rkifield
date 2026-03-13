@@ -302,9 +302,9 @@ pub(super) fn build_demo_scene() -> DemoScene {
 
     let mut scene = Scene::new("editor_demo");
 
-    // Ground plane
+    // Ground plane — large, flat, stone material.
     let ground = SceneNode::analytical("ground", SdfPrimitive::Box {
-        half_extents: Vec3::new(10.0, 0.1, 10.0),
+        half_extents: Vec3::new(12.0, 0.15, 12.0),
     }, 1);
     let ground_obj = SceneObject {
         id: 0,
@@ -314,15 +314,14 @@ pub(super) fn build_demo_scene() -> DemoScene {
         rotation: Quat::IDENTITY,
         scale: Vec3::ONE,
         root_node: ground,
-        aabb: Aabb::new(Vec3::new(-10.0, -0.1, -10.0), Vec3::new(10.0, 0.1, 10.0)),
+        aabb: Aabb::new(Vec3::new(-12.0, -0.15, -12.0), Vec3::new(12.0, 0.15, 12.0)),
     };
     scene.add_object_full(ground_obj);
 
     let mut brick_pool = BrickPool::new(4096);
     let mut brick_map_alloc = BrickMapAllocator::new();
 
-    // Try loading from .rkf file on disk (v2 only in demo -- geometry-first
-    // data populated later via convert_to_geometry_first if needed).
+    // Central hero object — try .rkf, fallback to sphere.
     let rkf_path = "scenes/test_cross.rkf";
     match load_rkf_into_pool(rkf_path, &mut brick_pool, &mut brick_map_alloc) {
         Ok((handle, voxel_size, grid_aabb, _brick_count)) => {
@@ -345,15 +344,15 @@ pub(super) fn build_demo_scene() -> DemoScene {
             scene.add_object_full(vox_obj);
         }
         Err(e) => {
-            log::warn!("Failed to load {rkf_path}: {e} -- falling back to analytical sphere");
+            log::warn!("Failed to load {rkf_path}: {e} -- using analytical primitives");
 
-            // Fallback: analytical sphere (voxelized on demand via convert_to_geometry_first).
-            let radius = 0.4;
-            let sphere_node = SceneNode::analytical("sphere", SdfPrimitive::Sphere { radius }, 6);
+            // Hero sphere — metallic material.
+            let radius = 0.5;
+            let sphere_node = SceneNode::analytical("hero_sphere", SdfPrimitive::Sphere { radius }, 6);
             let sphere_aabb = Aabb::new(Vec3::splat(-radius), Vec3::splat(radius));
             let sphere_obj = SceneObject {
                 id: 0,
-                name: "sphere".into(),
+                name: "hero_sphere".into(),
                 parent_id: None,
                 position: Vec3::new(0.0, 0.0, -2.0),
                 rotation: Quat::IDENTITY,
@@ -364,6 +363,71 @@ pub(super) fn build_demo_scene() -> DemoScene {
             scene.add_object_full(sphere_obj);
         }
     }
+
+    // Pillar — tall box with stone material.
+    let pillar_he = Vec3::new(0.2, 1.0, 0.2);
+    let pillar_node = SceneNode::analytical("pillar", SdfPrimitive::Box {
+        half_extents: pillar_he,
+    }, 2);
+    scene.add_object_full(SceneObject {
+        id: 0,
+        name: "pillar_left".into(),
+        parent_id: None,
+        position: Vec3::new(-3.0, 0.2, -4.0),
+        rotation: Quat::IDENTITY,
+        scale: Vec3::ONE,
+        root_node: pillar_node.clone(),
+        aabb: Aabb::new(-pillar_he, pillar_he),
+    });
+    scene.add_object_full(SceneObject {
+        id: 0,
+        name: "pillar_right".into(),
+        parent_id: None,
+        position: Vec3::new(3.0, 0.2, -4.0),
+        rotation: Quat::IDENTITY,
+        scale: Vec3::ONE,
+        root_node: pillar_node,
+        aabb: Aabb::new(-pillar_he, pillar_he),
+    });
+
+    // Floating orbs at different heights — different materials.
+    let orb_r = 0.25;
+    let orb_aabb = Aabb::new(Vec3::splat(-orb_r), Vec3::splat(orb_r));
+    let orb_positions = [
+        (Vec3::new(-1.5, 0.5, -3.0), 3),  // red-ish
+        (Vec3::new(1.5, 0.8, -3.0), 4),   // blue-ish
+        (Vec3::new(0.0, 1.2, -4.5), 5),   // green-ish
+    ];
+    for (pos, mat_id) in orb_positions {
+        let node = SceneNode::analytical("orb", SdfPrimitive::Sphere { radius: orb_r }, mat_id);
+        scene.add_object_full(SceneObject {
+            id: 0,
+            name: format!("orb_mat{}", mat_id),
+            parent_id: None,
+            position: pos,
+            rotation: Quat::IDENTITY,
+            scale: Vec3::ONE,
+            root_node: node,
+            aabb: orb_aabb,
+        });
+    }
+
+    // Capsule archway piece.
+    let cap_node = SceneNode::analytical("capsule", SdfPrimitive::Capsule {
+        radius: 0.15,
+        half_height: 0.8,
+    }, 7);
+    let cap_aabb = Aabb::new(Vec3::new(-0.15, -0.95, -0.15), Vec3::new(0.15, 0.95, 0.15));
+    scene.add_object_full(SceneObject {
+        id: 0,
+        name: "archway".into(),
+        parent_id: None,
+        position: Vec3::new(0.0, 0.5, -6.0),
+        rotation: Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
+        scale: Vec3::new(1.0, 2.0, 1.0),
+        root_node: cap_node,
+        aabb: cap_aabb,
+    });
 
     DemoScene {
         scene,

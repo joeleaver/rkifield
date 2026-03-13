@@ -7,6 +7,11 @@
 use std::any::TypeId;
 use std::collections::HashMap;
 
+use super::entity_names::ensure_unique_name;
+use super::stable_id::StableId;
+use super::stable_id_index::StableIdIndex;
+use crate::components::{EditorMetadata, Transform};
+
 /// Opaque handle to a not-yet-materialized entity.
 ///
 /// Returned by `CommandQueue::spawn*()`. Can be used with `insert()` to
@@ -26,12 +31,25 @@ enum SpawnScene {
     Explicit(String),
 }
 
+/// Source of components for a pending spawn.
+enum SpawnSource {
+    /// Explicit EntityBuilder with pre-added components.
+    Builder,
+    /// Blueprint name — resolved during flush() via BlueprintCatalog.
+    Blueprint {
+        name: String,
+        position: rkf_core::WorldPosition,
+    },
+}
+
 /// A pending spawn operation.
 struct PendingSpawn {
     /// The entity builder accumulating components.
     builder: hecs::EntityBuilder,
     /// Scene ownership assignment.
     scene: SpawnScene,
+    /// How to populate this entity's components.
+    source: SpawnSource,
 }
 
 /// A type-erased component insertion.
@@ -124,6 +142,7 @@ impl CommandQueue {
         self.spawns.push(PendingSpawn {
             builder,
             scene: SpawnScene::Current,
+            source: SpawnSource::Builder,
         });
         TempEntity(idx)
     }
@@ -134,6 +153,7 @@ impl CommandQueue {
         self.spawns.push(PendingSpawn {
             builder,
             scene: SpawnScene::Persistent,
+            source: SpawnSource::Builder,
         });
         TempEntity(idx)
     }
@@ -148,6 +168,74 @@ impl CommandQueue {
         self.spawns.push(PendingSpawn {
             builder,
             scene: SpawnScene::Explicit(scene.to_owned()),
+            source: SpawnSource::Builder,
+        });
+        TempEntity(idx)
+    }
+
+    // ─── Blueprint spawn variants ────────────────────────────────────
+
+    /// Spawn an entity from a blueprint in the current scene.
+    ///
+    /// The blueprint name and position are stored for deferred resolution.
+    /// During [`flush_with_catalog`], the blueprint is looked up in the
+    /// [`BlueprintCatalog`] and its components are deserialized onto the entity.
+    ///
+    /// Panics if multiple scenes are loaded — use `spawn_blueprint_in_scene()`.
+    pub fn spawn_blueprint(
+        &mut self,
+        name: &str,
+        position: impl Into<rkf_core::WorldPosition>,
+    ) -> TempEntity {
+        let idx = self.spawns.len();
+        self.spawns.push(PendingSpawn {
+            builder: hecs::EntityBuilder::new(),
+            scene: SpawnScene::Current,
+            source: SpawnSource::Blueprint {
+                name: name.to_owned(),
+                position: position.into(),
+            },
+        });
+        TempEntity(idx)
+    }
+
+    /// Spawn a persistent entity from a blueprint (survives scene transitions).
+    ///
+    /// See [`spawn_blueprint`](Self::spawn_blueprint) for details.
+    pub fn spawn_blueprint_persistent(
+        &mut self,
+        name: &str,
+        position: impl Into<rkf_core::WorldPosition>,
+    ) -> TempEntity {
+        let idx = self.spawns.len();
+        self.spawns.push(PendingSpawn {
+            builder: hecs::EntityBuilder::new(),
+            scene: SpawnScene::Persistent,
+            source: SpawnSource::Blueprint {
+                name: name.to_owned(),
+                position: position.into(),
+            },
+        });
+        TempEntity(idx)
+    }
+
+    /// Spawn an entity from a blueprint in an explicit scene.
+    ///
+    /// See [`spawn_blueprint`](Self::spawn_blueprint) for details.
+    pub fn spawn_blueprint_in_scene(
+        &mut self,
+        name: &str,
+        position: impl Into<rkf_core::WorldPosition>,
+        scene: &str,
+    ) -> TempEntity {
+        let idx = self.spawns.len();
+        self.spawns.push(PendingSpawn {
+            builder: hecs::EntityBuilder::new(),
+            scene: SpawnScene::Explicit(scene.to_owned()),
+            source: SpawnSource::Blueprint {
+                name: name.to_owned(),
+                position: position.into(),
+            },
         });
         TempEntity(idx)
     }
@@ -195,8 +283,71 @@ impl CommandQueue {
 
     /// Apply all pending operations to the world.
     ///
-    /// Order: spawns (with temp inserts) → inserts on existing → removes → despawns.
-    pub fn flush(&mut self, world: &mut hecs::World) {
+    /// Order: spawns (with temp inserts + auto-injected defaults) → inserts on existing → removes → despawns.
+    ///
+    /// Auto-injects on spawn (if not already provided by caller):
+    /// - `Transform::default()`
+    /// - `StableId::new()`
+    /// - `EditorMetadata::default()`
+    ///
+    /// Maintains `stable_ids` index: registers on spawn, removes on despawn.
+    ///
+    /// Blueprint spawns are ignored by this method — use [`flush_with_catalog`]
+    /// if the queue may contain blueprint spawns.
+    pub fn flush(&mut self, world: &mut hecs::World, stable_ids: &mut StableIdIndex) {
+        self.flush_inner(world, stable_ids, None, None);
+    }
+
+    /// Apply all pending operations, resolving blueprint spawns via the catalog.
+    ///
+    /// Blueprint spawns look up the named blueprint in `catalog` and use
+    /// `registry` to deserialize the blueprint's components onto the entity.
+    /// If a blueprint name is not found in the catalog, the spawn is skipped
+    /// with a warning.
+    pub fn flush_with_catalog(
+        &mut self,
+        world: &mut hecs::World,
+        stable_ids: &mut StableIdIndex,
+        catalog: &super::blueprint::BlueprintCatalog,
+        registry: &super::registry::GameplayRegistry,
+    ) {
+        self.flush_inner(world, stable_ids, Some(catalog), Some(registry));
+    }
+
+    /// Auto-inject default components onto a newly spawned entity if not
+    /// already present, and register it in the StableIdIndex.
+    fn auto_inject_defaults(
+        world: &mut hecs::World,
+        entity: hecs::Entity,
+        stable_ids: &mut StableIdIndex,
+    ) {
+        // Auto-inject Transform if not present
+        if world.get::<&Transform>(entity).is_err() {
+            let _ = world.insert_one(entity, Transform::default());
+        }
+        // Auto-inject StableId if not present
+        if world.get::<&StableId>(entity).is_err() {
+            let _ = world.insert_one(entity, StableId::new());
+        }
+        // Auto-inject EditorMetadata if not present
+        if world.get::<&EditorMetadata>(entity).is_err() {
+            let _ = world.insert_one(entity, EditorMetadata::default());
+        }
+
+        // Register in StableIdIndex
+        if let Ok(stable_id) = world.get::<&StableId>(entity) {
+            let uuid = stable_id.uuid();
+            stable_ids.insert(uuid, entity);
+        }
+    }
+
+    fn flush_inner(
+        &mut self,
+        world: &mut hecs::World,
+        stable_ids: &mut StableIdIndex,
+        catalog: Option<&super::blueprint::BlueprintCatalog>,
+        registry: Option<&super::registry::GameplayRegistry>,
+    ) {
         // 1. Process spawns
         let spawns = std::mem::take(&mut self.spawns);
         let mut temp_inserts = std::mem::take(&mut self.temp_inserts);
@@ -230,22 +381,123 @@ impl CommandQueue {
                 .builder
                 .add(super::scene_ownership::SceneOwnership { scene });
 
-            // Spawn the entity
-            let entity = world.spawn(pending.builder.build());
+            // Handle blueprint vs builder source
+            let spawned_entity = match pending.source {
+                SpawnSource::Builder => {
+                    let entity = world.spawn(pending.builder.build());
 
-            // Apply TempEntity inserts atomically with the spawn
-            if let Some(inserts) = temp_inserts.remove(&idx) {
-                for insert in inserts {
-                    insert.data.insert_into(world, entity);
+                    // Apply TempEntity inserts atomically with the spawn
+                    if let Some(inserts) = temp_inserts.remove(&idx) {
+                        for insert in inserts {
+                            insert.data.insert_into(world, entity);
+                        }
+                    }
+                    Some(entity)
+                }
+                SpawnSource::Blueprint { name, position } => {
+                    let (Some(cat), Some(reg)) = (catalog, registry) else {
+                        log::warn!(
+                            "Blueprint spawn '{}' ignored — flush() called without catalog/registry. \
+                             Use flush_with_catalog() instead.",
+                            name
+                        );
+                        continue;
+                    };
+                    let Some(blueprint) = cat.get(&name) else {
+                        log::warn!(
+                            "Blueprint '{}' not found in catalog — spawn skipped",
+                            name
+                        );
+                        continue;
+                    };
+
+                    // Spawn the entity with the scene ownership from the builder.
+                    let entity = world.spawn(pending.builder.build());
+
+                    // Deserialize blueprint components onto the entity.
+                    for (comp_name, ron_data) in &blueprint.components {
+                        if let Some(entry) = reg.component_entry(comp_name) {
+                            if let Err(e) = (entry.deserialize_insert)(world, entity, ron_data) {
+                                log::warn!(
+                                    "Failed to deserialize blueprint component '{}': {}",
+                                    comp_name, e
+                                );
+                            }
+                        } else {
+                            log::warn!(
+                                "Unknown component '{}' in blueprint '{}' — skipped",
+                                comp_name, name
+                            );
+                        }
+                    }
+
+                    // Set transform position.
+                    let _ = world.insert_one(entity, Transform {
+                        position,
+                        rotation: glam::Quat::IDENTITY,
+                        scale: glam::Vec3::ONE,
+                    });
+
+                    // Apply TempEntity inserts.
+                    if let Some(inserts) = temp_inserts.remove(&idx) {
+                        for insert in inserts {
+                            insert.data.insert_into(world, entity);
+                        }
+                    }
+                    Some(entity)
+                }
+            };
+
+            // Auto-inject defaults and register in StableIdIndex
+            if let Some(entity) = spawned_entity {
+                Self::auto_inject_defaults(world, entity, stable_ids);
+
+                // Enforce sibling name uniqueness (spec 4.3).
+                let needs_rename = world
+                    .get::<&EditorMetadata>(entity)
+                    .ok()
+                    .map(|m| m.name.clone());
+                if let Some(name) = needs_rename {
+                    if !name.is_empty() {
+                        let unique = ensure_unique_name(world, entity, &name);
+                        if unique != name {
+                            if let Ok(mut meta) = world.get::<&mut EditorMetadata>(entity) {
+                                meta.name = unique;
+                            }
+                        }
+                    }
                 }
             }
         }
 
         // 2. Inserts on existing entities
         let entity_inserts = std::mem::take(&mut self.entity_inserts);
+        let mut inserted_entities = Vec::new();
         for (entity, insert) in entity_inserts {
             if world.contains(entity) {
+                let is_metadata = insert.data.type_id() == std::any::TypeId::of::<EditorMetadata>();
                 insert.data.insert_into(world, entity);
+                if is_metadata {
+                    inserted_entities.push(entity);
+                }
+            }
+        }
+
+        // Enforce sibling name uniqueness on renamed entities (spec 4.3).
+        for entity in inserted_entities {
+            let needs_rename = world
+                .get::<&EditorMetadata>(entity)
+                .ok()
+                .map(|m| m.name.clone());
+            if let Some(name) = needs_rename {
+                if !name.is_empty() {
+                    let unique = ensure_unique_name(world, entity, &name);
+                    if unique != name {
+                        if let Ok(mut meta) = world.get::<&mut EditorMetadata>(entity) {
+                            meta.name = unique;
+                        }
+                    }
+                }
             }
         }
 
@@ -260,12 +512,17 @@ impl CommandQueue {
         // 4. Despawns (with cascading)
         let despawns = std::mem::take(&mut self.despawns);
         for entity in despawns {
-            self.despawn_cascading(world, entity);
+            self.despawn_cascading(world, entity, stable_ids);
         }
     }
 
     /// Despawn an entity and all its descendants.
-    fn despawn_cascading(&self, world: &mut hecs::World, entity: hecs::Entity) {
+    fn despawn_cascading(
+        &self,
+        world: &mut hecs::World,
+        entity: hecs::Entity,
+        stable_ids: &mut StableIdIndex,
+    ) {
         if !world.contains(entity) {
             return;
         }
@@ -285,8 +542,11 @@ impl CommandQueue {
 
         // Recursively despawn children
         for child in children {
-            self.despawn_cascading(world, child);
+            self.despawn_cascading(world, child, stable_ids);
         }
+
+        // Remove from StableIdIndex before despawning
+        stable_ids.remove_by_entity(entity);
 
         // Despawn the entity itself
         let _ = world.despawn(entity);
@@ -302,161 +562,3 @@ impl CommandQueue {
     }
 }
 
-// ─── Tests ────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::components::{EditorMetadata, Transform};
-    use super::super::scene_ownership::SceneOwnership;
-
-    #[test]
-    fn spawn_and_flush() {
-        let mut world = hecs::World::new();
-        let mut queue = CommandQueue::new();
-        queue.set_loaded_scenes(vec!["level_01".into()]);
-
-        let mut builder = hecs::EntityBuilder::new();
-        builder.add(Transform::default());
-        queue.spawn(builder);
-
-        assert!(!queue.is_empty());
-        queue.flush(&mut world);
-        assert!(queue.is_empty());
-
-        // Should have one entity with Transform + SceneOwnership
-        let count = world.query::<&Transform>().iter().count();
-        assert_eq!(count, 1);
-
-        let count = world.query::<&SceneOwnership>().iter().count();
-        assert_eq!(count, 1);
-
-        // Check scene ownership
-        let mut q = world.query::<&SceneOwnership>();
-        let (_, so) = q.iter().next().unwrap();
-        assert!(so.belongs_to("level_01"));
-    }
-
-    #[test]
-    fn spawn_persistent() {
-        let mut world = hecs::World::new();
-        let mut queue = CommandQueue::new();
-        queue.set_loaded_scenes(vec!["level_01".into()]);
-
-        let builder = hecs::EntityBuilder::new();
-        queue.spawn_persistent(builder);
-        queue.flush(&mut world);
-
-        let mut q = world.query::<&SceneOwnership>();
-        let (_, so) = q.iter().next().unwrap();
-        assert!(so.is_persistent());
-    }
-
-    #[test]
-    fn spawn_in_explicit_scene() {
-        let mut world = hecs::World::new();
-        let mut queue = CommandQueue::new();
-
-        let builder = hecs::EntityBuilder::new();
-        queue.spawn_in_scene(builder, "level_02");
-        queue.flush(&mut world);
-
-        let mut q = world.query::<&SceneOwnership>();
-        let (_, so) = q.iter().next().unwrap();
-        assert!(so.belongs_to("level_02"));
-    }
-
-    #[test]
-    #[should_panic(expected = "spawn() called with 2 scenes loaded")]
-    fn spawn_panics_with_multiple_scenes() {
-        let mut world = hecs::World::new();
-        let mut queue = CommandQueue::new();
-        queue.set_loaded_scenes(vec!["level_01".into(), "level_02".into()]);
-
-        let builder = hecs::EntityBuilder::new();
-        queue.spawn(builder);
-        queue.flush(&mut world);
-    }
-
-    #[test]
-    fn despawn() {
-        let mut world = hecs::World::new();
-        let entity = world.spawn((Transform::default(),));
-
-        let mut queue = CommandQueue::new();
-        queue.despawn(entity);
-        queue.flush(&mut world);
-
-        assert!(!world.contains(entity));
-    }
-
-    #[test]
-    fn despawn_cascading() {
-        let mut world = hecs::World::new();
-        let parent = world.spawn((Transform::default(),));
-        let child = world.spawn((
-            Transform::default(),
-            crate::components::Parent {
-                entity: parent,
-                bone_index: None,
-            },
-        ));
-        let grandchild = world.spawn((
-            Transform::default(),
-            crate::components::Parent {
-                entity: child,
-                bone_index: None,
-            },
-        ));
-
-        let mut queue = CommandQueue::new();
-        queue.despawn(parent);
-        queue.flush(&mut world);
-
-        assert!(!world.contains(parent));
-        assert!(!world.contains(child));
-        assert!(!world.contains(grandchild));
-    }
-
-    #[test]
-    fn insert_on_existing_entity() {
-        let mut world = hecs::World::new();
-        let entity = world.spawn((Transform::default(),));
-
-        let mut queue = CommandQueue::new();
-        queue.insert(entity, EditorMetadata {
-            name: "Test".into(),
-            tags: vec![],
-            locked: false,
-        });
-        queue.flush(&mut world);
-
-        let meta = world.get::<&EditorMetadata>(entity).unwrap();
-        assert_eq!(meta.name, "Test");
-    }
-
-    #[test]
-    fn remove_component() {
-        let mut world = hecs::World::new();
-        let entity = world.spawn((
-            Transform::default(),
-            EditorMetadata::default(),
-        ));
-
-        let mut queue = CommandQueue::new();
-        queue.remove::<EditorMetadata>(entity);
-        queue.flush(&mut world);
-
-        assert!(world.get::<&EditorMetadata>(entity).is_err());
-        assert!(world.get::<&Transform>(entity).is_ok());
-    }
-
-    #[test]
-    fn empty_flush_is_noop() {
-        let mut world = hecs::World::new();
-        let mut queue = CommandQueue::new();
-        assert!(queue.is_empty());
-        queue.flush(&mut world);
-        assert_eq!(world.query::<()>().iter().count(), 0);
-    }
-}

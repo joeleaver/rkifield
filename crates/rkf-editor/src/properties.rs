@@ -7,6 +7,7 @@
 #![allow(dead_code)]
 
 use glam::{Quat, Vec3};
+use uuid::Uuid;
 use rkf_core::scene_node::SdfSource;
 
 /// A typed property value that can appear in the inspector.
@@ -102,14 +103,14 @@ impl PropertyDef {
 #[derive(Debug, Clone)]
 pub struct PropertySheet {
     /// The entity this sheet describes.
-    pub entity_id: u64,
+    pub entity_id: Uuid,
     /// Ordered list of property definitions.
     pub properties: Vec<PropertyDef>,
 }
 
 impl PropertySheet {
     /// Create a new empty property sheet for the given entity.
-    pub fn new(entity_id: u64) -> Self {
+    pub fn new(entity_id: Uuid) -> Self {
         Self {
             entity_id,
             properties: Vec::new(),
@@ -173,7 +174,7 @@ impl PropertySheet {
 ///
 /// Creates properties for position (x/y/z), rotation as Euler angles (x/y/z in degrees),
 /// and uniform scale.
-pub fn build_transform_properties(entity_id: u64, pos: Vec3, rot: Quat, scale: Vec3) -> PropertySheet {
+pub fn build_transform_properties(entity_id: Uuid, pos: Vec3, rot: Quat, scale: Vec3) -> PropertySheet {
     let euler = rot.to_euler(glam::EulerRot::XYZ);
 
     let mut sheet = PropertySheet::new(entity_id);
@@ -222,7 +223,7 @@ pub fn build_transform_properties(entity_id: u64, pos: Vec3, rot: Quat, scale: V
 /// For voxelized objects, shows `voxel_size` as a read-only float.
 /// For analytical objects, shows "Analytical (infinite resolution)" as a read-only string.
 pub fn build_object_properties(
-    entity_id: u64,
+    entity_id: Uuid,
     pos: Vec3,
     rot: Quat,
     scale: Vec3,
@@ -265,7 +266,7 @@ mod tests {
 
     #[test]
     fn test_add_and_get_property() {
-        let mut sheet = PropertySheet::new(1);
+        let mut sheet = PropertySheet::new(Uuid::nil());
         sheet.add_property("health", PropertyValue::Float(100.0));
         assert_eq!(
             sheet.get_property("health"),
@@ -275,13 +276,13 @@ mod tests {
 
     #[test]
     fn test_get_nonexistent() {
-        let sheet = PropertySheet::new(1);
+        let sheet = PropertySheet::new(Uuid::nil());
         assert!(sheet.get_property("nope").is_none());
     }
 
     #[test]
     fn test_set_property() {
-        let mut sheet = PropertySheet::new(1);
+        let mut sheet = PropertySheet::new(Uuid::nil());
         sheet.add_property("speed", PropertyValue::Float(5.0));
         assert!(sheet.set_property("speed", PropertyValue::Float(10.0)));
         assert_eq!(
@@ -292,7 +293,7 @@ mod tests {
 
     #[test]
     fn test_set_wrong_type_returns_false() {
-        let mut sheet = PropertySheet::new(1);
+        let mut sheet = PropertySheet::new(Uuid::nil());
         sheet.add_property("name", PropertyValue::String("hello".into()));
         assert!(!sheet.set_property("name", PropertyValue::Float(1.0)));
         // Original value preserved
@@ -304,13 +305,13 @@ mod tests {
 
     #[test]
     fn test_set_nonexistent_returns_false() {
-        let mut sheet = PropertySheet::new(1);
+        let mut sheet = PropertySheet::new(Uuid::nil());
         assert!(!sheet.set_property("ghost", PropertyValue::Bool(true)));
     }
 
     #[test]
     fn test_read_only_enforcement() {
-        let mut sheet = PropertySheet::new(1);
+        let mut sheet = PropertySheet::new(Uuid::nil());
         sheet.add_property_def(PropertyDef::read_only(
             "entity_id",
             PropertyValue::U32(42),
@@ -324,7 +325,7 @@ mod tests {
 
     #[test]
     fn test_remove_property() {
-        let mut sheet = PropertySheet::new(1);
+        let mut sheet = PropertySheet::new(Uuid::nil());
         sheet.add_property("temp", PropertyValue::Bool(false));
         assert!(sheet.remove_property("temp"));
         assert!(sheet.get_property("temp").is_none());
@@ -332,13 +333,13 @@ mod tests {
 
     #[test]
     fn test_remove_nonexistent() {
-        let mut sheet = PropertySheet::new(1);
+        let mut sheet = PropertySheet::new(Uuid::nil());
         assert!(!sheet.remove_property("nope"));
     }
 
     #[test]
     fn test_property_names() {
-        let mut sheet = PropertySheet::new(1);
+        let mut sheet = PropertySheet::new(Uuid::nil());
         sheet.add_property("alpha", PropertyValue::Float(1.0));
         sheet.add_property("beta", PropertyValue::Bool(true));
         sheet.add_property("gamma", PropertyValue::U32(3));
@@ -347,8 +348,8 @@ mod tests {
 
     #[test]
     fn test_build_transform_properties_identity() {
-        let sheet = build_transform_properties(42, Vec3::ZERO, Quat::IDENTITY, Vec3::ONE);
-        assert_eq!(sheet.entity_id, 42);
+        let sheet = build_transform_properties(Uuid::from_u128(42), Vec3::ZERO, Quat::IDENTITY, Vec3::ONE);
+        assert_eq!(sheet.entity_id, Uuid::from_u128(42));
 
         assert_eq!(
             sheet.get_property("position.x"),
@@ -387,7 +388,7 @@ mod tests {
     #[test]
     fn test_build_transform_properties_with_rotation() {
         let rot = Quat::from_rotation_y(FRAC_PI_2);
-        let sheet = build_transform_properties(1, Vec3::new(1.0, 2.0, 3.0), rot, Vec3::splat(2.0));
+        let sheet = build_transform_properties(Uuid::nil(), Vec3::new(1.0, 2.0, 3.0), rot, Vec3::splat(2.0));
 
         assert_eq!(
             sheet.get_property("position.x"),
@@ -416,14 +417,14 @@ mod tests {
 
     #[test]
     fn test_build_transform_has_nine_properties() {
-        let sheet = build_transform_properties(1, Vec3::ZERO, Quat::IDENTITY, Vec3::ONE);
+        let sheet = build_transform_properties(Uuid::nil(), Vec3::ZERO, Quat::IDENTITY, Vec3::ONE);
         assert_eq!(sheet.property_names().len(), 9);
         // pos x/y/z + rot x/y/z + scale x/y/z = 9
     }
 
     #[test]
     fn test_scale_has_bounds() {
-        let sheet = build_transform_properties(1, Vec3::ZERO, Quat::IDENTITY, Vec3::ONE);
+        let sheet = build_transform_properties(Uuid::nil(), Vec3::ZERO, Quat::IDENTITY, Vec3::ONE);
         let scale_prop = sheet.properties.iter().find(|p| p.name == "scale.x").unwrap();
         assert_eq!(scale_prop.min, Some(0.001));
         assert_eq!(scale_prop.max, Some(1000.0));
@@ -458,8 +459,8 @@ mod tests {
 
     #[test]
     fn test_empty_sheet() {
-        let sheet = PropertySheet::new(99);
-        assert_eq!(sheet.entity_id, 99);
+        let sheet = PropertySheet::new(Uuid::from_u128(99));
+        assert_eq!(sheet.entity_id, Uuid::from_u128(99));
         assert!(sheet.properties.is_empty());
         assert!(sheet.property_names().is_empty());
     }
@@ -472,7 +473,7 @@ mod tests {
             primitive: SdfPrimitive::Sphere { radius: 1.0 },
             material_id: 0,
         };
-        let sheet = build_object_properties(1, Vec3::ZERO, Quat::IDENTITY, Vec3::ONE, &sdf);
+        let sheet = build_object_properties(Uuid::nil(), Vec3::ZERO, Quat::IDENTITY, Vec3::ONE, &sdf);
         // 9 transform + sdf_source
         assert_eq!(sheet.properties.len(), 10);
         assert_eq!(
@@ -494,7 +495,7 @@ mod tests {
             voxel_size: 0.02,
             aabb: rkf_core::Aabb::new(Vec3::ZERO, Vec3::ONE),
         };
-        let sheet = build_object_properties(1, Vec3::ZERO, Quat::IDENTITY, Vec3::ONE, &sdf);
+        let sheet = build_object_properties(Uuid::nil(), Vec3::ZERO, Quat::IDENTITY, Vec3::ONE, &sdf);
         // 9 transform + sdf_source + voxel_size
         assert_eq!(sheet.properties.len(), 11);
         assert_eq!(
@@ -513,7 +514,7 @@ mod tests {
     #[test]
     fn test_build_object_properties_none() {
         let sdf = SdfSource::None;
-        let sheet = build_object_properties(1, Vec3::ZERO, Quat::IDENTITY, Vec3::ONE, &sdf);
+        let sheet = build_object_properties(Uuid::nil(), Vec3::ZERO, Quat::IDENTITY, Vec3::ONE, &sdf);
         assert_eq!(sheet.properties.len(), 10);
         assert_eq!(
             sheet.get_property("sdf_source"),

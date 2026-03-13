@@ -15,9 +15,11 @@ pub enum FileEvent {
     MaterialChanged(PathBuf),
     /// A `.wgsl` shader file was created or modified.
     ShaderChanged(PathBuf),
+    /// A `.rs` source file was created or modified.
+    SourceChanged(PathBuf),
 }
 
-/// Watches directories for material and shader file changes.
+/// Watches directories for material, shader, and source file changes.
 ///
 /// Runs a background thread with a `notify::RecommendedWatcher`. Events are
 /// debounced (100ms) and classified by extension. Poll with [`poll_events`].
@@ -30,8 +32,8 @@ pub struct FileWatcher {
 impl FileWatcher {
     /// Create a new file watcher monitoring the given directories.
     ///
-    /// Each path is watched recursively. Only `.rkmat` and `.wgsl` file
-    /// changes produce events; other files are silently ignored.
+    /// Each path is watched recursively. Only `.rkmat`, `.wgsl`, and `.rs`
+    /// file changes produce events; other files are silently ignored.
     pub fn new(watch_paths: &[&Path]) -> Result<Self, String> {
         let (tx, rx) = mpsc::channel();
 
@@ -53,6 +55,7 @@ impl FileWatcher {
                 let file_event = match ext {
                     "rkmat" => Some(FileEvent::MaterialChanged(path.clone())),
                     "wgsl" => Some(FileEvent::ShaderChanged(path.clone())),
+                    "rs" => Some(FileEvent::SourceChanged(path.clone())),
                     _ => None,
                 };
                 if let Some(fe) = file_event {
@@ -82,6 +85,7 @@ impl FileWatcher {
             let dominated = events.iter().any(|existing: &FileEvent| match (existing, &event) {
                 (FileEvent::MaterialChanged(a), FileEvent::MaterialChanged(b)) => a == b,
                 (FileEvent::ShaderChanged(a), FileEvent::ShaderChanged(b)) => a == b,
+                (FileEvent::SourceChanged(a), FileEvent::SourceChanged(b)) => a == b,
                 _ => false,
             });
             if !dominated {
@@ -109,6 +113,14 @@ mod tests {
         let e = FileEvent::ShaderChanged(PathBuf::from("shade.wgsl"));
         let s = format!("{e:?}");
         assert!(s.contains("ShaderChanged"));
+    }
+
+    #[test]
+    fn file_event_source() {
+        let e = FileEvent::SourceChanged(PathBuf::from("main.rs"));
+        let s = format!("{e:?}");
+        assert!(s.contains("SourceChanged"));
+        assert!(s.contains("main.rs"));
     }
 
     #[test]

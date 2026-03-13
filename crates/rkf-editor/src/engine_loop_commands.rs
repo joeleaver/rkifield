@@ -2,25 +2,38 @@
 //!
 //! Extracted from `engine_loop.rs` to keep file sizes manageable.
 
-use crate::editor_state::{EditorMode, EditorState};
+use uuid::Uuid;
+
+use crate::editor_state::{
+    ComponentSnapshot, EditorMode, EditorState, FieldSnapshot, InspectorSnapshot,
+};
 use crate::engine::EditorEngine;
 
 /// Compute per-material voxel counts for the selected object.
 pub(crate) fn compute_material_usage(
     es: &EditorState,
     engine: &EditorEngine,
-    eid: u64,
+    entity_uuid: Uuid,
 ) -> Vec<crate::ui_snapshot::ObjectMaterialUsage> {
     use rkf_core::scene_node::SdfSource;
-    let scene = es.world.scene();
-    if let Some(obj) = scene.objects.iter().find(|o| o.id as u64 == eid) {
-        if let SdfSource::Analytical { material_id, .. } = &obj.root_node.sdf_source {
+    // Read from hecs SdfTree (authoritative source of truth).
+    let hecs_entity = match es.world.ecs_entity_for(entity_uuid) {
+        Some(e) => e,
+        None => return Vec::new(),
+    };
+    let sdf_tree = match es.world.ecs_ref().get::<&rkf_runtime::components::SdfTree>(hecs_entity) {
+        Ok(sdf) => sdf,
+        Err(_) => return Vec::new(),
+    };
+    let sdf_source = &sdf_tree.root.sdf_source;
+    {
+        if let SdfSource::Analytical { material_id, .. } = sdf_source {
             return vec![crate::ui_snapshot::ObjectMaterialUsage {
                 material_id: *material_id,
                 voxel_count: 0,
             }];
         }
-        if let SdfSource::Voxelized { brick_map_handle, .. } = &obj.root_node.sdf_source {
+        if let SdfSource::Voxelized { brick_map_handle, .. } = sdf_source {
             let handle = *brick_map_handle;
             let dims = handle.dims;
             let mut counts: std::collections::HashMap<u16, u32> = std::collections::HashMap::new();
@@ -56,6 +69,7 @@ pub(crate) fn compute_material_usage(
     }
     Vec::new()
 }
+
 
 /// Apply a single UI command to the editor state.
 ///
@@ -267,27 +281,20 @@ pub(crate) fn apply_editor_command(es: &mut EditorState, cmd: crate::editor_comm
 
         // -- Object properties -------------------------------------------
         SetObjectPosition { entity_id, position } => {
-            let sc = es.world.scene_mut();
-            if let Some(obj) = sc.objects.iter_mut().find(|o| o.id as u64 == entity_id) {
-                obj.position = position;
-            }
+            let wp = rkf_core::WorldPosition::new(glam::IVec3::ZERO, position);
+            let _ = es.world.set_position(entity_id, wp);
         }
         SetObjectRotation { entity_id, rotation } => {
-            let sc = es.world.scene_mut();
-            if let Some(obj) = sc.objects.iter_mut().find(|o| o.id as u64 == entity_id) {
-                obj.rotation = glam::Quat::from_euler(
-                    glam::EulerRot::XYZ,
-                    rotation.x.to_radians(),
-                    rotation.y.to_radians(),
-                    rotation.z.to_radians(),
-                );
-            }
+            let rot = glam::Quat::from_euler(
+                glam::EulerRot::XYZ,
+                rotation.x.to_radians(),
+                rotation.y.to_radians(),
+                rotation.z.to_radians(),
+            );
+            let _ = es.world.set_rotation(entity_id, rot);
         }
         SetObjectScale { entity_id, scale } => {
-            let sc = es.world.scene_mut();
-            if let Some(obj) = sc.objects.iter_mut().find(|o| o.id as u64 == entity_id) {
-                obj.scale = scale;
-            }
+            let _ = es.world.set_scale(entity_id, scale);
         }
 
         // -- Scene I/O ---------------------------------------------------
@@ -352,6 +359,19 @@ pub(crate) fn apply_editor_command(es: &mut EditorState, cmd: crate::editor_comm
             // Handled separately in engine loop (needs MaterialLibrary / brick pool access).
         }
 
+        // -- Component inspector -----------------------------------------
+        SetComponentField { .. } | AddComponent { .. } | RemoveComponent { .. } => {
+            // Handled by engine loop with registry access (needs GameplayRegistry).
+        }
+
+        // -- Play mode ---------------------------------------------------
+        PlayStart => {
+            es.pending_play_start = true;
+        }
+        PlayStop => {
+            es.pending_play_stop = true;
+        }
+
         // -- Window management -------------------------------------------
         WindowDrag => {
             es.pending_drag = true;
@@ -364,6 +384,182 @@ pub(crate) fn apply_editor_command(es: &mut EditorState, cmd: crate::editor_comm
         }
         RequestExit => {
             es.wants_exit = true;
+        }
+    }
+}
+
+/// Build an [`InspectorSnapshot`] for the given entity, suitable for the UI thread.
+///
+/// Uses the gameplay registry to introspect all components on the entity,
+/// then converts each field's `GameValue` to typed optional fields.
+pub(crate) fn build_inspector_snapshot(
+    es: &EditorState,
+    entity_uuid: Uuid,
+    registry: &rkf_runtime::behavior::GameplayRegistry,
+) -> Option<InspectorSnapshot> {
+    let hecs_entity = es.world.ecs_entity_for(entity_uuid)?;
+    let ecs = es.world.ecs_ref();
+
+    let data = rkf_runtime::behavior::inspector::build_inspector_data(ecs, hecs_entity, registry);
+
+    // Filter out engine components already rendered by ObjectProperties.
+    let components = data
+        .components
+        .into_iter()
+        .filter(|comp| {
+            !rkf_runtime::behavior::inspector::ENGINE_UI_COMPONENTS.contains(&comp.name.as_str())
+        })
+        .map(|comp| {
+            let fields = comp
+                .fields
+                .into_iter()
+                .map(|f| {
+                    let display_value = format_game_value(&f.value);
+                    let float_value = f.value.as_float();
+                    let int_value = f.value.as_int();
+                    let bool_value = f.value.as_bool();
+                    let vec3_value = f.value.as_vec3();
+                    let string_value = f.value.as_string().map(|s| s.to_string());
+
+                    FieldSnapshot {
+                        name: f.name,
+                        field_type: f.field_type,
+                        display_value,
+                        float_value,
+                        int_value,
+                        bool_value,
+                        vec3_value,
+                        string_value,
+                        range: f.range,
+                        transient: f.transient,
+                    }
+                })
+                .collect();
+
+            ComponentSnapshot {
+                name: comp.name,
+                fields,
+                removable: comp.removable,
+            }
+        })
+        .collect();
+
+    Some(InspectorSnapshot {
+        entity_id: entity_uuid,
+        components,
+    })
+}
+
+/// Build a list of component names available to add to the given entity.
+pub(crate) fn build_available_components(
+    es: &EditorState,
+    entity_uuid: Uuid,
+    registry: &rkf_runtime::behavior::GameplayRegistry,
+) -> Vec<String> {
+    let hecs_entity = match es.world.ecs_entity_for(entity_uuid) {
+        Some(e) => e,
+        None => return Vec::new(),
+    };
+    let ecs = es.world.ecs_ref();
+    rkf_runtime::behavior::inspector::available_components_for_entity(ecs, hecs_entity, registry)
+        .into_iter()
+        .filter(|name| {
+            !rkf_runtime::behavior::inspector::ENGINE_UI_COMPONENTS.contains(&name.as_str())
+        })
+        .collect()
+}
+
+/// Apply a component inspector command (requires the gameplay registry).
+///
+/// Returns `true` if the command was a component inspector command
+/// (consumed), `false` if it was something else (not consumed).
+pub(crate) fn apply_component_command(
+    es: &mut EditorState,
+    cmd: &crate::editor_command::EditorCommand,
+    registry: &rkf_runtime::behavior::GameplayRegistry,
+) -> bool {
+    use crate::editor_command::EditorCommand;
+    match cmd {
+        EditorCommand::SetComponentField {
+            entity_id,
+            component_name,
+            field_name,
+            value,
+        } => {
+            if let Some(hecs_entity) = es.world.ecs_entity_for(*entity_id) {
+                if let Some(entry) = registry.component_entry(component_name) {
+                    let _ = (entry.set_field)(
+                        es.world.ecs_mut(),
+                        hecs_entity,
+                        field_name,
+                        value.clone(),
+                    );
+                }
+            }
+            true
+        }
+        EditorCommand::AddComponent {
+            entity_id,
+            component_name,
+        } => {
+            if let Some(hecs_entity) = es.world.ecs_entity_for(*entity_id) {
+                let _ = rkf_runtime::behavior::inspector::add_component_default(
+                    es.world.ecs_mut(),
+                    hecs_entity,
+                    component_name,
+                    registry,
+                );
+            }
+            true
+        }
+        EditorCommand::RemoveComponent {
+            entity_id,
+            component_name,
+        } => {
+            if let Some(hecs_entity) = es.world.ecs_entity_for(*entity_id) {
+                let _ = rkf_runtime::behavior::inspector::remove_component(
+                    es.world.ecs_mut(),
+                    hecs_entity,
+                    component_name,
+                    registry,
+                );
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Format a `GameValue` as a short display string for the inspector.
+fn format_game_value(val: &rkf_runtime::behavior::game_value::GameValue) -> String {
+    use rkf_runtime::behavior::game_value::GameValue;
+    match val {
+        GameValue::Bool(b) => b.to_string(),
+        GameValue::Int(i) => i.to_string(),
+        GameValue::Float(f) => format!("{f:.3}"),
+        GameValue::String(s) => s.clone(),
+        GameValue::Vec3(v) => format!("({:.2}, {:.2}, {:.2})", v.x, v.y, v.z),
+        GameValue::WorldPosition(wp) => {
+            let v = wp.to_vec3();
+            format!("({:.2}, {:.2}, {:.2})", v.x, v.y, v.z)
+        }
+        GameValue::Quat(q) => {
+            let (x, y, z) = q.to_euler(glam::EulerRot::XYZ);
+            format!(
+                "({:.1}, {:.1}, {:.1})",
+                x.to_degrees(),
+                y.to_degrees(),
+                z.to_degrees()
+            )
+        }
+        GameValue::Color(c) => format!("({:.2}, {:.2}, {:.2}, {:.2})", c[0], c[1], c[2], c[3]),
+        GameValue::List(v) => format!("[{} items]", v.len()),
+        GameValue::Ron(s) => {
+            if s.len() > 40 {
+                format!("{}...", &s[..37])
+            } else {
+                s.clone()
+            }
         }
     }
 }

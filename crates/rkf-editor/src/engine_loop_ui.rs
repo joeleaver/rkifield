@@ -19,32 +19,49 @@ pub(crate) fn process_gpu_pick(
     editor_state: &Arc<Mutex<EditorState>>,
     engine: &EditorEngine,
     sculpting_active: bool,
+    gameplay_registry: &Arc<Mutex<rkf_runtime::behavior::GameplayRegistry>>,
 ) {
     let pick = shared_state.lock().ok()
         .and_then(|mut ss| ss.pick_result.take());
     if let Some(object_id) = pick {
         if !sculpting_active {
+            // Resolve GPU object ID (u32) to entity UUID.
             let picked_entity = if object_id > 0 {
-                Some(crate::editor_state::SelectedEntity::Object(object_id as u64))
+                if let Ok(es) = editor_state.lock() {
+                    es.world.find_by_sdf_id(object_id)
+                        .map(crate::editor_state::SelectedEntity::Object)
+                } else {
+                    None
+                }
             } else {
                 None
             };
-            let mat_usage = if let Ok(mut es) = editor_state.lock() {
+            let (mat_usage, inspector_snap, avail_comps) = if let Ok(mut es) = editor_state.lock() {
                 es.selected_entity = picked_entity;
                 if let Some(crate::editor_state::SelectedEntity::Object(eid)) = picked_entity {
-                    compute_material_usage(&es, engine, eid)
+                    let mu = compute_material_usage(&es, engine, eid);
+                    let (snap, avail) = if let Ok(reg) = gameplay_registry.lock() {
+                        let s = crate::engine_loop_commands::build_inspector_snapshot(&es, eid, &reg);
+                        let a = crate::engine_loop_commands::build_available_components(&es, eid, &reg);
+                        (s, a)
+                    } else {
+                        (None, Vec::new())
+                    };
+                    (mu, snap, avail)
                 } else {
-                    Vec::new()
+                    (Vec::new(), None, Vec::new())
                 }
             } else {
-                Vec::new()
+                (Vec::new(), None, Vec::new())
             };
-            // Push selection + material usage to UI signals directly.
+            // Push selection + material usage + inspector to UI signals directly.
             rinch::shell::rinch_runtime::run_on_main_thread(move || {
                 if let Some(ui) = rinch::core::context::try_use_context::<crate::editor_state::UiSignals>() {
                     // Set material usage BEFORE selection -- selection change
                     // triggers ObjectProperties rebuild which reads this signal.
                     ui.selected_object_materials.set(mat_usage);
+                    ui.inspector_data.set(inspector_snap);
+                    ui.available_components.set(avail_comps);
                     let sliders = rinch::core::context::try_use_context::<crate::editor_state::SliderSignals>();
                     let tree_state = rinch::core::context::try_use_context::<rinch::prelude::UseTreeReturn>();
                     if let (Some(sliders), Some(tree_state)) = (sliders, tree_state) {
@@ -67,18 +84,22 @@ pub(crate) fn process_brush_hit(
     let brush_hit = shared_state.lock().ok()
         .and_then(|mut ss| ss.brush_hit_result.take());
     if let Some(hit) = brush_hit {
-        let (left_down, mode, selected_obj_id) = editor_state.lock().ok()
+        let (left_down, mode, selected_sdf_id) = editor_state.lock().ok()
             .map(|es| {
-                let sel_id = match es.selected_entity {
-                    Some(crate::editor_state::SelectedEntity::Object(eid)) => Some(eid as u32),
+                let sel_sdf_id = match es.selected_entity {
+                    Some(crate::editor_state::SelectedEntity::Object(uuid)) => {
+                        es.world.entity_records()
+                            .find(|(uid, _)| **uid == uuid)
+                            .and_then(|(_, r)| r.sdf_object_id)
+                    }
                     _ => None,
                 };
-                (es.editor_input.viewport_left_down, es.mode, sel_id)
+                (es.editor_input.viewport_left_down, es.mode, sel_sdf_id)
             })
             .unwrap_or((false, crate::editor_state::EditorMode::Default, None));
 
         // Only allow sculpt/paint on the currently selected object.
-        let hit_on_selected = selected_obj_id == Some(hit.object_id);
+        let hit_on_selected = selected_sdf_id == Some(hit.object_id);
 
         if left_down {
             if let Ok(mut es) = editor_state.lock() {
@@ -183,13 +204,15 @@ pub(crate) fn push_dirty_ui_signals(
     dirty: &DirtyFlags,
     editor_state: &Arc<Mutex<EditorState>>,
     engine: &EditorEngine,
+    gameplay_registry: &Arc<Mutex<rkf_runtime::behavior::GameplayRegistry>>,
 ) {
     if dirty.scene || dirty.lights || dirty.materials || dirty.shaders {
         if let Ok(es) = editor_state.lock() {
             // Scene objects.
             if dirty.scene {
                 let objects = es.build_object_summaries();
-                let scene_name = es.world.scene().name.clone();
+                let scene_name = es.world.scene_name(es.world.active_scene_index())
+                    .unwrap_or("default").to_string();
                 let scene_path = es.current_scene_path.clone();
                 // Also compute material usage for selected object.
                 let mat_usage = if let Some(crate::editor_state::SelectedEntity::Object(eid)) = es.selected_entity {
@@ -197,6 +220,21 @@ pub(crate) fn push_dirty_ui_signals(
                 } else {
                     Vec::new()
                 };
+
+                // Build inspector data for the selected entity.
+                let (inspector_snap, avail_comps) =
+                    if let Some(crate::editor_state::SelectedEntity::Object(eid)) = es.selected_entity {
+                        if let Ok(reg) = gameplay_registry.lock() {
+                            let snap = crate::engine_loop_commands::build_inspector_snapshot(&es, eid, &reg);
+                            let avail = crate::engine_loop_commands::build_available_components(&es, eid, &reg);
+                            (snap, avail)
+                        } else {
+                            (None, Vec::new())
+                        }
+                    } else {
+                        (None, Vec::new())
+                    };
+
                 rinch::shell::rinch_runtime::run_on_main_thread(move || {
                     if let Some(ui) = rinch::core::context::try_use_context::<UiSignals>() {
                         // Set material usage BEFORE objects -- objects.set() triggers
@@ -205,6 +243,8 @@ pub(crate) fn push_dirty_ui_signals(
                         ui.objects.set(objects);
                         ui.scene_name.set(scene_name);
                         ui.scene_path.set(scene_path);
+                        ui.inspector_data.set(inspector_snap);
+                        ui.available_components.set(avail_comps);
                     }
                 });
             }
@@ -351,19 +391,26 @@ pub(crate) fn build_wireframe_overlays(
     }
 
     // Selection AABB + transform gizmo for selected objects.
-    if let Some(SelectedEntity::Object(eid)) = selected.filter(|_| !sculpting_active) {
+    if let Some(SelectedEntity::Object(sel_uuid)) = selected.filter(|_| !sculpting_active) {
         let color = [0.3, 0.7, 1.0, 1.0];
         let mut gizmo_center: Option<glam::Vec3> = None;
 
+        // Resolve the selected entity's SDF object ID for matching against scene objects.
+        let selected_sdf_id = editor_state.lock().ok().and_then(|es| {
+            es.world.entity_records()
+                .find(|(uid, _)| **uid == sel_uuid)
+                .and_then(|(_, r)| r.sdf_object_id)
+        });
+
         for obj in &scene_clone.objects {
-            let obj_id = obj.id as u64;
+            let obj_id = obj.id;
             let root_world = glam::Mat4::from_scale_rotation_translation(
                 obj.scale,
                 obj.rotation,
                 obj.position,
             );
 
-            if eid == obj_id {
+            if selected_sdf_id == Some(obj_id) {
                 if let Some((lmin, lmax)) =
                     crate::wireframe::compute_node_tree_aabb(&obj.root_node, glam::Mat4::IDENTITY)
                 {
@@ -375,7 +422,10 @@ pub(crate) fn build_wireframe_overlays(
                 }
             } else if let Some((child_node, child_world)) =
                 crate::wireframe::find_child_node_and_transform(
-                    eid, obj_id, &obj.root_node, root_world,
+                    selected_sdf_id.unwrap_or(0) as u64,
+                    obj_id as u64,
+                    &obj.root_node,
+                    root_world,
                 )
             {
                 if let Some((lmin, lmax)) =

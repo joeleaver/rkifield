@@ -10,7 +10,10 @@ fn make_api() -> EditorAutomationApi {
     let material_library = Arc::new(Mutex::new(
         rkf_core::material_library::MaterialLibrary::new(16),
     ));
-    EditorAutomationApi::new(state, editor_state, material_library)
+    let gameplay_registry = Arc::new(Mutex::new(
+        rkf_runtime::behavior::GameplayRegistry::new(),
+    ));
+    EditorAutomationApi::new(state, editor_state, material_library, gameplay_registry)
 }
 
 /// Spawn a test object and return its object_id.
@@ -77,7 +80,7 @@ fn automation_camera_spawn_creates_entity() {
     let cam_id = api
         .camera_spawn("Main", [1.0, 2.0, 3.0], 45.0, -10.0, 75.0)
         .unwrap();
-    assert!(cam_id != 0); // Should get a valid non-zero ID
+    assert!(!cam_id.is_empty()); // Should get a valid UUID string
 
     let list = api.camera_list().unwrap();
     let cameras: Vec<serde_json::Value> = serde_json::from_str(&list).unwrap();

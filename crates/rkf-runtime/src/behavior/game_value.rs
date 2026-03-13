@@ -176,6 +176,18 @@ impl From<Quat> for GameValue {
     }
 }
 
+impl From<[f32; 4]> for GameValue {
+    fn from(val: [f32; 4]) -> Self {
+        GameValue::Color(val)
+    }
+}
+
+impl From<Vec<GameValue>> for GameValue {
+    fn from(val: Vec<GameValue>) -> Self {
+        GameValue::List(val)
+    }
+}
+
 // ─── TryFrom conversions (GameValue → concrete type) ──────────────────────
 
 /// Error when converting a [`GameValue`] to a concrete type.
@@ -235,7 +247,10 @@ impl TryFrom<GameValue> for i32 {
     type Error = GameValueTypeError;
     fn try_from(v: GameValue) -> Result<Self, Self::Error> {
         match v {
-            GameValue::Int(i) => Ok(i as i32),
+            GameValue::Int(i) => i32::try_from(i).map_err(|_| GameValueTypeError {
+                expected: "Int(i32 range)",
+                actual: "Int(out of i32 range)",
+            }),
             other => Err(GameValueTypeError {
                 expected: "Int",
                 actual: other.variant_name(),
@@ -316,6 +331,32 @@ impl TryFrom<GameValue> for Quat {
             GameValue::Quat(q) => Ok(q),
             other => Err(GameValueTypeError {
                 expected: "Quat",
+                actual: other.variant_name(),
+            }),
+        }
+    }
+}
+
+impl TryFrom<GameValue> for [f32; 4] {
+    type Error = GameValueTypeError;
+    fn try_from(v: GameValue) -> Result<Self, Self::Error> {
+        match v {
+            GameValue::Color(c) => Ok(c),
+            other => Err(GameValueTypeError {
+                expected: "Color",
+                actual: other.variant_name(),
+            }),
+        }
+    }
+}
+
+impl TryFrom<GameValue> for Vec<GameValue> {
+    type Error = GameValueTypeError;
+    fn try_from(v: GameValue) -> Result<Self, Self::Error> {
+        match v {
+            GameValue::List(l) => Ok(l),
+            other => Err(GameValueTypeError {
+                expected: "List",
                 actual: other.variant_name(),
             }),
         }
@@ -455,6 +496,53 @@ mod tests {
         let v = GameValue::Bool(true);
         let err = i64::try_from(v).unwrap_err();
         assert_eq!(err.expected, "Int");
+        assert_eq!(err.actual, "Bool");
+    }
+
+    #[test]
+    fn from_color_array() {
+        let c = [1.0_f32, 0.5, 0.0, 1.0];
+        let v: GameValue = c.into();
+        assert_eq!(v, GameValue::Color(c));
+        assert_eq!(v.as_color(), Some(c));
+    }
+
+    #[test]
+    fn from_list() {
+        let items = vec![GameValue::Int(1), GameValue::Bool(false)];
+        let v: GameValue = items.clone().into();
+        assert_eq!(v, GameValue::List(items));
+    }
+
+    #[test]
+    fn try_from_color() {
+        let c = [0.2_f32, 0.4, 0.6, 0.8];
+        let v: GameValue = c.into();
+        let got = <[f32; 4]>::try_from(v).unwrap();
+        assert_eq!(got, c);
+    }
+
+    #[test]
+    fn try_from_list() {
+        let items = vec![GameValue::Float(1.5), GameValue::String("x".into())];
+        let v: GameValue = items.clone().into();
+        let got = Vec::<GameValue>::try_from(v).unwrap();
+        assert_eq!(got, items);
+    }
+
+    #[test]
+    fn try_from_color_wrong_type() {
+        let v = GameValue::Int(42);
+        let err = <[f32; 4]>::try_from(v).unwrap_err();
+        assert_eq!(err.expected, "Color");
+        assert_eq!(err.actual, "Int");
+    }
+
+    #[test]
+    fn try_from_list_wrong_type() {
+        let v = GameValue::Bool(true);
+        let err = Vec::<GameValue>::try_from(v).unwrap_err();
+        assert_eq!(err.expected, "List");
         assert_eq!(err.actual, "Bool");
     }
 

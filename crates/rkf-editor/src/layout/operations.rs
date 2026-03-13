@@ -366,7 +366,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(layout.bottom.zones.len(), 2);
         assert_eq!(layout.bottom.zones[0].tabs, vec![PanelId::Console]);
-        assert_eq!(layout.bottom.zones[1].tabs, vec![PanelId::Materials, PanelId::Shaders]);
+        assert_eq!(layout.bottom.zones[1].tabs, vec![PanelId::Materials, PanelId::Shaders, PanelId::Systems]);
     }
 
     #[test]
@@ -383,7 +383,7 @@ mod tests {
         );
         assert!(result.is_ok());
         assert_eq!(layout.bottom.zones.len(), 2);
-        assert_eq!(layout.bottom.zones[0].tabs, vec![PanelId::Materials, PanelId::Shaders]);
+        assert_eq!(layout.bottom.zones[0].tabs, vec![PanelId::Materials, PanelId::Shaders, PanelId::Systems]);
         assert_eq!(layout.bottom.zones[1].tabs, vec![PanelId::Console]);
     }
 

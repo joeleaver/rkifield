@@ -5,7 +5,7 @@
 //! missing dependency targets at build time.
 
 use super::registry::{Phase, SystemMeta};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 
 /// A resolved execution schedule: systems in topological order per phase.
 #[derive(Debug)]
@@ -152,6 +152,7 @@ fn sort_phase(all_systems: &[SystemMeta], phase: Phase) -> Result<Vec<usize>, Sc
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     fn meta(
         name: &'static str,

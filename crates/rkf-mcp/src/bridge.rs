@@ -165,7 +165,7 @@ impl AutomationApi for BridgeAutomationApi {
         serde_json::from_value(result).map_err(|e| AutomationError::EngineError(e.to_string()))
     }
 
-    fn entity_inspect(&self, entity_id: u64) -> AutomationResult<EntitySnapshot> {
+    fn entity_inspect(&self, entity_id: &str) -> AutomationResult<EntitySnapshot> {
         let result = self.call_tool(
             "entity_inspect",
             serde_json::json!({"entity_id": entity_id}),
@@ -215,18 +215,19 @@ impl AutomationApi for BridgeAutomationApi {
 
     // --- Mutation methods (forwarded over IPC) ---
 
-    fn entity_spawn(&self, def: EntityDef) -> AutomationResult<u64> {
+    fn entity_spawn(&self, def: EntityDef) -> AutomationResult<String> {
         let result = self.call_tool(
             "entity_spawn",
             serde_json::to_value(&def)
                 .map_err(|e| AutomationError::EngineError(format!("serialize: {e}")))?,
         )?;
         result["id"]
-            .as_u64()
+            .as_str()
+            .map(|s| s.to_string())
             .ok_or_else(|| AutomationError::EngineError("missing id in response".into()))
     }
 
-    fn entity_despawn(&self, entity_id: u64) -> AutomationResult<()> {
+    fn entity_despawn(&self, entity_id: &str) -> AutomationResult<()> {
         self.call_tool(
             "entity_despawn",
             serde_json::json!({"entity_id": entity_id}),
@@ -236,7 +237,7 @@ impl AutomationApi for BridgeAutomationApi {
 
     fn entity_set_component(
         &self,
-        entity_id: u64,
+        entity_id: &str,
         component: ComponentDef,
     ) -> AutomationResult<()> {
         let comp_value = serde_json::to_value(&component)
@@ -591,7 +592,7 @@ impl AutomationApi for BridgeAutomationApi {
         yaw: f32,
         pitch: f32,
         fov: f32,
-    ) -> Result<u64, String> {
+    ) -> Result<String, String> {
         let result = self
             .call_tool(
                 "camera_spawn",
@@ -603,7 +604,8 @@ impl AutomationApi for BridgeAutomationApi {
             )
             .map_err(|e| e.to_string())?;
         result["entity_id"]
-            .as_u64()
+            .as_str()
+            .map(|s| s.to_string())
             .ok_or_else(|| "missing entity_id in response".to_string())
     }
 
@@ -614,7 +616,7 @@ impl AutomationApi for BridgeAutomationApi {
         Ok(result.to_string())
     }
 
-    fn camera_snap_to(&self, entity_id: u64) -> Result<(), String> {
+    fn camera_snap_to(&self, entity_id: &str) -> Result<(), String> {
         self.call_tool(
             "camera_snap_to",
             serde_json::json!({"entity_id": entity_id}),
@@ -684,6 +686,155 @@ impl AutomationApi for BridgeAutomationApi {
         let result = self.call_tool("shader_list", serde_json::json!({}))?;
         serde_json::from_value(result).map_err(|e| AutomationError::EngineError(e.to_string()))
     }
+
+    // --- Behavior system tools (forwarded over IPC) --------------------------
+
+    fn component_list(&self) -> Vec<ComponentInfo> {
+        self.call_tool("component_list", serde_json::json!({}))
+            .and_then(|v| {
+                serde_json::from_value(v)
+                    .map_err(|e| AutomationError::EngineError(e.to_string()))
+            })
+            .unwrap_or_default()
+    }
+
+    fn component_get(
+        &self,
+        entity_id: &str,
+        component_name: &str,
+    ) -> Result<std::collections::HashMap<String, String>, String> {
+        let result = self
+            .call_tool(
+                "component_get",
+                serde_json::json!({"entity_id": entity_id, "component_name": component_name}),
+            )
+            .map_err(|e| e.to_string())?;
+        serde_json::from_value(result).map_err(|e| e.to_string())
+    }
+
+    fn component_set(
+        &self,
+        entity_id: &str,
+        component_name: &str,
+        fields: std::collections::HashMap<String, String>,
+    ) -> Result<(), String> {
+        self.call_tool(
+            "component_set",
+            serde_json::json!({
+                "entity_id": entity_id,
+                "component_name": component_name,
+                "fields": fields,
+            }),
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    }
+
+    fn component_add(
+        &self,
+        entity_id: &str,
+        component_name: &str,
+        fields: std::collections::HashMap<String, String>,
+    ) -> Result<(), String> {
+        self.call_tool(
+            "component_add",
+            serde_json::json!({
+                "entity_id": entity_id,
+                "component_name": component_name,
+                "fields": fields,
+            }),
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    }
+
+    fn component_remove(&self, entity_id: &str, component_name: &str) -> Result<(), String> {
+        self.call_tool(
+            "component_remove",
+            serde_json::json!({"entity_id": entity_id, "component_name": component_name}),
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    }
+
+    fn system_list(&self) -> Vec<SystemInfo> {
+        self.call_tool("system_list", serde_json::json!({}))
+            .and_then(|v| {
+                serde_json::from_value(v)
+                    .map_err(|e| AutomationError::EngineError(e.to_string()))
+            })
+            .unwrap_or_default()
+    }
+
+    fn blueprint_list(&self) -> Vec<BlueprintInfo> {
+        self.call_tool("blueprint_list", serde_json::json!({}))
+            .and_then(|v| {
+                serde_json::from_value(v)
+                    .map_err(|e| AutomationError::EngineError(e.to_string()))
+            })
+            .unwrap_or_default()
+    }
+
+    fn blueprint_spawn(&self, name: &str, position: [f32; 3]) -> Result<String, String> {
+        let result = self
+            .call_tool(
+                "blueprint_spawn",
+                serde_json::json!({"name": name, "position": position}),
+            )
+            .map_err(|e| e.to_string())?;
+        result["entity_id"]
+            .as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| "missing entity_id in response".to_string())
+    }
+
+    fn state_get(&self, key: &str) -> Result<Option<String>, String> {
+        let result = self
+            .call_tool("state_get", serde_json::json!({"key": key}))
+            .map_err(|e| e.to_string())?;
+        Ok(result["value"].as_str().map(|s| s.to_string()))
+    }
+
+    fn state_set(&self, key: &str, value: &str, value_type: &str) -> Result<(), String> {
+        self.call_tool(
+            "state_set",
+            serde_json::json!({"key": key, "value": value, "value_type": value_type}),
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    }
+
+    fn state_list(&self, prefix: &str) -> Vec<String> {
+        self.call_tool("state_list", serde_json::json!({"prefix": prefix}))
+            .and_then(|v| {
+                serde_json::from_value(v)
+                    .map_err(|e| AutomationError::EngineError(e.to_string()))
+            })
+            .unwrap_or_default()
+    }
+
+    fn play_start(&self) -> Result<(), String> {
+        self.call_tool("play_start", serde_json::json!({}))
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    fn play_stop(&self) -> Result<(), String> {
+        self.call_tool("play_stop", serde_json::json!({}))
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    fn play_state(&self) -> String {
+        self.call_tool("play_state", serde_json::json!({}))
+            .and_then(|v| {
+                v["state"]
+                    .as_str()
+                    .map(|s| s.to_string())
+                    .ok_or_else(|| AutomationError::EngineError("missing state field".into()))
+            })
+            .unwrap_or_else(|_| "unknown".into())
+    }
 }
 
 #[cfg(test)]
@@ -701,7 +852,7 @@ mod tests {
                 components: vec![]
             })
             .is_err());
-        assert!(bridge.entity_despawn(1).is_err());
+        assert!(bridge.entity_despawn("00000000-0000-0000-0000-000000000001").is_err());
         assert!(bridge.scene_load("foo").is_err());
         assert!(bridge.scene_save("foo").is_err());
         assert!(bridge.execute_command("test").is_err());

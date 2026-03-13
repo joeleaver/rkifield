@@ -3,6 +3,7 @@
 //! Both engine components (registered at startup via `engine_register()`) and gameplay
 //! components (registered by the dylib's `register()`) populate the same registry.
 
+use super::blueprint::BlueprintCatalog;
 use super::game_value::GameValue;
 use std::collections::HashMap;
 
@@ -48,6 +49,17 @@ pub struct FieldMeta {
     pub range: Option<(f64, f64)>,
     /// Optional default value for display in the inspector.
     pub default: Option<GameValue>,
+    /// True if this field should be automatically persisted to the GameStore.
+    ///
+    /// When a proc macro is available, this corresponds to the `#[persist]`
+    /// attribute on a component field. Without the macro, set this to `true`
+    /// manually in the `FieldMeta` declaration for fields that should survive
+    /// save/load. Transient fields should never be persisted.
+    ///
+    /// Use [`auto_sync_to_store`] and [`auto_sync_from_store`] from the
+    /// `persist` module to automatically sync all `persist: true` fields
+    /// via the component's `get_field`/`set_field` function pointers.
+    pub persist: bool,
 }
 
 /// Trait for component field introspection.
@@ -150,7 +162,7 @@ impl std::fmt::Debug for SystemMeta {
 // ─── Query error ──────────────────────────────────────────────────────────
 
 /// Error returned by `find_one` when the query doesn't match exactly one entity.
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum QueryError {
     /// No entity matches the query.
     #[error("no entity found matching query")]
@@ -173,7 +185,8 @@ pub enum QueryError {
 pub struct GameplayRegistry {
     components: HashMap<String, ComponentEntry>,
     systems: Vec<SystemMeta>,
-    // blueprints: HashMap<String, Blueprint>,  // added in Phase 11
+    /// Blueprint catalog — reusable entity templates.
+    pub blueprint_catalog: BlueprintCatalog,
 }
 
 impl Default for GameplayRegistry {
@@ -188,6 +201,7 @@ impl GameplayRegistry {
         Self {
             components: HashMap::new(),
             systems: Vec::new(),
+            blueprint_catalog: BlueprintCatalog::new(),
         }
     }
 
@@ -227,11 +241,9 @@ impl GameplayRegistry {
     ///
     /// Called during hot-reload before loading the new dylib.
     /// Engine components (registered via `engine_register()`) are not removed.
-    ///
-    /// Implementation: tracks which entries are engine vs gameplay.
-    /// For now, clears everything — Phase 9 will add engine/gameplay distinction.
-    pub fn clear_gameplay(&mut self) {
-        self.components.clear();
+    /// Engine component names are defined in [`ENGINE_COMPONENT_NAMES`].
+    pub fn clear_gameplay(&mut self, engine_names: &[&str]) {
+        self.components.retain(|name, _| engine_names.contains(&name.as_str()));
         self.systems.clear();
     }
 
@@ -361,7 +373,7 @@ mod tests {
             fn_ptr: std::ptr::null(),
         });
 
-        reg.clear_gameplay();
+        reg.clear_gameplay(&[]);
         assert_eq!(reg.component_count(), 0);
         assert!(reg.system_list().is_empty());
     }
@@ -374,11 +386,13 @@ mod tests {
             transient: false,
             range: Some((0.0, 100.0)),
             default: Some(GameValue::Float(100.0)),
+            persist: true,
         };
         assert_eq!(meta.name, "health");
         assert_eq!(meta.field_type, FieldType::Float);
         assert!(!meta.transient);
         assert_eq!(meta.range, Some((0.0, 100.0)));
+        assert!(meta.persist);
     }
 
     #[test]

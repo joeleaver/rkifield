@@ -42,6 +42,10 @@ pub fn render_panel(scope: &mut RenderScope, panel: PanelId) -> NodeHandle {
             el.set_attribute("style", "flex:1;min-height:0;");
             el.into()
         }
+        PanelId::Systems => {
+            let c = crate::ui::systems_panel::SystemsPanel::default();
+            c.render(scope, &[])
+        }
         PanelId::Console | PanelId::DebugOverlay | PanelId::GameView | PanelId::AnimationEditor => {
             placeholder(scope, panel)
         }
