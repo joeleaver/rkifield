@@ -13,7 +13,7 @@ use rkf_render::{
 };
 use rkf_render::radiance_inject::{RadianceInjectPass, InjectUniforms};
 use rkf_render::radiance_mip::RadianceMipPass;
-use rkf_render::material_table::{MaterialTable, create_test_materials};
+use rkf_render::material_table::MaterialTable;
 use rkf_core::material_library::MaterialLibrary;
 use super::EditorEngine;
 use super::{OFFSCREEN_FORMAT, build_demo_scene};
@@ -104,22 +104,17 @@ impl EditorEngine {
         );
         let debug_view = DebugViewPass::new(&ctx.device, &gbuffer);
 
-        // Material library — load from palette file, fallback to hardcoded test materials.
-        let palette_path = std::path::Path::new("assets/materials/default.rkmatlib");
-        let material_library = match MaterialLibrary::load_palette(palette_path) {
+        // Material library — load from engine library palette.
+        let palette_path = rkf_runtime::project::engine_library_dir()
+            .join("materials/default.rkmatlib");
+        let material_library = match MaterialLibrary::load_palette(&palette_path) {
             Ok(lib) => {
                 log::info!("Material library loaded from {}", palette_path.display());
                 lib
             }
             Err(e) => {
-                log::warn!("Failed to load material palette: {e} — using test materials");
-                let mut lib = MaterialLibrary::new(16);
-                #[allow(deprecated)]
-                for (i, mat) in create_test_materials().into_iter().enumerate() {
-                    lib.set_material(i as u16, mat);
-                }
-                lib.mark_dirty();
-                lib
+                log::warn!("Failed to load material palette from {}: {e}", palette_path.display());
+                MaterialLibrary::new(16)
             }
         };
         let materials = material_library.all_materials().to_vec();

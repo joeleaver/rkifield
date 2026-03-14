@@ -546,11 +546,13 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             if es.pending_open {
                 es.pending_open = false;
                 let open_path = es.pending_open_path.take();
+                let mat_lib = engine.material_library.clone();
                 let mut io_ctx = engine_loop_io::IoContext {
                     engine: &mut engine,
                     editor_state: &editor_state,
                     layout_backing: &layout_backing,
                     gameplay_registry: &gameplay_registry,
+                    material_library: &mat_lib,
                 };
                 engine_loop_io::handle_scene_open_impl(es, open_path, &mut io_ctx);
                 continue;
@@ -559,11 +561,13 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             if es.pending_new_project {
                 es.pending_new_project = false;
                 drop(es);
+                let mat_lib = engine.material_library.clone();
                 let mut io_ctx = engine_loop_io::IoContext {
                     engine: &mut engine,
                     editor_state: &editor_state,
                     layout_backing: &layout_backing,
                     gameplay_registry: &gameplay_registry,
+                    material_library: &mat_lib,
                 };
                 engine_loop_io::handle_new_project(&mut io_ctx, &mut frame_topology_changed);
 
@@ -589,11 +593,13 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                 es.pending_open_project = false;
                 let open_path = es.pending_open_project_path.take();
                 drop(es);
+                let mat_lib = engine.material_library.clone();
                 let mut io_ctx = engine_loop_io::IoContext {
                     engine: &mut engine,
                     editor_state: &editor_state,
                     layout_backing: &layout_backing,
                     gameplay_registry: &gameplay_registry,
+                    material_library: &mat_lib,
                 };
                 engine_loop_io::handle_open_project(open_path, &mut io_ctx, &mut frame_topology_changed);
 

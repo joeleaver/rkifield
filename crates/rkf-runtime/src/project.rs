@@ -299,6 +299,23 @@ pub fn create_project(parent_dir: &Path, name: &str) -> Result<PathBuf> {
         crate::save_environment(&envs_dir.join("default.rkenv").to_string_lossy(), &env)?;
     }
 
+    // Copy library materials into the project.
+    let library_materials_dir = engine_library_dir().join("materials");
+    if library_materials_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&library_materials_dir) {
+            for entry in entries.flatten() {
+                let src = entry.path();
+                if src.is_file() {
+                    let fname = entry.file_name();
+                    let dst = materials_dir.join(&fname);
+                    if let Err(e) = std::fs::copy(&src, &dst) {
+                        log::warn!("Could not copy library material {:?}: {}", fname, e);
+                    }
+                }
+            }
+        }
+    }
+
     // Scaffold the game crate with starter content.
     let game_crate_name = "game";
     match crate::behavior::scaffold::scaffold_game_crate(&project_root, game_crate_name, workspace_root) {
@@ -308,6 +325,7 @@ pub fn create_project(parent_dir: &Path, name: &str) -> Result<PathBuf> {
 
     // Write .rkproject file.
     let mut project = ProjectFile::new(name);
+    project.material_palette = Some("assets/materials/default.rkmatlib".to_string());
     project.scenes.push(SceneRef {
         name: "default".to_string(),
         path: "scenes/default.rkscene".to_string(),
@@ -320,6 +338,20 @@ pub fn create_project(parent_dir: &Path, name: &str) -> Result<PathBuf> {
     save_project(&project_file_path.to_string_lossy(), &project)?;
 
     Ok(project_file_path)
+}
+
+/// Get the path to the engine's built-in library directory.
+///
+/// Uses `CARGO_MANIFEST_DIR` (points to `crates/rkf-runtime/`) → go up 2 levels
+/// → append `library/`. Contains standard materials, component/system templates,
+/// and (future) pre-made assets.
+pub fn engine_library_dir() -> PathBuf {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = manifest_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .unwrap_or(manifest_dir);
+    workspace_root.join("library")
 }
 
 /// Get the project root directory (parent of the `.rkproject` file).
@@ -335,9 +367,254 @@ pub fn resolve_scene_path(project_path: &Path, scene_ref: &SceneRef) -> PathBuf 
     project_root(project_path).join(&scene_ref.path)
 }
 
+// ─── Library management utilities ────────────────────────────────────────
+
+/// A library item descriptor.
+#[derive(Debug, Clone)]
+pub struct LibraryItem {
+    /// Display name (e.g. "Health", "stone").
+    pub name: String,
+    /// Relative path within the library (e.g. "components/health.rs").
+    pub relative_path: String,
+    /// Category: "component", "system", "material", "asset", "blueprint".
+    pub category: String,
+}
+
+/// Copy a file from the engine library into a project directory.
+///
+/// `library_rel_path` is relative to the library root (e.g. "materials/stone.rkmat").
+/// `dest_rel_path` is relative to `project_root` (e.g. "assets/materials/stone.rkmat").
+pub fn copy_from_library(
+    library_rel_path: &str,
+    project_root: &Path,
+    dest_rel_path: &str,
+) -> Result<()> {
+    let src = engine_library_dir().join(library_rel_path);
+    let dst = project_root.join(dest_rel_path);
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::copy(&src, &dst)?;
+    Ok(())
+}
+
+/// Overwrite a project file with the library version (restore to defaults).
+///
+/// Same as [`copy_from_library`] — the destination is overwritten.
+pub fn restore_from_library(
+    library_rel_path: &str,
+    project_root: &Path,
+    dest_rel_path: &str,
+) -> Result<()> {
+    copy_from_library(library_rel_path, project_root, dest_rel_path)
+}
+
+/// Check if a library file exists for the given relative path.
+pub fn has_library_original(library_rel_path: &str) -> bool {
+    engine_library_dir().join(library_rel_path).is_file()
+}
+
+/// List available library items in a category.
+///
+/// Valid categories: "component", "system", "material", "asset", "blueprint".
+pub fn list_library_items(category: &str) -> Result<Vec<LibraryItem>> {
+    let (subdir, extension) = match category {
+        "component" => ("components", "rs"),
+        "system" => ("systems", "rs"),
+        "material" => ("materials", "rkmat"),
+        "asset" => ("assets", "rkf"),
+        "blueprint" => (".", "rs"),
+        _ => return Ok(Vec::new()),
+    };
+
+    let dir = engine_library_dir().join(subdir);
+    if !dir.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let mut items = Vec::new();
+    for entry in std::fs::read_dir(&dir)?.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if ext != extension {
+            continue;
+        }
+        // For blueprints, only match "blueprints.rs" specifically.
+        if category == "blueprint" {
+            if path.file_name().and_then(|n| n.to_str()) != Some("blueprints.rs") {
+                continue;
+            }
+        }
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let display_name = stem
+            .split('_')
+            .map(|w| {
+                let mut c = w.chars();
+                match c.next() {
+                    None => String::new(),
+                    Some(f) => f.to_uppercase().to_string() + c.as_str(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        let rel = if subdir == "." {
+            format!("{}.{}", stem, extension)
+        } else {
+            format!("{}/{}.{}", subdir, stem, extension)
+        };
+        items.push(LibraryItem {
+            name: display_name,
+            relative_path: rel,
+            category: category.to_string(),
+        });
+    }
+    items.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(items)
+}
+
+/// Resolve an asset path with project-local first, then engine library fallback.
+///
+/// Search order:
+/// 1. `project_root / asset_path / rel_path` for each `asset_path` in `project.asset_paths`
+/// 2. `engine_library_dir() / assets / rel_path`
+pub fn resolve_asset_path(
+    project_root_dir: &Path,
+    project: &ProjectFile,
+    rel_path: &str,
+) -> Option<PathBuf> {
+    // Search project asset paths first.
+    for asset_path in &project.asset_paths {
+        let candidate = project_root_dir.join(asset_path).join(rel_path);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    // Fallback to engine library.
+    let library_candidate = engine_library_dir().join("assets").join(rel_path);
+    if library_candidate.exists() {
+        return Some(library_candidate);
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn engine_library_dir_exists() {
+        let lib_dir = engine_library_dir();
+        assert!(lib_dir.is_dir(), "engine library dir should exist: {}", lib_dir.display());
+        assert!(lib_dir.join("materials").is_dir(), "library/materials/ should exist");
+        assert!(
+            lib_dir.join("materials/default.rkmatlib").exists(),
+            "library/materials/default.rkmatlib should exist"
+        );
+    }
+
+    #[test]
+    fn copy_from_library_creates_file() {
+        let tmp = std::env::temp_dir().join("rkf_test_copy_from_lib");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        copy_from_library(
+            "materials/stone.rkmat",
+            &tmp,
+            "assets/materials/stone.rkmat",
+        )
+        .expect("copy_from_library");
+
+        assert!(tmp.join("assets/materials/stone.rkmat").exists());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn restore_from_library_overwrites() {
+        let tmp = std::env::temp_dir().join("rkf_test_restore_from_lib");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("assets/materials")).unwrap();
+
+        // Write a fake file.
+        std::fs::write(tmp.join("assets/materials/stone.rkmat"), "modified").unwrap();
+
+        // Restore from library.
+        restore_from_library(
+            "materials/stone.rkmat",
+            &tmp,
+            "assets/materials/stone.rkmat",
+        )
+        .expect("restore");
+
+        let content = std::fs::read_to_string(tmp.join("assets/materials/stone.rkmat")).unwrap();
+        assert_ne!(content, "modified", "should be overwritten with library version");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn has_library_original_true_for_existing() {
+        assert!(has_library_original("materials/stone.rkmat"));
+        assert!(has_library_original("components/health.rs"));
+    }
+
+    #[test]
+    fn has_library_original_false_for_nonexistent() {
+        assert!(!has_library_original("materials/unicorn.rkmat"));
+        assert!(!has_library_original("components/nonexistent.rs"));
+    }
+
+    #[test]
+    fn list_library_components() {
+        let items = list_library_items("component").expect("list");
+        assert_eq!(items.len(), 8, "expected 8 library components");
+        let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
+        assert!(names.contains(&"Health"), "should contain Health");
+        assert!(names.contains(&"Spin"), "should contain Spin");
+    }
+
+    #[test]
+    fn list_library_systems() {
+        let items = list_library_items("system").expect("list");
+        assert_eq!(items.len(), 8, "expected 8 library systems");
+    }
+
+    #[test]
+    fn list_library_materials() {
+        let items = list_library_items("material").expect("list");
+        assert!(items.len() >= 14, "expected at least 14 library materials, got {}", items.len());
+    }
+
+    #[test]
+    fn resolve_asset_path_project_local_first() {
+        let tmp = std::env::temp_dir().join("rkf_test_resolve_asset");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("assets")).unwrap();
+        std::fs::write(tmp.join("assets/test.rkf"), "local").unwrap();
+
+        let project = ProjectFile::new("Test");
+        let resolved = resolve_asset_path(&tmp, &project, "test.rkf");
+        assert!(resolved.is_some());
+        assert_eq!(
+            std::fs::read_to_string(resolved.unwrap()).unwrap(),
+            "local",
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn resolve_asset_path_returns_none_when_missing() {
+        let tmp = std::env::temp_dir().join("rkf_test_resolve_none");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("assets")).unwrap();
+
+        let project = ProjectFile::new("Test");
+        let resolved = resolve_asset_path(&tmp, &project, "nonexistent.rkf");
+        assert!(resolved.is_none());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     #[test]
     fn new_project() {
@@ -674,6 +951,16 @@ mod tests {
             .count();
         assert!(shader_count > 0, "expected shaders to be copied");
 
+        // Library materials were copied into the project.
+        assert!(
+            root.join("assets/materials/default.rkmatlib").exists(),
+            "default.rkmatlib should be copied from library"
+        );
+        assert!(
+            root.join("assets/materials/stone.rkmat").exists(),
+            "stone.rkmat should be copied from library"
+        );
+
         // Game crate was scaffolded.
         assert!(root.join("game/Cargo.toml").exists(), "game crate Cargo.toml should exist");
         assert!(root.join("game/src/lib.rs").exists(), "game crate lib.rs should exist");
@@ -689,6 +976,10 @@ mod tests {
         assert_eq!(loaded.scenes[0].path, "scenes/default.rkscene");
         assert_eq!(loaded.default_scene, Some("default".to_string()));
         assert_eq!(loaded.game_crate, Some("game".to_string()));
+        assert_eq!(
+            loaded.material_palette,
+            Some("assets/materials/default.rkmatlib".to_string()),
+        );
 
         // Clean up.
         let _ = std::fs::remove_dir_all(&tmp);

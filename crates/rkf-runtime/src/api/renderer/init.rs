@@ -5,8 +5,7 @@ use std::sync::Arc;
 use glam::Vec3;
 use winit::window::Window as WinitWindow;
 
-#[allow(deprecated)]
-use rkf_render::material_table::{create_test_materials, MaterialTable};
+use rkf_render::material_table::MaterialTable;
 use rkf_render::radiance_inject::RadianceInjectPass;
 use rkf_render::radiance_mip::RadianceMipPass;
 use rkf_render::{
@@ -94,7 +93,16 @@ impl Renderer {
             RayMarchPass::new(&ctx.device, &gpu_scene, &gbuffer, &tile_cull, &coarse_field);
         let debug_view = DebugViewPass::new(&ctx.device, &gbuffer);
 
-        let materials = create_test_materials();
+        // Load materials from the engine library palette.
+        let palette_path = crate::project::engine_library_dir()
+            .join("materials/default.rkmatlib");
+        let materials = match rkf_core::material_library::MaterialLibrary::load_palette(&palette_path) {
+            Ok(lib) => lib.all_materials().to_vec(),
+            Err(e) => {
+                log::warn!("Failed to load library materials: {e} — using default");
+                vec![rkf_core::material::Material::default(); 16]
+            }
+        };
         let material_table = MaterialTable::upload(&ctx.device, &materials);
 
         // Lights — start with a default sun.

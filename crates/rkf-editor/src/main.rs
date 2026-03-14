@@ -126,29 +126,22 @@ fn main() -> anyhow::Result<()> {
     let (cmd_tx, cmd_rx) = crossbeam::channel::unbounded::<EditorCommand>();
     let layout_backing = layout::state::LayoutBacking::new(layout::default_layout());
 
-    // 1c. Create shared material library (pre-populated with test materials).
+    // 1c. Create shared material library (loaded from engine library palette).
     let material_library = {
-        use rkf_core::material_library::{MaterialLibrary, SlotInfo};
-        #[allow(deprecated)]
-        use rkf_render::material_table::create_test_materials;
-        #[allow(deprecated)]
-        let mats = create_test_materials();
-        let mut lib = MaterialLibrary::new(mats.len().max(16));
-        for (i, mat) in mats.into_iter().enumerate() {
-            lib.set_material_with_info(
-                i as u16,
-                mat,
-                SlotInfo {
-                    name: format!("Material {i}"),
-                    description: String::new(),
-                    category: "Default".into(),
-                    file_path: String::new(),
-                    shader_name: "pbr".into(),
-                },
-            );
+        use rkf_core::material_library::MaterialLibrary;
+        let palette_path = rkf_runtime::project::engine_library_dir()
+            .join("materials/default.rkmatlib");
+        match MaterialLibrary::load_palette(&palette_path) {
+            Ok(mut lib) => {
+                lib.clear_dirty(); // initial state is clean
+                log::info!("Material library loaded from {}", palette_path.display());
+                Arc::new(Mutex::new(lib))
+            }
+            Err(e) => {
+                log::warn!("Failed to load library materials: {e}");
+                Arc::new(Mutex::new(MaterialLibrary::new(16)))
+            }
         }
-        lib.clear_dirty(); // initial state is clean
-        Arc::new(Mutex::new(lib))
     };
 
     // 1d. Create shared gameplay registry.

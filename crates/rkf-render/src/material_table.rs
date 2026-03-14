@@ -95,22 +95,11 @@ impl MaterialTable {
     }
 }
 
-#[deprecated(note = "Use MaterialLibrary::load_palette() to load materials from .rkmat files instead")]
-/// Create a set of test materials for the Phase 6 materials showcase and Cornell box GI scene.
+/// Create a set of test materials for unit tests.
 ///
-/// | Index | Name           | Description                                    |
-/// |------:|----------------|------------------------------------------------|
-/// |     0 | Default        | Medium gray, fallback                          |
-/// |     1 | Stone          | Gray, rough, dielectric                        |
-/// |     2 | Metal          | Silver, low roughness, metallic                |
-/// |     3 | Wood           | Warm brown, moderate roughness                 |
-/// |     4 | Emissive       | Bright cyan glow                               |
-/// |     5 | Skin           | Warm tone, subsurface scattering               |
-/// |     6 | White Diffuse  | High albedo for good GI bouncing               |
-/// |     7 | Red Diffuse    | Cornell box left wall                          |
-/// |     8 | Green Diffuse  | Cornell box right wall                         |
-/// |     9 | Ceiling Light  | Warm white emissive ceiling panel              |
-pub fn create_test_materials() -> Vec<Material> {
+/// Not for production use — load from `.rkmat` files via `MaterialLibrary::load_palette()`.
+#[cfg(test)]
+fn create_test_materials() -> Vec<Material> {
     vec![
         // 0: Default (fallback)
         Material::default(),
@@ -222,7 +211,6 @@ pub fn create_test_materials() -> Vec<Material> {
 }
 
 #[cfg(test)]
-#[allow(deprecated)]
 mod tests {
     use super::*;
 

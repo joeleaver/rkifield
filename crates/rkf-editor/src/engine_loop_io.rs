@@ -18,6 +18,7 @@ pub(crate) struct IoContext<'a> {
     pub(crate) editor_state: &'a Arc<Mutex<EditorState>>,
     pub(crate) layout_backing: &'a LayoutBacking,
     pub(crate) gameplay_registry: &'a Arc<Mutex<GameplayRegistry>>,
+    pub(crate) material_library: &'a Arc<Mutex<rkf_core::material_library::MaterialLibrary>>,
 }
 
 // ─── Save helpers ────────────────────────────────────────────────────────
@@ -417,6 +418,10 @@ pub(crate) fn handle_new_project(
                             es.world.clear();
                             es.current_scene_path = None;
                         }
+
+                        // Load material palette from the new project.
+                        load_material_palette(&pf, &project_root, ctx.material_library);
+
                         es.current_project = Some(pf);
                         es.current_project_path = Some(project_path_str.clone());
                         es.selected_entity = None;
@@ -481,6 +486,9 @@ pub(crate) fn handle_open_project(
                         layout.load_from_backing(&lb);
                     });
                 }
+                // Load material palette from project or engine library.
+                load_material_palette(&pf, &project_root, ctx.material_library);
+
                 es.current_project = Some(pf);
                 es.current_project_path = Some(path_str.clone());
                 es.selected_entity = None;
@@ -530,6 +538,44 @@ pub(crate) fn handle_save_project(
         }
     } else {
         es.pending_save = true;
+    }
+}
+
+// ─── Material palette loading ────────────────────────────────────────────
+
+/// Load a material palette for a project, falling back to the engine library.
+///
+/// Search order:
+/// 1. `project.material_palette` relative to `project_root`
+/// 2. Engine library `materials/default.rkmatlib`
+fn load_material_palette(
+    project: &rkf_runtime::project::ProjectFile,
+    project_root: &std::path::Path,
+    material_library: &std::sync::Arc<std::sync::Mutex<rkf_core::material_library::MaterialLibrary>>,
+) {
+    use rkf_core::material_library::MaterialLibrary;
+
+    let palette_path = if let Some(ref rel) = project.material_palette {
+        let project_path = project_root.join(rel);
+        if project_path.exists() {
+            project_path
+        } else {
+            rkf_runtime::project::engine_library_dir().join("materials/default.rkmatlib")
+        }
+    } else {
+        rkf_runtime::project::engine_library_dir().join("materials/default.rkmatlib")
+    };
+
+    match MaterialLibrary::load_palette(&palette_path) {
+        Ok(new_lib) => {
+            let mut lib = material_library.lock().unwrap();
+            *lib = new_lib;
+            lib.clear_dirty();
+            log::info!("Material palette loaded from {}", palette_path.display());
+        }
+        Err(e) => {
+            log::warn!("Failed to load material palette from {}: {e}", palette_path.display());
+        }
     }
 }
 
