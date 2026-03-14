@@ -155,6 +155,11 @@ pub struct UiSignals {
     pub available_components: Signal<Vec<String>>,
     /// Behavior systems list — pushed by engine when play mode is active.
     pub systems: Signal<Vec<crate::ui_snapshot::SystemSummary>>,
+
+    // ── Loading indicator ────────────────────────────────────────
+    /// Loading status message — `None` means idle, `Some("...")` shows a message
+    /// in the status bar. Engine thread uses `send()` to update from its thread.
+    pub loading_status: Signal<Option<String>>,
 }
 
 /// Snapshot of inspector data, safe to send to the UI thread.
@@ -254,6 +259,7 @@ impl UiSignals {
             inspector_data: Signal::new(None),
             available_components: Signal::new(Vec::new()),
             systems: Signal::new(Vec::new()),
+            loading_status: Signal::new(None),
         }
     }
 

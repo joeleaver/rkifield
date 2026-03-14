@@ -102,6 +102,20 @@ pub fn StatusBar() -> NodeHandle {
                     }}
                 }
 
+                // Loading status indicator.
+                div {
+                    style: {move || {
+                        if ui.loading_status.get().is_some() {
+                            "color:var(--rinch-color-yellow-5, #fcc419);".to_string()
+                        } else {
+                            "display:none;".to_string()
+                        }
+                    }},
+                    {move || {
+                        ui.loading_status.get().unwrap_or_default()
+                    }}
+                }
+
                 // Spacer.
                 div { style: "flex:1;", }
 

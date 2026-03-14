@@ -135,10 +135,13 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
 
                         // Build and load game dylib if project has one.
                         if let Some(ref game_crate) = pf.game_crate {
+                            set_loading_status(Some("Building game plugin...".into()));
                             game_dylib_loader = engine_loop_io::build_and_load_game_dylib(
                                 &project_root, game_crate, &gameplay_registry, game_dylib_loader.take(),
                             );
                         }
+
+                        set_loading_status(Some("Loading project...".into()));
 
                         let default_scene_path = engine_loop_io::resolve_default_scene_path(&pf, &project_root);
 
@@ -190,10 +193,21 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                     }
                     Err(e) => log::warn!("Failed to load last project '{}': {e}", project_path_str),
                 }
+                set_loading_status(None);
             } else {
                 log::info!("Last project path no longer exists: {project_path_str}");
             }
         }
+    }
+
+    /// Push a loading status message to the UI from the engine thread.
+    /// Pass `None` to clear the loading indicator.
+    fn set_loading_status(msg: Option<String>) {
+        rinch::shell::rinch_runtime::run_on_main_thread(move || {
+            if let Some(ui) = rinch::core::context::try_use_context::<UiSignals>() {
+                ui.loading_status.set(msg);
+            }
+        });
     }
 
     log::info!("Engine thread: engine ready, entering render loop");
@@ -594,6 +608,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                 if let Ok(es_guard) = editor_state.lock() {
                     if let (Some(pf), Some(pp)) = (&es_guard.current_project, &es_guard.current_project_path) {
                         if let Some(ref game_crate) = pf.game_crate {
+                            set_loading_status(Some("Building game plugin...".into()));
                             let project_root = rkf_runtime::project::project_root(std::path::Path::new(pp));
                             game_dylib_loader = engine_loop_io::build_and_load_game_dylib(
                                 &project_root, game_crate, &gameplay_registry, game_dylib_loader.take(),
@@ -602,6 +617,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                             let reg = gameplay_registry.lock().expect("registry lock");
                             behavior_executor = rkf_runtime::behavior::BehaviorExecutor::new(&reg)
                                 .expect("failed to rebuild behavior schedule");
+                            set_loading_status(None);
                         }
                     }
                 }
@@ -626,6 +642,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                 if let Ok(es_guard) = editor_state.lock() {
                     if let (Some(pf), Some(pp)) = (&es_guard.current_project, &es_guard.current_project_path) {
                         if let Some(ref game_crate) = pf.game_crate {
+                            set_loading_status(Some("Building game plugin...".into()));
                             let project_root = rkf_runtime::project::project_root(std::path::Path::new(pp));
                             game_dylib_loader = engine_loop_io::build_and_load_game_dylib(
                                 &project_root, game_crate, &gameplay_registry, game_dylib_loader.take(),
@@ -634,6 +651,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                             let reg = gameplay_registry.lock().expect("registry lock");
                             behavior_executor = rkf_runtime::behavior::BehaviorExecutor::new(&reg)
                                 .expect("failed to rebuild behavior schedule");
+                            set_loading_status(None);
                         }
                     }
                 }
