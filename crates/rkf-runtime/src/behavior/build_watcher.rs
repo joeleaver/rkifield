@@ -69,9 +69,15 @@ impl BuildWatcher {
 
         let crate_name = self.crate_name();
 
+        // Use the game crate's own target directory to avoid contending with
+        // the engine workspace's cargo lock (which may still be held by the
+        // `cargo run` process that launched the editor).
+        let target_dir = self.game_crate_dir.join("target");
+
         let result = Command::new("cargo")
             .args(["build", "-p", &crate_name, "--lib", "--message-format=json"])
             .current_dir(&self.game_crate_dir)
+            .env("CARGO_TARGET_DIR", &target_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn();
@@ -172,14 +178,8 @@ impl BuildWatcher {
             format!("{crate_name}.dll")
         };
 
-        // Walk up from game_crate_dir to find workspace target/debug.
-        let mut target_dir = self.game_crate_dir.clone();
-        // Typically: workspace/crates/game-crate → workspace/target/debug
-        if let Some(workspace) = target_dir.parent().and_then(Path::parent) {
-            workspace.join("target").join("debug").join(&filename)
-        } else {
-            target_dir.join("target").join("debug").join(&filename)
-        }
+        // Use the game crate's own target directory (set via CARGO_TARGET_DIR).
+        self.game_crate_dir.join("target").join("debug").join(&filename)
     }
 }
 
