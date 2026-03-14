@@ -142,6 +142,25 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
 
                         let default_scene_path = engine_loop_io::resolve_default_scene_path(&pf, &project_root);
 
+                        // Load material palette from project or engine library.
+                        {
+                            use rkf_core::material_library::MaterialLibrary;
+                            let palette_path = if let Some(ref rel) = pf.material_palette {
+                                let pp = project_root.join(rel);
+                                if pp.exists() { pp } else {
+                                    rkf_runtime::project::engine_library_dir().join("materials/default.rkmatlib")
+                                }
+                            } else {
+                                rkf_runtime::project::engine_library_dir().join("materials/default.rkmatlib")
+                            };
+                            if let Ok(new_lib) = MaterialLibrary::load_palette(&palette_path) {
+                                let mut lib = engine.material_library.lock().unwrap();
+                                *lib = new_lib;
+                                lib.clear_dirty();
+                                log::info!("Material palette loaded from {}", palette_path.display());
+                            }
+                        }
+
                         if let Some(scene_path) = default_scene_path {
                             let sp = scene_path.to_string_lossy().to_string();
                             let reg = gameplay_registry.lock().unwrap();
