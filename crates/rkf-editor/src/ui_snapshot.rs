@@ -37,6 +37,8 @@ pub struct ObjectSummary {
     pub scale: Vec3,
     pub parent_id: Option<Uuid>,
     pub object_type: ObjectType,
+    /// Analytical primitive type (if this is an analytical object).
+    pub primitive: Option<rkf_core::SdfPrimitive>,
 }
 
 /// Lightweight summary of a material slot for UI display.
@@ -75,7 +77,6 @@ pub struct LightSummary {
 pub struct ShaderSummary {
     pub name: String,
     pub id: u32,
-    pub built_in: bool,
     pub file_path: String,
 }
 
@@ -92,6 +93,32 @@ pub struct SystemSummary {
     pub faulted: bool,
     /// Last frame execution time in microseconds, if available.
     pub last_frame_us: Option<u64>,
+}
+
+/// Severity of a diagnostic entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagnosticSeverity {
+    /// Compile error — blocks the build.
+    Error,
+    /// Warning — build succeeded but something is off.
+    Warning,
+    /// Informational message (build started/finished, etc.).
+    Info,
+}
+
+/// A single entry in the Debug panel's diagnostic list.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiagnosticEntry {
+    /// Severity level.
+    pub severity: DiagnosticSeverity,
+    /// The diagnostic message text.
+    pub message: String,
+    /// Source file path, if available.
+    pub file: Option<String>,
+    /// Line number in the source file, if available.
+    pub line: Option<u32>,
+    /// Column number in the source file, if available.
+    pub column: Option<u32>,
 }
 
 /// Helper for debug mode display.

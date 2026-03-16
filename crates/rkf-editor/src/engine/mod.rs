@@ -18,7 +18,7 @@ use rkf_core::material_library::MaterialLibrary;
 use rkf_render::{
     AutoExposurePass, BlitPass, BloomCompositePass, BloomPass, BrushOverlay, Camera,
     CloudShadowPass, CoarseField, ColorGradePass, CosmeticsPass, DebugViewPass, DofPass,
-    GBuffer, GodRaysBlurPass, GpuObject, GpuSceneV2, Light, LightBuffer, MotionBlurPass,
+    GBuffer, GodRaysBlurPass, GpuObject, GpuScene, Light, LightBuffer, MotionBlurPass,
     RadianceVolume, RayMarchPass, RenderContext, ShaderComposer, ShadingPass,
     SharpenPass, TileObjectCullPass, ToneMapPass, VolCompositePass, VolMarchPass,
     VolShadowPass, VolUpscalePass,
@@ -96,7 +96,7 @@ pub struct EditorEngine {
     /// Viewport size in physical pixels (set by RenderSurface layout).
     pub(super) viewport_width: u32,
     pub(super) viewport_height: u32,
-    pub(super) gpu_scene: GpuSceneV2,
+    pub(super) gpu_scene: GpuScene,
     pub(super) gbuffer: GBuffer,
     pub(super) tile_cull: TileObjectCullPass,
     pub(super) coarse_field: CoarseField,
@@ -205,6 +205,9 @@ pub struct EditorEngine {
     pub(super) tombstone_count: usize,
     /// Full scene replaced (open/new project) — triggers complete rebuild.
     pub(super) topology_changed: bool,
+    /// Current project root directory. Used to resolve project-relative paths
+    /// (e.g. `assets/shaders/` for user shaders).
+    pub(crate) project_root: Option<std::path::PathBuf>,
     /// Lights changed this frame (light editor dirty or world_lights replaced).
     pub(super) lights_dirty: bool,
     /// Last camera position used for light upload (detect camera movement).
@@ -413,10 +416,11 @@ impl EditorEngine {
             .and_then(|f| f.to_str())
             .unwrap_or("");
 
-        // User custom shader in assets/shaders/ — register/update in composer and recompose.
-        let is_user_shader = path.starts_with("assets/shaders/") ||
-            path.components().any(|c| c.as_os_str() == "assets") &&
-            path.components().any(|c| c.as_os_str() == "shaders");
+        // User custom shader in <project>/assets/shaders/ — register/update in composer and recompose.
+        let is_user_shader = self.project_root.as_ref().map_or(false, |root| {
+            let user_shader_dir = root.join("assets").join("shaders");
+            path.starts_with(&user_shader_dir)
+        });
 
         if is_user_shader && filename.ends_with(".wgsl") {
             let source = match std::fs::read_to_string(path) {
@@ -505,6 +509,9 @@ impl EditorEngine {
     /// Recompose the uber-shader from the current ShaderComposer state and recompile.
     fn recompose_and_recompile(&mut self) {
         let source = self.shader_composer.compose().to_string();
+        // Dump composed shader for debugging.
+        let _ = std::fs::write("/tmp/rkf_composed_shade.wgsl", &source);
+        log::info!("Composed shade shader: {} bytes, dumped to /tmp/rkf_composed_shade.wgsl", source.len());
         self.shading_pass.recompile(&self.ctx.device, &source);
         self.shader_error = None;
 
@@ -521,15 +528,18 @@ impl EditorEngine {
 
     /// Scan `assets/shaders/` for user shader files and register them.
     pub(crate) fn scan_user_shaders(&mut self) {
-        let shader_dir = std::path::Path::new("assets/shaders");
+        let shader_dir = match &self.project_root {
+            Some(root) => root.join("assets/shaders"),
+            None => return,
+        };
         if !shader_dir.exists() {
             return;
         }
 
-        let entries = match std::fs::read_dir(shader_dir) {
+        let entries = match std::fs::read_dir(&shader_dir) {
             Ok(e) => e,
             Err(e) => {
-                log::warn!("Failed to read assets/shaders/: {e}");
+                log::warn!("Failed to read {}: {e}", shader_dir.display());
                 return;
             }
         };
@@ -559,6 +569,41 @@ impl EditorEngine {
             let file_path = path.display().to_string();
             let id = self.shader_composer.register_with_path(&shader_name, source, Some(file_path));
             log::info!("Registered user shader: {shader_name} (id={id}) from {}", path.display());
+        }
+
+        // Recompose the uber-shader so new shaders take effect immediately.
+        self.recompose_and_recompile();
+    }
+
+    /// Reinitialize the file watcher to include project-specific directories.
+    pub(crate) fn reinit_file_watcher(&mut self) {
+        let engine_root = rkf_runtime::project::engine_library_dir()
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .to_path_buf();
+        let mut dirs: Vec<std::path::PathBuf> = vec![
+            engine_root.join("crates/rkf-render/shaders"),
+            engine_root.join("crates"),
+        ];
+        if let Some(ref root) = self.project_root {
+            let user_shaders = root.join("assets/shaders");
+            if user_shaders.exists() {
+                dirs.push(user_shaders);
+            }
+            let materials = root.join("assets/materials");
+            if materials.exists() {
+                dirs.push(materials);
+            }
+        }
+        let dir_refs: Vec<&std::path::Path> = dirs.iter().map(|d| d.as_path()).collect();
+        match rkf_runtime::FileWatcher::new(&dir_refs) {
+            Ok(w) => {
+                log::info!("File watcher reinitialized for {} dirs", dirs.len());
+                self.file_watcher = Some(w);
+            }
+            Err(e) => {
+                log::warn!("File watcher reinit failed: {e}");
+            }
         }
     }
 
@@ -645,19 +690,33 @@ impl EditorEngine {
             self.cpu_sdf_cache_pool.grow(new_cap);
         }
 
-        let prim = primitive.clone();
-        let min_scale = scale.x.min(scale.y).min(scale.z).max(1e-6);
-        let inv_scale = Vec3::new(
-            1.0 / scale.x.max(1e-6),
-            1.0 / scale.y.max(1e-6),
-            1.0 / scale.z.max(1e-6),
-        );
-        let sdf_fn = move |pos: Vec3| -> (f32, u8, [u8; 3]) {
-            // Map from scaled local space back to original primitive space,
-            // then apply conservative distance correction.
-            let d = rkf_core::evaluate_primitive(&prim, pos * inv_scale) * min_scale;
-            (d, material_id, [255, 255, 255])
-        };
+        // The voxelizer uses the SDF function for two things:
+        // 1. Sign (inside/outside) → occupancy. Correct regardless of scale.
+        // 2. Distance magnitude → narrow-band brick culling threshold.
+        // SDF cache distances are computed from voxel geometry, not this function.
+        //
+        // For Box, evaluate with scaled half_extents — exact in scaled space.
+        // For other primitives, evaluate in original space — sign is correct,
+        // and conservative min_scale keeps narrow-band culling safe.
+        let sdf_fn: Box<dyn Fn(Vec3) -> (f32, u8, [u8; 3])> =
+            if let Some(scaled_prim) = scale_primitive(primitive, scale) {
+                Box::new(move |pos: Vec3| {
+                    let d = rkf_core::evaluate_primitive(&scaled_prim, pos);
+                    (d, material_id, [255, 255, 255])
+                })
+            } else {
+                let prim = primitive.clone();
+                let min_scale = scale.x.min(scale.y).min(scale.z).max(1e-6);
+                let inv_scale = Vec3::new(
+                    1.0 / scale.x.max(1e-6),
+                    1.0 / scale.y.max(1e-6),
+                    1.0 / scale.z.max(1e-6),
+                );
+                Box::new(move |pos: Vec3| {
+                    let d = rkf_core::evaluate_primitive(&prim, pos * inv_scale) * min_scale;
+                    (d, material_id, [255, 255, 255])
+                })
+            };
 
         let result = voxelize_to_geometry(
             sdf_fn,

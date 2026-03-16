@@ -1,7 +1,7 @@
-//! GPU scene v2 — object-centric bind group layout and resource management.
+//! GPU scene — object-centric bind group layout and resource management.
 //!
-//! [`GpuSceneV2`] replaces the deleted v1 chunk-based GpuScene. It manages the
-//! GPU resources and bind group for the v2 object-centric ray marcher:
+//! [`GpuScene`] manages the GPU resources and bind group for the
+//! object-centric ray marcher:
 //!
 //! | Binding | Resource | Content |
 //! |---------|----------|---------|
@@ -48,8 +48,8 @@ const DEFAULT_OBJECT_CAPACITY: u32 = 256;
 /// Default initial capacity for the brick maps buffer (in u32 entries).
 const DEFAULT_BRICK_MAP_CAPACITY: u32 = 65536;
 
-/// GPU scene v2 — manages all object-centric rendering resources.
-pub struct GpuSceneV2 {
+/// GPU scene — manages all object-centric rendering resources.
+pub struct GpuScene {
     /// Packed brick maps buffer (all objects' brick maps).
     pub brick_maps: GpuBrickMaps,
 
@@ -74,11 +74,11 @@ pub struct GpuSceneV2 {
     pub bind_group: wgpu::BindGroup,
 
     /// Brick pool storage buffer (reference — owned elsewhere, e.g. by BrickPoolManager).
-    /// Set via [`set_brick_pool`](GpuSceneV2::set_brick_pool).
+    /// Set via [`set_brick_pool`](GpuScene::set_brick_pool).
     brick_pool_buffer: wgpu::Buffer,
 }
 
-impl GpuSceneV2 {
+impl GpuScene {
     /// Create a new GPU scene v2 with default capacities.
     ///
     /// `brick_pool_buffer` is the GPU storage buffer containing the brick pool
@@ -243,7 +243,7 @@ impl GpuSceneV2 {
 
     fn create_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
         device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("gpu_scene_v2"),
+            label: Some("gpu_scene"),
             entries: &[
                 // 0: Brick pool (storage, read-only)
                 wgpu::BindGroupLayoutEntry {
@@ -327,7 +327,7 @@ impl GpuSceneV2 {
         bvh: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("gpu_scene_v2"),
+            label: Some("gpu_scene"),
             layout,
             entries: &[
                 wgpu::BindGroupEntry {

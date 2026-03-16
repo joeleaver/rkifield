@@ -364,6 +364,10 @@ impl EditorState {
                     rkf_core::scene_node::SdfSource::Analytical { .. } => ObjectType::Analytical,
                     rkf_core::scene_node::SdfSource::Voxelized { .. } => ObjectType::Voxelized,
                 },
+                primitive: match &obj.root_node.sdf_source {
+                    rkf_core::scene_node::SdfSource::Analytical { primitive, .. } => Some(*primitive),
+                    _ => None,
+                },
             }
         }).collect()
     }

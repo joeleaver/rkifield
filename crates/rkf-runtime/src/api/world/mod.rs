@@ -89,7 +89,7 @@ impl World {
                 persistent: false,
             }],
             active_scene: 0,
-            next_sdf_id: 0,
+            next_sdf_id: 1, // 0 is reserved as "no object" sentinel for GPU picking
             ecs: hecs::World::new(),
             brick_pool: BrickPool::new(4096),
             brick_map_alloc: BrickMapAllocator::new(),

@@ -351,8 +351,9 @@ where
                 let sdf_cache = sdf_pool.get_mut(s_slot);
                 let half_voxel = voxel_size * 0.5;
 
-                // Sample SDF at each voxel center → occupancy + surface data + SDF cache.
-                // Store analytical distances directly — much smoother than Dijkstra.
+                // Sample SDF at each voxel center → occupancy + SDF cache.
+                // TEST: Store analytical distances directly to isolate whether
+                // rings come from compute_sdf_from_geometry or elsewhere.
                 for vz in 0..8u8 {
                     for vy in 0..8u8 {
                         for vx in 0..8u8 {
@@ -417,8 +418,6 @@ where
         }
     }
 
-    // SDF cache was populated with analytical distances during the second pass above.
-    // No Dijkstra needed — analytical values are exact.
     let actual_count = slot_mappings.len();
 
     let handle = map_alloc.allocate(&brick_map);

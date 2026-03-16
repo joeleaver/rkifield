@@ -398,24 +398,16 @@ fn build_float_editor(
         let comp_name = component_name.to_string();
         let field_name = field.name.clone();
 
-        let dv = super::components::DragValue {
-            value: signal,
-            step: 0.01,
-            min: -1e9,
-            max: 1e9,
-            decimals: 3,
-            label: String::new(),
-            label_color: String::new(),
-            suffix: String::new(),
-            on_change: Some(ValueCallback::new(move |v: f64| {
-                let _ = cmd.0.send(EditorCommand::SetComponentField {
-                    entity_id,
-                    component_name: comp_name.clone(),
-                    field_name: field_name.clone(),
-                    value: rkf_runtime::behavior::game_value::GameValue::Float(v),
-                });
-            })),
-        };
+        let mut dv = super::components::DragValue::from_signal(signal, Some(ValueCallback::new(move |v: f64| {
+            let _ = cmd.0.send(EditorCommand::SetComponentField {
+                entity_id,
+                component_name: comp_name.clone(),
+                field_name: field_name.clone(),
+                value: rkf_runtime::behavior::game_value::GameValue::Float(v),
+            });
+        })));
+        dv.step = 0.01;
+        dv.decimals = 3;
         let dv_container = scope.create_element("div");
         dv_container.set_attribute("style", "flex:1;min-width:60px;");
         dv_container.append_child(&dv.render(scope, &[]));
@@ -463,25 +455,17 @@ fn build_int_editor(
         slider_container.append_child(&slider_node);
         row.append_child(&slider_container);
     } else {
-        let dv = super::components::DragValue {
-            value: signal,
-            step: 1.0,
-            min: -1e9,
-            max: 1e9,
-            decimals: 0,
-            label: String::new(),
-            label_color: String::new(),
-            suffix: String::new(),
-            on_change: Some(ValueCallback::new(move |v: f64| {
-                let iv = v.round() as i64;
-                let _ = cmd.0.send(EditorCommand::SetComponentField {
-                    entity_id,
-                    component_name: comp_name.clone(),
-                    field_name: field_name.clone(),
-                    value: rkf_runtime::behavior::game_value::GameValue::Int(iv),
-                });
-            })),
-        };
+        let mut dv = super::components::DragValue::from_signal(signal, Some(ValueCallback::new(move |v: f64| {
+            let iv = v.round() as i64;
+            let _ = cmd.0.send(EditorCommand::SetComponentField {
+                entity_id,
+                component_name: comp_name.clone(),
+                field_name: field_name.clone(),
+                value: rkf_runtime::behavior::game_value::GameValue::Int(iv),
+            });
+        })));
+        dv.step = 1.0;
+        dv.decimals = 0;
         let dv_container = scope.create_element("div");
         dv_container.set_attribute("style", "flex:1;min-width:60px;");
         dv_container.append_child(&dv.render(scope, &[]));
@@ -581,12 +565,11 @@ fn build_vec3_editor(
     let comp_name = component_name.to_string();
     let field_name = field.name.clone();
 
-    let on_change = ValueCallback::new(move |_v: f64| {
-        let new_vec = glam::Vec3::new(
-            rinch::core::untracked(|| sx.get()) as f32,
-            rinch::core::untracked(|| sy.get()) as f32,
-            rinch::core::untracked(|| sz.get()) as f32,
-        );
+    let on_change = ValueCallback::new(move |v: [f64; 3]| {
+        sx.set(v[0]);
+        sy.set(v[1]);
+        sz.set(v[2]);
+        let new_vec = glam::Vec3::new(v[0] as f32, v[1] as f32, v[2] as f32);
         let _ = cmd.0.send(EditorCommand::SetComponentField {
             entity_id,
             component_name: comp_name.clone(),
@@ -596,15 +579,16 @@ fn build_vec3_editor(
     });
 
     let editor = super::components::Vec3Editor {
-        x: sx,
-        y: sy,
-        z: sz,
+        x: Memo::new(move || sx.get()),
+        y: Memo::new(move || sy.get()),
+        z: Memo::new(move || sz.get()),
+        on_change: Some(on_change),
+        on_commit: None,
         step: 0.01,
         min: -1e9,
         max: 1e9,
         decimals: 2,
         suffix: String::new(),
-        on_change: Some(on_change),
     };
 
     let editor_container = scope.create_element("div");

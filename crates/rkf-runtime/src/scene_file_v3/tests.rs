@@ -110,6 +110,55 @@ fn sdf_tree_component_roundtrip() {
 }
 
 #[test]
+fn sdf_tree_analytical_primitive_roundtrip() {
+    use rkf_core::scene_node::{SdfPrimitive, SdfSource};
+
+    let mut tree = crate::components::SdfTree {
+        root: rkf_core::scene_node::SceneNode::new("box"),
+        asset_path: None,
+        aabb: rkf_core::aabb::Aabb::new(
+            glam::Vec3::splat(-0.5),
+            glam::Vec3::splat(0.5),
+        ),
+    };
+    tree.root.sdf_source = SdfSource::Analytical {
+        primitive: SdfPrimitive::Box {
+            half_extents: glam::Vec3::splat(0.5),
+        },
+        material_id: 3,
+    };
+
+    let mut record = EntityRecord::new(Uuid::from_u128(999));
+    record.insert_component(component_names::SDF_TREE, &tree).unwrap();
+
+    let ron_str = &record.components[component_names::SDF_TREE];
+    let tree2: crate::components::SdfTree = ron::from_str(ron_str).unwrap();
+    assert_eq!(tree2.asset_path, None);
+    assert_eq!(tree2.aabb.min, glam::Vec3::splat(-0.5));
+    match &tree2.root.sdf_source {
+        SdfSource::Analytical { primitive, material_id } => {
+            assert_eq!(*material_id, 3);
+            match primitive {
+                SdfPrimitive::Box { half_extents } => {
+                    assert_eq!(*half_extents, glam::Vec3::splat(0.5));
+                }
+                other => panic!("Expected Box, got {other:?}"),
+            }
+        }
+        other => panic!("Expected Analytical, got {other:?}"),
+    }
+}
+
+#[test]
+fn sdf_tree_legacy_format_without_primitive() {
+    // Old scene files won't have primitive/material_id fields — should deserialize fine
+    let ron_str = "(asset_path:None,aabb:(min:(-0.5,-0.5,-0.5),max:(0.5,0.5,0.5)))";
+    let tree: crate::components::SdfTree = ron::from_str(ron_str).unwrap();
+    assert_eq!(tree.asset_path, None);
+    assert!(matches!(tree.root.sdf_source, rkf_core::scene_node::SdfSource::None));
+}
+
+#[test]
 fn fog_volume_component_roundtrip() {
     let mut record = EntityRecord::new(Uuid::from_u128(99));
     let fog = crate::components::FogVolumeComponent {

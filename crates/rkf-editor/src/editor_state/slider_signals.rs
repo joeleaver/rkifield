@@ -65,25 +65,9 @@ pub struct SliderSignals {
     pub brush_strength: Signal<f64>,
     pub brush_falloff: Signal<f64>,
 
-    // Object transform (bound to currently selected object)
-    pub obj_pos_x: Signal<f64>,
-    pub obj_pos_y: Signal<f64>,
-    pub obj_pos_z: Signal<f64>,
-    pub obj_rot_x: Signal<f64>,
-    pub obj_rot_y: Signal<f64>,
-    pub obj_rot_z: Signal<f64>,
-    pub obj_scale_x: Signal<f64>,
-    pub obj_scale_y: Signal<f64>,
-    pub obj_scale_z: Signal<f64>,
-    pub bound_object_id: Signal<Option<uuid::Uuid>>,
-
-    // Light properties (bound to currently selected light)
-    pub light_pos_x: Signal<f64>,
-    pub light_pos_y: Signal<f64>,
-    pub light_pos_z: Signal<f64>,
-    pub light_intensity: Signal<f64>,
-    pub light_range: Signal<f64>,
-    pub bound_light_id: Signal<Option<u64>>,
+    // Object transform and light properties are NO LONGER here.
+    // They read from UiSignals via Memo (single source of truth).
+    // See TransformEditor and LightProperties components.
 }
 
 impl SliderSignals {
@@ -126,24 +110,6 @@ impl SliderSignals {
             brush_radius: Signal::new(es.sculpt.current_settings.radius as f64),
             brush_strength: Signal::new(es.sculpt.current_settings.strength as f64),
             brush_falloff: Signal::new(es.sculpt.current_settings.falloff as f64),
-            // Object transform — initialized empty, populated on selection change.
-            obj_pos_x: Signal::new(0.0),
-            obj_pos_y: Signal::new(0.0),
-            obj_pos_z: Signal::new(0.0),
-            obj_rot_x: Signal::new(0.0),
-            obj_rot_y: Signal::new(0.0),
-            obj_rot_z: Signal::new(0.0),
-            obj_scale_x: Signal::new(1.0),
-            obj_scale_y: Signal::new(1.0),
-            obj_scale_z: Signal::new(1.0),
-            bound_object_id: Signal::new(None),
-            // Light properties — initialized empty, populated on selection change.
-            light_pos_x: Signal::new(0.0),
-            light_pos_y: Signal::new(0.0),
-            light_pos_z: Signal::new(0.0),
-            light_intensity: Signal::new(1.0),
-            light_range: Signal::new(10.0),
-            bound_light_id: Signal::new(None),
         }
     }
 
@@ -162,8 +128,8 @@ impl SliderSignals {
         self.send_cloud_commands(cmd, ui);
         self.send_post_process_commands(cmd, ui);
         self.send_brush_commands(cmd);
-        self.send_object_transform_commands(cmd);
-        self.send_light_commands(cmd);
+        // Object transform and light properties are handled by their
+        // respective UI components via EditorCommands (single source of truth).
     }
 
     /// Send camera-related commands (FOV, speed, near/far).
@@ -276,59 +242,6 @@ impl SliderSignals {
         });
     }
 
-    /// Send object transform commands (position, rotation, scale) for the bound object.
-    pub fn send_object_transform_commands(&self, cmd: &crate::CommandSender) {
-        use crate::editor_command::EditorCommand;
-        if let Some(oid) = self.bound_object_id.get() {
-            let _ = cmd.0.send(EditorCommand::SetObjectPosition {
-                entity_id: oid,
-                position: Vec3::new(
-                    self.obj_pos_x.get() as f32,
-                    self.obj_pos_y.get() as f32,
-                    self.obj_pos_z.get() as f32,
-                ),
-            });
-            let _ = cmd.0.send(EditorCommand::SetObjectRotation {
-                entity_id: oid,
-                rotation: Vec3::new(
-                    self.obj_rot_x.get() as f32,
-                    self.obj_rot_y.get() as f32,
-                    self.obj_rot_z.get() as f32,
-                ),
-            });
-            let _ = cmd.0.send(EditorCommand::SetObjectScale {
-                entity_id: oid,
-                scale: Vec3::new(
-                    self.obj_scale_x.get() as f32,
-                    self.obj_scale_y.get() as f32,
-                    self.obj_scale_z.get() as f32,
-                ),
-            });
-        }
-    }
-
-    /// Send light property commands (position, intensity, range) for the bound light.
-    pub fn send_light_commands(&self, cmd: &crate::CommandSender) {
-        use crate::editor_command::EditorCommand;
-        if let Some(lid) = self.bound_light_id.get() {
-            let _ = cmd.0.send(EditorCommand::SetLightPosition {
-                light_id: lid,
-                position: Vec3::new(
-                    self.light_pos_x.get() as f32,
-                    self.light_pos_y.get() as f32,
-                    self.light_pos_z.get() as f32,
-                ),
-            });
-            let _ = cmd.0.send(EditorCommand::SetLightIntensity {
-                light_id: lid,
-                intensity: self.light_intensity.get() as f32,
-            });
-            let _ = cmd.0.send(EditorCommand::SetLightRange {
-                light_id: lid,
-                range: self.light_range.get() as f32,
-            });
-        }
-    }
 
     /// Send toggle/state commands (atmosphere, fog, clouds, bloom, DoF, tone map mode).
     pub fn send_toggle_commands(&self, cmd: &crate::CommandSender, ui: &UiSignals) {
@@ -390,22 +303,6 @@ impl SliderSignals {
         let _ = self.brush_radius.get();
         let _ = self.brush_strength.get();
         let _ = self.brush_falloff.get();
-        // Object transform
-        let _ = self.obj_pos_x.get();
-        let _ = self.obj_pos_y.get();
-        let _ = self.obj_pos_z.get();
-        let _ = self.obj_rot_x.get();
-        let _ = self.obj_rot_y.get();
-        let _ = self.obj_rot_z.get();
-        let _ = self.obj_scale_x.get();
-        let _ = self.obj_scale_y.get();
-        let _ = self.obj_scale_z.get();
-        // Light properties
-        let _ = self.light_pos_x.get();
-        let _ = self.light_pos_y.get();
-        let _ = self.light_pos_z.get();
-        let _ = self.light_intensity.get();
-        let _ = self.light_range.get();
     }
 
     /// Write all signal values back to `EditorState` in one shot.
@@ -471,68 +368,8 @@ impl SliderSignals {
         // Mark environment dirty so the engine picks up changes.
         es.environment.mark_dirty();
 
-        // Object transform — write back via World API (hecs-authoritative).
-        // Read bound IDs with untracked() to avoid subscribing to selection changes.
-        let obj_id = rinch::core::untracked(|| self.bound_object_id.get());
-        if let Some(entity) = obj_id {
-            if es.world.is_alive(entity) {
-                let pos = glam::Vec3::new(
-                    self.obj_pos_x.get() as f32,
-                    self.obj_pos_y.get() as f32,
-                    self.obj_pos_z.get() as f32,
-                );
-                let rot = glam::Quat::from_euler(
-                    glam::EulerRot::XYZ,
-                    (self.obj_rot_x.get() as f32).to_radians(),
-                    (self.obj_rot_y.get() as f32).to_radians(),
-                    (self.obj_rot_z.get() as f32).to_radians(),
-                );
-                let scale = glam::Vec3::new(
-                    self.obj_scale_x.get() as f32,
-                    self.obj_scale_y.get() as f32,
-                    self.obj_scale_z.get() as f32,
-                );
-                let wp = rkf_core::WorldPosition::new(glam::IVec3::ZERO, pos);
-                let _ = es.world.set_position(entity, wp);
-                let _ = es.world.set_rotation(entity, rot);
-                let _ = es.world.set_scale(entity, scale);
-            }
-        }
-
-        // Light properties — write back if bound.
-        let light_id = rinch::core::untracked(|| self.bound_light_id.get());
-        if let Some(lid) = light_id {
-            if let Some(light) = es.light_editor.get_light_mut(lid) {
-                light.position.x = self.light_pos_x.get() as f32;
-                light.position.y = self.light_pos_y.get() as f32;
-                light.position.z = self.light_pos_z.get() as f32;
-                light.intensity = self.light_intensity.get() as f32;
-                light.range = self.light_range.get() as f32;
-            }
-            es.light_editor.mark_dirty();
-        }
+        // Object transform and light properties are handled by their
+        // respective UI components via EditorCommands (single source of truth).
     }
 
-    /// Push object transform values into the signals (selection changed).
-    /// Called from an untracked context to avoid triggering the batch sync Effect.
-    pub fn push_object_values(&self, pos: Vec3, rot_deg: Vec3, scale: Vec3) {
-        self.obj_pos_x.set(pos.x as f64);
-        self.obj_pos_y.set(pos.y as f64);
-        self.obj_pos_z.set(pos.z as f64);
-        self.obj_rot_x.set(rot_deg.x as f64);
-        self.obj_rot_y.set(rot_deg.y as f64);
-        self.obj_rot_z.set(rot_deg.z as f64);
-        self.obj_scale_x.set(scale.x as f64);
-        self.obj_scale_y.set(scale.y as f64);
-        self.obj_scale_z.set(scale.z as f64);
-    }
-
-    /// Push light property values into the signals (selection changed).
-    pub fn push_light_values(&self, pos: Vec3, intensity: f32, range: f32) {
-        self.light_pos_x.set(pos.x as f64);
-        self.light_pos_y.set(pos.y as f64);
-        self.light_pos_z.set(pos.z as f64);
-        self.light_intensity.set(intensity as f64);
-        self.light_range.set(range as f64);
-    }
 }

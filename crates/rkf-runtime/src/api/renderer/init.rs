@@ -11,7 +11,7 @@ use rkf_render::radiance_mip::RadianceMipPass;
 use rkf_render::{
     BlitPass, BloomCompositePass, BloomPass, Camera, CloudShadowPass,
     CoarseField, ColorGradePass, CosmeticsPass, DebugViewPass, DofPass, GBuffer,
-    GodRaysBlurPass, GpuSceneV2, Light, LightBuffer, MotionBlurPass,
+    GodRaysBlurPass, GpuScene, Light, LightBuffer, MotionBlurPass,
     RadianceVolume, RayMarchPass, RenderContext, ShadingPass,
     SharpenPass, TileObjectCullPass, ToneMapPass, VolCompositePass, VolMarchPass, VolShadowPass,
     VolUpscalePass, WireframePass, AutoExposurePass, COARSE_VOXEL_SIZE,
@@ -74,14 +74,7 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
-        let gpu_scene = GpuSceneV2::new(&ctx.device, brick_pool_buffer);
-
-        let brick_pool_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("brick_pool_shadow"),
-            size: 8,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let gpu_scene = GpuScene::new(&ctx.device, brick_pool_buffer);
 
         let gbuffer = GBuffer::new(&ctx.device, iw, ih);
         let tile_cull = TileObjectCullPass::new(&ctx.device, &gpu_scene, iw, ih);
@@ -282,7 +275,6 @@ impl Renderer {
         Self {
             ctx,
             gpu_scene,
-            brick_pool_buffer,
             gbuffer,
             tile_cull,
             coarse_field,

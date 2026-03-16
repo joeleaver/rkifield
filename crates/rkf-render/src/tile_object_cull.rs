@@ -8,7 +8,7 @@
 //! Dispatch: ceil(width/16) × ceil(height/16) × 1
 //! Workgroup: 16×16 = 256 threads (cooperative object testing)
 
-use crate::gpu_scene::GpuSceneV2;
+use crate::gpu_scene::GpuScene;
 
 /// Tile size in pixels (must match the shader's TILE_SIZE constant).
 pub const OBJECT_TILE_SIZE: u32 = 16;
@@ -47,7 +47,7 @@ impl TileObjectCullPass {
     ///
     /// `gpu_scene` provides the bind group layout for group 0 (objects, camera, scene).
     /// `width` and `height` are the internal render resolution.
-    pub fn new(device: &wgpu::Device, gpu_scene: &GpuSceneV2, width: u32, height: u32) -> Self {
+    pub fn new(device: &wgpu::Device, gpu_scene: &GpuScene, width: u32, height: u32) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("tile_object_cull.wgsl"),
             source: wgpu::ShaderSource::Wgsl(
@@ -193,7 +193,7 @@ impl TileObjectCullPass {
     ///
     /// Must be called after `gpu_scene.upload_objects()` and `gpu_scene.update_camera()`
     /// so that object AABBs and camera data are current.
-    pub fn dispatch(&self, encoder: &mut wgpu::CommandEncoder, gpu_scene: &GpuSceneV2) {
+    pub fn dispatch(&self, encoder: &mut wgpu::CommandEncoder, gpu_scene: &GpuScene) {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("tile_object_cull"),
             timestamp_writes: None,

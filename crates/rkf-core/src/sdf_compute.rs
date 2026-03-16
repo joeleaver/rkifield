@@ -398,45 +398,18 @@ fn x_range_clone(size: u32, reverse: bool) -> Box<dyn Iterator<Item = u32>> {
 /// - 2 axes:  ~0.35h (surface crosses an edge region)
 /// - 3 axes:  ~0.29h (surface crosses a corner region)
 fn surface_seed_distance(
-    ctx: &NeighborContext<'_>,
-    vx: u8,
-    vy: u8,
-    vz: u8,
+    _ctx: &NeighborContext<'_>,
+    _vx: u8,
+    _vy: u8,
+    _vz: u8,
     voxel_size: f32,
 ) -> f32 {
-    let solid = ctx.center.is_solid(vx, vy, vz);
-    let mut crossing_axes = 0u32;
-
-    // Check each axis for a boundary crossing
-    let offsets: [(i8, i8, i8); 6] = [
-        (-1, 0, 0), (1, 0, 0),  // x axis
-        (0, -1, 0), (0, 1, 0),  // y axis
-        (0, 0, -1), (0, 0, 1),  // z axis
-    ];
-
-    let mut x_cross = false;
-    let mut y_cross = false;
-    let mut z_cross = false;
-
-    for (i, &(dx, dy, dz)) in offsets.iter().enumerate() {
-        let nx = vx as i8 + dx;
-        let ny = vy as i8 + dy;
-        let nz = vz as i8 + dz;
-        let neighbor_solid = ctx.is_neighbor_solid(nx, ny, nz);
-        if solid != neighbor_solid {
-            match i / 2 {
-                0 => x_cross = true,
-                1 => y_cross = true,
-                _ => z_cross = true,
-            }
-        }
-    }
-
-    crossing_axes = x_cross as u32 + y_cross as u32 + z_cross as u32;
-
-    // Distance = 0.5h / sqrt(crossing_axes), clamped to at least 1 axis
-    let axes = crossing_axes.max(1) as f32;
-    0.5 * voxel_size / axes.sqrt()
+    // A surface voxel is ~0.5 voxels from the true surface, regardless of
+    // whether it sits at a face, edge, or corner. The old multi-axis
+    // correction (0.5h / sqrt(N)) seeded edge/corner voxels with smaller
+    // distances, which the Eikonal solver then propagated inward as circular
+    // wavefronts — visible as concentric ring artifacts on large flat surfaces.
+    0.5 * voxel_size
 }
 
 

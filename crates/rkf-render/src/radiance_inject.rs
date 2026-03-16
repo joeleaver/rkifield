@@ -9,7 +9,7 @@
 //!
 //! | Group | Content |
 //! |-------|---------|
-//! | 0 | GpuSceneV2 (brick pool, brick maps, objects, camera, scene, BVH) |
+//! | 0 | GpuScene (brick pool, brick maps, objects, camera, scene, BVH) |
 //! | 1 | Material table (storage buffer) |
 //! | 2 | Lights (storage buffer) + InjectUniforms (uniform) |
 //! | 3 | Radiance volume L0 write (storage texture) + volume uniforms (uniform) |
@@ -18,7 +18,7 @@
 use bytemuck::{Pod, Zeroable};
 
 use crate::coarse_field::CoarseField;
-use crate::gpu_scene::GpuSceneV2;
+use crate::gpu_scene::GpuScene;
 use crate::light::LightBuffer;
 use crate::radiance_volume::{RadianceVolume, RADIANCE_DIM, RADIANCE_FORMAT};
 
@@ -65,7 +65,7 @@ impl RadianceInjectPass {
     /// Create the radiance injection pass.
     pub fn new(
         device: &wgpu::Device,
-        scene: &GpuSceneV2,
+        scene: &GpuScene,
         material_buffer: &wgpu::Buffer,
         lights: &LightBuffer,
         radiance_volume: &RadianceVolume,
@@ -269,7 +269,7 @@ impl RadianceInjectPass {
     pub fn dispatch(
         &self,
         encoder: &mut wgpu::CommandEncoder,
-        scene: &GpuSceneV2,
+        scene: &GpuScene,
         coarse_field: &CoarseField,
     ) {
         let wg = RADIANCE_DIM / 4; // 32

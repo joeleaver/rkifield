@@ -113,9 +113,10 @@ pub enum EditorCommand {
     NewProject,
     OpenProject { path: String },
     SaveProject,
+    RemoveRecentProject { path: String },
 
     // ── Voxel ops ────────────────────────────────────────────────────────
-    ConvertToVoxel { object_id: Uuid },
+    ConvertToVoxel { object_id: Uuid, voxel_size: f32 },
 
     // ── Materials ────────────────────────────────────────────────────────
     SelectMaterial { slot: u16 },

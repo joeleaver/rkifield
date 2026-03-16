@@ -105,7 +105,8 @@ impl EditorAutomationApi {
                     .ok_or_else(|| AutomationError::EngineError(
                         format!("object {object_id} not found")
                     ))?;
-                es.pending_convert_to_voxel = Some(entity_uuid);
+                // MCP uses a default voxel_size of 0 to signal auto-compute.
+                es.pending_convert_to_voxel = Some((entity_uuid, 0.0));
                 Ok(format!("queued voxelization for object {object_id}"))
             }
             ["voxelize"] => Err(AutomationError::InvalidParameter(

@@ -81,123 +81,27 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
     log::info!("Engine thread: creating dedicated GPU device");
 
     // Create engine with its own wgpu device (no sharing with compositor).
-    let (mut engine, demo_scene) = EditorEngine::new_headless(
+    // Starts with an empty scene — content loaded via project/scene path.
+    // hecs is the single source of truth for all scene data.
+    let mut engine = EditorEngine::new_headless(
         DISPLAY_WIDTH,
         DISPLAY_HEIGHT,
         Arc::clone(&shared_state),
     );
 
-    // 4. Store demo scene in editor_state (set world's scene directly).
-    if let Ok(mut es) = editor_state.lock() {
-        es.world.load_from_scene(&demo_scene);
-
-        // Seed editor light list from render lights (point/spot only).
-        for rl in &engine.world_lights {
-            use crate::light_editor::{SceneLight, SceneLightType};
-            if rl.light_type == 0 {
-                continue; // Skip directional -- driven by environment
-            }
-            let light_type = match rl.light_type {
-                2 => SceneLightType::Spot,
-                _ => SceneLightType::Point,
-            };
-            es.light_editor.add_light_full(SceneLight {
-                id: 0, // overwritten by add_light_full
-                light_type,
-                position: glam::Vec3::new(rl.pos_x, rl.pos_y, rl.pos_z),
-                direction: glam::Vec3::new(rl.dir_x, rl.dir_y, rl.dir_z),
-                color: glam::Vec3::new(rl.color_r, rl.color_g, rl.color_b),
-                intensity: rl.intensity,
-                range: rl.range,
-                spot_inner_angle: rl.inner_angle,
-                spot_outer_angle: rl.outer_angle,
-                cast_shadows: rl.shadow_caster != 0,
-                cookie_path: None,
-            });
-        }
-        es.light_editor.clear_dirty();
-    }
-
     // Game plugin dylib handle — must outlive the GameplayRegistry since system
     // fn_ptrs point into the loaded library. Dropping unloads the dylib.
     let mut game_dylib_loader: Option<rkf_runtime::behavior::DylibLoader> = None;
 
-    // Auto-open last project if configured.
+    // Load recent projects and push to UI for the welcome screen.
     {
         let config = crate::editor_config::load_editor_config();
-        if let Some(ref project_path_str) = config.last_project_path {
-            if std::path::Path::new(project_path_str).exists() {
-                log::info!("Auto-opening last project: {project_path_str}");
-                match rkf_runtime::load_project(project_path_str) {
-                    Ok(pf) => {
-                        let project_path = std::path::Path::new(project_path_str);
-                        let project_root = rkf_runtime::project::project_root(project_path);
-
-                        // Build and load game dylib if project has one.
-                        if let Some(ref game_crate) = pf.game_crate {
-                            set_loading_status(Some("Building game plugin...".into()));
-                            game_dylib_loader = engine_loop_io::build_and_load_game_dylib(
-                                &project_root, game_crate, &gameplay_registry, game_dylib_loader.take(),
-                            );
-                        }
-
-                        set_loading_status(Some("Loading project...".into()));
-
-                        let default_scene_path = engine_loop_io::resolve_default_scene_path(&pf, &project_root);
-
-                        // Load material palette from project or engine library.
-                        {
-                            use rkf_core::material_library::MaterialLibrary;
-                            let palette_path = if let Some(ref rel) = pf.material_palette {
-                                let pp = project_root.join(rel);
-                                if pp.exists() { pp } else {
-                                    rkf_runtime::project::engine_library_dir().join("materials/default.rkmatlib")
-                                }
-                            } else {
-                                rkf_runtime::project::engine_library_dir().join("materials/default.rkmatlib")
-                            };
-                            if let Ok(new_lib) = MaterialLibrary::load_palette(&palette_path) {
-                                let mut lib = engine.material_library.lock().unwrap();
-                                *lib = new_lib;
-                                lib.clear_dirty();
-                                log::info!("Material palette loaded from {}", palette_path.display());
-                            }
-                        }
-
-                        if let Some(scene_path) = default_scene_path {
-                            let sp = scene_path.to_string_lossy().to_string();
-                            let reg = gameplay_registry.lock().unwrap();
-                            if let Ok(mut es) = editor_state.lock() {
-                                match engine_loop_io::load_scene_v3(
-                                    &sp, &mut engine, &mut es, &reg,
-                                ) {
-                                    Ok(()) => {
-                                        es.current_scene_path = Some(sp.clone());
-                                        // Restore editor layout if saved in project.
-                                        if let Some(ref layout_ron) = pf.editor_layout {
-                                            layout_backing.from_ron(layout_ron);
-                                            let lb = layout_backing.clone();
-                                            rinch::shell::rinch_runtime::run_on_main_thread(move || {
-                                                let layout = rinch::core::use_context::<crate::layout::state::LayoutState>();
-                                                layout.load_from_backing(&lb);
-                                            });
-                                        }
-                                        es.current_project = Some(pf);
-                                        es.current_project_path = Some(project_path_str.clone());
-                                        log::info!("Last project restored: {project_path_str}");
-                                    }
-                                    Err(e) => log::error!("Failed to load last project's scene: {e}"),
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => log::warn!("Failed to load last project '{}': {e}", project_path_str),
-                }
-                set_loading_status(None);
-            } else {
-                log::info!("Last project path no longer exists: {project_path_str}");
+        let recents = config.recent_projects;
+        rinch::shell::rinch_runtime::run_on_main_thread(move || {
+            if let Some(ui) = rinch::core::context::try_use_context::<UiSignals>() {
+                ui.recent_projects.set(recents);
             }
-        }
+        });
     }
 
     /// Push a loading status message to the UI from the engine thread.
@@ -286,6 +190,9 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                                     frame_dirty_objects.push(obj_id);
                                 }
                             }
+                            // Push updated summaries to UiSignals so the properties
+                            // panel (which reads via Memo) reflects the change.
+                            dirty.scene = true;
                         }
                         // Structural scene changes.
                         EditorCommand::SpawnPrimitive { .. }
@@ -306,6 +213,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                         EditorCommand::SetLightPosition { .. }
                         | EditorCommand::SetLightIntensity { .. }
                         | EditorCommand::SetLightRange { .. } => {
+                            dirty.lights = true;
                         }
                         _ => {}
                     }
@@ -573,7 +481,8 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                 es.pending_save_as = false;
                 let reg = gameplay_registry.lock().expect("registry lock");
                 engine_loop_io::handle_scene_save_as(es, &editor_state, &engine, &reg);
-                continue;
+                // Re-acquire lock — es was consumed by handle_scene_save_as.
+                es = editor_state.lock().expect("editor_state lock after save-as");
             }
 
             if es.pending_open {
@@ -588,7 +497,13 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                     material_library: &mat_lib,
                 };
                 engine_loop_io::handle_scene_open_impl(es, open_path, &mut io_ctx);
-                continue;
+                // Re-acquire lock — es was consumed by handle_scene_open_impl.
+                // Fall through to render the newly loaded scene this frame.
+                es = editor_state.lock().expect("editor_state lock after scene open");
+                frame_topology_changed = true;
+                dirty.scene = true;
+                dirty.lights = true;
+                dirty.materials = true;
             }
 
             if es.pending_new_project {
@@ -604,24 +519,35 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                 };
                 engine_loop_io::handle_new_project(&mut io_ctx, &mut frame_topology_changed);
 
-                // Build and load game dylib for the new project.
-                if let Ok(es_guard) = editor_state.lock() {
-                    if let (Some(pf), Some(pp)) = (&es_guard.current_project, &es_guard.current_project_path) {
-                        if let Some(ref game_crate) = pf.game_crate {
-                            set_loading_status(Some("Building game plugin...".into()));
-                            let project_root = rkf_runtime::project::project_root(std::path::Path::new(pp));
-                            game_dylib_loader = engine_loop_io::build_and_load_game_dylib(
-                                &project_root, game_crate, &gameplay_registry, game_dylib_loader.take(),
-                            );
-                            // Rebuild schedule after loading new components/systems.
-                            let reg = gameplay_registry.lock().expect("registry lock");
-                            behavior_executor = rkf_runtime::behavior::BehaviorExecutor::new(&reg)
-                                .expect("failed to rebuild behavior schedule");
-                            set_loading_status(None);
-                        }
-                    }
+                // Push project-loaded to UI if a project was actually created.
+                if editor_state.lock().ok().map_or(false, |es| es.current_project.is_some()) {
+                    engine_loop_io::push_project_loaded_to_ui();
                 }
-                continue;
+
+                // Build and load game plugin for the new project.
+                let project_root = editor_state.lock().ok().and_then(|es_guard| {
+                    let pp = es_guard.current_project_path.as_ref()?;
+                    Some(rkf_runtime::project::project_root(std::path::Path::new(pp)))
+                });
+                if let Some(project_root) = project_root {
+                    set_loading_status(Some("Building game plugin...".into()));
+                    game_dylib_loader = engine_loop_io::build_and_load_game_dylib(
+                        &project_root, &gameplay_registry, game_dylib_loader.take(),
+                    );
+                    let reg = gameplay_registry.lock().expect("registry lock");
+                    behavior_executor = rkf_runtime::behavior::BehaviorExecutor::new(&reg)
+                        .expect("failed to rebuild behavior schedule");
+                    set_loading_status(None);
+                }
+
+                engine.topology_changed = true;
+                dirty.scene = true;
+                dirty.lights = true;
+                dirty.materials = true;
+                dirty.shaders = true;
+                // Re-acquire lock — es was dropped above.
+                // Fall through to render the newly created project this frame.
+                es = editor_state.lock().expect("editor_state lock after new project");
             }
 
             if es.pending_open_project {
@@ -638,24 +564,35 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                 };
                 engine_loop_io::handle_open_project(open_path, &mut io_ctx, &mut frame_topology_changed);
 
-                // Build and load game dylib for the opened project.
-                if let Ok(es_guard) = editor_state.lock() {
-                    if let (Some(pf), Some(pp)) = (&es_guard.current_project, &es_guard.current_project_path) {
-                        if let Some(ref game_crate) = pf.game_crate {
-                            set_loading_status(Some("Building game plugin...".into()));
-                            let project_root = rkf_runtime::project::project_root(std::path::Path::new(pp));
-                            game_dylib_loader = engine_loop_io::build_and_load_game_dylib(
-                                &project_root, game_crate, &gameplay_registry, game_dylib_loader.take(),
-                            );
-                            // Rebuild schedule after loading new components/systems.
-                            let reg = gameplay_registry.lock().expect("registry lock");
-                            behavior_executor = rkf_runtime::behavior::BehaviorExecutor::new(&reg)
-                                .expect("failed to rebuild behavior schedule");
-                            set_loading_status(None);
-                        }
-                    }
+                // Push project-loaded to UI if a project was actually opened.
+                if editor_state.lock().ok().map_or(false, |es| es.current_project.is_some()) {
+                    engine_loop_io::push_project_loaded_to_ui();
                 }
-                continue;
+
+                // Build and load game plugin for the opened project.
+                let project_root = editor_state.lock().ok().and_then(|es_guard| {
+                    let pp = es_guard.current_project_path.as_ref()?;
+                    Some(rkf_runtime::project::project_root(std::path::Path::new(pp)))
+                });
+                if let Some(project_root) = project_root {
+                    set_loading_status(Some("Building game plugin...".into()));
+                    game_dylib_loader = engine_loop_io::build_and_load_game_dylib(
+                        &project_root, &gameplay_registry, game_dylib_loader.take(),
+                    );
+                    let reg = gameplay_registry.lock().expect("registry lock");
+                    behavior_executor = rkf_runtime::behavior::BehaviorExecutor::new(&reg)
+                        .expect("failed to rebuild behavior schedule");
+                    set_loading_status(None);
+                }
+
+                engine.topology_changed = true;
+                dirty.scene = true;
+                dirty.lights = true;
+                dirty.materials = true;
+                dirty.shaders = true;
+                // Re-acquire lock — es was dropped above.
+                // Fall through to render the newly opened project this frame.
+                es = editor_state.lock().expect("editor_state lock after open project");
             }
 
             if es.pending_save_project {
@@ -789,9 +726,9 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         }
 
         // e0. Process pending convert-to-voxel.
-        if let Some(obj_id) = f_convert_to_voxel {
+        if let Some((obj_id, voxel_size)) = f_convert_to_voxel {
             engine_loop_edits::process_convert_to_voxel(
-                obj_id, &mut engine, &editor_state, &mut scene_clone, &mut frame_dirty_objects,
+                obj_id, voxel_size, &mut engine, &editor_state, &mut scene_clone, &mut frame_dirty_objects,
             );
         }
 
@@ -913,16 +850,24 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             );
         }
 
-        // h. Render frame to offscreen texture.
+        // h. Render frame to offscreen texture (skip if no project loaded).
         let t_render_start = std::time::Instant::now();
-        engine.render_frame_offscreen(&scene_clone);
+        let has_project = engine.project_root.is_some();
+        if has_project {
+            engine.render_frame_offscreen(&scene_clone);
+        }
         let t_render_end = std::time::Instant::now();
 
         // i. Synchronous readback -- wait for GPU, read pixels, submit to compositor.
-        let (pixels, px_w, px_h) = engine.map_readback();
-        let t_submit_start = std::time::Instant::now();
-        surface_writer.submit_frame(&pixels, px_w, px_h);
-        let t_submit_end = std::time::Instant::now();
+        let (pixels, px_w, px_h, t_submit_start, t_submit_end) = if has_project {
+            let (pixels, px_w, px_h) = engine.map_readback();
+            let ts = std::time::Instant::now();
+            surface_writer.submit_frame(&pixels, px_w, px_h);
+            let te = std::time::Instant::now();
+            (pixels, px_w, px_h, ts, te)
+        } else {
+            (Vec::new(), 0, 0, t_render_end, t_render_end)
+        };
 
         // Log frame breakdown every 60 frames.
         static FRAME_N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

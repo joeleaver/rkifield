@@ -326,10 +326,21 @@ pub(crate) fn apply_editor_command(es: &mut EditorState, cmd: crate::editor_comm
         SaveProject => {
             es.pending_save_project = true;
         }
+        RemoveRecentProject { path } => {
+            crate::editor_config::remove_recent_project(&path);
+            // Refresh the UI signal with updated list.
+            let config = crate::editor_config::load_editor_config();
+            let recents = config.recent_projects;
+            rinch::shell::rinch_runtime::run_on_main_thread(move || {
+                if let Some(ui) = rinch::core::context::try_use_context::<crate::editor_state::UiSignals>() {
+                    ui.recent_projects.set(recents);
+                }
+            });
+        }
 
         // -- Voxel ops ---------------------------------------------------
-        ConvertToVoxel { object_id } => {
-            es.pending_convert_to_voxel = Some(object_id);
+        ConvertToVoxel { object_id, voxel_size } => {
+            es.pending_convert_to_voxel = Some((object_id, voxel_size));
         }
         // -- Animation ---------------------------------------------------
         SetAnimationState { state } => {

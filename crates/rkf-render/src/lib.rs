@@ -119,7 +119,7 @@ pub use gpu_color_pool::GpuColorPool;
 pub use gpu_brick_maps::GpuBrickMaps;
 pub use gpu_bvh::{GpuBvh, GpuBvhNode};
 pub use gpu_object::GpuObject;
-pub use gpu_scene::{GpuSceneV2, SceneUniforms};
+pub use gpu_scene::{GpuScene, SceneUniforms};
 pub use brush_overlay::{BrushOverlay, BrushOverlayUniforms};
 pub use blit::BlitPass;
 pub use ray_march::RayMarchPass;

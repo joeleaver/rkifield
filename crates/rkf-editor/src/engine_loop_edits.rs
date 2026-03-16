@@ -8,6 +8,45 @@ use crate::automation::SharedState;
 use crate::editor_state::EditorState;
 use crate::engine::EditorEngine;
 
+/// Compute a default voxel_size for a primitive with the given scale.
+///
+/// Targets ~16 bricks on the longest axis (128 voxels), clamped to [0.005, ∞).
+pub(crate) fn compute_default_voxel_size(
+    primitive: &rkf_core::SdfPrimitive,
+    scale: glam::Vec3,
+) -> f32 {
+    let scaled_half = crate::engine::primitive_half_extents(primitive) * scale;
+    let max_extent = scaled_half.x.max(scaled_half.y).max(scaled_half.z);
+    // Target ~16 bricks on the longest axis.
+    (max_extent * 2.0 / 16.0 / 8.0).max(0.005)
+}
+
+/// Estimate voxelization results for a given primitive, scale, and voxel_size.
+///
+/// Returns `(grid_dims, estimated_surface_bricks, memory_bytes)`.
+/// Used by the UI to show a preview before committing to voxelization.
+pub fn estimate_voxelization(
+    primitive: &rkf_core::SdfPrimitive,
+    scale: glam::Vec3,
+    voxel_size: f32,
+) -> (glam::UVec3, u32, u64) {
+    let scaled_half = crate::engine::primitive_half_extents(primitive) * scale;
+    let margin = voxel_size * 2.0;
+    let aabb_size = (scaled_half + glam::Vec3::splat(margin)) * 2.0;
+    let brick_size = voxel_size * 8.0;
+    let dims = glam::UVec3::new(
+        (aabb_size.x / brick_size).ceil().max(1.0) as u32,
+        (aabb_size.y / brick_size).ceil().max(1.0) as u32,
+        (aabb_size.z / brick_size).ceil().max(1.0) as u32,
+    );
+    // Rough estimate: surface bricks ≈ 2 * (xy + xz + yz) faces of the grid,
+    // capped at total grid volume.
+    let total = dims.x * dims.y * dims.z;
+    let surface_est = (2 * (dims.x * dims.y + dims.x * dims.z + dims.y * dims.z)).min(total);
+    let mem_bytes = surface_est as u64 * 4096; // 4KB per brick
+    (dims, surface_est, mem_bytes)
+}
+
 /// Rebuild a render scene clone from hecs (authoritative source of truth).
 pub(crate) fn rebuild_scene_clone(es: &EditorState) -> rkf_core::scene::Scene {
     let mut merged = es.world.build_render_scene();
@@ -20,6 +59,7 @@ pub(crate) fn rebuild_scene_clone(es: &EditorState) -> rkf_core::scene::Scene {
 /// e0: Process pending convert-to-voxel (analytical -> geometry-first).
 pub(crate) fn process_convert_to_voxel(
     entity_uuid: uuid::Uuid,
+    voxel_size: f32,
     engine: &mut EditorEngine,
     editor_state: &Arc<Mutex<EditorState>>,
     scene_clone: &mut rkf_core::scene::Scene,
@@ -48,13 +88,12 @@ pub(crate) fn process_convert_to_voxel(
             }
         };
 
-        // Bake non-uniform scale into the voxelized volume.
-        let scaled_half = crate::engine::primitive_half_extents(&primitive) * obj_scale;
-        let min_extent = scaled_half.x.min(scaled_half.y).min(scaled_half.z).max(0.001);
-        let max_extent = scaled_half.x.max(scaled_half.y).max(scaled_half.z);
-        let vs_from_short = min_extent * 2.0 / 8.0;
-        let vs_from_long  = max_extent * 2.0 / 128.0;
-        let voxel_size = vs_from_short.min(vs_from_long).max(0.005);
+        // Auto-compute voxel_size if not specified (0.0 = auto).
+        let voxel_size = if voxel_size <= 0.0 {
+            compute_default_voxel_size(&primitive, obj_scale)
+        } else {
+            voxel_size
+        };
 
         if let Some((handle, vs, grid_aabb, _count)) =
             engine.convert_to_geometry_first(

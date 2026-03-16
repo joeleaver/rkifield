@@ -106,27 +106,23 @@ impl Renderer {
         // Upload brick pool if needed
         let pool_data: &[u8] = bytemuck::cast_slice(world.brick_pool().as_slice());
         if !pool_data.is_empty() {
-            if pool_data.len() as u64 > self.brick_pool_buffer.size() {
-                self.brick_pool_buffer =
+            let gpu_buf = self.gpu_scene.brick_pool_buffer();
+            if pool_data.len() as u64 > gpu_buf.size() {
+                let new_buf =
                     self.ctx.device.create_buffer(&wgpu::BufferDescriptor {
                         label: Some("brick_pool"),
                         size: pool_data.len() as u64,
                         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                         mapped_at_creation: false,
                     });
-                let new_pool_buf =
-                    self.ctx.device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some("brick_pool_gpu"),
-                        size: pool_data.len() as u64,
-                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                        mapped_at_creation: false,
-                    });
+                self.ctx.queue.write_buffer(&new_buf, 0, pool_data);
                 self.gpu_scene
-                    .set_brick_pool(&self.ctx.device, new_pool_buf);
+                    .set_brick_pool(&self.ctx.device, new_buf);
+            } else {
+                self.ctx
+                    .queue
+                    .write_buffer(gpu_buf, 0, pool_data);
             }
-            self.ctx
-                .queue
-                .write_buffer(&self.brick_pool_buffer, 0, pool_data);
         }
 
         // Upload brick maps

@@ -7,6 +7,7 @@ pub mod asset_browser;
 pub mod camera_properties;
 pub mod component_inspector;
 pub mod components;
+pub mod debug_panel;
 pub mod environment_panel;
 pub mod light_properties;
 pub mod material_properties;
@@ -16,8 +17,11 @@ pub mod scene_tree_panel;
 pub mod shader_properties;
 pub mod shaders_panel;
 pub mod systems_panel;
+pub mod library_panel;
+pub mod welcome_screen;
 mod slider_helpers;
 pub mod brush_palette;
+pub mod loading_modal;
 pub mod titlebar;
 pub mod right_panel;
 pub mod status_bar;
@@ -29,6 +33,7 @@ use rinch::prelude::*;
 use crate::automation::SharedState;
 use crate::editor_command::EditorCommand;
 use crate::editor_state::{EditorMode, EditorState, SelectedEntity, SliderSignals, UiSignals};
+use crate::CommandSender;
 use crate::gizmo;
 use crate::input::{InputState, KeyCode, Modifiers};
 use status_bar::StatusBar;
@@ -37,6 +42,8 @@ use crate::wireframe;
 use crate::layout::components::layout_root::LayoutRoot;
 use crate::layout::components::floating_host::FloatingPanelHost;
 use brush_palette::BrushPalette;
+use loading_modal::LoadingModal;
+use welcome_screen::WelcomeScreen;
 
 // ── Style constants ─────────────────────────────────────────────────────────
 // All colors use rinch theme CSS variables for the dark theme.
@@ -124,6 +131,7 @@ pub fn editor_ui() -> NodeHandle {
         let sh = surface_handle.clone();
         let ui = use_context::<UiSignals>();
         let sliders = use_context::<SliderSignals>();
+        let cmd = use_context::<CommandSender>();
         let tree_state = use_context::<UseTreeReturn>();
         let cmd_tx = use_context::<crate::CommandSender>().0.clone();
         // Track last mouse position for delta computation (lock-free).
@@ -198,20 +206,23 @@ pub fn editor_ui() -> NodeHandle {
                                     };
 
                                     if state.world.is_alive(eid) {
-                                        let wp = rkf_core::WorldPosition::new(
-                                            glam::IVec3::ZERO, new_pos,
-                                        );
-                                        let _ = state.world.set_position(eid, wp);
-                                        let _ = state.world.set_rotation(eid, new_rot);
-                                        let _ = state.world.set_scale(eid, new_scale);
-
-                                        // Push to slider signals so right panel tracks gizmo drag.
+                                        // Send commands so the engine loop processes the
+                                        // change, marks dirty, and pushes to UiSignals.
                                         let (rx, ry, rz) = new_rot.to_euler(glam::EulerRot::XYZ);
-                                        sliders.push_object_values(
-                                            new_pos,
-                                            glam::Vec3::new(rx.to_degrees(), ry.to_degrees(), rz.to_degrees()),
-                                            new_scale,
-                                        );
+                                        let _ = cmd.0.send(EditorCommand::SetObjectPosition {
+                                            entity_id: eid,
+                                            position: new_pos,
+                                        });
+                                        let _ = cmd.0.send(EditorCommand::SetObjectRotation {
+                                            entity_id: eid,
+                                            rotation: glam::Vec3::new(
+                                                rx.to_degrees(), ry.to_degrees(), rz.to_degrees(),
+                                            ),
+                                        });
+                                        let _ = cmd.0.send(EditorCommand::SetObjectScale {
+                                            entity_id: eid,
+                                            scale: new_scale,
+                                        });
                                     }
                                 } else if let Some(SelectedEntity::Light(lid)) = state.selected_entity {
                                     // Light gizmo drag — translate only.
@@ -219,12 +230,10 @@ pub fn editor_ui() -> NodeHandle {
                                         &state.gizmo, ray_o, ray_d,
                                     );
                                     let new_pos = state.gizmo.initial_position + delta;
-                                    state.light_editor.set_position(lid, new_pos);
-                                    sliders.push_light_values(
-                                        new_pos,
-                                        state.light_editor.get_light(lid).map(|l| l.intensity).unwrap_or(1.0),
-                                        state.light_editor.get_light(lid).map(|l| l.range).unwrap_or(10.0),
-                                    );
+                                    let _ = cmd.0.send(EditorCommand::SetLightPosition {
+                                        light_id: lid,
+                                        position: new_pos,
+                                    });
                                 }
                             } else {
                                 // Hover detection: update hovered_axis.
@@ -467,7 +476,7 @@ pub fn editor_ui() -> NodeHandle {
                     if button == Btn::Left {
                         if gizmo_was_dragging {
                             // Signal update after lock released.
-                            ui.set_selection(picked_after_drag, &sliders, &tree_state);
+                            ui.set_selection(picked_after_drag, &tree_state);
                             if picked_after_drag.is_some() {
                                 ui.properties_tab.set(0); // switch to Object tab
                             }
@@ -581,6 +590,12 @@ pub fn editor_ui() -> NodeHandle {
 
             // ── Brush palette (compact overlay in Sculpt/Paint modes) ──
             BrushPalette {}
+
+            // ── Welcome screen (absolute overlay, hides when project loaded) ──
+            WelcomeScreen {}
+
+            // ── Loading modal (absolute overlay, blocks interaction during builds) ──
+            LoadingModal {}
 
             // ── Titlebar (absolute, last child for z-ordering / hit testing) ──
             TitleBar {}

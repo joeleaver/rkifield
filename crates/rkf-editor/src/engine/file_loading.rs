@@ -447,6 +447,25 @@ pub(crate) fn primitive_diameter(prim: &rkf_core::SdfPrimitive) -> f32 {
 /// Returns a `Vec3` where each component is the half-extent along that axis.
 /// Used by convert-to-voxel to build a tight (possibly non-cubic) AABB,
 /// especially important when non-uniform scale is baked in.
+/// Create a new primitive with per-axis scale baked into its dimensions.
+///
+/// Only primitives where per-axis scaling can be expressed exactly get a
+/// scaled primitive (currently only Box). Returns `None` for primitives that
+/// can't be exactly scaled (spheres, capsules, etc.) — caller should fall
+/// back to the inverse-transform approach.
+pub(crate) fn scale_primitive(
+    prim: &rkf_core::SdfPrimitive,
+    scale: glam::Vec3,
+) -> Option<rkf_core::SdfPrimitive> {
+    use rkf_core::SdfPrimitive;
+    match *prim {
+        SdfPrimitive::Box { half_extents } => Some(SdfPrimitive::Box {
+            half_extents: half_extents * scale,
+        }),
+        _ => None,
+    }
+}
+
 pub(crate) fn primitive_half_extents(prim: &rkf_core::SdfPrimitive) -> glam::Vec3 {
     use rkf_core::SdfPrimitive;
     match *prim {

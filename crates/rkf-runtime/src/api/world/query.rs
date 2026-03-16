@@ -59,7 +59,7 @@ impl World {
             persistent: false,
         }];
         self.active_scene = 0;
-        self.next_sdf_id = 0;
+        self.next_sdf_id = 1; // 0 is reserved as "no object" sentinel for GPU picking
     }
 
     /// Look up an entity UUID by its SDF object ID.

@@ -372,7 +372,7 @@ fn sample_voxelized(local_pos: vec3<f32>, obj: GpuObject) -> f32 {
         let geom_closest = clamp(local_pos, geom_min, geom_max);
         let geom_dist = length(local_pos - geom_closest);
         if geom_dist > brick_extent {
-            return geom_dist + outside_dist;
+            return geom_dist;
         }
     }
 

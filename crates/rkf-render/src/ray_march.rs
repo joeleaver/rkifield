@@ -10,14 +10,14 @@
 //!
 //! | Group | Content |
 //! |-------|---------|
-//! | 0 | GpuSceneV2 (brick pool, brick maps, objects, camera, scene, BVH) |
+//! | 0 | GpuScene (brick pool, brick maps, objects, camera, scene, BVH) |
 //! | 1 | G-buffer write targets (position, normal, material, motion) |
 //! | 2 | Per-tile object lists from [`TileObjectCullPass`] (indices + counts) |
 //! | 3 | Coarse acceleration field from [`CoarseField`] (3D texture + sampler + uniforms) |
 
 use crate::coarse_field::CoarseField;
 use crate::gbuffer::GBuffer;
-use crate::gpu_scene::GpuSceneV2;
+use crate::gpu_scene::GpuScene;
 use crate::tile_object_cull::TileObjectCullPass;
 
 /// Default internal rendering resolution (width).
@@ -41,7 +41,7 @@ impl RayMarchPass {
     /// skipping (group 3).
     pub fn new(
         device: &wgpu::Device,
-        scene: &GpuSceneV2,
+        scene: &GpuScene,
         gbuffer: &GBuffer,
         tile_cull: &TileObjectCullPass,
         coarse_field: &CoarseField,
@@ -96,7 +96,7 @@ impl RayMarchPass {
     pub fn dispatch(
         &self,
         encoder: &mut wgpu::CommandEncoder,
-        scene: &GpuSceneV2,
+        scene: &GpuScene,
         gbuffer: &GBuffer,
         tile_cull: &TileObjectCullPass,
         coarse_field: &CoarseField,

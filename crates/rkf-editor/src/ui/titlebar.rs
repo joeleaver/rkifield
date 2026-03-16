@@ -126,7 +126,7 @@ pub fn TitleBar() -> NodeHandle {
             let cmd = cmd.clone();
             move || {
                 let _ = cmd.0.send(EditorCommand::OpenProject { path: String::new() });
-                ui.set_selection(None, &sliders, &tree_state);
+                ui.set_selection(None, &tree_state);
             }
         }))
         .separator()
@@ -134,7 +134,7 @@ pub fn TitleBar() -> NodeHandle {
             let cmd = cmd.clone();
             move || {
                 let _ = cmd.0.send(EditorCommand::OpenScene { path: String::new() });
-                ui.set_selection(None, &sliders, &tree_state);
+                ui.set_selection(None, &tree_state);
             }
         }))
         .item(MenuItem::new("Save").shortcut("Ctrl+S").on_click({

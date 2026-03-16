@@ -4,7 +4,7 @@
 use rinch::prelude::*;
 
 use crate::editor_command::EditorCommand;
-use crate::editor_state::{SliderSignals, UiSignals};
+use crate::editor_state::UiSignals;
 use crate::CommandSender;
 
 use super::components::TransformEditor;
@@ -16,7 +16,6 @@ use super::{DIVIDER_STYLE, LABEL_STYLE, SECTION_STYLE, VALUE_STYLE};
 pub fn ObjectProperties(
     entity_id: uuid::Uuid,
 ) -> NodeHandle {
-    let sliders = use_context::<SliderSignals>();
     let cmd = use_context::<CommandSender>();
     let ui = use_context::<UiSignals>();
 
@@ -38,18 +37,8 @@ pub fn ObjectProperties(
         return rsx! { div { style: "display:flex;flex-direction:column;" } };
     };
 
-    // Build transform editor imperatively (component struct).
-    let transform = TransformEditor {
-        pos_x: sliders.obj_pos_x,
-        pos_y: sliders.obj_pos_y,
-        pos_z: sliders.obj_pos_z,
-        rot_x: sliders.obj_rot_x,
-        rot_y: sliders.obj_rot_y,
-        rot_z: sliders.obj_rot_z,
-        scale_x: sliders.obj_scale_x,
-        scale_y: sliders.obj_scale_y,
-        scale_z: sliders.obj_scale_z,
-    };
+    // Build transform editor — reads from UiSignals, writes via EditorCommands.
+    let transform = TransformEditor { entity_id: eid };
     let xf_node = rinch::core::untracked(|| transform.render(__scope, &[]));
 
     // Build material rows imperatively — they use drag-drop handlers and
@@ -238,33 +227,165 @@ pub fn ObjectProperties(
             div { style: {LABEL_STYLE}, "Transform" }
             {xf_node}
 
-            // Convert to Voxel Object button (analytical primitives only).
-            // Read from signal reactively so the button disappears immediately
+            // Convert to Voxel Object panel (analytical primitives only).
+            // Read from signal reactively so the panel disappears immediately
             // when the object is converted to voxelized.
             if ui.objects.get().iter().find(|o| o.id == eid)
                 .map(|o| o.object_type == crate::ui_snapshot::ObjectType::Analytical)
                 .unwrap_or(false)
             {
-                div { style: "padding: 6px 8px;",
-                    button {
-                        style: "width:100%; padding:4px 8px; background:#223355; \
-                               color:#99ccff; border:1px solid #334477; \
-                               border-radius:3px; cursor:pointer; font-size:12px;",
-                        onclick: {
-                            let cmd = cmd.clone();
-                            move || {
-                                let _ = cmd.0.send(EditorCommand::ConvertToVoxel {
-                                    object_id: eid,
-                                });
-                            }
-                        },
-                        "Convert to Voxel Object"
-                    }
-                }
+                VoxelizePanel { entity_id: eid }
             }
 
             // Materials section (voxelized objects only — empty div if not voxelized).
             {materials_section}
+        }
+    }
+}
+
+/// Standard resolution tiers with labels for the voxelize UI.
+const VOXEL_TIERS: [(f32, &str); 4] = [
+    (0.005, "0.5cm — Fine detail"),
+    (0.02,  "2cm — Standard"),
+    (0.08,  "8cm — Large"),
+    (0.32,  "32cm — Terrain"),
+];
+
+/// Pick the best default tier index for an object based on its world-space size.
+fn default_tier_for_object(primitive: &rkf_core::SdfPrimitive, scale: glam::Vec3) -> usize {
+    let scaled_half = crate::engine::primitive_half_extents(primitive) * scale;
+    let max_dim = scaled_half.x.max(scaled_half.y).max(scaled_half.z) * 2.0;
+    // Heuristic: pick the coarsest tier that gives at least 8 bricks on the longest axis.
+    for (i, &(vs, _)) in VOXEL_TIERS.iter().enumerate().rev() {
+        let bricks = (max_dim / (vs * 8.0)).ceil();
+        if bricks >= 8.0 {
+            return i;
+        }
+    }
+    0 // Finest if the object is tiny.
+}
+
+fn format_memory(bytes: u64) -> String {
+    if bytes >= 1_073_741_824 {
+        format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
+    } else if bytes >= 1_048_576 {
+        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
+    } else {
+        format!("{} KB", bytes / 1024)
+    }
+}
+
+/// Expandable panel for converting analytical primitives to voxelized form.
+/// Shows tier selection with live estimates before committing.
+#[component]
+fn VoxelizePanel(entity_id: uuid::Uuid) -> NodeHandle {
+    let cmd = use_context::<CommandSender>();
+    let ui = use_context::<UiSignals>();
+    let eid = entity_id;
+
+    let expanded = Signal::new(false);
+
+    // Get the primitive info and scale for estimates.
+    let obj_data = ui.objects.get().iter().find(|o| o.id == eid).map(|o| {
+        (o.primitive, o.scale)
+    });
+    let Some((Some(primitive), scale)) = obj_data else {
+        return rsx! { div {} };
+    };
+
+    let default_tier = default_tier_for_object(&primitive, scale);
+    let selected_tier = Signal::new(default_tier);
+
+    rsx! {
+        div { style: "padding: 6px 8px;",
+            if !expanded.get() {
+                button {
+                    style: "width:100%; padding:4px 8px; background:#223355; \
+                           color:#99ccff; border:1px solid #334477; \
+                           border-radius:3px; cursor:pointer; font-size:12px;",
+                    onclick: move || expanded.set(true),
+                    "Convert to Voxel Object"
+                }
+            }
+
+            if expanded.get() {
+                div { style: "background:#1a1a2e; border:1px solid #334477; \
+                             border-radius:4px; padding:8px; display:flex; \
+                             flex-direction:column; gap:4px;",
+                    div { style: "font-size:11px; color:#99ccff; font-weight:600; \
+                                 margin-bottom:2px;",
+                        "Voxelize Settings"
+                    }
+
+                    // Tier selection buttons.
+                    for (i, (vs, label)) in VOXEL_TIERS.iter().copied().enumerate() {
+                        div { key: i,
+                            style: {
+                                move || {
+                                    let sel = selected_tier.get() == i;
+                                    format!(
+                                        "padding:3px 8px; font-size:10px; cursor:pointer; \
+                                         border-radius:3px; border:1px solid {}; \
+                                         background:{}; color:{};",
+                                        if sel { "#4488cc" } else { "#333344" },
+                                        if sel { "#223355" } else { "transparent" },
+                                        if sel { "#99ccff" } else { "#8899aa" },
+                                    )
+                                }
+                            },
+                            onclick: move || selected_tier.set(i),
+                            {label}
+                        }
+                    }
+
+                    // Estimates.
+                    div { style: "font-size:10px; color:#8899aa; font-family:monospace; \
+                                 line-height:1.6; margin-top:4px; \
+                                 white-space:pre;",
+                        {|| {
+                            let tier = selected_tier.get();
+                            let vs = VOXEL_TIERS[tier].0;
+                            let (dims, bricks, mem) =
+                                crate::engine_loop_edits::estimate_voxelization(&primitive, scale, vs);
+                            format!(
+                                "Grid:   {}×{}×{} bricks\n\
+                                 Bricks: ~{}\n\
+                                 Memory: ~{}",
+                                dims.x, dims.y, dims.z,
+                                bricks, format_memory(mem),
+                            )
+                        }}
+                    }
+
+                    // Buttons.
+                    div { style: "display:flex; gap:6px; margin-top:4px;",
+                        button {
+                            style: "flex:1; padding:4px 8px; background:#224433; \
+                                   color:#88ddaa; border:1px solid #336644; \
+                                   border-radius:3px; cursor:pointer; font-size:11px;",
+                            onclick: {
+                                let cmd = cmd.clone();
+                                move || {
+                                    let tier = selected_tier.get();
+                                    let vs = VOXEL_TIERS[tier].0;
+                                    let _ = cmd.0.send(EditorCommand::ConvertToVoxel {
+                                        object_id: eid,
+                                        voxel_size: vs,
+                                    });
+                                }
+                            },
+                            "Convert"
+                        }
+                        button {
+                            style: "flex:1; padding:4px 8px; background:#332222; \
+                                   color:#aa8888; border:1px solid #443333; \
+                                   border-radius:3px; cursor:pointer; font-size:11px;",
+                            onclick: move || expanded.set(false),
+                            "Cancel"
+                        }
+                    }
+                }
+            }
         }
     }
 }

@@ -11,7 +11,7 @@
 //! | 1 | Material table (storage buffer) |
 //! | 2 | HDR output (storage texture, write) |
 //! | 3 | Shade uniforms + brush overlay (uniforms, data, map, brush params) |
-//! | 4 | GpuSceneV2 (brick pool, brick maps, objects, camera, scene, BVH) |
+//! | 4 | GpuScene (brick pool, brick maps, objects, camera, scene, BVH) |
 //! | 5 | Lights (storage buffer) |
 //! | 6 | Coarse field (3D texture + sampler + uniforms) |
 //! | 7 | Radiance volume (4 clipmap levels + sampler + uniforms) |
@@ -22,7 +22,7 @@ use crate::brush_overlay::BrushOverlay;
 use crate::coarse_field::CoarseField;
 use crate::gbuffer::GBuffer;
 use crate::gpu_color_pool::GpuColorPool;
-use crate::gpu_scene::GpuSceneV2;
+use crate::gpu_scene::GpuScene;
 use crate::light::LightBuffer;
 use crate::radiance_volume::RadianceVolume;
 
@@ -62,8 +62,8 @@ pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 /// PBR shading compute pass — v2 object-centric SDF shadows and AO.
 pub struct ShadingPass {
-    /// The compute pipeline.
-    pipeline: wgpu::ComputePipeline,
+    /// The compute pipeline (None until shaders are loaded from a project).
+    pipeline: Option<wgpu::ComputePipeline>,
     /// Pipeline layout (stored for shader hot-reload).
     pipeline_layout: wgpu::PipelineLayout,
 
@@ -111,7 +111,7 @@ impl ShadingPass {
     pub fn new(
         device: &wgpu::Device,
         gbuffer: &GBuffer,
-        scene: &GpuSceneV2,
+        scene: &GpuScene,
         lights: &LightBuffer,
         coarse_field: &CoarseField,
         radiance_volume: &RadianceVolume,
@@ -295,22 +295,6 @@ impl ShadingPass {
             }],
         });
 
-        // Compile shader and create pipeline.
-        // Use the composed uber-shader source if provided, otherwise compose a default.
-        let default_source;
-        let source = match shader_source {
-            Some(s) => s,
-            None => {
-                let mut composer = crate::shader_composer::ShaderComposer::new();
-                default_source = composer.compose().to_string();
-                &default_source
-            }
-        };
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("shade_composed"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(source)),
-        });
-
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("shade_pipeline_layout"),
             bind_group_layouts: &[
@@ -326,13 +310,21 @@ impl ShadingPass {
             push_constant_ranges: &[],
         });
 
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("shade_pipeline"),
-            layout: Some(&pipeline_layout),
-            module: &shader,
-            entry_point: Some("main"),
-            compilation_options: Default::default(),
-            cache: None,
+        // Compile pipeline now if shader source provided, otherwise defer
+        // until recompile() is called when a project loads its shaders.
+        let pipeline = shader_source.map(|src| {
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("shade_composed"),
+                source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(src)),
+            });
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("shade_pipeline"),
+                layout: Some(&pipeline_layout),
+                module: &shader,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            })
         });
 
         Self {
@@ -441,14 +433,14 @@ impl ShadingPass {
 
     /// Recreate the compute pipeline with a new shader module (hot-reload).
     pub fn recreate_pipeline(&mut self, device: &wgpu::Device, module: &wgpu::ShaderModule) {
-        self.pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        self.pipeline = Some(device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("shade_pipeline"),
             layout: Some(&self.pipeline_layout),
             module,
             entry_point: Some("main"),
             compilation_options: Default::default(),
             cache: None,
-        });
+        }));
     }
 
     /// Rebuild the material bind group when the material buffer changes.
@@ -468,19 +460,24 @@ impl ShadingPass {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         gbuffer: &GBuffer,
-        scene: &GpuSceneV2,
+        scene: &GpuScene,
         coarse_field: &CoarseField,
         radiance_volume: &RadianceVolume,
     ) {
         let workgroups_x = (self.width + 7) / 8;
         let workgroups_y = (self.height + 7) / 8;
 
+        let pipeline = match &self.pipeline {
+            Some(p) => p,
+            None => return, // No shader compiled yet (no project loaded).
+        };
+
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("shade"),
             timestamp_writes: None,
         });
 
-        pass.set_pipeline(&self.pipeline);
+        pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &gbuffer.read_bind_group, &[]);
         pass.set_bind_group(1, &self.material_bind_group, &[]);
         pass.set_bind_group(2, &self.hdr_bind_group, &[]);

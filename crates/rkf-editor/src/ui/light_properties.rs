@@ -3,7 +3,8 @@
 
 use rinch::prelude::*;
 
-use crate::editor_state::{SliderSignals, UiSignals};
+use crate::editor_command::EditorCommand;
+use crate::editor_state::UiSignals;
 use crate::CommandSender;
 
 use super::components::{DragValue, Vec3Editor};
@@ -20,17 +21,11 @@ const DRAG_LABEL_STYLE: &str =
 pub fn LightProperties(
     light_id: u64,
 ) -> NodeHandle {
-    let sliders = use_context::<SliderSignals>();
     let cmd = use_context::<CommandSender>();
     let ui = use_context::<UiSignals>();
-
-    let on_change = ValueCallback::new(move |_v: f64| {
-        sliders.send_light_commands(&cmd);
-    });
-
-    let lights = ui.lights.get();
     let lid = light_id;
 
+    let lights = ui.lights.get();
     let light_data = lights.iter().find(|l| l.id == lid);
 
     if let Some(light) = light_data {
@@ -39,39 +34,51 @@ pub fn LightProperties(
             crate::light_editor::SceneLightType::Spot => "Spot Light",
         };
 
-        // Build component instances for embedding via untracked render.
+        // Memos derived from UiSignals — reactive, Copy, single source of truth.
+        let pos_x = Memo::new(move || ui.lights.get().iter().find(|l| l.id == lid).map(|l| l.position.x as f64).unwrap_or(0.0));
+        let pos_y = Memo::new(move || ui.lights.get().iter().find(|l| l.id == lid).map(|l| l.position.y as f64).unwrap_or(0.0));
+        let pos_z = Memo::new(move || ui.lights.get().iter().find(|l| l.id == lid).map(|l| l.position.z as f64).unwrap_or(0.0));
+
+        let pos_cb = ValueCallback::new({
+            let cmd = cmd.clone();
+            move |v: [f64; 3]| {
+                let _ = cmd.0.send(EditorCommand::SetLightPosition {
+                    light_id: lid,
+                    position: glam::Vec3::new(v[0] as f32, v[1] as f32, v[2] as f32),
+                });
+            }
+        });
+
         let pos_editor = Vec3Editor {
-            x: sliders.light_pos_x,
-            y: sliders.light_pos_y,
-            z: sliders.light_pos_z,
-            step: 0.01,
-            min: -500.0,
-            max: 500.0,
-            decimals: 2,
-            suffix: String::new(),
-            on_change: Some(on_change.clone()),
+            x: pos_x, y: pos_y, z: pos_z,
+            on_change: Some(pos_cb.clone()),
+            on_commit: Some(pos_cb),
+            step: 0.01, min: -500.0, max: 500.0, decimals: 2, suffix: String::new(),
         };
         let pos_node = rinch::core::untracked(|| pos_editor.render(__scope, &[]));
 
+        let int_cb = ValueCallback::new({
+            let cmd = cmd.clone();
+            move |v: f64| { let _ = cmd.0.send(EditorCommand::SetLightIntensity { light_id: lid, intensity: v as f32 }); }
+        });
         let int_dv = DragValue {
-            value: sliders.light_intensity,
-            step: 0.1,
-            min: 0.0,
-            max: 50.0,
-            decimals: 1,
-            on_change: Some(on_change.clone()),
+            value: Memo::new(move || ui.lights.get().iter().find(|l| l.id == lid).map(|l| l.intensity as f64).unwrap_or(1.0)),
+            on_change: Some(int_cb.clone()),
+            on_commit: Some(int_cb),
+            step: 0.1, min: 0.0, max: 50.0, decimals: 1,
             ..Default::default()
         };
         let int_node = rinch::core::untracked(|| int_dv.render(__scope, &[]));
 
+        let range_cb = ValueCallback::new({
+            let cmd = cmd.clone();
+            move |v: f64| { let _ = cmd.0.send(EditorCommand::SetLightRange { light_id: lid, range: v as f32 }); }
+        });
         let range_dv = DragValue {
-            value: sliders.light_range,
-            step: 0.5,
-            min: 0.1,
-            max: 100.0,
-            decimals: 1,
-            suffix: "m".to_string(),
-            on_change: Some(on_change.clone()),
+            value: Memo::new(move || ui.lights.get().iter().find(|l| l.id == lid).map(|l| l.range as f64).unwrap_or(10.0)),
+            on_change: Some(range_cb.clone()),
+            on_commit: Some(range_cb),
+            step: 0.5, min: 0.1, max: 100.0, decimals: 1, suffix: "m".to_string(),
             ..Default::default()
         };
         let range_node = rinch::core::untracked(|| range_dv.render(__scope, &[]));

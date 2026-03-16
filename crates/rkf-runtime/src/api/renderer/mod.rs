@@ -39,7 +39,7 @@ use rkf_render::radiance_mip::RadianceMipPass;
 use rkf_render::{
     AutoExposurePass, BlitPass, BloomCompositePass, BloomPass, Camera, CloudShadowPass,
     CoarseField, ColorGradePass, CosmeticsPass, DebugViewPass, DofPass, GBuffer,
-    GodRaysBlurPass, GpuSceneV2, Light, LightBuffer, MotionBlurPass,
+    GodRaysBlurPass, GpuScene, Light, LightBuffer, MotionBlurPass,
     RadianceVolume, RayMarchPass, RenderContext, ShadingPass,
     SharpenPass, TileObjectCullPass, ToneMapPass, VolCompositePass, VolMarchPass, VolShadowPass,
     VolUpscalePass, WireframePass,
@@ -205,8 +205,7 @@ pub struct Renderer {
     pub(crate) ctx: RenderContext,
 
     // Scene GPU data
-    pub(crate) gpu_scene: GpuSceneV2,
-    pub(crate) brick_pool_buffer: wgpu::Buffer,
+    pub(crate) gpu_scene: GpuScene,
 
     // Core rendering
     pub(crate) gbuffer: GBuffer,

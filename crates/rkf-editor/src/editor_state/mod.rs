@@ -34,7 +34,8 @@ use uuid::Uuid;
 use rkf_runtime::api::World;
 
 use crate::ui_snapshot::{
-    LightSummary, MaterialSummary, ObjectMaterialUsage, ObjectSummary, ShaderSummary,
+    DiagnosticEntry, LightSummary, MaterialSummary, ObjectMaterialUsage, ObjectSummary,
+    ShaderSummary,
 };
 
 /// What is currently selected in the scene tree.
@@ -160,6 +161,17 @@ pub struct UiSignals {
     /// Loading status message — `None` means idle, `Some("...")` shows a message
     /// in the status bar. Engine thread uses `send()` to update from its thread.
     pub loading_status: Signal<Option<String>>,
+
+    // ── Diagnostics (Debug panel) ────────────────────────────────
+    /// Compile errors, warnings, and info messages from the game plugin build.
+    /// Pushed from the engine thread via `run_on_main_thread`.
+    pub diagnostics: Signal<Vec<DiagnosticEntry>>,
+
+    // ── Project state ─────────────────────────────────────────────
+    /// Whether a project is currently loaded. Drives welcome screen visibility.
+    pub project_loaded: Signal<bool>,
+    /// Recent projects list for the welcome screen.
+    pub recent_projects: Signal<Vec<crate::editor_config::RecentProject>>,
 }
 
 /// Snapshot of inspector data, safe to send to the UI thread.
@@ -242,12 +254,7 @@ impl UiSignals {
             objects: Signal::new(Vec::new()),
             lights: Signal::new(Vec::new()),
             materials: Signal::new(Vec::new()),
-            shaders: Signal::new(vec![
-                ShaderSummary { name: "pbr".into(), id: 0, built_in: true, file_path: "crates/rkf-render/shaders/shade_pbr.wgsl".into() },
-                ShaderSummary { name: "unlit".into(), id: 1, built_in: true, file_path: "crates/rkf-render/shaders/shade_unlit.wgsl".into() },
-                ShaderSummary { name: "toon".into(), id: 2, built_in: true, file_path: "crates/rkf-render/shaders/shade_toon.wgsl".into() },
-                ShaderSummary { name: "emissive".into(), id: 3, built_in: true, file_path: "crates/rkf-render/shaders/shade_emissive.wgsl".into() },
-            ]),
+            shaders: Signal::new(Vec::new()),
             selected_object_materials: Signal::new(Vec::new()),
             camera_display_pos: Signal::new(Vec3::new(0.0, 2.5, 5.0)),
             scene_name: Signal::new("Untitled".into()),
@@ -260,6 +267,9 @@ impl UiSignals {
             available_components: Signal::new(Vec::new()),
             systems: Signal::new(Vec::new()),
             loading_status: Signal::new(None),
+            diagnostics: Signal::new(Vec::new()),
+            project_loaded: Signal::new(false),
+            recent_projects: Signal::new(Vec::new()),
         }
     }
 
@@ -270,62 +280,17 @@ impl UiSignals {
     pub fn set_selection(
         &self,
         sel: Option<SelectedEntity>,
-        sliders: &SliderSignals,
         tree_state: &rinch::prelude::UseTreeReturn,
     ) {
         self.selection.set(sel);
-        self.on_selection_changed(sliders);
         self.sync_tree_selection(tree_state);
     }
 
-    /// Push object/light data into SliderSignals when selection changes.
-    ///
-    /// Reads from reactive signals (objects/lights) — always up-to-date
-    /// since the engine pushes changes via `run_on_main_thread`.
-    pub fn on_selection_changed(
-        &self,
-        sliders: &SliderSignals,
-    ) {
-        let sel = self.selection.get();
-
-        enum PushData {
-            Object(glam::Vec3, glam::Vec3, glam::Vec3),
-            Light(glam::Vec3, f32, f32),
-            None,
-        }
-        let (push, oid, lid) = match sel {
-            Some(SelectedEntity::Object(oid)) => {
-                let objects = self.objects.get();
-                let data = objects
-                    .iter()
-                    .find(|o| o.id == oid)
-                    .map(|o| PushData::Object(o.position, o.rotation_degrees, o.scale))
-                    .unwrap_or(PushData::None);
-                (data, Some(oid), None)
-            }
-            Some(SelectedEntity::Light(lid)) => {
-                let lights = self.lights.get();
-                let data = lights
-                    .iter()
-                    .find(|l| l.id == lid)
-                    .map(|l| PushData::Light(l.position, l.intensity, l.range))
-                    .unwrap_or(PushData::None);
-                (data, None, Some(lid))
-            }
-            _ => (PushData::None, None, None),
-        };
-
-        sliders.bound_object_id.set(oid);
-        sliders.bound_light_id.set(lid);
-        match push {
-            PushData::Object(pos, rot_deg, scale) => {
-                sliders.push_object_values(pos, rot_deg, scale);
-            }
-            PushData::Light(pos, intensity, range) => {
-                sliders.push_light_values(pos, intensity, range);
-            }
-            PushData::None => {}
-        }
+    /// Called when selection changes. No longer needs to push to SliderSignals
+    /// since TransformEditor and LightProperties read from UiSignals directly.
+    pub fn on_selection_changed(&self) {
+        // No-op — kept for API compatibility with callers that still reference it.
+        // TODO: remove this method and inline any remaining logic.
     }
 
     /// Sync tree selection highlight when ui.selection changes.
@@ -583,7 +548,7 @@ pub struct EditorState {
     pub pending_maximize: bool,
     /// Set by "Convert to Voxel Object" button. Contains the object ID
     /// of an analytical primitive to convert to geometry-first voxelized form.
-    pub pending_convert_to_voxel: Option<Uuid>,
+    pub pending_convert_to_voxel: Option<(Uuid, f32)>,
     /// Set by material drag-and-drop in object properties panel.
     /// Contains (object_id, from_material, to_material).
     pub pending_remap_material: Option<(Uuid, u16, u16)>,

@@ -176,20 +176,34 @@ impl Default for SdfTree {
     }
 }
 
-/// Proxy type for SdfTree serialization — only persists asset_path + aabb.
-/// SceneNode contains non-serializable runtime handles (BrickMapHandle),
-/// so root is reconstructed as default on deserialize.
+/// Proxy type for SdfTree serialization — persists asset_path + aabb +
+/// analytical primitive data. SceneNode contains non-serializable runtime
+/// handles (BrickMapHandle), so root is reconstructed on deserialize.
+/// Analytical primitives are restored from the proxy fields; voxelized
+/// objects are restored later from their `.rkf` asset files.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct SdfTreeProxy {
     asset_path: Option<String>,
     aabb: rkf_core::aabb::Aabb,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    primitive: Option<rkf_core::scene_node::SdfPrimitive>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    material_id: Option<u16>,
 }
 
 impl serde::Serialize for SdfTree {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let (primitive, material_id) = match &self.root.sdf_source {
+            rkf_core::scene_node::SdfSource::Analytical { primitive, material_id } => {
+                (Some(*primitive), Some(*material_id))
+            }
+            _ => (None, None),
+        };
         let proxy = SdfTreeProxy {
             asset_path: self.asset_path.clone(),
             aabb: self.aabb,
+            primitive,
+            material_id,
         };
         proxy.serialize(serializer)
     }
@@ -198,8 +212,15 @@ impl serde::Serialize for SdfTree {
 impl<'de> serde::Deserialize<'de> for SdfTree {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let proxy = SdfTreeProxy::deserialize(deserializer)?;
+        let mut root = rkf_core::scene_node::SceneNode::new("root");
+        if let (Some(primitive), Some(material_id)) = (proxy.primitive, proxy.material_id) {
+            root.sdf_source = rkf_core::scene_node::SdfSource::Analytical {
+                primitive,
+                material_id,
+            };
+        }
         Ok(SdfTree {
-            root: rkf_core::scene_node::SceneNode::new("root"),
+            root,
             asset_path: proxy.asset_path,
             aabb: proxy.aabb,
         })

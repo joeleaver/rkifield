@@ -128,7 +128,7 @@ impl Default for BlendMode {
 }
 
 /// Analytical SDF primitive — evaluated as math, zero memory cost.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SdfPrimitive {
     /// Sphere centered at local origin.
     Sphere {

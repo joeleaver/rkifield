@@ -3,7 +3,7 @@
 use glam::{Mat4, Vec3};
 
 use rkf_core::material::Material;
-use rkf_render::{BlitPass, Camera, GpuSceneV2, Light, LineVertex};
+use rkf_render::{BlitPass, Camera, GpuScene, Light, LineVertex};
 #[allow(deprecated)]
 use rkf_render::material_table::MaterialTable;
 
@@ -280,12 +280,12 @@ impl Renderer {
     }
 
     /// Access the GPU scene (for direct brick pool / brick map operations).
-    pub fn gpu_scene(&self) -> &GpuSceneV2 {
+    pub fn gpu_scene(&self) -> &GpuScene {
         &self.gpu_scene
     }
 
     /// Access the GPU scene mutably.
-    pub fn gpu_scene_mut(&mut self) -> &mut GpuSceneV2 {
+    pub fn gpu_scene_mut(&mut self) -> &mut GpuScene {
         &mut self.gpu_scene
     }
 }
