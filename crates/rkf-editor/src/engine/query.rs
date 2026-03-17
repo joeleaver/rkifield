@@ -152,7 +152,17 @@ impl EditorEngine {
                         let lx = (vx % 8) as u32;
                         let ly = (vy % 8) as u32;
                         let lz = (vz % 8) as u32;
-                        match self.cpu_brick_map_alloc.get_entry(brick_map_handle, bx, by, bz) {
+                        let entry = self.cpu_brick_map_alloc.get_entry(brick_map_handle, bx, by, bz);
+                        log::warn!(
+                            "[spatial_query] handle={{offset:{}, dims:{:?}}}, brick=({},{},{}), \
+                             alloc_buf_len={}, entry={:?}, pool_cap={}",
+                            brick_map_handle.offset, brick_map_handle.dims,
+                            bx, by, bz,
+                            self.cpu_brick_map_alloc.buffer_len(),
+                            entry,
+                            self.cpu_brick_pool.capacity(),
+                        );
+                        match entry {
                             Some(slot) if !Self::is_unallocated(slot) => {
                                 self.cpu_brick_pool.get(slot).sample(lx, ly, lz).distance_f32()
                             }

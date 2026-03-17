@@ -131,7 +131,7 @@ pub fn SceneTreePanel() -> NodeHandle {
     // NOT here. Effects must not .set() signals during render.
 
     // Selection callback → send command + sync slider values (no lock).
-    let sliders = use_context::<SliderSignals>();
+    let _sliders = use_context::<SliderSignals>();
     let onselect = ValueCallback::new(move |value: String| {
         if let Some(entity) = parse_value(&value) {
             let _ = cmd.0.send(EditorCommand::SelectEntity { entity: Some(entity) });

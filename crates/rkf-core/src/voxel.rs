@@ -13,7 +13,9 @@ use half::f16;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(C)]
 pub struct VoxelSample {
+    #[allow(missing_docs)]
     pub word0: u32,
+    #[allow(missing_docs)]
     pub word1: u32,
 }
 

@@ -11,7 +11,6 @@ use uuid::Uuid;
 use crate::editor_state::{EditorMode, SelectedEntity};
 use crate::gizmo::GizmoMode;
 use crate::input::{KeyCode, Modifiers};
-use crate::sculpt::BrushSettings;
 
 /// A command from the UI thread to the engine thread.
 ///

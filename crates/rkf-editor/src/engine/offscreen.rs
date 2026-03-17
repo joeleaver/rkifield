@@ -2,22 +2,26 @@
 
 use std::sync::{Arc, Mutex};
 use glam::Vec3;
-use rkf_core::Scene;
 use rkf_render::{
     AutoExposurePass, BlitPass, BloomCompositePass, BloomPass, BrushOverlay, Camera,
-    CloudShadowPass, CoarseField, ColorGradePass, CosmeticsPass, DebugMode, DebugViewPass,
-    DofPass, GBuffer, GodRaysBlurPass, GpuSceneV2, Light, LightBuffer, MotionBlurPass,
-    RadianceVolume, RayMarchPass, RenderContext, SceneUniforms, ShadeUniforms, ShadingPass,
+    CloudShadowPass, CoarseField, ColorGradePass, CosmeticsPass, DebugViewPass,
+    DofPass, GBuffer, GodRaysBlurPass, GpuScene, Light, LightBuffer, MotionBlurPass,
+    RadianceVolume, RayMarchPass, RenderContext, ShadingPass,
     SharpenPass, TileObjectCullPass, ToneMapPass, VolCompositePass, VolMarchPass,
     VolShadowPass, VolUpscalePass, COARSE_VOXEL_SIZE,
 };
-use rkf_render::radiance_inject::{RadianceInjectPass, InjectUniforms};
+use rkf_render::radiance_inject::RadianceInjectPass;
 use rkf_render::radiance_mip::RadianceMipPass;
 use rkf_render::material_table::MaterialTable;
 use rkf_core::material_library::MaterialLibrary;
+use rkf_core::brick_pool::BrickPool;
+use rkf_core::brick_map::BrickMapAllocator;
 use super::EditorEngine;
-use super::{OFFSCREEN_FORMAT, build_demo_scene};
+use super::OFFSCREEN_FORMAT;
 use crate::engine_viewport::RENDER_SCALE;
+
+/// Default brick pool capacity for an empty engine (resized on scene load).
+const DEFAULT_BRICK_POOL_CAPACITY: u32 = 4096;
 use crate::automation::SharedState;
 
 impl EditorEngine {
@@ -28,12 +32,13 @@ impl EditorEngine {
     /// path (`SurfaceWriter::submit_frame`). This eliminates GPU contention
     /// between the engine and the compositor.
     ///
-    /// Returns `(engine, scene)` — the caller stores the scene in EditorState.
+    /// Returns the engine with an empty scene. The caller loads content via
+    /// the project/scene loading path (hecs is the single source of truth).
     pub fn new_headless(
         viewport_width: u32,
         viewport_height: u32,
         shared_state: Arc<Mutex<SharedState>>,
-    ) -> (Self, Scene) {
+    ) -> Self {
         let ctx = RenderContext::new_headless();
 
         // Compute internal render resolution from viewport size.
@@ -42,15 +47,15 @@ impl EditorEngine {
         let internal_w = ((vp_w as f32 * RENDER_SCALE) as u32).max(64);
         let internal_h = ((vp_h as f32 * RENDER_SCALE) as u32).max(64);
 
-        // Build demo scene.
-        let demo = build_demo_scene();
-        let scene = demo.scene;
+        // Empty brick pool — content loaded via project/scene path.
+        let empty_pool = BrickPool::new(DEFAULT_BRICK_POOL_CAPACITY);
+        let empty_alloc = BrickMapAllocator::new();
 
-        // Upload brick pool to GPU.
-        let pool_data: &[u8] = bytemuck::cast_slice(demo.brick_pool.as_slice());
+        // Upload empty brick pool to GPU.
+        let pool_data: &[u8] = bytemuck::cast_slice(empty_pool.as_slice());
         let brick_pool_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("brick_pool"),
-            size: pool_data.len().max(8) as u64,
+            size: (DEFAULT_BRICK_POOL_CAPACITY as u64 * std::mem::size_of::<rkf_core::Brick>() as u64).max(8),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -58,45 +63,18 @@ impl EditorEngine {
             ctx.queue.write_buffer(&brick_pool_buffer, 0, pool_data);
         }
 
-        let mut gpu_scene = GpuSceneV2::new(&ctx.device, brick_pool_buffer);
-        let brick_map_data = demo.brick_map_alloc.as_slice();
-        if !brick_map_data.is_empty() {
-            gpu_scene.upload_brick_maps(&ctx.device, &ctx.queue, brick_map_data);
-        }
+        let gpu_scene = GpuScene::new(&ctx.device, brick_pool_buffer);
 
         let gbuffer = GBuffer::new(&ctx.device, internal_w, internal_h);
         let tile_cull = TileObjectCullPass::new(
             &ctx.device, &gpu_scene, internal_w, internal_h,
         );
 
-        // Coarse acceleration field.
-        let init_transforms = rkf_core::transform_bake::bake_world_transforms(&scene.objects);
-        let init_default_wt = rkf_core::transform_bake::WorldTransform::default();
-        let scene_aabbs: Vec<(Vec3, Vec3)> = scene.objects.iter()
-            .map(|obj| {
-                let wt = init_transforms.get(&obj.id).unwrap_or(&init_default_wt);
-                let smin = obj.aabb.min * wt.scale;
-                let smax = obj.aabb.max * wt.scale;
-                let corners = [
-                    Vec3::new(smin.x, smin.y, smin.z), Vec3::new(smax.x, smin.y, smin.z),
-                    Vec3::new(smin.x, smax.y, smin.z), Vec3::new(smax.x, smax.y, smin.z),
-                    Vec3::new(smin.x, smin.y, smax.z), Vec3::new(smax.x, smin.y, smax.z),
-                    Vec3::new(smin.x, smax.y, smax.z), Vec3::new(smax.x, smax.y, smax.z),
-                ];
-                let mut wmin = Vec3::splat(f32::MAX);
-                let mut wmax = Vec3::splat(f32::MIN);
-                for c in &corners {
-                    let r = wt.rotation * *c + wt.position;
-                    wmin = wmin.min(r);
-                    wmax = wmax.max(r);
-                }
-                (wmin, wmax)
-            })
-            .collect();
-        let mut coarse_field = CoarseField::from_scene_aabbs(
-            &ctx.device, &scene_aabbs, COARSE_VOXEL_SIZE, 1.0,
+        // Coarse acceleration field — empty, populated when scene loads.
+        let empty_aabbs: Vec<(Vec3, Vec3)> = Vec::new();
+        let coarse_field = CoarseField::from_scene_aabbs(
+            &ctx.device, &empty_aabbs, COARSE_VOXEL_SIZE, 1.0,
         );
-        coarse_field.populate(&scene_aabbs);
         coarse_field.upload(&ctx.queue, Vec3::ZERO);
 
         let ray_march = RayMarchPass::new(
@@ -122,14 +100,11 @@ impl EditorEngine {
 
         let material_table = MaterialTable::upload(&ctx.device, &materials);
 
-        // Lights.
-        let world_lights = vec![
-            Light::point([2.0, 1.5, -1.0], [1.0, 0.8, 0.5], 5.0, 8.0, true),
-            Light::point([-2.0, 1.0, -3.0], [0.5, 0.7, 1.0], 3.0, 6.0, false),
-        ];
+        // Lights — empty, populated when scene loads.
+        let world_lights = Vec::new();
         let mut init_lights = Vec::with_capacity(64);
+        // Slot 0 = directional (driven by environment).
         init_lights.push(Light::point([0.0; 3], [0.0; 3], 0.0, 0.0, false));
-        init_lights.extend(&world_lights);
         while init_lights.len() < 64 {
             init_lights.push(Light::point([0.0; 3], [0.0; 3], 0.0, 0.0, false));
         }
@@ -143,42 +118,9 @@ impl EditorEngine {
         );
         let radiance_mip = RadianceMipPass::new(&ctx.device, &radiance_volume);
 
-        // Shader composer — compose the uber-shader from built-in + user shaders.
-        let mut shader_composer = rkf_render::ShaderComposer::new();
-        {
-            let shader_dir = std::path::Path::new("assets/shaders");
-            if shader_dir.exists() {
-                if let Ok(entries) = std::fs::read_dir(shader_dir) {
-                    for entry in entries.flatten() {
-                        let path = entry.path();
-                        if path.extension().and_then(|e| e.to_str()) != Some("wgsl") {
-                            continue;
-                        }
-                        if let Ok(source) = std::fs::read_to_string(&path) {
-                            let name = super::EditorEngine::extract_shader_name(&source)
-                                .unwrap_or_else(|| {
-                                    let fname = path.file_name().unwrap().to_str().unwrap_or("unknown");
-                                    fname.strip_prefix("shade_")
-                                        .and_then(|s| s.strip_suffix(".wgsl"))
-                                        .unwrap_or(fname.trim_end_matches(".wgsl"))
-                                        .to_string()
-                                });
-                            let file_path = path.display().to_string();
-                            let id = shader_composer.register_with_path(&name, source, Some(file_path));
-                            log::info!("Registered user shader: {name} (id={id}) from {}", path.display());
-                        }
-                    }
-                }
-            }
-        }
-        let composed_source = shader_composer.compose().to_string();
-
-        // Resolve shader IDs in the material library.
-        {
-            let mut lib = material_library.lock().unwrap();
-            let composer = &shader_composer;
-            lib.resolve_shader_ids(|name| composer.shader_id(name));
-        }
+        // Shader composer — user shaders are loaded when a project is opened
+        // via scan_user_shaders(). At startup there's no project yet.
+        let shader_composer = rkf_render::ShaderComposer::new();
 
         // Brush overlay (empty placeholder until brush is active).
         let brush_overlay = BrushOverlay::empty(&ctx.device);
@@ -186,12 +128,13 @@ impl EditorEngine {
         // Color pool (empty placeholder until paint is used).
         let gpu_color_pool = rkf_render::GpuColorPool::empty(&ctx.device);
 
-        // Shading pass.
+        // Shading pass — no pipeline compiled yet (no project loaded).
+        // Pipeline gets compiled when scan_user_shaders() triggers recompose_and_recompile().
         let shading_pass = ShadingPass::new(
             &ctx.device, &gbuffer, &gpu_scene, &light_buffer,
             &coarse_field, &radiance_volume, &material_table.buffer,
             internal_w, internal_h,
-            Some(&composed_source),
+            None,
             &brush_overlay,
             &gpu_color_pool,
         );
@@ -309,7 +252,7 @@ impl EditorEngine {
             &ctx.device, &ctx.queue,
         );
 
-        let brick_pool_capacity = demo.brick_pool.capacity();
+        let brick_pool_capacity = empty_pool.capacity();
         let engine = Self {
             ctx,
             surface: None,
@@ -384,8 +327,8 @@ impl EditorEngine {
             window_height: vp_h,
             shared_state,
             wireframe_pass: Some(wireframe_pass),
-            cpu_brick_pool: demo.brick_pool,
-            cpu_brick_map_alloc: demo.brick_map_alloc,
+            cpu_brick_pool: empty_pool,
+            cpu_brick_map_alloc: empty_alloc,
             cpu_geometry_pool: rkf_core::brick_pool::GeometryPool::new(256),
             cpu_sdf_cache_pool: rkf_core::brick_pool::SdfCachePool::new(256),
             geometry_first_data: std::collections::HashMap::new(),
@@ -400,6 +343,7 @@ impl EditorEngine {
             despawned_objects: Vec::new(),
             tombstone_count: 0,
             topology_changed: true,
+            project_root: None,
             lights_dirty: true,
             last_light_cam_pos: Vec3::new(f32::NAN, f32::NAN, f32::NAN),
             pending_wireframe: Vec::new(),
@@ -407,13 +351,17 @@ impl EditorEngine {
             last_vol_shadow_cam_pos: Vec3::new(f32::NAN, f32::NAN, f32::NAN),
             last_vol_shadow_sun_dir: [f32::NAN; 3],
             file_watcher: {
-                let assets_dir = std::path::Path::new("assets/materials");
-                let shaders_dir = std::path::Path::new("crates/rkf-render/shaders");
-                let user_shaders_dir = std::path::Path::new("assets/shaders");
-                let source_dir = std::path::Path::new("crates");
-                match rkf_runtime::FileWatcher::new(&[assets_dir, shaders_dir, user_shaders_dir, source_dir]) {
+                // Watch engine shaders and source. Project-specific paths (user shaders,
+                // materials) are added when a project is opened via reinit_file_watcher().
+                let engine_root = rkf_runtime::project::engine_library_dir()
+                    .parent()
+                    .unwrap_or(std::path::Path::new("."))
+                    .to_path_buf();
+                let shaders_dir = engine_root.join("crates/rkf-render/shaders");
+                let source_dir = engine_root.join("crates");
+                match rkf_runtime::FileWatcher::new(&[shaders_dir.as_path(), source_dir.as_path()]) {
                     Ok(w) => {
-                        log::info!("File watcher started for materials + shaders + user shaders + source");
+                        log::info!("File watcher started for engine shaders + source");
                         Some(w)
                     }
                     Err(e) => {
@@ -429,8 +377,9 @@ impl EditorEngine {
             cpu_color_bricks: Vec::new(),
             color_companion_map: vec![0xFFFFFFFF; brick_pool_capacity as usize],
             gpu_color_pool,
+            console: rkf_runtime::behavior::ConsoleBuffer::new(),
         };
-        (engine, scene)
+        engine
     }
 
     /// Create the offscreen render target texture at the given resolution.

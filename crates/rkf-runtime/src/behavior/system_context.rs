@@ -4,7 +4,12 @@
 //! time, and entity lookup. Systems receive `&mut SystemContext` and use it for
 //! all world interaction.
 
+use glam::{Quat, Vec3};
+use rkf_core::WorldPosition;
+
 use super::command_queue::{CommandQueue, TempEntity};
+use super::console::ConsoleBuffer;
+use super::engine_access::{EngineAccess, TransformUpdate};
 use super::game_store::GameStore;
 use super::persist::Persistable;
 use super::registry::QueryError;
@@ -38,6 +43,9 @@ pub struct SystemContext<'a> {
     commands: &'a mut CommandQueue,
     store: &'a mut GameStore,
     stable_ids: &'a StableIdIndex,
+    engine: &'a dyn EngineAccess,
+    console: ConsoleBuffer,
+    transform_updates: Vec<TransformUpdate>,
     delta_time: f32,
     total_time: f64,
     frame: u64,
@@ -50,6 +58,8 @@ impl<'a> SystemContext<'a> {
         commands: &'a mut CommandQueue,
         store: &'a mut GameStore,
         stable_ids: &'a StableIdIndex,
+        engine: &'a dyn EngineAccess,
+        console: ConsoleBuffer,
         delta_time: f32,
         total_time: f64,
         frame: u64,
@@ -59,6 +69,9 @@ impl<'a> SystemContext<'a> {
             commands,
             store,
             stable_ids,
+            engine,
+            console,
+            transform_updates: Vec::new(),
             delta_time,
             total_time,
             frame,
@@ -214,6 +227,84 @@ impl<'a> SystemContext<'a> {
         }
     }
 
+    // ─── Engine component access (cross-dylib safe) ───────────────────────
+
+    /// Access the engine bridge for reading engine components.
+    ///
+    /// Use this instead of querying `Transform` directly — direct hecs queries
+    /// for engine types won't work across the dylib boundary.
+    pub fn engine(&self) -> &dyn EngineAccess {
+        self.engine
+    }
+
+    /// Read an entity's position.
+    pub fn position(&self, entity: hecs::Entity) -> Option<WorldPosition> {
+        self.engine.position(entity)
+    }
+
+    /// Read an entity's full transform.
+    pub fn get_transform(&self, entity: hecs::Entity) -> Option<(WorldPosition, Quat, Vec3)> {
+        self.engine.transform(entity)
+    }
+
+    /// Queue a position update (applied after the current system returns).
+    pub fn set_position(&mut self, entity: hecs::Entity, position: WorldPosition) {
+        self.transform_updates.push(TransformUpdate {
+            entity,
+            position: Some(position),
+            rotation: None,
+            scale: None,
+        });
+    }
+
+    /// Queue a rotation update.
+    pub fn set_rotation(&mut self, entity: hecs::Entity, rotation: Quat) {
+        self.transform_updates.push(TransformUpdate {
+            entity,
+            position: None,
+            rotation: Some(rotation),
+            scale: None,
+        });
+    }
+
+    /// Queue a full transform update.
+    pub fn set_transform(
+        &mut self,
+        entity: hecs::Entity,
+        position: WorldPosition,
+        rotation: Quat,
+        scale: Vec3,
+    ) {
+        self.transform_updates.push(TransformUpdate {
+            entity,
+            position: Some(position),
+            rotation: Some(rotation),
+            scale: Some(scale),
+        });
+    }
+
+    /// Drain pending transform updates (called by the executor).
+    pub(crate) fn take_transform_updates(&mut self) -> Vec<TransformUpdate> {
+        std::mem::take(&mut self.transform_updates)
+    }
+
+    // ─── Console (cross-dylib safe) ──────────────────────────────────────
+
+    /// Log an info message to the console.
+    pub fn log(&self, message: impl Into<String>) {
+        self.console.info(message);
+    }
+
+    /// Log a warning to the console.
+    pub fn warn(&self, message: impl Into<String>) {
+        self.console.warn(message);
+    }
+
+    /// Log an error to the console.
+    pub fn error(&self, message: impl Into<String>) {
+        self.console.error(message);
+    }
+
     // ─── Time ────────────────────────────────────────────────────────────
 
     /// Seconds elapsed since the previous frame (variable timestep).
@@ -243,6 +334,18 @@ mod tests {
     use crate::behavior::stable_id_index::StableIdIndex;
     use crate::components::{EditorMetadata, Transform};
 
+    /// Stub EngineAccess for tests (no transforms).
+    struct StubEngineAccess;
+    impl EngineAccess for StubEngineAccess {
+        fn position(&self, _: hecs::Entity) -> Option<rkf_core::WorldPosition> { None }
+        fn rotation(&self, _: hecs::Entity) -> Option<glam::Quat> { None }
+        fn scale(&self, _: hecs::Entity) -> Option<glam::Vec3> { None }
+        fn transform(&self, _: hecs::Entity) -> Option<(rkf_core::WorldPosition, glam::Quat, glam::Vec3)> { None }
+        fn all_transforms(&self) -> Vec<(hecs::Entity, rkf_core::WorldPosition, glam::Quat, glam::Vec3)> { Vec::new() }
+    }
+
+    static STUB_ENGINE: StubEngineAccess = StubEngineAccess;
+
     /// Helper: create a world + command queue + context for testing.
     fn make_ctx<'a>(
         world: &'a mut hecs::World,
@@ -250,7 +353,7 @@ mod tests {
         store: &'a mut GameStore,
         stable_ids: &'a StableIdIndex,
     ) -> SystemContext<'a> {
-        SystemContext::new(world, commands, store, stable_ids, 1.0 / 60.0, 10.5, 630)
+        SystemContext::new(world, commands, store, stable_ids, &STUB_ENGINE, ConsoleBuffer::new(), 1.0 / 60.0, 10.5, 630)
     }
 
     // ─── World access ────────────────────────────────────────────────────
@@ -455,7 +558,7 @@ mod tests {
         let mut commands = CommandQueue::new();
         let mut store = GameStore::new();
         let mut stable_ids = StableIdIndex::new();
-        let ctx = SystemContext::new(&mut world, &mut commands, &mut store, &stable_ids, 0.016, 42.5, 2550);
+        let ctx = SystemContext::new(&mut world, &mut commands, &mut store, &stable_ids, &STUB_ENGINE, ConsoleBuffer::new(), 0.016, 42.5, 2550);
 
         assert!((ctx.delta_time() - 0.016).abs() < 1e-6);
         assert!((ctx.total_time() - 42.5).abs() < 1e-12);

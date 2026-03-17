@@ -39,7 +39,7 @@ use crate::brick_map::{BrickMap, EMPTY_SLOT, INTERIOR_SLOT};
 use crate::scene_node::SdfPrimitive;
 use crate::sdf_cache::SdfCache;
 
-use crate::asset_file::{AssetError, LodEntryInfo, ObjectHeader};
+use crate::asset_file::AssetError;
 
 // ---------------------------------------------------------------------------
 // File-format structs
@@ -122,6 +122,7 @@ pub struct LodDataV3 {
 
 /// V3 header info (extends ObjectHeader).
 #[derive(Debug)]
+#[allow(missing_docs)]
 pub struct ObjectHeaderV3 {
     /// Base header info.
     pub aabb: Aabb,
@@ -133,6 +134,7 @@ pub struct ObjectHeaderV3 {
 
 /// V3 LOD entry info.
 #[derive(Debug)]
+#[allow(missing_docs)]
 pub struct LodEntryInfoV3 {
     pub voxel_size: f32,
     pub brick_count: u32,
@@ -157,7 +159,7 @@ fn decode_analytical(type_id: u32, params: [f32; 4]) -> Option<SdfPrimitive> {
 
 /// Pack geometry data for one LOD into bytes.
 fn pack_geometry(brick_map: &BrickMap, geometry: &[BrickGeometry]) -> (Vec<u8>, Vec<u32>) {
-    let total_entries = brick_map.entries.len();
+    let _total_entries = brick_map.entries.len();
 
     // Build slot remapping: original slot → local index
     let mut slot_to_local: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();

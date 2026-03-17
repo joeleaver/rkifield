@@ -46,7 +46,7 @@ pub enum PlayState {
 /// Returns `(play_world, play_stable_index, edit_entity → play_entity mapping)`.
 pub fn clone_world_for_play(
     edit_ecs: &hecs::World,
-    edit_stable_index: &StableIdIndex,
+    _edit_stable_index: &StableIdIndex,
     registry: &GameplayRegistry,
 ) -> (
     hecs::World,
@@ -184,11 +184,12 @@ pub fn run_play_frame(
     stable_ids: &mut StableIdIndex,
     registry: &GameplayRegistry,
     commands: &mut CommandQueue,
+    console: &super::console::ConsoleBuffer,
     dt: f32,
     total_time: f64,
     frame: u64,
 ) {
-    executor.tick(registry, world, commands, store, stable_ids, dt, total_time, frame);
+    executor.tick(registry, world, commands, store, stable_ids, console, dt, total_time, frame);
 }
 
 /// Returns `true` only when systems should be ticked (i.e. during [`PlayState::Playing`]).

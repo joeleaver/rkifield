@@ -46,7 +46,15 @@ pub fn render_panel(scope: &mut RenderScope, panel: PanelId) -> NodeHandle {
             let c = crate::ui::systems_panel::SystemsPanel::default();
             c.render(scope, &[])
         }
-        PanelId::Console | PanelId::DebugOverlay | PanelId::GameView | PanelId::AnimationEditor => {
+        PanelId::Library => {
+            let c = crate::ui::library_panel::LibraryPanel::default();
+            c.render(scope, &[])
+        }
+        PanelId::DebugOverlay | PanelId::Console => {
+            let c = crate::ui::debug_panel::DebugPanel::default();
+            c.render(scope, &[])
+        }
+        PanelId::GameView | PanelId::AnimationEditor => {
             placeholder(scope, panel)
         }
     }

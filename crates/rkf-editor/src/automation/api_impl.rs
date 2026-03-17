@@ -2,8 +2,6 @@
 //!
 //! Large method bodies are delegated to `api_helpers.rs` to keep this file under 900 lines.
 
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
 use glam::Vec3;
 use image::ImageEncoder;
 use rkf_core::automation::*;
@@ -379,11 +377,10 @@ impl AutomationApi for EditorAutomationApi {
             .lock()
             .map_err(|e| AutomationError::EngineError(format!("lock poisoned: {e}")))?;
 
-        Ok(state.shader_names.iter().map(|(name, id, built_in)| {
+        Ok(state.shader_names.iter().map(|(name, id)| {
             ShaderInfo {
                 name: name.clone(),
                 id: *id,
-                built_in: *built_in,
             }
         }).collect())
     }

@@ -1,7 +1,6 @@
 //! Guard AI system — patrol/chase/return state machine.
 
 use rkf_runtime::behavior::system_context::SystemContext;
-use rkf_runtime::components::Transform;
 use crate::components::{GuardAi, GuardState};
 
 /// Guard AI state machine: patrol near origin, chase detected targets, return when lost.
@@ -13,11 +12,11 @@ pub fn guard_ai_system(ctx: &mut SystemContext) {
     let player_pos = glam::Vec3::new(0.0, 0.0, 0.0);
 
     let guards: Vec<_> = ctx
-        .query::<(&GuardAi, &Transform)>()
+        .query::<&GuardAi>()
         .iter()
-        .map(|(entity, (ai, transform))| {
-            let pos = transform.position.local;
-            (entity, ai.state, ai.patrol_origin, ai.patrol_radius, ai.chase_speed, ai.detection_range, pos)
+        .filter_map(|(entity, ai)| {
+            let pos = ctx.engine().position(entity)?.to_vec3();
+            Some((entity, ai.state, ai.patrol_origin, ai.patrol_radius, ai.chase_speed, ai.detection_range, pos))
         })
         .collect();
 
@@ -89,12 +88,6 @@ pub fn guard_ai_system(ctx: &mut SystemContext) {
                 detection_range,
             },
         );
-        ctx.insert(
-            entity,
-            Transform {
-                position: new_pos.into(),
-                ..Transform::default()
-            },
-        );
+        ctx.set_position(entity, new_pos.into());
     }
 }

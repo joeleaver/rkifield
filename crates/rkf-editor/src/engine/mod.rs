@@ -223,7 +223,9 @@ pub struct EditorEngine {
     /// File watcher for material, shader, and source hot-reload.
     pub(super) file_watcher: Option<rkf_runtime::FileWatcher>,
     /// Build watcher for auto-building on .rs source changes.
-    pub(super) build_watcher: Option<rkf_runtime::BuildWatcher>,
+    /// Set by the engine loop after a non-blocking `build_and_load_game_dylib` call,
+    /// polled each frame via `process_file_events()`.
+    pub(crate) build_watcher: Option<rkf_runtime::BuildWatcher>,
     /// Shader composer — manages the uber-shader composition and shader registry.
     pub(crate) shader_composer: ShaderComposer,
     /// Last shader compile error for status bar display (cleared on success).
@@ -237,6 +239,8 @@ pub struct EditorEngine {
     pub(super) color_companion_map: Vec<u32>,
     /// GPU color pool (buffers for shading pass).
     pub(super) gpu_color_pool: rkf_render::GpuColorPool,
+    /// Unified console buffer for scripts, engine, and build output.
+    pub(crate) console: rkf_runtime::behavior::ConsoleBuffer,
 }
 
 impl EditorEngine {
@@ -375,10 +379,13 @@ impl EditorEngine {
     }
 
     /// Process file watcher events (material + shader + source hot-reload).
-    pub fn process_file_events(&mut self) {
+    ///
+    /// Returns `Some(path)` when the build watcher reports a successful build,
+    /// signaling that the caller should hot-reload the game dylib.
+    pub fn process_file_events(&mut self) -> Option<std::path::PathBuf> {
         let events = match self.file_watcher {
             Some(ref watcher) => watcher.poll_events(),
-            None => return,
+            None => Vec::new(),
         };
 
         for event in events {
@@ -396,18 +403,46 @@ impl EditorEngine {
                     self.try_reload_shader(&path);
                 }
                 rkf_runtime::FileEvent::SourceChanged(path) => {
+                    if let Some(ref root) = self.project_root {
+                        // Re-scaffold to copy updated scripts into the generated crate.
+                        let engine_root = rkf_runtime::project::engine_library_dir()
+                            .parent()
+                            .unwrap_or(std::path::Path::new("."))
+                            .to_path_buf();
+                        let _ = rkf_runtime::behavior::scaffold::generate_game_crate(root, &engine_root);
+                    }
                     if let Some(ref mut bw) = self.build_watcher {
                         log::info!("Source changed: {} — triggering build", path.display());
-                        bw.trigger_build();
+                        self.console.info("Compiling scripts...");
+                        bw.trigger_build(Some(self.console.clone()));
                     }
                 }
             }
         }
 
-        // Poll build watcher for completion.
+        // Poll build watcher for completion (stderr streams directly to console via reader thread).
         if let Some(ref mut bw) = self.build_watcher {
+            let state_before = format!("{:?}", bw.state());
             bw.poll();
+            let state_after = bw.state();
+            if !matches!(state_after, rkf_runtime::behavior::BuildState::Idle | rkf_runtime::behavior::BuildState::Compiling) {
+                eprintln!("[BUILD] state: {state_before} -> {:?}", state_after);
+            }
+            if let Some(path) = bw.take_success() {
+                eprintln!("[BUILD] Success: {}", path.display());
+                self.console.info("Build succeeded");
+                return Some(path);
+            }
+            if let rkf_runtime::behavior::BuildState::Error(_) = bw.state() {
+                if let rkf_runtime::behavior::BuildState::Error(ref err) = bw.state() {
+                    log::error!("Game crate build failed: {err}");
+                    self.console.error(format!("Build failed: {err}"));
+                }
+                bw.reset();
+            }
         }
+
+        None
     }
 
     /// Attempt to reload a shader from disk and recreate the affected pipeline.
@@ -577,22 +612,11 @@ impl EditorEngine {
 
     /// Reinitialize the file watcher to include project-specific directories.
     pub(crate) fn reinit_file_watcher(&mut self) {
-        let engine_root = rkf_runtime::project::engine_library_dir()
-            .parent()
-            .unwrap_or(std::path::Path::new("."))
-            .to_path_buf();
-        let mut dirs: Vec<std::path::PathBuf> = vec![
-            engine_root.join("crates/rkf-render/shaders"),
-            engine_root.join("crates"),
-        ];
+        let mut dirs: Vec<std::path::PathBuf> = Vec::new();
         if let Some(ref root) = self.project_root {
-            let user_shaders = root.join("assets/shaders");
-            if user_shaders.exists() {
-                dirs.push(user_shaders);
-            }
-            let materials = root.join("assets/materials");
-            if materials.exists() {
-                dirs.push(materials);
+            let assets = root.join("assets");
+            if assets.exists() {
+                dirs.push(assets);
             }
         }
         let dir_refs: Vec<&std::path::Path> = dirs.iter().map(|d| d.as_path()).collect();

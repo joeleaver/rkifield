@@ -141,6 +141,7 @@ pub(crate) fn tick_play_mode(
                 sids,
                 &reg,
                 &mut ps.play_commands,
+                &engine.console,
                 dt,
                 ps.play_total_time,
                 ps.play_frame_number,
@@ -161,14 +162,12 @@ pub(crate) fn tick_play_mode(
                 }
             }
             // Apply to scene objects by matching object ID.
-            let mut synced = 0u32;
             for obj in scene_clone.objects.iter_mut() {
                 if let Some(&(pos, rot, scale)) = obj_transforms.get(&obj.id) {
                     obj.position = pos;
                     obj.rotation = rot;
                     obj.scale = scale;
                     engine.dirty_objects.insert(obj.id);
-                    synced += 1;
                 }
             }
 

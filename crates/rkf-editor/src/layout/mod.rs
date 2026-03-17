@@ -26,6 +26,7 @@ pub enum PanelId {
     Console,
     DebugOverlay,
     Systems,
+    Library,
     // Canvas panels (center only)
     SceneView,
     GameView,
@@ -52,6 +53,7 @@ impl PanelId {
         Self::Console,
         Self::DebugOverlay,
         Self::Systems,
+        Self::Library,
         Self::SceneView,
         Self::GameView,
         Self::AnimationEditor,
@@ -74,8 +76,9 @@ impl PanelId {
             Self::Materials => "Materials",
             Self::Shaders => "Shaders",
             Self::Console => "Console",
-            Self::DebugOverlay => "Debug",
+            Self::DebugOverlay => "Debug Log",
             Self::Systems => "Systems",
+            Self::Library => "Library",
             Self::SceneView => "Scene",
             Self::GameView => "Game",
             Self::AnimationEditor => "Animation",
@@ -87,7 +90,7 @@ impl PanelId {
         match self {
             Self::SceneTree => ContainerKind::Left,
             Self::ObjectProperties | Self::AssetProperties => ContainerKind::Right,
-            Self::Materials | Self::Shaders | Self::Console | Self::DebugOverlay | Self::Systems => ContainerKind::Bottom,
+            Self::Materials | Self::Shaders | Self::Console | Self::DebugOverlay | Self::Systems | Self::Library => ContainerKind::Bottom,
             Self::SceneView | Self::GameView | Self::AnimationEditor => ContainerKind::Center,
         }
     }
@@ -288,7 +291,7 @@ pub fn default_layout() -> LayoutConfig {
     LayoutConfig {
         left: ContainerConfig::single_zone(vec![PanelId::SceneTree]),
         right: ContainerConfig::single_zone(vec![PanelId::ObjectProperties, PanelId::AssetProperties]),
-        bottom: ContainerConfig::single_zone(vec![PanelId::Materials, PanelId::Shaders, PanelId::Systems]),
+        bottom: ContainerConfig::single_zone(vec![PanelId::Materials, PanelId::Shaders, PanelId::Systems, PanelId::Library, PanelId::Console]),
         center: ContainerConfig::single_zone(vec![PanelId::SceneView]),
         floating: Vec::new(),
         // 250px / 1280px ≈ 0.195
@@ -331,7 +334,7 @@ mod tests {
         assert_eq!(layout.center.zones.len(), 1);
         assert_eq!(layout.center.zones[0].tabs, vec![PanelId::SceneView]);
         assert_eq!(layout.bottom.zones.len(), 1);
-        assert_eq!(layout.bottom.zones[0].tabs, vec![PanelId::Materials, PanelId::Shaders, PanelId::Systems]);
+        assert_eq!(layout.bottom.zones[0].tabs, vec![PanelId::Materials, PanelId::Shaders, PanelId::Systems, PanelId::Library, PanelId::Console]);
         assert!(layout.floating.is_empty());
     }
 
@@ -350,7 +353,10 @@ mod tests {
             layout.find_panel(PanelId::AssetProperties),
             Some((ContainerKind::Right, 0, 1))
         );
-        assert_eq!(layout.find_panel(PanelId::Console), None);
+        assert_eq!(
+            layout.find_panel(PanelId::Console),
+            Some((ContainerKind::Bottom, 0, 4))
+        );
     }
 
     #[test]

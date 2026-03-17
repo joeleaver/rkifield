@@ -25,18 +25,16 @@ struct ShaderEntry {
     name: String,
     /// WGSL source containing `fn shade_<name>(ctx: ShadingContext) -> vec3<f32>`.
     source: String,
-    /// Whether this is a built-in shader (vs user-provided).
-    built_in: bool,
     /// File path to the WGSL source file (for editor "open in editor" feature).
     file_path: Option<String>,
 }
 
 /// Summary data for a registered shader (for UI display).
 #[derive(Debug, Clone)]
+#[allow(missing_docs)]
 pub struct ShaderSummaryData {
     pub name: String,
     pub id: u32,
-    pub built_in: bool,
     pub file_path: String,
 }
 
@@ -60,7 +58,14 @@ pub struct ShaderComposer {
 }
 
 impl ShaderComposer {
-    /// Create a new composer with the built-in PBR shader.
+    /// Create a new composer with a fallback PBR shader.
+    ///
+    /// The built-in PBR shader ensures the shade pipeline is always valid, even
+    /// before a project is loaded. When a project opens, `scan_user_shaders()`
+    /// registers the project's shaders — if the project has its own `pbr.wgsl`,
+    /// it overwrites this fallback (same name → same id=0).
+    ///
+    /// The common infrastructure and main entry point are compiled into the binary.
     pub fn new() -> Self {
         let common = format!(
             "{}\n{}",
@@ -80,34 +85,10 @@ impl ShaderComposer {
             dirty: true,
         };
 
-        // Register built-in shaders.
-        composer.register_built_in("pbr", pbr_source);        // id=0
-
-        let unlit_source = include_str!("../shaders/shade_unlit.wgsl").to_string();
-        let toon_source = include_str!("../shaders/shade_toon.wgsl").to_string();
-        let emissive_source = include_str!("../shaders/shade_emissive.wgsl").to_string();
-        composer.register_built_in("unlit", unlit_source);     // id=1
-        composer.register_built_in("toon", toon_source);       // id=2
-        composer.register_built_in("emissive", emissive_source); // id=3
+        // Register fallback PBR at id=0 so the pipeline always compiles.
+        composer.register("pbr", pbr_source);
 
         composer
-    }
-
-    /// Register a built-in shading model. Returns the assigned ID.
-    fn register_built_in(&mut self, name: &str, source: String) -> u32 {
-        let file_path = format!("crates/rkf-render/shaders/shade_{name}.wgsl");
-        let id = self.next_id;
-        self.next_id += 1;
-        self.shaders.push(ShaderEntry {
-            id,
-            name: name.to_string(),
-            source,
-            built_in: true,
-            file_path: Some(file_path),
-        });
-        self.name_to_id.insert(name.to_string(), id);
-        self.dirty = true;
-        id
     }
 
     /// Register a user-provided shading model. Returns the assigned ID.
@@ -142,7 +123,6 @@ impl ShaderComposer {
             id,
             name: name.to_string(),
             source,
-            built_in: false,
             file_path,
         });
         self.name_to_id.insert(name.to_string(), id);
@@ -167,11 +147,11 @@ impl ShaderComposer {
         entries.iter().map(|e| e.name.clone()).collect()
     }
 
-    /// List all shaders with their info (name, id, built_in).
-    pub fn shader_info(&self) -> Vec<(String, u32, bool)> {
+    /// List all shaders with their info (name, id).
+    pub fn shader_info(&self) -> Vec<(String, u32)> {
         let mut entries: Vec<_> = self.shaders.iter().collect();
         entries.sort_by_key(|e| e.id);
-        entries.iter().map(|e| (e.name.clone(), e.id, e.built_in)).collect()
+        entries.iter().map(|e| (e.name.clone(), e.id)).collect()
     }
 
     /// List all shaders with full summary data (for UI display).
@@ -181,7 +161,6 @@ impl ShaderComposer {
         entries.iter().map(|e| ShaderSummaryData {
             name: e.name.clone(),
             id: e.id,
-            built_in: e.built_in,
             file_path: e.file_path.clone().unwrap_or_default(),
         }).collect()
     }
@@ -195,6 +174,7 @@ impl ShaderComposer {
     fn generate_dispatch(&self) -> String {
         let mut s = String::new();
         s.push_str("fn dispatch_shade(shader_id: u32, ctx: ShadingContext) -> vec3<f32> {\n");
+
         s.push_str("    switch shader_id {\n");
 
         for entry in &self.shaders {
@@ -204,8 +184,11 @@ impl ShaderComposer {
             ));
         }
 
-        // Default: fall back to PBR.
-        s.push_str("        default: { return shade_pbr(ctx); }\n");
+        // Default: fall back to the first registered shader (always PBR at id=0).
+        s.push_str(&format!(
+            "        default: {{ return shade_{}(ctx); }}\n",
+            self.shaders[0].name
+        ));
         s.push_str("    }\n");
         s.push_str("}\n");
         s
@@ -280,31 +263,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn new_registers_pbr() {
+    fn new_has_fallback_pbr() {
         let composer = ShaderComposer::new();
         assert_eq!(composer.shader_id("pbr"), 0);
         assert_eq!(composer.shader_name(0), Some("pbr"));
-        assert_eq!(composer.shader_id("unlit"), 1);
-        assert_eq!(composer.shader_name(1), Some("unlit"));
-        assert_eq!(composer.shader_id("toon"), 2);
-        assert_eq!(composer.shader_name(2), Some("toon"));
-        assert_eq!(composer.shader_id("emissive"), 3);
-        assert_eq!(composer.shader_name(3), Some("emissive"));
-    }
-
-    #[test]
-    fn unknown_name_returns_zero() {
-        let composer = ShaderComposer::new();
+        assert_eq!(composer.shader_names().len(), 1);
+        // Unknown name returns 0 (PBR fallback).
         assert_eq!(composer.shader_id("nonexistent"), 0);
     }
 
     #[test]
-    fn register_user_shader() {
+    fn register_shader() {
         let mut composer = ShaderComposer::new();
-        let id = composer.register("hologram", "fn shade_hologram(ctx: ShadingContext) -> vec3<f32> { return vec3<f32>(0.0); }".into());
-        assert_eq!(id, 4); // after pbr=0, unlit=1, toon=2, emissive=3
-        assert_eq!(composer.shader_id("hologram"), id);
-        assert_eq!(composer.shader_name(id), Some("hologram"));
+        // Re-registering "pbr" updates it in place (same id=0).
+        let id = composer.register("pbr", "fn shade_pbr(ctx: ShadingContext) -> vec3<f32> { return vec3<f32>(1.0); }".into());
+        assert_eq!(id, 0);
+
+        let id2 = composer.register("hologram", "fn shade_hologram(ctx: ShadingContext) -> vec3<f32> { return vec3<f32>(0.0); }".into());
+        assert_eq!(id2, 1);
+        assert_eq!(composer.shader_id("hologram"), id2);
     }
 
     #[test]
@@ -321,46 +298,40 @@ mod tests {
         composer.register("zebra", "z".into());
         composer.register("alpha", "a".into());
         let names = composer.shader_names();
-        assert_eq!(names[0], "pbr");
-        assert_eq!(names[1], "unlit");
-        assert_eq!(names[2], "toon");
-        assert_eq!(names[3], "emissive");
-        // After built-ins, zebra was registered first, then alpha.
-        assert_eq!(names[4], "zebra");
-        assert_eq!(names[5], "alpha");
+        assert_eq!(names[0], "pbr");   // fallback at id=0
+        assert_eq!(names[1], "zebra"); // id=1
+        assert_eq!(names[2], "alpha"); // id=2
     }
 
     #[test]
     fn compose_contains_all_parts() {
         let mut composer = ShaderComposer::new();
+        composer.register("pbr", "fn shade_pbr(ctx: ShadingContext) -> vec3<f32> { return ctx.albedo; }".into());
         let source = composer.compose().to_string();
 
         // Contains common (has ShadingContext struct)
         assert!(source.contains("struct ShadingContext"));
-        // Contains all built-in shading model functions
+        // Contains registered shading model
         assert!(source.contains("fn shade_pbr"));
-        assert!(source.contains("fn shade_unlit"));
-        assert!(source.contains("fn shade_toon"));
-        assert!(source.contains("fn shade_emissive"));
         // Contains dispatch
         assert!(source.contains("fn dispatch_shade"));
         // Contains entry point
         assert!(source.contains("fn main("));
-        // Marker line was replaced (the comment describing the mechanism may remain)
+        // Marker line was replaced
         assert!(!source.contains("// SHADER_DISPATCH_PLACEHOLDER\n"));
     }
 
     #[test]
     fn compose_dispatch_includes_registered_shaders() {
         let mut composer = ShaderComposer::new();
+        composer.register("pbr", "fn shade_pbr(ctx: ShadingContext) -> vec3<f32> { return ctx.albedo; }".into());
+        composer.register("toon", "fn shade_toon(ctx: ShadingContext) -> vec3<f32> { return vec3<f32>(1.0); }".into());
         composer.register("test_model", "fn shade_test_model(ctx: ShadingContext) -> vec3<f32> { return vec3<f32>(1.0); }".into());
         let source = composer.compose().to_string();
 
         assert!(source.contains("case 0u: { return shade_pbr(ctx); }"));
-        assert!(source.contains("case 1u: { return shade_unlit(ctx); }"));
-        assert!(source.contains("case 2u: { return shade_toon(ctx); }"));
-        assert!(source.contains("case 3u: { return shade_emissive(ctx); }"));
-        assert!(source.contains("case 4u: { return shade_test_model(ctx); }"));
+        assert!(source.contains("case 1u: { return shade_toon(ctx); }"));
+        assert!(source.contains("case 2u: { return shade_test_model(ctx); }"));
         assert!(source.contains("default: { return shade_pbr(ctx); }"));
     }
 
@@ -392,11 +363,12 @@ mod tests {
     }
 
     #[test]
-    fn shader_info_includes_built_in_flag() {
+    fn shader_info_lists_all() {
         let mut composer = ShaderComposer::new();
+        composer.register("pbr", "source".into());
         composer.register("custom", "source".into());
         let info = composer.shader_info();
-        assert!(info.iter().any(|(name, _, built_in)| name == "pbr" && *built_in));
-        assert!(info.iter().any(|(name, _, built_in)| name == "custom" && !*built_in));
+        assert!(info.iter().any(|(name, _)| name == "pbr"));
+        assert!(info.iter().any(|(name, _)| name == "custom"));
     }
 }

@@ -28,9 +28,13 @@ pub mod scene_ownership;
 pub mod scheduler;
 pub mod sequence;
 pub mod sequence_system;
+#[allow(missing_docs)]
 pub mod stable_id;
+#[allow(missing_docs)]
 pub mod stable_id_index;
 pub mod build_watcher;
+pub mod console;
+pub mod engine_access;
 pub mod inspector;
 pub mod persist;
 pub mod play_mode;
@@ -70,7 +74,10 @@ pub use registry::{
     ComponentEntry, ComponentMeta, FieldMeta, FieldType, GameplayRegistry, Phase, QueryError,
     SystemMeta,
 };
-pub use build_watcher::{BuildState, BuildWatcher, CompileError, parse_cargo_errors};
+pub use build_watcher::{
+    BuildState, BuildWatcher, CompileError, parse_cargo_errors,
+    hash_source_tree, read_build_stamp, write_build_stamp,
+};
 pub use inspector::{
     InspectorData, ComponentInspectorData, FieldInspectorData, MANDATORY_COMPONENTS,
     build_inspector_data, available_components_for_entity, add_component_default, remove_component,
@@ -85,7 +92,7 @@ pub use persist::{
 pub use dylib_loader::{DylibError, DylibLoader};
 pub use hot_reload::{HotReloadError, ReloadReport, hot_reload};
 pub use reload_queue::ReloadQueue;
-pub use scaffold::{ScaffoldError, scaffold_game_crate};
+pub use scaffold::ScaffoldError;
 pub use scene_ownership::SceneOwnership;
 pub use scheduler::{Schedule, ScheduleError, build_schedule};
 pub use sequence::{Ease, Sequence, SequenceBuilder, SequenceStep, StepStartValues};
@@ -100,6 +107,8 @@ pub use play_mode::{
     load_scene_into_play_world, unload_scene_from_play_world, push_field_to_edit,
     build_play_inspector_data,
 };
+pub use console::{ConsoleBuffer, ConsoleEntry, ConsoleFilter, ConsoleLevel};
+pub use engine_access::{EngineAccess, TransformUpdate, WorldEngineAccess};
 pub use system_context::SystemContext;
 pub use tool_routing::ToolEditMapping;
 pub use uniform_treatment::{

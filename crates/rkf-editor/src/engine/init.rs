@@ -4,7 +4,7 @@ use glam::Vec3;
 
 use rkf_core::Scene;
 use rkf_render::{
-    AutoExposurePass, BloomCompositePass, BloomPass, BrushOverlay, CloudShadowPass,
+    AutoExposurePass, BloomCompositePass, BloomPass, BrushOverlay,
     CoarseField, ColorGradePass, CosmeticsPass, DebugViewPass, DofPass,
     GBuffer, GodRaysBlurPass, MotionBlurPass,
     RayMarchPass, RenderContext, ShadingPass, SharpenPass,

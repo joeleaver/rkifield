@@ -353,7 +353,7 @@ pub fn standard_tool_definitions() -> Value {
         },
         {
             "name": "shader_list",
-            "description": "List available shading models (name, id, built_in)",
+            "description": "List available shading models (name, id)",
             "inputSchema": { "type": "object", "properties": {}, "required": [] }
         }
     ]);

@@ -130,7 +130,7 @@ pub fn editor_ui() -> NodeHandle {
         let ss = shared_state.clone();
         let sh = surface_handle.clone();
         let ui = use_context::<UiSignals>();
-        let sliders = use_context::<SliderSignals>();
+        let _sliders = use_context::<SliderSignals>();
         let cmd = use_context::<CommandSender>();
         let tree_state = use_context::<UseTreeReturn>();
         let cmd_tx = use_context::<crate::CommandSender>().0.clone();
@@ -161,7 +161,7 @@ pub fn editor_ui() -> NodeHandle {
 
                     // Brief lock for gizmo hover/drag (needs camera + scene state).
                     // Also update mouse_pos for gizmo ray casting.
-                    let (mode, left_down) = if let Ok(mut state) = es.lock() {
+                    let (mode, _left_down) = if let Ok(mut state) = es.lock() {
                         state.editor_input.mouse_pos = glam::Vec2::new(x, y);
 
                         let mode = state.mode;

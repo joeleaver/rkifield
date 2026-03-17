@@ -345,46 +345,46 @@ mod tests {
     #[test]
     fn remove_tab_not_found() {
         let mut layout = default_layout();
-        let result = remove_tab(&mut layout, PanelId::Console);
-        assert_eq!(result, Err(LayoutError::PanelNotFound(PanelId::Console)));
+        let result = remove_tab(&mut layout, PanelId::GameView);
+        assert_eq!(result, Err(LayoutError::PanelNotFound(PanelId::GameView)));
     }
 
     #[test]
     fn split_zone_before() {
         let mut layout = default_layout();
-        // Add Console to layout first
-        layout.bottom.zones[0].tabs.push(PanelId::Console);
+        // Add DebugOverlay to layout first
+        layout.bottom.zones[0].tabs.push(PanelId::DebugOverlay);
 
-        // Split bottom zone 0, putting Console before it
+        // Split bottom zone 0, putting DebugOverlay before it
         let result = split_zone(
             &mut layout,
-            PanelId::Console,
+            PanelId::DebugOverlay,
             ContainerKind::Bottom,
             0,
             true,
         );
         assert!(result.is_ok());
         assert_eq!(layout.bottom.zones.len(), 2);
-        assert_eq!(layout.bottom.zones[0].tabs, vec![PanelId::Console]);
-        assert_eq!(layout.bottom.zones[1].tabs, vec![PanelId::Materials, PanelId::Shaders, PanelId::Systems]);
+        assert_eq!(layout.bottom.zones[0].tabs, vec![PanelId::DebugOverlay]);
+        assert_eq!(layout.bottom.zones[1].tabs, vec![PanelId::Materials, PanelId::Shaders, PanelId::Systems, PanelId::Library, PanelId::Console]);
     }
 
     #[test]
     fn split_zone_after() {
         let mut layout = default_layout();
-        layout.bottom.zones[0].tabs.push(PanelId::Console);
+        layout.bottom.zones[0].tabs.push(PanelId::DebugOverlay);
 
         let result = split_zone(
             &mut layout,
-            PanelId::Console,
+            PanelId::DebugOverlay,
             ContainerKind::Bottom,
             0,
             false,
         );
         assert!(result.is_ok());
         assert_eq!(layout.bottom.zones.len(), 2);
-        assert_eq!(layout.bottom.zones[0].tabs, vec![PanelId::Materials, PanelId::Shaders, PanelId::Systems]);
-        assert_eq!(layout.bottom.zones[1].tabs, vec![PanelId::Console]);
+        assert_eq!(layout.bottom.zones[0].tabs, vec![PanelId::Materials, PanelId::Shaders, PanelId::Systems, PanelId::Library, PanelId::Console]);
+        assert_eq!(layout.bottom.zones[1].tabs, vec![PanelId::DebugOverlay]);
     }
 
     #[test]

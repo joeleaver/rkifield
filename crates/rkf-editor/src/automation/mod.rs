@@ -15,7 +15,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use glam::Vec3;
-use image::ImageEncoder;
 use rkf_core::automation::*;
 
 use rkf_core::material_library::MaterialLibrary;
@@ -113,7 +112,7 @@ pub struct SharedState {
     /// Object shape result (set by render loop, consumed by MCP polling).
     pub object_shape_result: Option<rkf_core::automation::ObjectShapeResult>,
     /// Available shader model names (published by engine thread from ShaderComposer).
-    pub shader_names: Vec<(String, u32, bool)>,
+    pub shader_names: Vec<(String, u32)>,
     /// Which material slot to preview (None = no preview).
     pub preview_material_slot: Option<u16>,
     /// Preview primitive type: 0=sphere, 1=box, 2=capsule, 3=torus, 4=cylinder, 5=plane.

@@ -3,10 +3,7 @@
 //! These are `pub(super)` helpers on `EditorAutomationApi`; the trait impl in
 //! `api_impl.rs` delegates to them.
 
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
 use glam::Vec3;
-use image::ImageEncoder;
 use rkf_core::automation::*;
 
 use super::*;

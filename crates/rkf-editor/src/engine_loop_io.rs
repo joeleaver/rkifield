@@ -204,7 +204,7 @@ fn load_rkf_assets_from_hecs(
 
     // Collect (ecs_entity, asset_path, sdf_object_id) tuples.
     let mut to_load: Vec<(hecs::Entity, String, Option<u32>)> = Vec::new();
-    for (entity, record) in es.world.entity_records() {
+    for (_entity, record) in es.world.entity_records() {
         if let Ok(sdf) = es.world.ecs_ref().get::<&SdfTree>(record.ecs_entity) {
             if let Some(ref asset_path) = sdf.asset_path {
                 to_load.push((record.ecs_entity, asset_path.clone(), record.sdf_object_id));
@@ -343,7 +343,7 @@ pub(crate) fn handle_scene_save_as(
 
 /// Handle the "Scene Open" action -- full implementation.
 pub(crate) fn handle_scene_open_impl(
-    mut es: std::sync::MutexGuard<'_, EditorState>,
+    es: std::sync::MutexGuard<'_, EditorState>,
     open_path: Option<String>,
     ctx: &mut IoContext<'_>,
 ) {
@@ -385,14 +385,20 @@ pub(crate) fn handle_new_project(
     frame_topology_changed: &mut bool,
 ) {
     let dialog_result = rfd::FileDialog::new()
-        .set_title("Choose parent folder for new project")
-        .pick_folder();
+        .set_title("Create New Project")
+        .set_file_name("MyProject.rkproject")
+        .add_filter("RKIField Project", &["rkproject"])
+        .save_file();
 
-    if let Some(parent_dir) = dialog_result {
-        let project_name = parent_dir
-            .file_name()
+    if let Some(chosen_path) = dialog_result {
+        // Extract project name from the chosen filename (strip .rkproject extension).
+        let project_name = chosen_path
+            .file_stem()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "NewProject".to_string());
+        let parent_dir = chosen_path
+            .parent()
+            .unwrap_or(std::path::Path::new("."));
 
         match rkf_runtime::project::create_project(&parent_dir, &project_name) {
             Ok(project_path) => {
@@ -422,13 +428,18 @@ pub(crate) fn handle_new_project(
                         // Load material palette from the new project.
                         load_material_palette(&pf, &project_root, ctx.material_library);
 
+                        // Set engine project root, scan for user shaders, and reinit file watcher.
+                        ctx.engine.project_root = Some(project_root.clone());
+                        ctx.engine.scan_user_shaders();
+                        ctx.engine.reinit_file_watcher();
+
                         es.current_project = Some(pf);
                         es.current_project_path = Some(project_path_str.clone());
                         es.selected_entity = None;
                         es.undo.clear();
                         es.unsaved_changes.mark_saved();
                         *frame_topology_changed = true;
-                        crate::editor_config::set_last_project(Some(&project_path_str));
+                        crate::editor_config::add_recent_project(&project_path_str, &project_name);
                         log::info!("New project created at {project_path_str}");
                     }
                     Err(e) => log::error!("Failed to load new project file: {e}"),
@@ -437,6 +448,8 @@ pub(crate) fn handle_new_project(
             Err(e) => log::error!("Failed to create project: {e}"),
         }
     }
+    // NOTE: project_loaded UI push happens in the engine loop AFTER this
+    // function returns and all mutex guards are dropped.
 }
 
 /// Handle the "Open Project" action.
@@ -489,18 +502,31 @@ pub(crate) fn handle_open_project(
                 // Load material palette from project or engine library.
                 load_material_palette(&pf, &project_root, ctx.material_library);
 
+                // Set engine project root, scan for user shaders, and reinit file watcher.
+                ctx.engine.project_root = Some(project_root.clone());
+                ctx.engine.scan_user_shaders();
+                ctx.engine.reinit_file_watcher();
+
                 es.current_project = Some(pf);
                 es.current_project_path = Some(path_str.clone());
                 es.selected_entity = None;
                 es.undo.clear();
                 es.unsaved_changes.mark_saved();
                 *frame_topology_changed = true;
-                crate::editor_config::set_last_project(Some(&path_str));
+                let project_name = project_root
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("Project")
+                    .to_string();
+                crate::editor_config::add_recent_project(&path_str, &project_name);
                 log::info!("Project opened from {path_str}");
             }
             Err(e) => log::error!("Failed to load project '{}': {e}", path_str),
         }
     }
+    // NOTE: project_loaded UI push happens in the engine loop AFTER this
+    // function returns and all mutex guards are dropped. This avoids
+    // potential deadlocks from signal effects running while locks are held.
 }
 
 /// Handle the "Save Project" action (save scene + .rkproject file).
@@ -579,91 +605,220 @@ fn load_material_palette(
     }
 }
 
+// ─── Project-loaded UI push ──────────────────────────────────────────────
+
+/// Push project-loaded state to the UI thread.
+///
+/// **Must be called after all mutex guards are dropped** to avoid deadlocks
+/// from reactive signal effects that might try to lock `EditorState`.
+pub(crate) fn push_project_loaded_to_ui() {
+    let config = crate::editor_config::load_editor_config();
+    let recents = config.recent_projects;
+    rinch::shell::rinch_runtime::run_on_main_thread(move || {
+        if let Some(ui) = rinch::core::context::try_use_context::<crate::editor_state::UiSignals>() {
+            ui.project_loaded.set(true);
+            ui.recent_projects.set(recents);
+        }
+    });
+}
+
 // ─── Game dylib loading ─────────────────────────────────────────────────
 
-/// Build and load the project's game crate dylib, registering its
-/// components and systems into the gameplay registry.
+/// Non-blocking game plugin setup: scaffold the crate, try to load an
+/// existing dylib, and prepare a [`BuildWatcher`] for the background build.
 ///
-/// Returns the `DylibLoader` handle (must be kept alive for fn_ptr validity)
-/// or `None` if the build/load fails.
+/// Returns `(dylib_loader, build_watcher)`:
+/// - `dylib_loader` — `Some` if an existing (possibly stale) dylib was loaded,
+///   `None` if no dylib exists yet.
+/// - `build_watcher` — `Some` with a triggered background build, or `None` if
+///   scaffolding failed or no scripts directory exists.
+///
+/// The caller should install the returned `BuildWatcher` on the engine so it
+/// gets polled each frame via `process_file_events()`. When the build
+/// completes, the hot-reload path loads the (re)built dylib.
 pub(crate) fn build_and_load_game_dylib(
     project_root: &std::path::Path,
-    game_crate_name: &str,
+    registry: &Arc<Mutex<GameplayRegistry>>,
+    old_loader: Option<rkf_runtime::behavior::DylibLoader>,
+    console: Option<&rkf_runtime::behavior::ConsoleBuffer>,
+) -> (
+    Option<rkf_runtime::behavior::DylibLoader>,
+    Option<rkf_runtime::behavior::BuildWatcher>,
+) {
+    use rkf_runtime::behavior::scaffold;
+
+    let scripts_dir = scaffold::scripts_dir(project_root);
+    if !scripts_dir.is_dir() {
+        log::info!("No assets/scripts/ directory, skipping game plugin build");
+        return (old_loader, None);
+    }
+
+    let game_crate_dir = scaffold::game_crate_dir(project_root);
+
+    // Always generate/update the crate wrapper first (uses write-if-changed
+    // internally, so it's cheap and preserves file mtimes when nothing changed).
+    let engine_root = rkf_runtime::project::engine_library_dir()
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .to_path_buf();
+    match scaffold::generate_game_crate(project_root, &engine_root) {
+        Ok(crate_dir) => {
+            log::info!("Generated/updated game crate at {}", crate_dir.display());
+        }
+        Err(e) => {
+            log::error!("Failed to generate game crate: {e}");
+            return (old_loader, None);
+        }
+    }
+
+    // Check if an existing dylib can be loaded immediately.
+    let watcher_probe = rkf_runtime::behavior::BuildWatcher::new(
+        game_crate_dir.clone(),
+        scripts_dir.clone(),
+    );
+    let dylib_path = watcher_probe.expected_dylib_path();
+    let dylib_exists = dylib_path.exists();
+
+    log::info!(
+        "Game dylib check: path={}, exists={}",
+        dylib_path.display(), dylib_exists,
+    );
+
+    // Load existing dylib immediately for fast startup. Also trigger a
+    // background rebuild — if the dylib is up-to-date, cargo finishes
+    // instantly; if stale, the hot-reload path swaps in the new one.
+    let loader = if dylib_exists {
+        log::info!("Loading existing dylib (background build will update if stale)");
+        load_game_dylib(&dylib_path, registry, old_loader)
+    } else {
+        log::info!("No existing dylib — will load after background build completes");
+        drop(old_loader);
+        None
+    };
+
+    let mut bw = rkf_runtime::behavior::BuildWatcher::new(
+        game_crate_dir,
+        scripts_dir,
+    );
+    bw.trigger_build(console.cloned());
+    log::info!("Background game plugin build triggered");
+
+    if let Some(c) = console {
+        c.info("Compiling scripts...");
+    }
+
+    (loader, Some(bw))
+}
+
+/// Load a game dylib and register its components/systems (public for hot-reload).
+pub(crate) fn load_game_dylib_public(
+    dylib_path: &std::path::Path,
     registry: &Arc<Mutex<GameplayRegistry>>,
     old_loader: Option<rkf_runtime::behavior::DylibLoader>,
 ) -> Option<rkf_runtime::behavior::DylibLoader> {
-    let game_crate_dir = project_root.join(game_crate_name);
-    if !game_crate_dir.join("Cargo.toml").exists() {
-        log::warn!(
-            "Game crate directory '{}' has no Cargo.toml, skipping dylib load",
-            game_crate_dir.display()
-        );
-        return old_loader;
+    load_game_dylib(dylib_path, registry, old_loader)
+}
+
+/// Load a game dylib and register its components/systems.
+fn load_game_dylib(
+    dylib_path: &std::path::Path,
+    registry: &Arc<Mutex<GameplayRegistry>>,
+    old_loader: Option<rkf_runtime::behavior::DylibLoader>,
+) -> Option<rkf_runtime::behavior::DylibLoader> {
+    let mut reg = registry.lock().expect("registry lock");
+
+    // Clear old gameplay components (keep engine ones).
+    let engine_names = rkf_runtime::behavior::engine_components::ENGINE_COMPONENT_NAMES;
+    reg.clear_gameplay(engine_names);
+
+    // Drop old loader before loading new one.
+    drop(old_loader);
+
+    match rkf_runtime::behavior::DylibLoader::load(dylib_path) {
+        Ok(loader) => {
+            match loader.call_register(&mut reg) {
+                Ok(()) => {
+                    log::info!(
+                        "Game crate loaded: {} components, {} systems",
+                        reg.component_count(),
+                        reg.system_list().len(),
+                    );
+                    Some(loader)
+                }
+                Err(e) => {
+                    log::error!("Game crate register failed: {e}");
+                    None
+                }
+            }
+        }
+        Err(e) => {
+            log::error!("Failed to load game dylib: {e}");
+            None
+        }
     }
+}
 
-    log::info!("Building game crate at {}...", game_crate_dir.display());
+// ─── Diagnostics → UI ──────────────────────────────────────────────────
 
-    // Synchronous build — blocks briefly on first load.
-    let mut watcher = rkf_runtime::behavior::BuildWatcher::new(game_crate_dir);
-    watcher.trigger_build();
+/// Parse build stderr into structured diagnostics and push them to the UI.
+///
+/// Called from the engine thread — uses `run_on_main_thread` to update the
+/// reactive signal. An empty `stderr` clears existing diagnostics (build OK).
+fn push_diagnostics_to_ui(stderr: &str, console: Option<&rkf_runtime::behavior::ConsoleBuffer>) {
+    use crate::ui_snapshot::{DiagnosticEntry, DiagnosticSeverity};
 
-    // Poll until complete (timeout after 120 seconds).
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-    loop {
-        watcher.poll();
-        match watcher.state() {
-            rkf_runtime::behavior::BuildState::Success(dylib_path) => {
-                log::info!("Game crate built: {}", dylib_path.display());
+    let entries: Vec<DiagnosticEntry> = if stderr.is_empty() {
+        // Build succeeded — clear diagnostics.
+        Vec::new()
+    } else {
+        let parsed = rkf_runtime::behavior::parse_cargo_errors(stderr);
+        if parsed.is_empty() {
+            // Unparseable stderr — show the raw output as a single error.
+            vec![DiagnosticEntry {
+                severity: DiagnosticSeverity::Error,
+                message: stderr.lines().take(20).collect::<Vec<_>>().join("\n"),
+                file: None,
+                line: None,
+                column: None,
+            }]
+        } else {
+            parsed
+                .into_iter()
+                .map(|ce| DiagnosticEntry {
+                    severity: DiagnosticSeverity::Error,
+                    message: ce.message,
+                    file: ce.file,
+                    line: ce.line,
+                    column: ce.column,
+                })
+                .collect()
+        }
+    };
 
-                let mut reg = registry.lock().expect("registry lock");
-
-                // Clear old gameplay components (keep engine ones).
-                let engine_names = rkf_runtime::behavior::engine_components::ENGINE_COMPONENT_NAMES;
-                reg.clear_gameplay(engine_names);
-
-                // Drop old loader before loading new one.
-                drop(old_loader);
-
-                match rkf_runtime::behavior::DylibLoader::load(&dylib_path) {
-                    Ok(loader) => {
-                        match loader.call_register(&mut reg) {
-                            Ok(()) => {
-                                log::info!(
-                                    "Game crate loaded: {} components, {} systems",
-                                    reg.component_count(),
-                                    reg.system_list().len(),
-                                );
-                                return Some(loader);
-                            }
-                            Err(e) => {
-                                log::error!("Game crate register failed: {e}");
-                                return None;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        log::error!("Failed to load game dylib: {e}");
-                        return None;
-                    }
+    // Also push compile errors to the console buffer.
+    if let Some(console) = console {
+        for entry in &entries {
+            let mut msg = entry.message.clone();
+            if let Some(ref f) = entry.file {
+                if let Some(line) = entry.line {
+                    msg = format!("{f}:{line}: {msg}");
                 }
             }
-            rkf_runtime::behavior::BuildState::Error(err) => {
-                log::error!("Game crate build failed:\n{err}");
-                return old_loader;
-            }
-            rkf_runtime::behavior::BuildState::Compiling => {
-                if std::time::Instant::now() > deadline {
-                    log::error!("Game crate build timed out");
-                    return old_loader;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-            rkf_runtime::behavior::BuildState::Idle => {
-                // Should not happen after trigger_build
-                return old_loader;
+            match entry.severity {
+                DiagnosticSeverity::Error => console.error(msg),
+                DiagnosticSeverity::Warning => console.warn(msg),
+                DiagnosticSeverity::Info => console.info(msg),
             }
         }
     }
+
+    rinch::shell::rinch_runtime::run_on_main_thread(move || {
+        if let Some(ui) =
+            rinch::core::context::try_use_context::<crate::editor_state::UiSignals>()
+        {
+            ui.diagnostics.set(entries);
+        }
+    });
 }
 
 // ─── Stable ID management ───────────────────────────────────────────────

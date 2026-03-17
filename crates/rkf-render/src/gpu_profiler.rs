@@ -8,6 +8,8 @@ const MAX_PASSES: usize = 32;
 /// Total timestamps: 2 per pass (begin + end).
 const MAX_TIMESTAMPS: usize = MAX_PASSES * 2;
 
+/// GPU timestamp profiler for measuring per-pass execution time.
+#[allow(missing_docs)]
 pub struct GpuProfiler {
     query_set: wgpu::QuerySet,
     resolve_buffer: wgpu::Buffer,
@@ -25,6 +27,7 @@ pub struct GpuProfiler {
 }
 
 impl GpuProfiler {
+    /// Create a new GPU profiler.
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
         let enabled = device
             .features()

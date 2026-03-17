@@ -678,7 +678,7 @@ pub fn register_observation_tools(registry: &mut ToolRegistry) {
     registry.register(
         ToolDefinition {
             name: "shader_list".to_string(),
-            description: "List available shading models (name, id, built_in)".to_string(),
+            description: "List available shading models (name, id)".to_string(),
             category: ToolCategory::Observation,
             parameters: vec![],
             return_type: ReturnTypeDef {

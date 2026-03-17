@@ -10,6 +10,7 @@
 mod tests {
     use crate::behavior::blueprint::{Blueprint, create_blueprint_from_entity};
     use crate::behavior::command_queue::CommandQueue;
+    use crate::behavior::console::ConsoleBuffer;
     use crate::behavior::edit_pipeline::{EditOp, EditPipeline};
     use crate::behavior::engine_components::engine_register;
     use crate::behavior::engine_persist::{
@@ -343,6 +344,7 @@ mod tests {
                 &mut commands,
                 &mut store,
                 &mut stable_ids,
+                &ConsoleBuffer::new(),
                 1.0 / 60.0,
                 frame as f64 / 60.0,
                 frame,
@@ -651,6 +653,7 @@ mod tests {
             &mut commands,
             &mut store,
             &mut stable_ids,
+            &ConsoleBuffer::new(),
             1.0 / 60.0,
             0.0,
             0,
@@ -688,6 +691,7 @@ mod tests {
             &mut commands,
             &mut store,
             &mut stable_ids,
+            &ConsoleBuffer::new(),
             1.0 / 60.0,
             0.0,
             0,

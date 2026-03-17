@@ -36,7 +36,9 @@ pub struct GeometryEditResult {
     /// Brick coordinates of deallocated bricks (became fully empty/solid).
     pub removed_bricks: Vec<UVec3>,
     /// Region bounds (brick coords) for SDF recomputation. Min inclusive, max exclusive.
+    #[allow(missing_docs)]
     pub sdf_region_min: UVec3,
+    #[allow(missing_docs)]
     pub sdf_region_max: UVec3,
 }
 

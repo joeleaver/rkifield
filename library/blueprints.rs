@@ -32,3 +32,8 @@ pub fn collectible_blueprint() -> Blueprint {
         components,
     }
 }
+
+/// Return all blueprints defined in this module.
+pub fn all_blueprints() -> Vec<Blueprint> {
+    vec![guard_blueprint(), collectible_blueprint()]
+}

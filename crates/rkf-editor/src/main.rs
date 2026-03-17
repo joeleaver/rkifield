@@ -186,6 +186,11 @@ fn main() -> anyhow::Result<()> {
     let preview_writer = preview_surface.writer();
     let socket_path_for_cleanup = socket_path.clone();
 
+    // Shared console buffer — created before both engine and UI so both
+    // sides hold clones of the same Arc-based buffer.
+    let console_buffer = rkf_runtime::behavior::ConsoleBuffer::new();
+    let console_for_thread = console_buffer.clone();
+
     // 5. Spawn engine thread.
     //    Engine creates its own wgpu device — no dependency on rinch's device.
     std::thread::spawn(move || {
@@ -199,6 +204,7 @@ fn main() -> anyhow::Result<()> {
             preview_writer,
             gameplay_registry: gameplay_registry_for_thread,
             game_store: game_store_for_thread,
+            console: console_for_thread,
         });
     });
 
@@ -249,6 +255,23 @@ fn main() -> anyhow::Result<()> {
             // Per-property UI signals for fine-grained reactivity.
             let ui_signals = UiSignals::new();
             create_context(ui_signals);
+            // Wire console buffer → UI signal. On any push (from any thread),
+            // schedule a main-thread update that snapshots into the signal.
+            {
+                let buf = console_buffer.clone();
+                console_buffer.set_on_push(move || {
+                    let buf = buf.clone();
+                    rinch::shell::rinch_runtime::run_on_main_thread(move || {
+                        if let Some(ui) = rinch::core::context::try_use_context::<UiSignals>() {
+                            ui.console_entries.set(buf.snapshot());
+                        }
+                    });
+                });
+                // Flush any entries that were pushed before the callback was set
+                // (e.g. during initial game crate build on the engine thread).
+                let buf2 = console_buffer.clone();
+                ui_signals.console_entries.set(buf2.snapshot());
+            }
             create_context(slider_signals);
             create_context(crate::editor_state::FpsSignal::new());
             // Command channel for UI→engine communication.

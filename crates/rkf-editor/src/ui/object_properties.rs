@@ -318,7 +318,7 @@ fn VoxelizePanel(entity_id: uuid::Uuid) -> NodeHandle {
                     }
 
                     // Tier selection buttons.
-                    for (i, (vs, label)) in VOXEL_TIERS.iter().copied().enumerate() {
+                    for (i, (_vs, label)) in VOXEL_TIERS.iter().copied().enumerate() {
                         div { key: i,
                             style: {
                                 move || {

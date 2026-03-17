@@ -1,8 +1,6 @@
 //! `impl EditorState` methods.
 
 use glam::Vec3;
-use rinch::prelude::Signal;
-
 use super::*;
 
 

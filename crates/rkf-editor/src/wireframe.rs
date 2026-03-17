@@ -8,7 +8,7 @@
 // Re-export generic wireframe types from rkf-render.
 pub use rkf_render::wireframe::{
     aabb_wireframe, circle_wireframe, ground_grid_wireframe, obb_wireframe,
-    point_light_wireframe, sphere_wireframe, spot_light_wireframe, LineVertex, WireframePass,
+    point_light_wireframe, spot_light_wireframe, LineVertex, WireframePass,
 };
 // Also re-export less commonly used helpers (suppress unused-import warnings).
 #[allow(unused_imports)]

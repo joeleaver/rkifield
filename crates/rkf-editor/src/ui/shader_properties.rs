@@ -35,15 +35,6 @@ pub fn ShaderProperties(
         }
     };
 
-    let (badge_text, badge_bg) = if shader.built_in {
-        ("built-in", "rgba(60,120,200,0.3)")
-    } else {
-        ("custom", "rgba(60,180,100,0.3)")
-    };
-    let badge_style = format!(
-        "font-size:10px;color:var(--rinch-color-text);padding:1px 6px;\
-         border-radius:3px;background:{badge_bg};"
-    );
 
     let name = shader.name.clone();
     let id_text = format!("{}", shader.id);
@@ -53,12 +44,6 @@ pub fn ShaderProperties(
     rsx! {
         div { style: "display:flex;flex-direction:column;",
             div { style: {SECTION_STYLE}, {name} }
-
-            // Type badge row.
-            div { style: {ROW_STYLE},
-                span { style: {LABEL_SPAN_STYLE}, "Type" }
-                span { style: {badge_style.as_str()}, {badge_text} }
-            }
 
             // Shader ID row.
             div { style: {ROW_STYLE},

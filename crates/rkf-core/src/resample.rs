@@ -159,7 +159,7 @@ pub fn resample_geometry(
     let downsampling = ratio > 1.0;
 
     // Estimate max needed bricks
-    let max_bricks = new_dims.x * new_dims.y * new_dims.z;
+    let _max_bricks = new_dims.x * new_dims.y * new_dims.z;
 
     // Pre-allocate temporary storage for new bricks
     let mut new_brick_map = BrickMap::new(new_dims);
@@ -308,7 +308,7 @@ pub fn resample_geometry(
         let slot_mappings: Vec<SlotMapping> = allocated_bricks
             .iter()
             .enumerate()
-            .map(|(i, &(_, _, _, g_slot, s_slot))| SlotMapping {
+            .map(|(i, &(_, _, _, g_slot, _s_slot))| SlotMapping {
                 brick_slot: g_slot,
                 geometry_slot: i as u32,
                 sdf_slot: i as u32,

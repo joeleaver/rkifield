@@ -49,7 +49,7 @@ pub fn TitleBar() -> NodeHandle {
 
     let editor_state = use_context::<Arc<Mutex<EditorState>>>();
     let ui = use_context::<UiSignals>();
-    let sliders = use_context::<SliderSignals>();
+    let _sliders = use_context::<SliderSignals>();
     let cmd = use_context::<CommandSender>();
     let tree_state = use_context::<UseTreeReturn>();
     let layout = use_context::<LayoutState>();
@@ -539,10 +539,16 @@ pub fn TitleBar() -> NodeHandle {
             div {
                 style: {move || {
                     let playing = ui.play_state.get();
+                    let ready = ui.dylib_ready.get();
                     if playing {
                         "padding:2px 10px;cursor:pointer;border-radius:3px;\
                          background:#c0392b;font-size:11px;color:#fff;user-select:none;\
                          border:1px solid #a93226;font-weight:600;"
+                    } else if !ready {
+                        "padding:2px 10px;cursor:default;border-radius:3px;\
+                         background:#555;font-size:11px;color:#999;user-select:none;\
+                         border:1px solid #444;font-weight:600;opacity:0.6;\
+                         pointer-events:none;"
                     } else {
                         "padding:2px 10px;cursor:pointer;border-radius:3px;\
                          background:#27ae60;font-size:11px;color:#fff;user-select:none;\
@@ -550,6 +556,9 @@ pub fn TitleBar() -> NodeHandle {
                     }
                 }},
                 onclick: move || {
+                    if !ui.dylib_ready.get() && !ui.play_state.get() {
+                        return; // Ignore click when dylib not ready.
+                    }
                     let playing = ui.play_state.get();
                     if playing {
                         let _ = cmd.0.send(EditorCommand::PlayStop);

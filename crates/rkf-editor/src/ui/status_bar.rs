@@ -46,6 +46,36 @@ pub fn StatusBar() -> NodeHandle {
                     }
                 }} }
 
+                // Diagnostics indicator — reads ui.diagnostics.
+                // Shows error/warning count in red. Hidden when no diagnostics.
+                div {
+                    style: {move || {
+                        let diags = ui.diagnostics.get();
+                        if diags.is_empty() {
+                            "display:none;".to_string()
+                        } else {
+                            "color:var(--rinch-color-red-5, #ff6b6b);".to_string()
+                        }
+                    }},
+                    {move || {
+                        let diags = ui.diagnostics.get();
+                        let errors = diags.iter()
+                            .filter(|d| d.severity == crate::ui_snapshot::DiagnosticSeverity::Error)
+                            .count();
+                        let warnings = diags.iter()
+                            .filter(|d| d.severity == crate::ui_snapshot::DiagnosticSeverity::Warning)
+                            .count();
+                        let mut parts = Vec::new();
+                        if errors > 0 {
+                            parts.push(format!("{errors} err"));
+                        }
+                        if warnings > 0 {
+                            parts.push(format!("{warnings} warn"));
+                        }
+                        parts.join(" ")
+                    }}
+                }
+
                 // Selected entity name — reads ui.selection, ui.objects, ui.lights.
                 // Hidden via display:none when nothing is selected.
                 div {
@@ -99,20 +129,6 @@ pub fn StatusBar() -> NodeHandle {
                     {move || {
                         let debug_mode = ui.debug_mode.get();
                         crate::ui_snapshot::debug_mode_name(debug_mode).to_string()
-                    }}
-                }
-
-                // Loading status indicator.
-                div {
-                    style: {move || {
-                        if ui.loading_status.get().is_some() {
-                            "color:var(--rinch-color-yellow-5, #fcc419);".to_string()
-                        } else {
-                            "display:none;".to_string()
-                        }
-                    }},
-                    {move || {
-                        ui.loading_status.get().unwrap_or_default()
                     }}
                 }
 

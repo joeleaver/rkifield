@@ -2,6 +2,7 @@
 
 use super::play_mode::*;
 use super::command_queue::CommandQueue;
+use super::console::ConsoleBuffer;
 use super::executor::BehaviorExecutor;
 use super::game_store::GameStore;
 use super::game_value::GameValue;
@@ -458,6 +459,7 @@ fn run_play_frame_executes_tick() {
         &mut stable_ids,
         &registry,
         &mut commands,
+        &ConsoleBuffer::new(),
         1.0 / 60.0,
         0.0,
         0,

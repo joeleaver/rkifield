@@ -50,6 +50,8 @@ const DROPDOWN_ITEM_HOVER: &str = "padding:4px 8px;font-size:11px;\
 /// selected entity, with editable inputs and add/remove controls.
 ///
 /// Designed to be appended below ObjectProperties in the right panel.
+/// When the game plugin dylib is not yet loaded (`dylib_ready == false`),
+/// shows a "Building scripts..." placeholder instead of the component list.
 #[component]
 pub fn ComponentInspector(entity_id: uuid::Uuid) -> NodeHandle {
     let ui = use_context::<UiSignals>();
@@ -74,10 +76,45 @@ pub fn ComponentInspector(entity_id: uuid::Uuid) -> NodeHandle {
     header.append_child(&__scope.create_text("Components"));
     container.append_child(&header);
 
+    // "Building scripts..." placeholder — shown when dylib not ready.
+    let building_msg = __scope.create_element("div");
+    building_msg.set_attribute(
+        "style",
+        "font-size:11px;color:var(--rinch-color-placeholder);padding:8px 12px;",
+    );
+    building_msg.append_child(&__scope.create_text("Building scripts..."));
+    {
+        let msg = building_msg.clone();
+        __scope.create_effect(move || {
+            if ui.dylib_ready.get() {
+                msg.set_attribute("style", "display:none;");
+            } else {
+                msg.set_attribute(
+                    "style",
+                    "font-size:11px;color:var(--rinch-color-placeholder);padding:8px 12px;",
+                );
+            }
+        });
+    }
+    container.append_child(&building_msg);
+
+    // Content wrapper — hidden when dylib not ready.
+    let content = __scope.create_element("div");
+    {
+        let c = content.clone();
+        __scope.create_effect(move || {
+            if ui.dylib_ready.get() {
+                c.set_attribute("style", "display:flex;flex-direction:column;");
+            } else {
+                c.set_attribute("style", "display:none;");
+            }
+        });
+    }
+
     // Reactive component list — rebuilds when inspector_data changes.
     let components_container = __scope.create_element("div");
     components_container.set_attribute("style", "display:flex;flex-direction:column;");
-    container.append_child(&components_container.clone());
+    content.append_child(&components_container.clone());
 
     let cmd_for_list = cmd.clone();
     rinch::core::for_each_dom_typed(
@@ -162,7 +199,8 @@ pub fn ComponentInspector(entity_id: uuid::Uuid) -> NodeHandle {
         },
     );
 
-    container.append_child(&add_section);
+    content.append_child(&add_section);
+    container.append_child(&content);
 
     container
 }

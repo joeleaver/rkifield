@@ -115,8 +115,8 @@ pub use shader_reload::{
     check_shader_changed, compute_source_hash,
 };
 pub use material_reload::{
-    MaterialChangeSet, MaterialDefinition, MaterialFile, MaterialFileEntry, MaterialProperties,
-    MaterialRegistry, diff_material_files, parse_material_file, serialize_material_file,
+    MaterialChangeSet, MaterialFile, MaterialFileEntry, MaterialProperties,
+    diff_material_files, parse_material_file, serialize_material_file,
 };
 pub use lru_eviction::{
     EvictionAction, EvictionPolicy, LruEvictionTracker, ObjectUsageEntry,
@@ -129,7 +129,7 @@ pub use scene_manager::{
 };
 pub use project::{
     ProjectFile, SceneRef, load_project, save_project,
-    create_project, project_root, resolve_scene_path, ENGINE_SHADERS,
+    create_project, project_root, resolve_scene_path,
 };
 pub use environment::{
     AmbientConfig, EnvironmentOverrides, EnvironmentProfile, FogConfig, PostProcessHints,
@@ -145,7 +145,7 @@ pub use behavior::{
     StableIdIndex, StoreEvent, SystemContext, SystemMeta, TempEntity, UndoAction, UndoStack,
     build_schedule, children_of, clone_world_for_play, create_blueprint_from_entity, descendants_of,
     deserialize_blueprint, deserialize_entity, find_path, find_tagged, parent_of, root_of,
-    scaffold_game_crate, serialize_blueprint, serialize_entity,
+    serialize_blueprint, serialize_entity,
 };
 pub use behavior::engine_components::{engine_register, ENGINE_COMPONENT_NAMES};
 pub use behavior::game_value::GameValue as BehaviorGameValue;
@@ -160,3 +160,7 @@ pub use terrain_streaming::{
     TerrainStreamConfig, TerrainStreaming, TileRequest, TileState,
 };
 pub use file_watcher::{FileEvent, FileWatcher};
+
+/// Re-export rkf-core so game scripts can access core types (WorldPosition, etc.)
+/// without adding rkf-core as a direct dependency.
+pub use rkf_core;

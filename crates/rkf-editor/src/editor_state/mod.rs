@@ -167,11 +167,24 @@ pub struct UiSignals {
     /// Pushed from the engine thread via `run_on_main_thread`.
     pub diagnostics: Signal<Vec<DiagnosticEntry>>,
 
+    // ── Console ─────────────────────────────────────────────────
+    /// Console entries snapshot, pushed from engine thread when revision changes.
+    pub console_entries: Signal<Vec<rkf_runtime::behavior::ConsoleEntry>>,
+    /// Console filter state (show/hide info/warn/error).
+    pub console_filter: Signal<rkf_runtime::behavior::ConsoleFilter>,
+
     // ── Project state ─────────────────────────────────────────────
     /// Whether a project is currently loaded. Drives welcome screen visibility.
     pub project_loaded: Signal<bool>,
     /// Recent projects list for the welcome screen.
     pub recent_projects: Signal<Vec<crate::editor_config::RecentProject>>,
+
+    // ── Dylib readiness ─────────────────────────────────────────────
+    /// Whether the game plugin dylib has been loaded successfully.
+    /// `false` while the initial build is in progress; `true` once loaded.
+    /// UI elements that depend on the dylib (component inspector, systems
+    /// panel, play button) should check this before enabling interaction.
+    pub dylib_ready: Signal<bool>,
 }
 
 /// Snapshot of inspector data, safe to send to the UI thread.
@@ -268,8 +281,11 @@ impl UiSignals {
             systems: Signal::new(Vec::new()),
             loading_status: Signal::new(None),
             diagnostics: Signal::new(Vec::new()),
+            console_entries: Signal::new(Vec::new()),
+            console_filter: Signal::new(rkf_runtime::behavior::ConsoleFilter::default()),
             project_loaded: Signal::new(false),
             recent_projects: Signal::new(Vec::new()),
+            dylib_ready: Signal::new(false),
         }
     }
 

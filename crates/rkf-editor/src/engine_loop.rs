@@ -6,9 +6,9 @@ use rinch::render_surface::{GpuTextureRegistrar, SurfaceWriter};
 
 use crate::automation::SharedState;
 use crate::editor_command::EditorCommand;
-use crate::editor_state::{EditorMode, EditorState, UiSignals};
+use crate::editor_state::{EditorState, UiSignals};
 use crate::engine::EditorEngine;
-use crate::engine_loop_commands::{apply_editor_command, compute_material_usage};
+use crate::engine_loop_commands::apply_editor_command;
 use crate::engine_loop_edits;
 use crate::engine_loop_io;
 use crate::engine_loop_play;
@@ -25,6 +25,7 @@ pub(crate) struct EngineThreadData {
     pub(crate) preview_writer: SurfaceWriter,
     pub(crate) gameplay_registry: Arc<Mutex<rkf_runtime::behavior::GameplayRegistry>>,
     pub(crate) game_store: Arc<Mutex<rkf_runtime::behavior::GameStore>>,
+    pub(crate) console: rkf_runtime::behavior::ConsoleBuffer,
 }
 
 /// Tracks which categories of data changed this frame, so we only
@@ -76,6 +77,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         preview_writer,
         gameplay_registry,
         game_store,
+        console,
     } = data;
 
     log::info!("Engine thread: creating dedicated GPU device");
@@ -88,6 +90,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         DISPLAY_HEIGHT,
         Arc::clone(&shared_state),
     );
+    engine.console = console;
 
     // Game plugin dylib handle — must outlive the GameplayRegistry since system
     // fn_ptrs point into the loaded library. Dropping unloads the dylib.
@@ -125,7 +128,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
     let game_store_arc = game_store;
     // The game store lock is held briefly per-frame for behavior ticks.
     // Clone Arc for passing to play state functions.
-    let mut stable_ids = rkf_runtime::behavior::StableIdIndex::new();
+    let stable_ids = rkf_runtime::behavior::StableIdIndex::new();
     let mut play_state = engine_loop_play::PlayState::new();
 
     let mut last_frame = std::time::Instant::now();
@@ -524,20 +527,37 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                     engine_loop_io::push_project_loaded_to_ui();
                 }
 
-                // Build and load game plugin for the new project.
+                // Build and load game plugin for the new project (non-blocking).
                 let project_root = editor_state.lock().ok().and_then(|es_guard| {
                     let pp = es_guard.current_project_path.as_ref()?;
                     Some(rkf_runtime::project::project_root(std::path::Path::new(pp)))
                 });
                 if let Some(project_root) = project_root {
-                    set_loading_status(Some("Building game plugin...".into()));
-                    game_dylib_loader = engine_loop_io::build_and_load_game_dylib(
+                    // Signal dylib not ready while build runs.
+                    rinch::shell::rinch_runtime::run_on_main_thread(|| {
+                        if let Some(ui) = rinch::core::context::try_use_context::<UiSignals>() {
+                            ui.dylib_ready.set(false);
+                        }
+                    });
+                    let (loader, bw) = engine_loop_io::build_and_load_game_dylib(
                         &project_root, &gameplay_registry, game_dylib_loader.take(),
+                        Some(&engine.console),
                     );
+                    game_dylib_loader = loader;
+                    if let Some(bw) = bw {
+                        engine.build_watcher = Some(bw);
+                    }
                     let reg = gameplay_registry.lock().expect("registry lock");
                     behavior_executor = rkf_runtime::behavior::BehaviorExecutor::new(&reg)
                         .expect("failed to rebuild behavior schedule");
-                    set_loading_status(None);
+                    // If we loaded an existing dylib, signal ready immediately.
+                    if game_dylib_loader.is_some() {
+                        rinch::shell::rinch_runtime::run_on_main_thread(|| {
+                            if let Some(ui) = rinch::core::context::try_use_context::<UiSignals>() {
+                                ui.dylib_ready.set(true);
+                            }
+                        });
+                    }
                 }
 
                 engine.topology_changed = true;
@@ -569,20 +589,37 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                     engine_loop_io::push_project_loaded_to_ui();
                 }
 
-                // Build and load game plugin for the opened project.
+                // Build and load game plugin for the opened project (non-blocking).
                 let project_root = editor_state.lock().ok().and_then(|es_guard| {
                     let pp = es_guard.current_project_path.as_ref()?;
                     Some(rkf_runtime::project::project_root(std::path::Path::new(pp)))
                 });
                 if let Some(project_root) = project_root {
-                    set_loading_status(Some("Building game plugin...".into()));
-                    game_dylib_loader = engine_loop_io::build_and_load_game_dylib(
+                    // Signal dylib not ready while build runs.
+                    rinch::shell::rinch_runtime::run_on_main_thread(|| {
+                        if let Some(ui) = rinch::core::context::try_use_context::<UiSignals>() {
+                            ui.dylib_ready.set(false);
+                        }
+                    });
+                    let (loader, bw) = engine_loop_io::build_and_load_game_dylib(
                         &project_root, &gameplay_registry, game_dylib_loader.take(),
+                        Some(&engine.console),
                     );
+                    game_dylib_loader = loader;
+                    if let Some(bw) = bw {
+                        engine.build_watcher = Some(bw);
+                    }
                     let reg = gameplay_registry.lock().expect("registry lock");
                     behavior_executor = rkf_runtime::behavior::BehaviorExecutor::new(&reg)
                         .expect("failed to rebuild behavior schedule");
-                    set_loading_status(None);
+                    // If we loaded an existing dylib, signal ready immediately.
+                    if game_dylib_loader.is_some() {
+                        rinch::shell::rinch_runtime::run_on_main_thread(|| {
+                            if let Some(ui) = rinch::core::context::try_use_context::<UiSignals>() {
+                                ui.dylib_ready.set(true);
+                            }
+                        });
+                    }
                 }
 
                 engine.topology_changed = true;
@@ -826,17 +863,36 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             f_sculpting_active,
         );
 
-        // g2. Process file watcher events (material + shader hot-reload).
-        engine.process_file_events();
+        // g2. Process file watcher events (material + shader + source hot-reload).
+        if let Some(built_dylib_path) = engine.process_file_events() {
+            // Game crate build completed — hot-reload the dylib.
+            game_dylib_loader = engine_loop_io::load_game_dylib_public(
+                &built_dylib_path, &gameplay_registry, game_dylib_loader.take(),
+            );
+            if let Ok(reg) = gameplay_registry.lock() {
+                if let Ok(()) = behavior_executor.rebuild(&reg) {
+                    log::info!("Behavior schedule rebuilt after hot-reload");
+                }
+            }
+            dirty.scene = true;
+            engine.console.info("Scripts reloaded");
+            rinch::shell::rinch_runtime::run_on_main_thread(|| {
+                if let Some(ui) = rinch::core::context::try_use_context::<crate::editor_state::UiSignals>() {
+                    ui.dylib_ready.set(true);
+                }
+            });
+        }
         // g3. Sync material library to GPU if dirty.
         engine.sync_materials();
 
         // g4. Play mode transitions and behavior tick.
+        //     Block play start if no dylib is loaded.
+        let safe_play_start = f_play_start && game_dylib_loader.is_some();
         {
             let mut game_store = game_store_arc.lock().expect("game_store lock");
             engine_loop_play::tick_play_mode(
                 &mut play_state,
-                f_play_start,
+                safe_play_start,
                 f_play_stop,
                 &mut scene_clone,
                 &mut engine,

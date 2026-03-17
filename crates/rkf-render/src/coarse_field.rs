@@ -326,6 +326,7 @@ impl CoarseField {
 
     /// Convert a world-space position to cell coordinates.
     /// Returns `None` if the position is outside the field bounds.
+    #[allow(dead_code)]
     fn world_to_cell(&self, world_pos: Vec3) -> Option<UVec3> {
         let local = world_pos - self.origin;
         let cell = local / self.voxel_size;

@@ -6,7 +6,6 @@
 //!
 //! SDF distances are derived from geometry and cached separately in [`super::sdf_cache::SdfCache`].
 
-use crate::constants::BRICK_DIM;
 
 /// Compact geometry representation for one 8×8×8 brick.
 ///

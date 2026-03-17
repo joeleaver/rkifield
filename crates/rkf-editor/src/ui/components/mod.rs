@@ -9,6 +9,7 @@ pub mod transform_editor;
 pub mod vec3_editor;
 
 pub use drag_value::DragValue;
+#[allow(unused_imports)]
 pub use slider_row::*;
 pub use toggle_row::*;
 pub use transform_editor::TransformEditor;

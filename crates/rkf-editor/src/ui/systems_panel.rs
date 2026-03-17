@@ -64,6 +64,9 @@ pub fn SystemsPanel() -> NodeHandle {
                     font-family:var(--rinch-font-family-monospace);padding:4px 12px;\
                     border-bottom:1px solid var(--rinch-color-border);flex-shrink:0;",
             {move || {
+                if !ui.dylib_ready.get() {
+                    return "Building scripts...".to_string();
+                }
                 let systems = ui.systems.get();
                 if systems.is_empty() {
                     "No systems registered".to_string()
@@ -80,13 +83,13 @@ pub fn SystemsPanel() -> NodeHandle {
     };
     root.append_child(&header);
 
-    // Play state hint — shown when not playing.
+    // Play state hint — shown when not playing and dylib is ready.
     let hint = rsx! {
         div {
             style: {
                 let ui2 = ui;
                 move || {
-                    if ui2.systems.get().is_empty() && !ui2.play_state.get() {
+                    if ui2.dylib_ready.get() && ui2.systems.get().is_empty() && !ui2.play_state.get() {
                         EMPTY_MSG_STYLE.to_string()
                     } else {
                         "display:none;".to_string()

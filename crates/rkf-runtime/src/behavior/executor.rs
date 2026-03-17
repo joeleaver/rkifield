@@ -7,11 +7,14 @@
 use std::time::Instant;
 
 use super::command_queue::CommandQueue;
+use super::console::ConsoleBuffer;
+use super::engine_access::WorldEngineAccess;
 use super::game_store::GameStore;
 use super::registry::GameplayRegistry;
 use super::scheduler::{Schedule, ScheduleError, build_schedule};
 use super::stable_id_index::StableIdIndex;
 use super::system_context::SystemContext;
+use crate::components::Transform;
 
 /// Runs one frame of gameplay systems in schedule order.
 ///
@@ -113,6 +116,7 @@ impl BehaviorExecutor {
         commands: &mut CommandQueue,
         store: &mut GameStore,
         stable_ids: &mut StableIdIndex,
+        console: &ConsoleBuffer,
         delta_time: f32,
         total_time: f64,
         frame: u64,
@@ -135,17 +139,31 @@ impl BehaviorExecutor {
             // The #[system] proc macro guarantees this invariant.
             let system_fn: fn(&mut SystemContext) =
                 unsafe { std::mem::transmute(meta.fn_ptr) };
-            let mut ctx = SystemContext::new(world, commands, store, stable_ids, delta_time, total_time, frame);
+            // SAFETY: WorldEngineAccess holds a raw pointer for read-only access
+            // through the EngineAccess trait. The pointer is valid for the scope
+            // of this system call, and no mutable aliasing occurs — the trait
+            // methods only read from the world.
+            // SAFETY: Raw pointer for read-only EngineAccess. The pointer is
+            // derived before the &mut borrow for SystemContext, and EngineAccess
+            // methods only read from the world (no mutation through this pointer).
+            let world_ptr: *const hecs::World = &raw const *world;
+            let engine_access = unsafe { WorldEngineAccess::new(world_ptr) };
+            let mut ctx = SystemContext::new(world, commands, store, stable_ids, &engine_access, console.clone(), delta_time, total_time, frame);
             let start = Instant::now();
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 system_fn(&mut ctx);
             }));
             let elapsed_us = start.elapsed().as_micros() as u64;
+            let pending_updates = ctx.take_transform_updates();
+            drop(ctx);
             if result.is_err() {
                 log::error!("system '{}' panicked during Update phase", meta.name);
                 self.faulted_systems.insert(idx);
-            } else if idx < self.system_timings.len() {
-                self.system_timings[idx] = Some(elapsed_us);
+            } else {
+                apply_transform_updates(world, pending_updates);
+                if idx < self.system_timings.len() {
+                    self.system_timings[idx] = Some(elapsed_us);
+                }
             }
         }
 
@@ -162,23 +180,53 @@ impl BehaviorExecutor {
             // SAFETY: same invariant as above.
             let system_fn: fn(&mut SystemContext) =
                 unsafe { std::mem::transmute(meta.fn_ptr) };
-            let mut ctx = SystemContext::new(world, commands, store, stable_ids, delta_time, total_time, frame);
+            // SAFETY: Raw pointer for read-only EngineAccess. The pointer is
+            // derived before the &mut borrow for SystemContext, and EngineAccess
+            // methods only read from the world (no mutation through this pointer).
+            let world_ptr: *const hecs::World = &raw const *world;
+            let engine_access = unsafe { WorldEngineAccess::new(world_ptr) };
+            let mut ctx = SystemContext::new(world, commands, store, stable_ids, &engine_access, console.clone(), delta_time, total_time, frame);
             let start = Instant::now();
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 system_fn(&mut ctx);
             }));
             let elapsed_us = start.elapsed().as_micros() as u64;
+            let pending_updates = ctx.take_transform_updates();
+            drop(ctx);
             if result.is_err() {
                 log::error!("system '{}' panicked during LateUpdate phase", meta.name);
                 self.faulted_systems.insert(idx);
-            } else if idx < self.system_timings.len() {
-                self.system_timings[idx] = Some(elapsed_us);
+            } else {
+                apply_transform_updates(world, pending_updates);
+                if idx < self.system_timings.len() {
+                    self.system_timings[idx] = Some(elapsed_us);
+                }
             }
         }
 
         // Final flush + drain events
         commands.flush_with_catalog(world, stable_ids, &registry.blueprint_catalog, registry);
         store.drain_events();
+    }
+}
+
+/// Apply buffered transform updates using host TypeIds.
+fn apply_transform_updates(
+    world: &mut hecs::World,
+    updates: Vec<super::engine_access::TransformUpdate>,
+) {
+    for update in updates {
+        if let Ok(mut t) = world.get::<&mut Transform>(update.entity) {
+            if let Some(pos) = update.position {
+                t.position = pos;
+            }
+            if let Some(rot) = update.rotation {
+                t.rotation = rot;
+            }
+            if let Some(scale) = update.scale {
+                t.scale = scale;
+            }
+        }
     }
 }
 
@@ -222,7 +270,7 @@ mod tests {
         let mut commands = CommandQueue::new();
         let mut store = GameStore::new();
 
-        executor.tick(&registry, &mut world, &mut commands, &mut store, &mut StableIdIndex::new(), 0.016, 0.0, 0);
+        executor.tick(&registry, &mut world, &mut commands, &mut store, &mut StableIdIndex::new(), &ConsoleBuffer::new(), 0.016, 0.0, 0);
 
         // World should be unchanged
         assert_eq!(world.query::<()>().iter().count(), 0);
@@ -259,7 +307,7 @@ mod tests {
         let mut commands = CommandQueue::new();
         let mut store = GameStore::new();
 
-        executor.tick(&registry, &mut world, &mut commands, &mut store, &mut StableIdIndex::new(), 0.016, 0.0, 0);
+        executor.tick(&registry, &mut world, &mut commands, &mut store, &mut StableIdIndex::new(), &ConsoleBuffer::new(), 0.016, 0.0, 0);
 
         // After tick, flush happened, so the insert should be applied
         let mut q = world.query::<&Counter>();
@@ -303,7 +351,7 @@ mod tests {
         let mut commands = CommandQueue::new();
         let mut store = GameStore::new();
 
-        executor.tick(&registry, &mut world, &mut commands, &mut store, &mut StableIdIndex::new(), 0.016, 0.0, 0);
+        executor.tick(&registry, &mut world, &mut commands, &mut store, &mut StableIdIndex::new(), &ConsoleBuffer::new(), 0.016, 0.0, 0);
 
         EXEC_ORDER.with(|v| {
             let order = v.borrow();
@@ -348,7 +396,7 @@ mod tests {
         let mut commands = CommandQueue::new();
         let mut store = GameStore::new();
 
-        executor.tick(&registry, &mut world, &mut commands, &mut store, &mut StableIdIndex::new(), 0.016, 0.0, 0);
+        executor.tick(&registry, &mut world, &mut commands, &mut store, &mut StableIdIndex::new(), &ConsoleBuffer::new(), 0.016, 0.0, 0);
 
         EXEC_ORDER.with(|v| {
             let order = v.borrow();
@@ -407,7 +455,7 @@ mod tests {
         commands.set_loaded_scenes(vec!["test".into()]);
         let mut store = GameStore::new();
 
-        executor.tick(&registry, &mut world, &mut commands, &mut store, &mut StableIdIndex::new(), 0.016, 0.0, 0);
+        executor.tick(&registry, &mut world, &mut commands, &mut store, &mut StableIdIndex::new(), &ConsoleBuffer::new(), 0.016, 0.0, 0);
 
         // The LateUpdate system should have seen the entity spawned in Update
         // (because commands flush between phases). The count should be 1.
@@ -432,7 +480,7 @@ mod tests {
         store.emit("test_event", None, None);
         assert_eq!(store.events("test_event").count(), 2);
 
-        executor.tick(&registry, &mut world, &mut commands, &mut store, &mut StableIdIndex::new(), 0.016, 0.0, 0);
+        executor.tick(&registry, &mut world, &mut commands, &mut store, &mut StableIdIndex::new(), &ConsoleBuffer::new(), 0.016, 0.0, 0);
 
         // Events should be drained after tick
         assert_eq!(store.events("test_event").count(), 0);
@@ -479,7 +527,7 @@ mod tests {
         // First tick: system panics, gets recorded as faulted.
         executor.tick(
             &registry, &mut world, &mut commands, &mut store,
-            &mut StableIdIndex::new(), 0.016, 0.0, 0,
+            &mut StableIdIndex::new(), &ConsoleBuffer::new(), 0.016, 0.0, 0,
         );
         assert!(executor.is_faulted(0));
         assert_eq!(executor.faulted_systems().len(), 1);
@@ -487,7 +535,7 @@ mod tests {
         // Second tick: faulted system is skipped (no panic propagation).
         executor.tick(
             &registry, &mut world, &mut commands, &mut store,
-            &mut StableIdIndex::new(), 0.016, 0.016, 1,
+            &mut StableIdIndex::new(), &ConsoleBuffer::new(), 0.016, 0.016, 1,
         );
         assert!(executor.is_faulted(0));
     }
@@ -511,7 +559,7 @@ mod tests {
         let mut store = GameStore::new();
         executor.tick(
             &registry, &mut world, &mut commands, &mut store,
-            &mut StableIdIndex::new(), 0.016, 0.0, 0,
+            &mut StableIdIndex::new(), &ConsoleBuffer::new(), 0.016, 0.0, 0,
         );
         EXEC_ORDER.with(|v| assert!(v.borrow().is_empty(), "faulted system should not run"));
 
@@ -523,7 +571,7 @@ mod tests {
         // Tick again: system_a should run now.
         executor.tick(
             &registry, &mut world, &mut commands, &mut store,
-            &mut StableIdIndex::new(), 0.016, 0.016, 1,
+            &mut StableIdIndex::new(), &ConsoleBuffer::new(), 0.016, 0.016, 1,
         );
         EXEC_ORDER.with(|v| assert_eq!(*v.borrow(), vec!["a"]));
     }
@@ -551,7 +599,7 @@ mod tests {
 
         executor.tick(
             &registry, &mut world, &mut commands, &mut store,
-            &mut StableIdIndex::new(), 0.016, 0.0, 0,
+            &mut StableIdIndex::new(), &ConsoleBuffer::new(), 0.016, 0.0, 0,
         );
 
         // After tick, timings should be recorded (non-None).

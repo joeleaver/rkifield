@@ -297,8 +297,6 @@ pub struct ShaderInfo {
     pub name: String,
     /// Numeric ID used in the GPU dispatch switch.
     pub id: u32,
-    /// Whether this is a built-in shader (vs user-provided).
-    pub built_in: bool,
 }
 
 /// Full snapshot of a material's properties — returned by `material_get`.

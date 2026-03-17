@@ -51,7 +51,7 @@ pub struct ReloadReport {
 // ─── Serialized component snapshot ───────────────────────────────────────────
 
 /// A single serialized component instance, captured before dylib unload.
-struct SavedComponent {
+pub(crate) struct SavedComponent {
     entity: hecs::Entity,
     component_name: String,
     ron_data: String,
@@ -63,7 +63,7 @@ struct SavedComponent {
 ///
 /// Returns a list of serialized component snapshots and the count of
 /// components that were serialized.
-pub fn serialize_gameplay_components(
+pub(crate) fn serialize_gameplay_components(
     world: &hecs::World,
     registry: &GameplayRegistry,
 ) -> Vec<SavedComponent> {
@@ -125,7 +125,7 @@ pub fn remove_gameplay_components(
 /// Restore serialized components after a new dylib has been loaded and registered.
 ///
 /// Returns `(restored_count, failures)`.
-pub fn restore_gameplay_components(
+pub(crate) fn restore_gameplay_components(
     world: &mut hecs::World,
     registry: &GameplayRegistry,
     saved: &[SavedComponent],

@@ -327,17 +327,9 @@ fn build_shaders_grid(
             let shader_name_for_style = shader.name.clone();
             let shader_name = shader.name.clone();
             let file_path = shader.file_path.clone();
-            let built_in = shader.built_in;
-
-            let (bg_color, icon_text) = if built_in {
-                ("rgba(60,120,200,0.3)", "B")
-            } else {
-                ("rgba(60,180,100,0.3)", "C")
-            };
-            let type_label = if built_in { "built-in" } else { "custom" };
 
             let icon_style = format!(
-                "width:100%;height:32px;background:{bg_color};\
+                "width:100%;height:32px;background:rgba(60,180,100,0.3);\
                  display:flex;align-items:center;justify-content:center;\
                  font-size:14px;color:var(--rinch-color-dimmed);font-weight:600;"
             );
@@ -409,19 +401,14 @@ fn build_shaders_grid(
                     },
 
                     // Icon area.
-                    div { style: {icon_style.as_str()}, {icon_text} }
+                    div { style: {icon_style.as_str()}, "S" }
 
-                    // Name + type label.
-                    div { style: "padding:2px 3px;display:flex;flex-direction:column;gap:1px;",
+                    // Name label.
+                    div { style: "padding:2px 3px;",
                         div {
                             style: "font-size:9px;color:var(--rinch-color-text);\
                                     white-space:nowrap;overflow:hidden;text-overflow:ellipsis;",
                             {shader_name.clone()}
-                        }
-                        div {
-                            style: "font-size:8px;color:var(--rinch-color-placeholder);\
-                                    font-family:var(--rinch-font-family-monospace);",
-                            {type_label}
                         }
                     }
                 }
