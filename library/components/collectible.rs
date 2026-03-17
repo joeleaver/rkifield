@@ -3,9 +3,17 @@
 use rkf_runtime::behavior::{ComponentEntry, FieldMeta, FieldType, GameValue};
 
 /// A collectible item with a value and spinning animation.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Collectible {
     pub value: i32,
     pub spin_speed: f32,
+}
+
+impl Default for Collectible {
+    fn default() -> Self {
+        Self { value: 10, spin_speed: 1.0 }
+    }
 }
 
 static FIELDS: [FieldMeta; 2] = [
@@ -35,17 +43,12 @@ pub fn entry() -> ComponentEntry {
             world
                 .get::<&Collectible>(entity)
                 .ok()
-                .map(|c| format!("(value: {}, spin_speed: {})", c.value, c.spin_speed))
+                .map(|c| ron::to_string(&*c).unwrap_or_default())
         },
-        deserialize_insert: |world, entity, _ron_str| {
+        deserialize_insert: |world, entity, ron_str| {
+            let comp: Collectible = ron::from_str(ron_str).map_err(|e| e.to_string())?;
             world
-                .insert_one(
-                    entity,
-                    Collectible {
-                        value: 10,
-                        spin_speed: 1.0,
-                    },
-                )
+                .insert_one(entity, comp)
                 .map_err(|e| e.to_string())
         },
         has: |world, entity| world.get::<&Collectible>(entity).is_ok(),

@@ -9,6 +9,36 @@ pub struct CameraFollow {
     pub smoothing: f32,
 }
 
+impl Default for CameraFollow {
+    fn default() -> Self {
+        Self {
+            target: hecs::Entity::DANGLING,
+            offset: glam::Vec3::new(0.0, 5.0, -10.0),
+            smoothing: 0.1,
+        }
+    }
+}
+
+/// Proxy struct for serializing CameraFollow (hecs::Entity is not serde-compatible).
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct CameraFollowProxy {
+    target_bits: u64,
+    offset: glam::Vec3,
+    smoothing: f32,
+}
+
+impl Default for CameraFollowProxy {
+    fn default() -> Self {
+        let def = CameraFollow::default();
+        Self {
+            target_bits: def.target.to_bits().get(),
+            offset: def.offset,
+            smoothing: def.smoothing,
+        }
+    }
+}
+
 static FIELDS: [FieldMeta; 2] = [
     FieldMeta {
         name: "offset",
@@ -37,21 +67,24 @@ pub fn entry() -> ComponentEntry {
                 .get::<&CameraFollow>(entity)
                 .ok()
                 .map(|c| {
-                    format!(
-                        "(offset: ({}, {}, {}), smoothing: {})",
-                        c.offset.x, c.offset.y, c.offset.z, c.smoothing
-                    )
+                    let proxy = CameraFollowProxy {
+                        target_bits: c.target.to_bits().get(),
+                        offset: c.offset,
+                        smoothing: c.smoothing,
+                    };
+                    ron::to_string(&proxy).unwrap_or_default()
                 })
         },
-        deserialize_insert: |world, entity, _ron_str| {
-            let placeholder = world.reserve_entity();
+        deserialize_insert: |world, entity, ron_str| {
+            let proxy: CameraFollowProxy = ron::from_str(ron_str).map_err(|e| e.to_string())?;
+            let target = hecs::Entity::from_bits(proxy.target_bits).unwrap_or_else(|| world.reserve_entity());
             world
                 .insert_one(
                     entity,
                     CameraFollow {
-                        target: placeholder,
-                        offset: glam::Vec3::new(0.0, 5.0, -10.0),
-                        smoothing: 0.1,
+                        target,
+                        offset: proxy.offset,
+                        smoothing: proxy.smoothing,
                     },
                 )
                 .map_err(|e| e.to_string())

@@ -55,7 +55,7 @@ impl World {
             return Err(WorldError::SceneOutOfRange(index));
         }
 
-        use crate::behavior::{GameplayRegistry, StableIdIndex};
+        use crate::behavior::GameplayRegistry;
         use crate::scene_file_v3;
 
         // Ensure all entities have StableIds for v3 save
@@ -76,7 +76,7 @@ impl World {
     ///
     /// Returns the UUIDs of loaded entities.
     pub fn load_scene(&mut self, path: impl AsRef<Path>) -> Result<Vec<Uuid>, WorldError> {
-        use crate::behavior::{GameplayRegistry, StableId, StableIdIndex};
+        use crate::behavior::{GameplayRegistry, StableIdIndex};
         use crate::scene_file_v3;
 
         let ron_str = std::fs::read_to_string(path.as_ref())

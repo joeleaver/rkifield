@@ -3,9 +3,17 @@
 use rkf_runtime::behavior::{ComponentEntry, FieldMeta, FieldType, GameValue};
 
 /// Spin component: rotates an entity around the Y axis.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Spin {
     /// Rotation speed in radians per second.
     pub speed: f32,
+}
+
+impl Default for Spin {
+    fn default() -> Self {
+        Self { speed: 1.0 }
+    }
 }
 
 static FIELDS: [FieldMeta; 1] = [
@@ -17,10 +25,11 @@ pub fn entry() -> ComponentEntry {
         name: "Spin",
         meta: &FIELDS,
         serialize: |world, entity| {
-            world.get::<&Spin>(entity).ok().map(|c| format!("(speed: {})", c.speed))
+            world.get::<&Spin>(entity).ok().map(|c| ron::to_string(&*c).unwrap_or_default())
         },
-        deserialize_insert: |world, entity, _ron_str| {
-            world.insert_one(entity, Spin { speed: 1.0 }).map_err(|e| e.to_string())
+        deserialize_insert: |world, entity, ron_str| {
+            let comp: Spin = ron::from_str(ron_str).map_err(|e| e.to_string())?;
+            world.insert_one(entity, comp).map_err(|e| e.to_string())
         },
         has: |world, entity| world.get::<&Spin>(entity).is_ok(),
         remove: |world, entity| { let _ = world.remove_one::<Spin>(entity); },

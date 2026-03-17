@@ -3,9 +3,17 @@
 use rkf_runtime::behavior::{ComponentEntry, FieldMeta, FieldType, GameValue};
 
 /// A door that can be opened, optionally requiring a key.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct DoorState {
     pub open: bool,
     pub key_required: Option<String>,
+}
+
+impl Default for DoorState {
+    fn default() -> Self {
+        Self { open: false, key_required: None }
+    }
 }
 
 static FIELDS: [FieldMeta; 2] = [
@@ -35,23 +43,12 @@ pub fn entry() -> ComponentEntry {
             world
                 .get::<&DoorState>(entity)
                 .ok()
-                .map(|c| {
-                    let key = match &c.key_required {
-                        Some(k) => format!("Some(\"{}\")", k),
-                        None => "None".to_string(),
-                    };
-                    format!("(open: {}, key_required: {})", c.open, key)
-                })
+                .map(|c| ron::to_string(&*c).unwrap_or_default())
         },
-        deserialize_insert: |world, entity, _ron_str| {
+        deserialize_insert: |world, entity, ron_str| {
+            let comp: DoorState = ron::from_str(ron_str).map_err(|e| e.to_string())?;
             world
-                .insert_one(
-                    entity,
-                    DoorState {
-                        open: false,
-                        key_required: None,
-                    },
-                )
+                .insert_one(entity, comp)
                 .map_err(|e| e.to_string())
         },
         has: |world, entity| world.get::<&DoorState>(entity).is_ok(),

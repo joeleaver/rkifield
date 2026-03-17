@@ -2,6 +2,7 @@
 
 use glam::Vec3;
 
+#[allow(dead_code)]
 pub(super) fn parse_analytical_primitive(
     name: &str,
     params: Option<&[f32]>,
@@ -68,6 +69,7 @@ pub(super) fn parse_analytical_primitive(
     }
 }
 
+#[allow(dead_code)]
 pub(super) fn primitive_to_analytical(
     primitive: &rkf_core::scene_node::SdfPrimitive,
 ) -> (String, Vec<f32>) {

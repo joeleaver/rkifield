@@ -239,6 +239,7 @@ rkf-runtime = {{ path = "{runtime_path}" }}
 glam = {{ version = "0.29", features = ["bytemuck", "serde"] }}
 hecs = "0.10"
 serde = {{ version = "1", features = ["derive"] }}
+ron = "0.8"
 
 # The game dylib shares hecs::World with the editor across the FFI boundary.
 # The editor always runs in release mode. hecs has #[cfg(debug_assertions)]

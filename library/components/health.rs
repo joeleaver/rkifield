@@ -3,9 +3,17 @@
 use rkf_runtime::behavior::{ComponentEntry, FieldMeta, FieldType, GameValue};
 
 /// Hit points for a damageable entity.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Health {
     pub current: f32,
     pub max: f32,
+}
+
+impl Default for Health {
+    fn default() -> Self {
+        Self { current: 100.0, max: 100.0 }
+    }
 }
 
 static FIELDS: [FieldMeta; 2] = [
@@ -35,11 +43,12 @@ pub fn entry() -> ComponentEntry {
             world
                 .get::<&Health>(entity)
                 .ok()
-                .map(|c| format!("(current: {}, max: {})", c.current, c.max))
+                .map(|c| ron::to_string(&*c).unwrap_or_default())
         },
-        deserialize_insert: |world, entity, _ron_str| {
+        deserialize_insert: |world, entity, ron_str| {
+            let comp: Health = ron::from_str(ron_str).map_err(|e| e.to_string())?;
             world
-                .insert_one(entity, Health { current: 100.0, max: 100.0 })
+                .insert_one(entity, comp)
                 .map_err(|e| e.to_string())
         },
         has: |world, entity| world.get::<&Health>(entity).is_ok(),

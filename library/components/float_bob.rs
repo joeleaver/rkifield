@@ -3,6 +3,8 @@
 use rkf_runtime::behavior::{ComponentEntry, FieldMeta, FieldType, GameValue};
 
 /// Float/bob component: makes an entity bob up and down sinusoidally.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct FloatBob {
     /// Amplitude of the bobbing motion in metres.
     pub amplitude: f32,
@@ -12,6 +14,12 @@ pub struct FloatBob {
     pub phase: f32,
     /// Base Y position to oscillate around (initialized from entity position on first tick).
     pub base_y: Option<f32>,
+}
+
+impl Default for FloatBob {
+    fn default() -> Self {
+        Self { amplitude: 0.3, frequency: 1.0, phase: 0.0, base_y: None }
+    }
 }
 
 static FIELDS: [FieldMeta; 4] = [
@@ -27,13 +35,12 @@ pub fn entry() -> ComponentEntry {
         meta: &FIELDS,
         serialize: |world, entity| {
             world.get::<&FloatBob>(entity).ok().map(|c| {
-                let base = c.base_y.unwrap_or(0.0);
-                format!("(amplitude: {}, frequency: {}, phase: {}, base_y: {})", c.amplitude, c.frequency, c.phase, base)
+                ron::to_string(&*c).unwrap_or_default()
             })
         },
-        deserialize_insert: |world, entity, _ron_str| {
-            world.insert_one(entity, FloatBob { amplitude: 0.3, frequency: 1.0, phase: 0.0, base_y: None })
-                .map_err(|e| e.to_string())
+        deserialize_insert: |world, entity, ron_str| {
+            let comp: FloatBob = ron::from_str(ron_str).map_err(|e| e.to_string())?;
+            world.insert_one(entity, comp).map_err(|e| e.to_string())
         },
         has: |world, entity| world.get::<&FloatBob>(entity).is_ok(),
         remove: |world, entity| { let _ = world.remove_one::<FloatBob>(entity); },

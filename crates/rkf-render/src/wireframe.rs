@@ -9,7 +9,6 @@
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Quat, Vec3};
-use wgpu::util::DeviceExt;
 
 /// A single line vertex (position in camera-relative space + RGBA color).
 #[repr(C)]

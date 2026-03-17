@@ -14,12 +14,26 @@ pub enum GuardState {
 }
 
 /// Guard AI component: patrol/chase/return behavior around a patrol origin.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct GuardAi {
     pub state: GuardState,
     pub patrol_origin: glam::Vec3,
     pub patrol_radius: f32,
     pub chase_speed: f32,
     pub detection_range: f32,
+}
+
+impl Default for GuardAi {
+    fn default() -> Self {
+        Self {
+            state: GuardState::Patrol,
+            patrol_origin: glam::Vec3::ZERO,
+            patrol_radius: 10.0,
+            chase_speed: 8.0,
+            detection_range: 15.0,
+        }
+    }
 }
 
 static FIELDS: [FieldMeta; 5] = [
@@ -73,26 +87,12 @@ pub fn entry() -> ComponentEntry {
             world
                 .get::<&GuardAi>(entity)
                 .ok()
-                .map(|c| {
-                    format!(
-                        "(state: {:?}, patrol_origin: ({}, {}, {}), patrol_radius: {}, chase_speed: {}, detection_range: {})",
-                        c.state, c.patrol_origin.x, c.patrol_origin.y, c.patrol_origin.z,
-                        c.patrol_radius, c.chase_speed, c.detection_range
-                    )
-                })
+                .map(|c| ron::to_string(&*c).unwrap_or_default())
         },
-        deserialize_insert: |world, entity, _ron_str| {
+        deserialize_insert: |world, entity, ron_str| {
+            let comp: GuardAi = ron::from_str(ron_str).map_err(|e| e.to_string())?;
             world
-                .insert_one(
-                    entity,
-                    GuardAi {
-                        state: GuardState::Patrol,
-                        patrol_origin: glam::Vec3::ZERO,
-                        patrol_radius: 10.0,
-                        chase_speed: 8.0,
-                        detection_range: 15.0,
-                    },
-                )
+                .insert_one(entity, comp)
                 .map_err(|e| e.to_string())
         },
         has: |world, entity| world.get::<&GuardAi>(entity).is_ok(),

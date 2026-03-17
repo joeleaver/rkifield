@@ -3,10 +3,18 @@
 use rkf_runtime::behavior::{ComponentEntry, FieldMeta, FieldType, GameValue};
 
 /// Patrol behavior: move between waypoints at a given speed.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Patrol {
     pub waypoints: Vec<glam::Vec3>,
     pub speed: f32,
     pub current_index: usize,
+}
+
+impl Default for Patrol {
+    fn default() -> Self {
+        Self { waypoints: Vec::new(), speed: 5.0, current_index: 0 }
+    }
 }
 
 static FIELDS: [FieldMeta; 3] = [
@@ -44,18 +52,12 @@ pub fn entry() -> ComponentEntry {
             world
                 .get::<&Patrol>(entity)
                 .ok()
-                .map(|c| format!("(speed: {}, current_index: {})", c.speed, c.current_index))
+                .map(|c| ron::to_string(&*c).unwrap_or_default())
         },
-        deserialize_insert: |world, entity, _ron_str| {
+        deserialize_insert: |world, entity, ron_str| {
+            let comp: Patrol = ron::from_str(ron_str).map_err(|e| e.to_string())?;
             world
-                .insert_one(
-                    entity,
-                    Patrol {
-                        waypoints: Vec::new(),
-                        speed: 5.0,
-                        current_index: 0,
-                    },
-                )
+                .insert_one(entity, comp)
                 .map_err(|e| e.to_string())
         },
         has: |world, entity| world.get::<&Patrol>(entity).is_ok(),
