@@ -860,7 +860,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             &mut engine, &editor_state, &shared_state, &scene_clone,
             camera.position, f_selected, f_gizmo_mode, f_gizmo_axis,
             f_show_grid, f_editor_mode, f_brush_radius, f_brush_falloff,
-            f_sculpting_active,
+            f_sculpting_active, play_state.is_playing(),
         );
 
         // g2. Process file watcher events (material + shader + source hot-reload).

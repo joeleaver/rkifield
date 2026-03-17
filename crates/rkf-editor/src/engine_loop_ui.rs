@@ -358,8 +358,16 @@ pub(crate) fn build_wireframe_overlays(
     brush_radius: f32,
     brush_falloff: f32,
     sculpting_active: bool,
+    playing: bool,
 ) {
     let mut wf_verts: Vec<crate::wireframe::LineVertex> = Vec::new();
+
+    // Skip selection highlights, gizmos, and brush overlays during play mode.
+    if playing {
+        engine.deactivate_brush_overlay();
+        engine.set_wireframe_vertices(wf_verts);
+        return;
+    }
 
     // Light wireframe + translate gizmo for selected light.
     if let Some(SelectedEntity::Light(lid)) = selected {

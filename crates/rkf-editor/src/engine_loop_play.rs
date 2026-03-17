@@ -23,6 +23,11 @@ pub(crate) struct PlayState {
 }
 
 impl PlayState {
+    /// Whether play mode is currently active.
+    pub(crate) fn is_playing(&self) -> bool {
+        self.play_mode.is_playing()
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             play_mode: rkf_runtime::behavior::PlayModeManager::new(),
@@ -114,6 +119,24 @@ pub(crate) fn tick_play_mode(
         ps.play_commands = rkf_runtime::behavior::CommandQueue::new();
         ps.play_frame_number = 0;
         ps.play_total_time = 0.0;
+
+        // Restore scene object transforms from the edit world.
+        if let Ok(es) = editor_state.lock() {
+            for (_, record) in es.world.entity_records() {
+                if let Some(obj_id) = record.sdf_object_id {
+                    if let Ok(t) = es.world.ecs_ref().get::<&rkf_runtime::components::Transform>(record.ecs_entity) {
+                        let pos = t.position.to_vec3();
+                        if let Some(obj) = scene_clone.objects.iter_mut().find(|o| o.id == obj_id) {
+                            obj.position = pos;
+                            obj.rotation = t.rotation;
+                            obj.scale = t.scale;
+                            engine.dirty_objects.insert(obj_id);
+                        }
+                    }
+                }
+            }
+        }
+
         if let Ok(mut ss) = shared_state.lock() {
             ss.play_mode_state = crate::automation::PlayModeState::Stopped;
         }
