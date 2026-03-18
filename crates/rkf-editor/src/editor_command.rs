@@ -47,6 +47,8 @@ pub enum EditorCommand {
     SetCameraFov { fov: f32 },
     SetCameraSpeed { speed: f32 },
     SetCameraNearFar { near: f32, far: f32 },
+    /// Set orbit yaw/pitch (radians) — for camera presets (Top, Front, etc.).
+    SetCameraOrbitAngles { yaw: f32, pitch: f32 },
 
     // ── Environment ──────────────────────────────────────────────────────
     // Environment settings flow through SetComponentField targeting the

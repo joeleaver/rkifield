@@ -11,7 +11,7 @@ mod tests;
 pub use slider_signals::SliderSignals;
 
 use crate::animation_preview::AnimationPreview;
-use crate::camera::{CameraMode, SceneCamera};
+use crate::camera::{CameraControlState, CameraMode, CameraSnapshot};
 use crate::debug_viz::{DebugOverlay, FrameTimeHistory};
 use crate::gizmo::{GizmoMode, GizmoState};
 use crate::input::InputState;
@@ -176,10 +176,10 @@ pub struct UiSignals {
     /// UUID of the scene camera currently driving the viewport, if any.
     pub viewport_camera: Signal<Option<Uuid>>,
 
-    // ── Scene environment ─────────────────────────────────────────
-    /// UUID of the scene environment singleton entity.
-    /// Used by the environment panel to send SetComponentField commands.
-    pub scene_env_uuid: Signal<Option<Uuid>>,
+    // ── Active camera (environment owner) ──────────────────────────
+    /// UUID of the camera entity whose EnvironmentSettings the panel edits.
+    /// Resolved as `viewport_camera.or(editor_camera_entity)`.
+    pub active_camera_uuid: Signal<Option<Uuid>>,
 }
 
 /// Snapshot of inspector data, safe to send to the UI thread.
@@ -288,7 +288,7 @@ impl UiSignals {
             recent_projects: Signal::new(Vec::new()),
             dylib_ready: Signal::new(false),
             viewport_camera: Signal::new(None),
-            scene_env_uuid: Signal::new(None),
+            active_camera_uuid: Signal::new(None),
         }
     }
 
@@ -450,7 +450,7 @@ pub struct EditorState {
     pub mode: EditorMode,
 
     // ── Camera & Input ───────────────────────────────────────
-    pub editor_camera: SceneCamera,
+    pub camera_control: CameraControlState,
     pub editor_input: InputState,
 
     // ── Scene ────────────────────────────────────────────────

@@ -20,8 +20,10 @@ pub(crate) struct PlayState {
     /// Maps play hecs::Entity → SceneObject.id for syncing play transforms to the renderer.
     /// Built once at play start from the edit world's entity tracking.
     pub(crate) play_entity_to_obj_id: HashMap<hecs::Entity, u32>,
-    /// Saved editor camera state before play mode (restored on stop).
-    pub(crate) pre_play_camera: Option<crate::camera::SceneCamera>,
+    /// Saved camera snapshot (position/yaw/pitch/fov) before play mode (restored on stop).
+    pub(crate) pre_play_snapshot: Option<crate::camera::CameraSnapshot>,
+    /// Saved camera control state before play mode.
+    pub(crate) pre_play_control: Option<crate::camera::CameraControlState>,
     /// The hecs entity of the active scene camera in the play world (if any).
     pub(crate) play_active_camera: Option<hecs::Entity>,
 }
@@ -42,7 +44,8 @@ impl PlayState {
             play_total_time: 0.0,
             global_frame: 0,
             play_entity_to_obj_id: HashMap::new(),
-            pre_play_camera: None,
+            pre_play_snapshot: None,
+            pre_play_control: None,
             play_active_camera: None,
         }
     }
@@ -105,7 +108,8 @@ pub(crate) fn tick_play_mode(
                 if active_cam_entity.is_some() {
                     // Save editor camera state for restoration on stop.
                     let es = editor_state.lock().expect("editor_state lock for camera save");
-                    ps.pre_play_camera = Some(es.editor_camera);
+                    ps.pre_play_snapshot = Some(es.extract_camera_snapshot());
+                    ps.pre_play_control = Some(es.camera_control);
                 }
                 ps.play_active_camera = active_cam_entity;
 
@@ -143,9 +147,23 @@ pub(crate) fn tick_play_mode(
         ps.play_total_time = 0.0;
 
         // Restore editor camera if it was saved before play.
-        if let Some(saved_camera) = ps.pre_play_camera.take() {
+        if let Some(snap) = ps.pre_play_snapshot.take() {
             if let Ok(mut es) = editor_state.lock() {
-                es.editor_camera = saved_camera;
+                if let Some(ctrl) = ps.pre_play_control.take() {
+                    es.camera_control = ctrl;
+                }
+                if let Some(uuid) = es.editor_camera_entity {
+                    let wp = rkf_core::WorldPosition::new(glam::IVec3::ZERO, snap.position);
+                    let _ = es.world.set_position(uuid, wp);
+                    if let Some(e) = es.world.ecs_entity_for(uuid) {
+                        if let Ok(mut cam) = es.world.ecs_mut()
+                            .get::<&mut rkf_runtime::components::CameraComponent>(e)
+                        {
+                            cam.yaw = snap.yaw.to_degrees();
+                            cam.pitch = snap.pitch.to_degrees();
+                        }
+                    }
+                }
             }
         }
         ps.play_active_camera = None;
@@ -224,10 +242,30 @@ pub(crate) fn tick_play_mode(
                 }
             }
 
-            // Sync active scene camera to editor camera during play.
+            // Sync active scene camera to editor camera entity during play.
             if let Some(cam_entity) = ps.play_active_camera {
                 if let Ok(mut es) = editor_state.lock() {
-                    es.editor_camera.sync_from_entity(world, cam_entity);
+                    // Read play camera's transform → write to editor camera entity.
+                    // Sync play camera → editor camera entity.
+                    if let Ok(t) = world.get::<&rkf_runtime::components::Transform>(cam_entity) {
+                        let pos = t.position.to_vec3();
+                        if let Some(uuid) = es.editor_camera_entity {
+                            let wp = rkf_core::WorldPosition::new(glam::IVec3::ZERO, pos);
+                            let _ = es.world.set_position(uuid, wp);
+                        }
+                    }
+                    if let Ok(cam) = world.get::<&rkf_runtime::components::CameraComponent>(cam_entity) {
+                        if let Some(uuid) = es.editor_camera_entity {
+                            if let Some(e) = es.world.ecs_entity_for(uuid) {
+                                if let Ok(mut ec) = es.world.ecs_mut()
+                                    .get::<&mut rkf_runtime::components::CameraComponent>(e)
+                                {
+                                    ec.yaw = cam.yaw;
+                                    ec.pitch = cam.pitch;
+                                }
+                            }
+                        }
+                    }
 
                     // Resolve environment from the active camera's profile → editor camera entity.
                     let profile_path = world

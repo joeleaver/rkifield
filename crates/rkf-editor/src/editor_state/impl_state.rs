@@ -8,13 +8,6 @@ impl EditorState {
     /// Create a new editor state with default values and fly-mode camera
     /// positioned to match the engine's initial viewpoint.
     pub fn new() -> Self {
-        let mut cam = SceneCamera::new();
-        cam.mode = CameraMode::Fly;
-        cam.position = Vec3::new(0.0, 2.5, 5.0);
-        cam.fly_yaw = 0.0;
-        cam.fly_pitch = -0.15;
-        cam.fly_speed = 5.0;
-
         let mut world = World::new("editor");
 
         // Spawn the editor's own camera entity with EditorCameraMarker.
@@ -35,9 +28,15 @@ impl EditorState {
             let _ = world.ecs_mut().insert_one(ecs_entity, rkf_runtime::components::EditorCameraMarker);
         }
 
+        let camera_control = CameraControlState {
+            mode: CameraMode::Fly,
+            fly_speed: 5.0,
+            ..CameraControlState::default()
+        };
+
         Self {
             mode: EditorMode::Default,
-            editor_camera: cam,
+            camera_control,
             editor_input: InputState::new(),
             selected_entity: None,
             selected_properties: None,
@@ -125,23 +124,48 @@ impl EditorState {
 
     /// Update camera from current input state.
     ///
-    /// This method exists to work around Rust's borrow checker: calling
-    /// `self.editor_camera.update(&self.editor_input, dt)` through a
-    /// `MutexGuard` doesn't allow simultaneous mutable + immutable borrows,
-    /// but a method on `Self` can borrow separate fields.
+    /// Reads position/yaw/pitch from the editor camera entity, applies
+    /// `CameraControlState` controls, then writes the result back to the entity.
     pub fn update_camera(&mut self, dt: f32) {
-        self.editor_camera.update(&self.editor_input, dt);
-    }
+        let uuid = match self.editor_camera_entity {
+            Some(u) => u,
+            None => return,
+        };
 
-    /// Sync editor camera state to an engine `Camera`.
-    ///
-    /// Copies position, orientation, and FOV from the editor camera entity
-    /// to the render engine's `Camera` struct.
-    pub fn sync_to_engine_camera(&self, engine_cam: &mut rkf_render::camera::Camera) {
-        engine_cam.position = self.editor_camera.position;
-        engine_cam.yaw = self.editor_camera.fly_yaw;
-        engine_cam.pitch = self.editor_camera.fly_pitch;
-        engine_cam.fov_degrees = self.editor_camera_fov_degrees();
+        let ecs_entity = self.world.ecs_entity_for(uuid);
+
+        let mut position = ecs_entity
+            .and_then(|e| {
+                self.world.ecs_ref()
+                    .get::<&rkf_runtime::components::Transform>(e)
+                    .ok()
+                    .map(|t| t.position.to_vec3())
+            })
+            .unwrap_or(Vec3::new(0.0, 2.5, 5.0));
+
+        let (mut yaw, mut pitch) = ecs_entity
+            .and_then(|e| {
+                self.world.ecs_ref()
+                    .get::<&rkf_runtime::components::CameraComponent>(e)
+                    .ok()
+                    .map(|c| (c.yaw.to_radians(), c.pitch.to_radians()))
+            })
+            .unwrap_or((0.0, 0.0));
+
+        // Apply control state.
+        self.camera_control.update(&self.editor_input, dt, &mut position, &mut yaw, &mut pitch);
+
+        // Write back to entity.
+        let wp = rkf_core::WorldPosition::new(glam::IVec3::ZERO, position);
+        let _ = self.world.set_position(uuid, wp);
+        if let Some(e) = ecs_entity {
+            if let Ok(mut cam) = self.world.ecs_mut()
+                .get::<&mut rkf_runtime::components::CameraComponent>(e)
+            {
+                cam.yaw = yaw.to_degrees();
+                cam.pitch = pitch.to_degrees();
+            }
+        }
     }
 
     /// Read fov_degrees from the editor camera entity's CameraComponent.
@@ -177,6 +201,37 @@ impl EditorState {
         Some(f(&cam))
     }
 
+    /// Extract a `CameraSnapshot` from the editor camera entity.
+    ///
+    /// Reads position from Transform, yaw/pitch/fov/near/far from CameraComponent.
+    pub fn extract_camera_snapshot(&self) -> CameraSnapshot {
+        self.extract_camera_snapshot_for(
+            self.editor_camera_entity.expect("editor camera entity must exist"),
+        )
+    }
+
+    /// Extract a `CameraSnapshot` from any camera entity by UUID.
+    pub fn extract_camera_snapshot_for(&self, uuid: uuid::Uuid) -> CameraSnapshot {
+        let ecs_entity = self.world.ecs_entity_for(uuid);
+        let position = ecs_entity
+            .and_then(|e| {
+                self.world.ecs_ref()
+                    .get::<&rkf_runtime::components::Transform>(e)
+                    .ok()
+                    .map(|t| t.position.to_vec3())
+            })
+            .unwrap_or(Vec3::new(0.0, 2.5, 5.0));
+        let (yaw, pitch, fov_degrees, near, far) = ecs_entity
+            .and_then(|e| {
+                self.world.ecs_ref()
+                    .get::<&rkf_runtime::components::CameraComponent>(e)
+                    .ok()
+                    .map(|c| (c.yaw.to_radians(), c.pitch.to_radians(), c.fov_degrees, c.near, c.far))
+            })
+            .unwrap_or((0.0, 0.0, 70.0, 0.1, 1000.0));
+        CameraSnapshot { position, yaw, pitch, fov_degrees, near, far }
+    }
+
     /// Write a field on the editor camera entity's CameraComponent.
     pub fn set_editor_camera_component_field(
         &mut self,
@@ -195,24 +250,28 @@ impl EditorState {
 
     /// Re-spawn the editor camera entity after a world clear.
     ///
-    /// Preserves the current SceneCamera control state (position, yaw, pitch)
-    /// and camera component settings (fov, near, far). Call this immediately
-    /// after `world.clear()` to restore the editor camera entity.
-    pub fn respawn_editor_camera(&mut self) {
-        let saved_fov = self.editor_camera_fov_degrees();
-        let saved_near = self.editor_camera_near();
-        let saved_far = self.editor_camera_far();
+    /// `saved` must be captured BEFORE `world.clear()` since the old entity
+    /// will be gone. If `None`, uses defaults.
+    pub fn respawn_editor_camera(&mut self, saved: Option<CameraSnapshot>) {
+        let snap = saved.unwrap_or(CameraSnapshot {
+            position: Vec3::new(0.0, 2.5, 5.0),
+            yaw: 0.0,
+            pitch: -0.15,
+            fov_degrees: 70.0,
+            near: 0.1,
+            far: 1000.0,
+        });
 
         let editor_cam_pos = rkf_core::WorldPosition::new(
             glam::IVec3::ZERO,
-            self.editor_camera.position,
+            snap.position,
         );
         let editor_cam_uuid = self.world.spawn_camera(
             "Editor Camera",
             editor_cam_pos,
-            self.editor_camera.fly_yaw.to_degrees(),
-            self.editor_camera.fly_pitch.to_degrees(),
-            saved_fov,
+            snap.yaw.to_degrees(),
+            snap.pitch.to_degrees(),
+            snap.fov_degrees,
             None,
         );
         if let Some(ecs_entity) = self.world.ecs_entity_for(editor_cam_uuid) {
@@ -223,33 +282,11 @@ impl EditorState {
             if let Ok(mut cam) = self.world.ecs_mut()
                 .get::<&mut rkf_runtime::components::CameraComponent>(ecs_entity)
             {
-                cam.near = saved_near;
-                cam.far = saved_far;
+                cam.near = snap.near;
+                cam.far = snap.far;
             }
         }
         self.editor_camera_entity = Some(editor_cam_uuid);
-    }
-
-    /// Write the editor camera's position/yaw/pitch back to its entity.
-    ///
-    /// Called each frame after update_camera() to keep the entity in sync
-    /// with the transient SceneCamera working state.
-    pub fn write_camera_to_entity(&mut self) {
-        if let Some(uuid) = self.editor_camera_entity {
-            let pos = rkf_core::WorldPosition::new(
-                glam::IVec3::ZERO,
-                self.editor_camera.position,
-            );
-            let _ = self.world.set_position(uuid, pos);
-            if let Some(ecs_entity) = self.world.ecs_entity_for(uuid) {
-                if let Ok(mut cam) = self.world.ecs_mut()
-                    .get::<&mut rkf_runtime::components::CameraComponent>(ecs_entity)
-                {
-                    cam.yaw = self.editor_camera.fly_yaw.to_degrees();
-                    cam.pitch = self.editor_camera.fly_pitch.to_degrees();
-                }
-            }
-        }
     }
 
     /// Name of the current debug visualization mode (empty for normal shading).
@@ -341,15 +378,13 @@ impl EditorState {
         vp_width: f32,
         vp_height: f32,
     ) -> Option<uuid::Uuid> {
-        let (ray_o, ray_d) = crate::camera::screen_to_ray(
-            &self.editor_camera,
+        let snap = self.extract_camera_snapshot();
+        let (ray_o, ray_d) = crate::camera::screen_to_ray_snapshot(
+            &snap,
             pixel_x,
             pixel_y,
             vp_width,
             vp_height,
-            self.editor_camera_fov_y(),
-            self.editor_camera_near(),
-            self.editor_camera_far(),
         );
 
         let render_scene = self.world.build_render_scene();
@@ -401,8 +436,13 @@ impl EditorState {
         let scene_v3 = scene_file_v3::deserialize_scene_v3(&ron_str)
             .map_err(|e| format!("Failed to parse scene file: {e}"))?;
 
+        let saved_snap = if self.editor_camera_entity.is_some() {
+            Some(self.extract_camera_snapshot())
+        } else {
+            None
+        };
         self.world.clear();
-        self.respawn_editor_camera();
+        self.respawn_editor_camera(saved_snap);
 
         let registry = GameplayRegistry::new();
         let mut stable_index = StableIdIndex::new();
@@ -467,9 +507,16 @@ impl EditorState {
         let registry = GameplayRegistry::new();
         let mut scene_v3 = scene_file_v3::save_scene(self.world.ecs_ref(), &stable_index, &registry);
 
-        // Filter out the editor camera entity — it's transient, not part of the scene.
+        // Filter out internal entities — editor camera and SceneEnvironment singleton.
         if let Some(editor_cam_id) = self.editor_camera_entity {
             scene_v3.entities.retain(|e| e.stable_id != editor_cam_id);
+        }
+        // Filter out SceneEnvironment entity (internal singleton, not user content).
+        if let Some(scene_env_hecs) = self.world.scene_environment_entity() {
+            if let Ok(sid) = self.world.ecs_ref().get::<&rkf_runtime::behavior::StableId>(scene_env_hecs) {
+                let env_uuid = sid.0;
+                scene_v3.entities.retain(|e| e.stable_id != env_uuid);
+            }
         }
 
         // Environment is stored as the EnvironmentSettings component on the

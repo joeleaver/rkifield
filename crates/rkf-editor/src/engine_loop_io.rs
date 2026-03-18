@@ -25,7 +25,7 @@ pub(crate) struct IoContext<'a> {
 
 /// Camera snapshot for scene save/load.
 #[derive(serde::Serialize, serde::Deserialize)]
-pub struct CameraSnapshot {
+pub struct SavedCameraSnapshot {
     pub position: glam::Vec3,
     pub yaw: f32,
     pub pitch: f32,
@@ -63,11 +63,12 @@ fn save_scene_v3(
     }
 
     // Store editor state in properties bag.
-    let cam_snap = CameraSnapshot {
-        position: es.editor_camera.position,
-        yaw: es.editor_camera.fly_yaw,
-        pitch: es.editor_camera.fly_pitch,
-        fov_y: es.editor_camera_fov_y(),
+    let snap = es.extract_camera_snapshot();
+    let cam_snap = SavedCameraSnapshot {
+        position: snap.position,
+        yaw: snap.yaw,
+        pitch: snap.pitch,
+        fov_y: snap.fov_degrees.to_radians(),
     };
     if let Ok(s) = ron::to_string(&cam_snap) {
         scene_v3.properties.insert("camera".into(), s);
@@ -172,9 +173,14 @@ pub(crate) fn load_scene_v3(
     let scene_v3 = scene_file_v3::deserialize_scene_v3(&ron_str)
         .map_err(|e| anyhow::anyhow!("parse scene: {e}"))?;
 
+    let saved_snap = if es.editor_camera_entity.is_some() {
+        Some(es.extract_camera_snapshot())
+    } else {
+        None
+    };
     engine.clear_scene();
     es.world.clear();
-    es.respawn_editor_camera();
+    es.respawn_editor_camera(saved_snap);
 
     // Load entities into hecs.
     let mut stable_index = StableIdIndex::new();
@@ -276,18 +282,21 @@ fn load_rkf_assets_from_hecs(
 /// Restore camera, environment, and lights from a v3 scene file's properties.
 fn restore_properties_v3(es: &mut EditorState, scene_v3: &SceneFileV3) {
     if let Some(s) = scene_v3.properties.get("camera") {
-        if let Ok(cam) = ron::from_str::<CameraSnapshot>(s) {
-            es.editor_camera.position = cam.position;
-            es.editor_camera.fly_yaw = cam.yaw;
-            es.editor_camera.fly_pitch = cam.pitch;
-            es.set_editor_camera_component_field(|c| c.fov_degrees = cam.fov_y.to_degrees());
-            let dir = glam::Vec3::new(
-                -cam.yaw.sin() * cam.pitch.cos(),
-                cam.pitch.sin(),
-                -cam.yaw.cos() * cam.pitch.cos(),
-            );
-            es.editor_camera.target = es.editor_camera.position
-                + dir * es.editor_camera.orbit_distance;
+        if let Ok(cam) = ron::from_str::<SavedCameraSnapshot>(s) {
+            // Write to entity (source of truth).
+            if let Some(uuid) = es.editor_camera_entity {
+                let wp = rkf_core::WorldPosition::new(glam::IVec3::ZERO, cam.position);
+                let _ = es.world.set_position(uuid, wp);
+                if let Some(e) = es.world.ecs_entity_for(uuid) {
+                    if let Ok(mut cc) = es.world.ecs_mut()
+                        .get::<&mut rkf_runtime::components::CameraComponent>(e)
+                    {
+                        cc.yaw = cam.yaw.to_degrees();
+                        cc.pitch = cam.pitch.to_degrees();
+                        cc.fov_degrees = cam.fov_y.to_degrees();
+                    }
+                }
+            }
         }
     }
     // Environment is restored from the EnvironmentSettings component
@@ -447,9 +456,12 @@ pub(crate) fn handle_new_project(
                                 Err(e) => log::error!("Failed to load default scene: {e}"),
                             }
                         } else {
+                            let saved = if es.editor_camera_entity.is_some() {
+                                Some(es.extract_camera_snapshot())
+                            } else { None };
                             ctx.engine.clear_scene();
                             es.world.clear();
-                            es.respawn_editor_camera();
+                            es.respawn_editor_camera(saved);
                             es.current_scene_path = None;
                         }
 
@@ -513,9 +525,12 @@ pub(crate) fn handle_open_project(
                         Err(e) => log::error!("Failed to load scene: {e}"),
                     }
                 } else {
+                    let saved = if es.editor_camera_entity.is_some() {
+                        Some(es.extract_camera_snapshot())
+                    } else { None };
                     ctx.engine.clear_scene();
                     es.world.clear();
-                    es.respawn_editor_camera();
+                    es.respawn_editor_camera(saved);
                     es.current_scene_path = None;
                 }
 

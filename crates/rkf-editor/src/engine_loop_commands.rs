@@ -174,10 +174,36 @@ pub(crate) fn apply_editor_command(es: &mut EditorState, cmd: crate::editor_comm
             es.set_editor_camera_component_field(|c| c.fov_degrees = fov);
         }
         SetCameraSpeed { speed } => {
-            es.editor_camera.fly_speed = speed;
+            es.camera_control.fly_speed = speed;
         }
         SetCameraNearFar { near, far } => {
             es.set_editor_camera_component_field(|c| { c.near = near; c.far = far; });
+        }
+        SetCameraOrbitAngles { yaw, pitch } => {
+            let mut pos = glam::Vec3::ZERO;
+            let mut cur_yaw = 0.0f32;
+            let mut cur_pitch = 0.0f32;
+            // Read current transform, then set_orbit_angles writes back.
+            if let Some(uuid) = es.editor_camera_entity {
+                let snap = es.extract_camera_snapshot_for(uuid);
+                pos = snap.position;
+                cur_yaw = snap.yaw;
+                cur_pitch = snap.pitch;
+            }
+            es.camera_control.set_orbit_angles(yaw, pitch, &mut pos, &mut cur_yaw, &mut cur_pitch);
+            // Write back to entity.
+            if let Some(uuid) = es.editor_camera_entity {
+                let wp = rkf_core::WorldPosition::new(glam::IVec3::ZERO, pos);
+                let _ = es.world.set_position(uuid, wp);
+                if let Some(e) = es.world.ecs_entity_for(uuid) {
+                    if let Ok(mut cam) = es.world.ecs_mut()
+                        .get::<&mut rkf_runtime::components::CameraComponent>(e)
+                    {
+                        cam.yaw = cur_yaw.to_degrees();
+                        cam.pitch = cur_pitch.to_degrees();
+                    }
+                }
+            }
         }
 
         // -- Environment -------------------------------------------------
@@ -324,19 +350,28 @@ pub(crate) fn apply_editor_command(es: &mut EditorState, cmd: crate::editor_comm
             es.viewport_camera = camera_id;
         }
         SnapToCamera { camera_id } => {
-            if let Some(hecs_entity) = es.world.ecs_entity_for(camera_id) {
-                es.editor_camera.sync_from_entity(es.world.ecs_ref(), hecs_entity);
+            // Read target camera's transform and apply to editor camera entity.
+            let snap = es.extract_camera_snapshot_for(camera_id);
+            if let Some(uuid) = es.editor_camera_entity {
+                let wp = rkf_core::WorldPosition::new(glam::IVec3::ZERO, snap.position);
+                let _ = es.world.set_position(uuid, wp);
+                if let Some(e) = es.world.ecs_entity_for(uuid) {
+                    if let Ok(mut cam) = es.world.ecs_mut()
+                        .get::<&mut rkf_runtime::components::CameraComponent>(e)
+                    {
+                        cam.yaw = snap.yaw.to_degrees();
+                        cam.pitch = snap.pitch.to_degrees();
+                    }
+                }
             }
         }
         CreateCameraFromView => {
-            let pos = rkf_core::WorldPosition::new(
-                glam::IVec3::ZERO,
-                es.editor_camera.position,
+            let snap = es.extract_camera_snapshot();
+            let pos = rkf_core::WorldPosition::new(glam::IVec3::ZERO, snap.position);
+            let _uuid = es.world.spawn_camera(
+                "Camera", pos, snap.yaw.to_degrees(), snap.pitch.to_degrees(),
+                snap.fov_degrees, None,
             );
-            let yaw = es.editor_camera.fly_yaw.to_degrees();
-            let pitch = es.editor_camera.fly_pitch.to_degrees();
-            let fov = es.editor_camera_fov_degrees();
-            let _uuid = es.world.spawn_camera("Camera", pos, yaw, pitch, fov, None);
         }
         PilotCamera { camera_id } => {
             es.piloting = camera_id;
