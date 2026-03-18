@@ -282,6 +282,15 @@ pub struct ColorBrick {
 unsafe impl Zeroable for ColorBrick {}
 unsafe impl Pod for ColorBrick {}
 
+impl std::fmt::Debug for ColorBrick {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let non_zero = self.data.iter().filter(|v| v.packed != 0).count();
+        f.debug_struct("ColorBrick")
+            .field("non_zero_voxels", &non_zero)
+            .finish()
+    }
+}
+
 impl Default for ColorBrick {
     fn default() -> Self {
         bytemuck::Zeroable::zeroed()

@@ -3,6 +3,8 @@
 //! Loads polygon meshes from glTF (.gltf, .glb) files into a unified
 //! [`MeshData`] representation ready for voxelization.
 
+use std::path::Path;
+
 use anyhow::{Context, Result};
 use glam::Vec3;
 
@@ -267,6 +269,8 @@ fn load_gltf(path: &str) -> Result<MeshData> {
 
 /// Load mesh data from a Wavefront OBJ file.
 fn load_obj(path: &str) -> Result<MeshData> {
+    let obj_dir = Path::new(path).parent().unwrap_or(Path::new("."));
+
     let (models, materials_result) = tobj::load_obj(
         path,
         &tobj::LoadOptions {
@@ -293,12 +297,29 @@ fn load_obj(path: &str) -> Result<MeshData> {
         .iter()
         .map(|m| {
             let dc = m.diffuse.unwrap_or([0.8, 0.8, 0.8]);
+            let albedo_texture = m.diffuse_texture.as_ref().and_then(|tex_name| {
+                let tex_path = obj_dir.join(tex_name);
+                match image::open(&tex_path) {
+                    Ok(img) => {
+                        let rgba = img.to_rgba8();
+                        Some(TextureData {
+                            width: rgba.width(),
+                            height: rgba.height(),
+                            data: rgba.into_raw(),
+                        })
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to load OBJ texture '{}': {e}", tex_path.display());
+                        None
+                    }
+                }
+            });
             ImportMaterial {
                 name: m.name.clone(),
                 base_color: dc,
                 metallic: m.shininess.unwrap_or(0.0) / 1000.0, // rough approximation
                 roughness: 1.0 - (m.shininess.unwrap_or(0.0) / 1000.0).min(1.0),
-                albedo_texture: None, // OBJ texture loading is an upgrade path
+                albedo_texture,
             }
         })
         .collect();
@@ -543,5 +564,76 @@ mod tests {
     fn load_mesh_obj_not_found() {
         let result = load_mesh("/tmp/nonexistent_rkf_test.obj");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_obj_texture_from_disk() {
+        let dir = std::env::temp_dir().join("rkf_test_obj_tex");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Write a 2x2 PNG texture
+        let mut img = image::RgbaImage::new(2, 2);
+        img.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+        img.put_pixel(1, 0, image::Rgba([0, 255, 0, 255]));
+        img.put_pixel(0, 1, image::Rgba([0, 0, 255, 255]));
+        img.put_pixel(1, 1, image::Rgba([255, 255, 255, 255]));
+        img.save(dir.join("diffuse.png")).unwrap();
+
+        // Write MTL referencing the texture
+        std::fs::write(
+            dir.join("cube.mtl"),
+            "newmtl textured\nKd 0.8 0.8 0.8\nmap_Kd diffuse.png\n",
+        )
+        .unwrap();
+
+        // Write minimal OBJ with one triangle
+        std::fs::write(
+            dir.join("cube.obj"),
+            "mtllib cube.mtl\nusemtl textured\n\
+             v 0 0 0\nv 1 0 0\nv 0 1 0\n\
+             vt 0 0\nvt 1 0\nvt 0 1\n\
+             vn 0 0 1\n\
+             f 1/1/1 2/2/1 3/3/1\n",
+        )
+        .unwrap();
+
+        let mesh = load_obj(dir.join("cube.obj").to_str().unwrap()).unwrap();
+        assert_eq!(mesh.materials.len(), 1);
+        let tex = mesh.materials[0].albedo_texture.as_ref().expect("should load texture");
+        assert_eq!(tex.width, 2);
+        assert_eq!(tex.height, 2);
+        assert_eq!(tex.data.len(), 16); // 2x2 RGBA8
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_obj_missing_texture_falls_back() {
+        let dir = std::env::temp_dir().join("rkf_test_obj_notex");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // MTL references a texture that doesn't exist
+        std::fs::write(
+            dir.join("cube.mtl"),
+            "newmtl missing\nKd 0.5 0.5 0.5\nmap_Kd nonexistent.png\n",
+        )
+        .unwrap();
+
+        std::fs::write(
+            dir.join("cube.obj"),
+            "mtllib cube.mtl\nusemtl missing\n\
+             v 0 0 0\nv 1 0 0\nv 0 1 0\n\
+             vn 0 0 1\n\
+             f 1//1 2//1 3//1\n",
+        )
+        .unwrap();
+
+        let mesh = load_obj(dir.join("cube.obj").to_str().unwrap()).unwrap();
+        assert_eq!(mesh.materials.len(), 1);
+        assert!(mesh.materials[0].albedo_texture.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

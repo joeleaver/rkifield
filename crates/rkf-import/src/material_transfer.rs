@@ -61,7 +61,10 @@ pub fn sample_material(mesh: &MeshData, bvh: &TriangleBvh, world_pos: Vec3) -> M
 ///
 /// Returns `None` only if there are no UVs AND no materials. Otherwise returns
 /// the texture sample or the material's base color as fallback.
-fn sample_texture_at_triangle(
+///
+/// This is useful when you already have BVH query results (triangle index +
+/// barycentric coords) and want to avoid a redundant BVH lookup.
+pub fn sample_texture_at_triangle(
     mesh: &MeshData,
     tri_idx: usize,
     barycentric: &[f32; 3],

@@ -1,8 +1,8 @@
-//! rkf-convert — offline mesh-to-.rkf v2 conversion CLI.
+//! rkf-convert — offline mesh-to-.rkf v3 conversion CLI.
 //!
-//! Converts glTF/GLB/OBJ mesh files to .rkf v2 format with per-object brick maps
-//! and multi-LOD voxelization. Uses BVH-accelerated nearest-triangle lookup for
-//! unsigned distance and winding-number-based sign determination.
+//! Converts glTF/GLB/OBJ mesh files to .rkf v3 format (geometry-first) with
+//! per-object brick maps, multi-LOD voxelization, per-voxel material transfer,
+//! and optional per-voxel color from mesh textures.
 //!
 //! # Usage
 //!
@@ -13,8 +13,8 @@
 //!   -o, --output <path>     Output .rkf file path (required)
 //!   --voxel-size <float>    Finest voxel size (default: auto)
 //!   --lod-levels <int>      Number of LOD levels (default: 3)
-//!   --material-id <int>     Material ID for voxels (default: 1)
-//!   --pool-size <int>       Brick pool capacity (default: 65536)
+//!   --material-id <int>     Override material ID for all voxels (default: use mesh materials)
+//!   --pool-size <int>       Max brick count per LOD (default: 65536)
 //!   -v, --verbose           Print progress info
 //!   -h, --help              Print help
 //! ```
@@ -25,14 +25,19 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use glam::Vec3;
+use rayon::prelude::*;
 
 use rkf_core::aabb::Aabb;
-use rkf_core::asset_file::{SaveLodLevel, save_object};
+use rkf_core::asset_file_v3::{SaveLodV3, save_object_v3};
+use rkf_core::brick_geometry::{BrickGeometry, voxel_index};
 use rkf_core::brick_map::BrickMap;
+use rkf_core::companion::{ColorBrick, ColorVoxel};
 use rkf_core::constants::BRICK_DIM;
 use rkf_core::scene_node::SdfPrimitive;
-use rkf_core::voxel::VoxelSample;
+use rkf_core::sdf_cache::SdfCache;
+use rkf_core::sdf_compute::{SlotMapping, compute_sdf_from_geometry};
 use rkf_import::bvh::TriangleBvh;
+use rkf_import::material_transfer::sample_texture_at_triangle;
 use rkf_import::mesh::{MeshData, load_mesh};
 
 // ---------------------------------------------------------------------------
@@ -44,13 +49,15 @@ struct Args {
     output: String,
     voxel_size: Option<f32>,
     lod_levels: usize,
-    material_id: u16,
+    material_id_override: Option<u8>,
     pool_size: u32,
+    target_size: f32,
+    no_normalize: bool,
     verbose: bool,
 }
 
 fn print_help() {
-    eprintln!("rkf-convert v2 — mesh to .rkf converter");
+    eprintln!("rkf-convert v3 — mesh to .rkf converter (geometry-first)");
     eprintln!();
     eprintln!("USAGE:");
     eprintln!("  rkf-convert <input> -o <output.rkf> [options]");
@@ -62,8 +69,10 @@ fn print_help() {
     eprintln!("  -o, --output <path>       Output .rkf file path (required)");
     eprintln!("  --voxel-size <float>      Finest voxel size in metres (default: auto)");
     eprintln!("  --lod-levels <int>        Number of LOD levels (default: 3)");
-    eprintln!("  --material-id <int>       Material ID for voxels (default: 1)");
-    eprintln!("  --pool-size <int>         Brick pool capacity (default: 65536)");
+    eprintln!("  --material-id <int>       Override material ID for all voxels (default: use mesh materials)");
+    eprintln!("  --pool-size <int>         Max bricks per LOD (default: 65536)");
+    eprintln!("  --target-size <float>     Normalize longest axis to this size (default: 1.0)");
+    eprintln!("  --no-normalize            Skip normalization, keep original coordinates");
     eprintln!("  -v, --verbose             Print per-LOD progress");
     eprintln!("  -h, --help                Print this help message");
 }
@@ -86,8 +95,10 @@ fn parse_args() -> Result<Args> {
     let mut output: Option<String> = None;
     let mut voxel_size: Option<f32> = None;
     let mut lod_levels: usize = 3;
-    let mut material_id: u16 = 1;
+    let mut material_id_override: Option<u8> = None;
     let mut pool_size: u32 = 65536;
+    let mut target_size: f32 = 1.0;
+    let mut no_normalize = false;
     let mut verbose = false;
 
     let mut i = 1usize;
@@ -138,9 +149,13 @@ fn parse_args() -> Result<Args> {
                 let v = args
                     .get(i)
                     .with_context(|| "--material-id requires a value")?;
-                material_id = v
-                    .parse::<u16>()
+                let id = v
+                    .parse::<u8>()
                     .with_context(|| format!("invalid --material-id: '{v}'"))?;
+                if id > 63 {
+                    bail!("--material-id must be 0-63 (6-bit)");
+                }
+                material_id_override = Some(id);
                 i += 1;
             }
             "--pool-size" => {
@@ -151,6 +166,23 @@ fn parse_args() -> Result<Args> {
                 pool_size = v
                     .parse::<u32>()
                     .with_context(|| format!("invalid --pool-size: '{v}'"))?;
+                i += 1;
+            }
+            "--target-size" => {
+                i += 1;
+                let v = args
+                    .get(i)
+                    .with_context(|| "--target-size requires a value")?;
+                target_size = v
+                    .parse::<f32>()
+                    .with_context(|| format!("invalid --target-size: '{v}'"))?;
+                if target_size <= 0.0 {
+                    bail!("--target-size must be positive");
+                }
+                i += 1;
+            }
+            "--no-normalize" => {
+                no_normalize = true;
                 i += 1;
             }
             arg => {
@@ -172,8 +204,10 @@ fn parse_args() -> Result<Args> {
         output,
         voxel_size,
         lod_levels,
-        material_id,
+        material_id_override,
         pool_size,
+        target_size,
+        no_normalize,
         verbose,
     })
 }
@@ -182,79 +216,123 @@ fn parse_args() -> Result<Args> {
 // Voxel size auto-detection
 // ---------------------------------------------------------------------------
 
-/// Estimate a sensible finest voxel size from the mesh bounding box.
+/// Standard voxel size tiers — must match the editor's VOXEL_TIERS.
+const VOXEL_TIERS: [f32; 4] = [0.005, 0.02, 0.08, 0.32];
+
+/// Pick the best voxel tier for a mesh based on its bounding box.
 ///
-/// Targets approximately 128 brick-widths (1024 voxels) along the longest
-/// axis of the mesh, clamped to [0.001, 0.1] metres.
+/// Uses the same heuristic as the editor: pick the coarsest tier that
+/// gives at least 8 bricks on the longest axis.
 fn auto_voxel_size(mesh: &MeshData) -> f32 {
     let extent = mesh.bounds_max - mesh.bounds_min;
     let longest = extent.max_element();
     if longest < 1e-6 {
-        return 0.02; // degenerate mesh fallback
+        return VOXEL_TIERS[0]; // degenerate mesh fallback
     }
-    // 1024 voxels along longest axis
-    let vs = longest / 1024.0;
-    vs.clamp(0.001, 0.1)
-}
-
-// ---------------------------------------------------------------------------
-// SDF evaluation — BVH nearest + winding number sign
-// ---------------------------------------------------------------------------
-
-/// Estimate inside/outside sign using generalized winding number (angle-weighted).
-///
-/// For each triangle, computes the solid angle it subtends at `point` and
-/// accumulates the signed winding number. Positive winding → inside.
-///
-/// This is an O(N) approximation sufficient for offline conversion.
-fn winding_number(mesh: &MeshData, point: Vec3) -> f32 {
-    let mut winding = 0.0f32;
-    for i in 0..mesh.triangle_count() {
-        let [a, b, c] = mesh.triangle_positions(i);
-        let a = a - point;
-        let b = b - point;
-        let c = c - point;
-        let la = a.length();
-        let lb = b.length();
-        let lc = c.length();
-        if la < 1e-10 || lb < 1e-10 || lc < 1e-10 {
-            continue;
+    // Pick coarsest tier with >= 8 bricks on longest axis (same as editor)
+    for &vs in VOXEL_TIERS.iter().rev() {
+        let bricks = longest / (vs * BRICK_DIM as f32);
+        if bricks >= 8.0 {
+            return vs;
         }
-        let na = a / la;
-        let nb = b / lb;
-        let nc = c / lc;
-        // Solid angle of triangle: 2 * atan2(|a·(b×c)|, 1 + a·b + b·c + a·c)
-        let num = na.dot(nb.cross(nc));
-        let den = 1.0 + na.dot(nb) + nb.dot(nc) + na.dot(nc);
-        winding += 2.0 * num.atan2(den);
     }
-    winding / (4.0 * std::f32::consts::PI)
+    VOXEL_TIERS[0] // finest if the object is tiny
 }
 
 // ---------------------------------------------------------------------------
-// Per-LOD voxelization
+// Sign determination
 // ---------------------------------------------------------------------------
 
-/// Voxelize the mesh SDF into a `SaveLodLevel` at the given voxel resolution.
+// ---------------------------------------------------------------------------
+// Per-LOD voxelization (geometry-first)
+// ---------------------------------------------------------------------------
+
+/// Voxelize the mesh into a `SaveLodV3` at the given voxel resolution.
 ///
-/// Performs a narrow-band optimization: bricks whose center is farther than
-/// `brick_world_size * 1.8` from the nearest surface triangle are skipped.
-///
-/// Slot indices in the returned `BrickMap` are sequential local indices
-/// (0..brick_count-1) matching the order of `brick_data` entries, which is
-/// exactly what `save_object` expects.
+/// Produces BrickGeometry (occupancy + surface voxels with material),
+/// SdfCache (computed from geometry), and ColorBricks (from mesh textures).
+/// Result of processing a single brick (produced in parallel).
+struct BrickResult {
+    geo: BrickGeometry,
+    color: ColorBrick,
+}
+
+/// Process a single brick: winding number sign test + material/color transfer.
+fn process_brick(
+    mesh: &MeshData,
+    bvh: &TriangleBvh,
+    brick_min: Vec3,
+    voxel_size: f32,
+    material_id_override: Option<u8>,
+    sample_color: bool,
+) -> BrickResult {
+    let half_voxel = voxel_size * 0.5;
+    let mut geo = BrickGeometry::new();
+    let mut color_brick = ColorBrick { data: [ColorVoxel::new(0, 0, 0, 0); 512] };
+    let mut voxel_material_ids = [0u8; 512];
+
+    for vz in 0..BRICK_DIM as u8 {
+        for vy in 0..BRICK_DIM as u8 {
+            for vx in 0..BRICK_DIM as u8 {
+                let pos = brick_min
+                    + Vec3::new(
+                        vx as f32 * voxel_size + half_voxel,
+                        vy as f32 * voxel_size + half_voxel,
+                        vz as f32 * voxel_size + half_voxel,
+                    );
+
+                // BVH-accelerated winding number for robust sign test
+                let winding = bvh.winding_number(pos);
+                geo.set_solid(vx, vy, vz, winding > 0.5);
+
+                // BVH nearest query for material and color transfer
+                let nearest = bvh.nearest(pos);
+                let flat = voxel_index(vx, vy, vz) as usize;
+
+                let mat_id = if let Some(override_id) = material_id_override {
+                    override_id
+                } else {
+                    let tri_idx = nearest.triangle_index;
+                    let mesh_mat = if tri_idx < mesh.material_indices.len() {
+                        mesh.material_indices[tri_idx] as u8
+                    } else {
+                        0
+                    };
+                    mesh_mat.min(63)
+                };
+                voxel_material_ids[flat] = mat_id;
+
+                if sample_color {
+                    if let Some(c) = sample_texture_at_triangle(
+                        mesh, nearest.triangle_index, &nearest.barycentric,
+                    ) {
+                        color_brick.data[flat] = ColorVoxel::new(c.r, c.g, c.b, 255);
+                    }
+                }
+            }
+        }
+    }
+
+    geo.rebuild_surface_list();
+    for sv in &mut geo.surface_voxels {
+        sv.material_id = voxel_material_ids[sv.index() as usize];
+    }
+
+    BrickResult { geo, color: color_brick }
+}
+
 fn voxelize_to_lod(
     mesh: &MeshData,
     bvh: &TriangleBvh,
     aabb: &Aabb,
     voxel_size: f32,
-    material_id: u16,
+    material_id_override: Option<u8>,
     pool_size: u32,
+    has_textures: bool,
     verbose: bool,
-) -> Result<SaveLodLevel> {
+) -> Result<SaveLodV3> {
     let brick_world_size = voxel_size * BRICK_DIM as f32;
 
-    // Compute brick grid dimensions from the (padded) AABB.
     let aabb_size = aabb.max - aabb.min;
     let dims = glam::UVec3::new(
         ((aabb_size.x / brick_world_size).ceil() as u32).max(1),
@@ -262,89 +340,96 @@ fn voxelize_to_lod(
         ((aabb_size.z / brick_world_size).ceil() as u32).max(1),
     );
 
-    // Narrow-band threshold: matches voxelize_sdf's margin.
     let narrow_band = brick_world_size * 1.8;
 
+    // Phase 1 (serial): narrow-band cull to find which bricks need allocation.
     let mut brick_map = BrickMap::new(dims);
-    let mut brick_data: Vec<[VoxelSample; 512]> = Vec::new();
-    let mut next_slot: u32 = 0;
+    let mut brick_coords: Vec<(u32, u32, u32)> = Vec::new();
 
     for bz in 0..dims.z {
         for by in 0..dims.y {
             for bx in 0..dims.x {
-                let brick_min = aabb.min
+                let brick_center = aabb.min
                     + Vec3::new(
-                        bx as f32 * brick_world_size,
-                        by as f32 * brick_world_size,
-                        bz as f32 * brick_world_size,
+                        (bx as f32 + 0.5) * brick_world_size,
+                        (by as f32 + 0.5) * brick_world_size,
+                        (bz as f32 + 0.5) * brick_world_size,
                     );
-                let brick_center = brick_min + Vec3::splat(brick_world_size * 0.5);
 
-                // Narrow-band cull: sample unsigned distance at brick center.
                 let center_nearest = bvh.nearest(brick_center);
-                if center_nearest.distance >= narrow_band {
-                    // Entirely outside the surface band — skip.
-                    continue;
-                }
-
-                // Guard against exceeding the pool size hint.
-                if next_slot >= pool_size {
-                    bail!(
-                        "Brick count exceeded pool_size={pool_size} at ({bx},{by},{bz}). \
-                         Use --pool-size to increase the limit."
-                    );
-                }
-
-                // Assign a sequential local slot and populate brick voxels.
-                let slot = next_slot;
-                next_slot += 1;
-                brick_map.set(bx, by, bz, slot);
-
-                let mut samples = [VoxelSample::default(); 512];
-                let half_voxel = voxel_size * 0.5;
-
-                let mut idx = 0;
-                for vz in 0..BRICK_DIM {
-                    for vy in 0..BRICK_DIM {
-                        for vx in 0..BRICK_DIM {
-                            let pos = brick_min
-                                + Vec3::new(
-                                    vx as f32 * voxel_size + half_voxel,
-                                    vy as f32 * voxel_size + half_voxel,
-                                    vz as f32 * voxel_size + half_voxel,
-                                );
-
-                            // Unsigned distance via BVH nearest-triangle.
-                            let nearest = bvh.nearest(pos);
-                            let unsigned_dist = nearest.distance;
-
-                            // Sign via winding number.
-                            let winding = winding_number(mesh, pos);
-                            let sign = if winding < -0.5 { -1.0f32 } else { 1.0f32 };
-                            let signed_dist = sign * unsigned_dist;
-
-                            samples[idx] = VoxelSample::new(signed_dist, material_id, [255, 255, 255, 255]);
-                            idx += 1;
-                        }
+                if center_nearest.distance < narrow_band {
+                    let slot = brick_coords.len() as u32;
+                    if slot >= pool_size {
+                        bail!(
+                            "Brick count exceeded pool_size={pool_size} at ({bx},{by},{bz}). \
+                             Use --pool-size to increase the limit."
+                        );
                     }
+                    brick_map.set(bx, by, bz, slot);
+                    brick_coords.push((bx, by, bz));
                 }
-
-                brick_data.push(samples);
             }
         }
     }
 
+    let sample_color = has_textures && material_id_override.is_none();
+
+    // Phase 2 (parallel): process each brick independently.
+    let results: Vec<BrickResult> = brick_coords
+        .par_iter()
+        .map(|&(bx, by, bz)| {
+            let brick_min = aabb.min
+                + Vec3::new(
+                    bx as f32 * brick_world_size,
+                    by as f32 * brick_world_size,
+                    bz as f32 * brick_world_size,
+                );
+            process_brick(mesh, bvh, brick_min, voxel_size, material_id_override, sample_color)
+        })
+        .collect();
+
+    // Collect results in slot order.
+    let brick_count = results.len();
+    let mut geometry_vec = Vec::with_capacity(brick_count);
+    let mut color_vec = Vec::with_capacity(brick_count);
+    for r in results {
+        geometry_vec.push(r.geo);
+        color_vec.push(r.color);
+    }
+
+    // Compute SDF from geometry using Fast Sweeping Method (serial — needs global context)
+    let mut sdf_caches: Vec<SdfCache> = vec![SdfCache::empty(); brick_count];
+    let slot_mappings: Vec<SlotMapping> = (0..brick_count as u32)
+        .map(|i| SlotMapping {
+            brick_slot: i,
+            geometry_slot: i,
+            sdf_slot: i,
+        })
+        .collect();
+
+    compute_sdf_from_geometry(
+        &brick_map,
+        &geometry_vec,
+        &mut sdf_caches,
+        &slot_mappings,
+        voxel_size,
+    );
+
     if verbose {
         eprintln!(
             "    dims={}x{}x{}  bricks={}",
-            dims.x, dims.y, dims.z, brick_data.len()
+            dims.x, dims.y, dims.z, brick_count
         );
     }
 
-    Ok(SaveLodLevel {
+    let color_bricks = if sample_color { Some(color_vec) } else { None };
+
+    Ok(SaveLodV3 {
         voxel_size,
         brick_map,
-        brick_data,
+        geometry: geometry_vec,
+        sdf_cache: Some(sdf_caches),
+        color_bricks,
     })
 }
 
@@ -353,18 +438,16 @@ fn voxelize_to_lod(
 // ---------------------------------------------------------------------------
 
 /// Generate all LOD levels for a mesh.
-///
-/// Returns a `Vec<SaveLodLevel>` ordered finest-to-coarsest (level 0 = finest).
-/// `save_object` sorts them coarsest-first for on-disk layout.
 fn generate_lods(
     mesh: &MeshData,
     bvh: &TriangleBvh,
     finest_voxel_size: f32,
     lod_levels: usize,
-    material_id: u16,
+    material_id_override: Option<u8>,
     pool_size: u32,
+    has_textures: bool,
     verbose: bool,
-) -> Result<Vec<SaveLodLevel>> {
+) -> Result<Vec<SaveLodV3>> {
     // Build a slightly padded AABB so surface bricks at mesh boundaries are captured.
     let margin = finest_voxel_size * 2.0;
     let aabb = Aabb::new(
@@ -382,16 +465,24 @@ fn generate_lods(
             eprintln!("  LOD {}: voxel_size={:.4}m ...", level, voxel_size);
         }
 
-        let lod =
-            voxelize_to_lod(mesh, bvh, &aabb, voxel_size, material_id, pool_size, verbose)
-                .with_context(|| format!("LOD {level} (voxel_size={voxel_size:.4}m) failed"))?;
+        let lod = voxelize_to_lod(
+            mesh,
+            bvh,
+            &aabb,
+            voxel_size,
+            material_id_override,
+            pool_size,
+            has_textures,
+            verbose,
+        )
+        .with_context(|| format!("LOD {level} (voxel_size={voxel_size:.4}m) failed"))?;
 
         if !verbose {
             eprintln!(
                 "  LOD {}: voxel_size={:.4}m  bricks={}",
                 level,
                 lod.voxel_size,
-                lod.brick_data.len()
+                lod.geometry.len()
             );
         }
 
@@ -406,7 +497,7 @@ fn generate_lods(
 // ---------------------------------------------------------------------------
 
 fn run() -> Result<()> {
-    eprintln!("rkf-convert v2 — mesh to .rkf converter");
+    eprintln!("rkf-convert v3 — mesh to .rkf converter (geometry-first)");
     eprintln!();
 
     let args = parse_args()?;
@@ -414,8 +505,10 @@ fn run() -> Result<()> {
     // --- Step 1: Load mesh ---------------------------------------------------
 
     eprintln!("Loading mesh: {}", args.input);
-    let mesh = load_mesh(&args.input)
+    let mut mesh = load_mesh(&args.input)
         .with_context(|| format!("Failed to load '{}'", args.input))?;
+
+    let has_textures = mesh.materials.iter().any(|m| m.albedo_texture.is_some());
 
     eprintln!(
         "  vertices: {}  triangles: {}",
@@ -431,12 +524,39 @@ fn run() -> Result<()> {
         mesh.bounds_max.y,
         mesh.bounds_max.z
     );
-    eprintln!("  materials: {}", mesh.materials.len());
-    eprintln!();
+    eprintln!(
+        "  materials: {}  textures: {}",
+        mesh.materials.len(),
+        if has_textures { "yes" } else { "no" }
+    );
 
     if mesh.triangle_count() == 0 {
         bail!("Input mesh has no triangles");
     }
+
+    // --- Step 1b: Normalize mesh to target size ------------------------------
+
+    if !args.no_normalize {
+        let extent = mesh.bounds_max - mesh.bounds_min;
+        let longest = extent.x.max(extent.y).max(extent.z);
+        if longest > 1e-6 {
+            let scale = args.target_size / longest;
+            let center = (mesh.bounds_min + mesh.bounds_max) * 0.5;
+
+            // Scale and center all vertices: new_pos = (pos - center) * scale
+            for pos in &mut mesh.positions {
+                *pos = (*pos - center) * scale;
+            }
+            mesh.bounds_min = (mesh.bounds_min - center) * scale;
+            mesh.bounds_max = (mesh.bounds_max - center) * scale;
+
+            eprintln!(
+                "  normalized: longest axis {:.3} → {:.3} (scale {:.6})",
+                longest, args.target_size, scale
+            );
+        }
+    }
+    eprintln!();
 
     // --- Step 2: Determine voxel size ----------------------------------------
 
@@ -472,8 +592,9 @@ fn run() -> Result<()> {
         &bvh,
         finest_voxel_size,
         args.lod_levels,
-        args.material_id,
+        args.material_id_override,
         args.pool_size,
+        has_textures,
         args.verbose,
     )
     .context("LOD generation failed")?;
@@ -490,9 +611,14 @@ fn run() -> Result<()> {
         radius: bounding_radius,
     };
 
-    let material_ids: Vec<u16> = vec![args.material_id];
+    // Collect material IDs: either the override or all mesh material indices
+    let material_ids: Vec<u8> = if let Some(id) = args.material_id_override {
+        vec![id]
+    } else {
+        (0..mesh.materials.len().min(64) as u8).collect()
+    };
 
-    // --- Step 6: Save to .rkf v2 ---------------------------------------------
+    // --- Step 6: Save to .rkf v3 ---------------------------------------------
 
     eprintln!("Writing output: {}", args.output);
 
@@ -509,7 +635,7 @@ fn run() -> Result<()> {
         .with_context(|| format!("Failed to create output file '{}'", args.output))?;
     let mut writer = BufWriter::new(file);
 
-    save_object(
+    save_object_v3(
         &mut writer,
         &aabb,
         Some(&analytical_bound),
@@ -530,17 +656,21 @@ fn run() -> Result<()> {
     eprintln!("=== Conversion complete ===");
     eprintln!("Output:    {}", args.output);
     eprintln!("File size: {}", format_bytes(file_size));
+    eprintln!("Format:    .rkf v3 (geometry-first)");
     eprintln!("LODs:      {}", lods.len());
     for (i, lod) in lods.iter().enumerate() {
         eprintln!(
             "  LOD {}: voxel_size={:.4}m  bricks={}  map_dims={}x{}x{}",
             i,
             lod.voxel_size,
-            lod.brick_data.len(),
+            lod.geometry.len(),
             lod.brick_map.dims.x,
             lod.brick_map.dims.y,
             lod.brick_map.dims.z,
         );
+    }
+    if has_textures && args.material_id_override.is_none() {
+        eprintln!("Color:     per-voxel color from mesh textures");
     }
 
     Ok(())

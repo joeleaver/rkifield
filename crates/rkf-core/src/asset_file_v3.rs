@@ -36,6 +36,7 @@ use glam::{UVec3, Vec3};
 use crate::aabb::Aabb;
 use crate::brick_geometry::BrickGeometry;
 use crate::brick_map::{BrickMap, EMPTY_SLOT, INTERIOR_SLOT};
+use crate::companion::ColorBrick;
 use crate::scene_node::SdfPrimitive;
 use crate::sdf_cache::SdfCache;
 
@@ -50,6 +51,7 @@ const VERSION_V3: u32 = 3;
 
 /// Flags for the v3 header.
 const FLAG_HAS_SDF_CACHE: u32 = 1 << 0;
+const FLAG_HAS_COLOR: u32 = 1 << 1;
 
 /// On-disk v3 header — 128 bytes.
 #[derive(Clone, Copy, Debug)]
@@ -71,7 +73,7 @@ struct RkfV3Header {
 unsafe impl Zeroable for RkfV3Header {}
 unsafe impl Pod for RkfV3Header {}
 
-/// On-disk v3 LOD entry — 48 bytes.
+/// On-disk v3 LOD entry — 72 bytes.
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
 struct LodV3Entry {
@@ -85,13 +87,16 @@ struct LodV3Entry {
     sdf_offset: u64,
     sdf_compressed_size: u32,
     sdf_uncompressed_size: u32,
+    color_offset: u64,
+    color_compressed_size: u32,
+    color_uncompressed_size: u32,
 }
 
 unsafe impl Zeroable for LodV3Entry {}
 unsafe impl Pod for LodV3Entry {}
 
 const _: () = assert!(mem::size_of::<RkfV3Header>() == 128);
-const _: () = assert!(mem::size_of::<LodV3Entry>() == 56); // adjust if needed
+const _: () = assert!(mem::size_of::<LodV3Entry>() == 72);
 
 // ---------------------------------------------------------------------------
 // Public data types
@@ -107,6 +112,9 @@ pub struct SaveLodV3 {
     pub geometry: Vec<BrickGeometry>,
     /// Optional SDF cache data (same order as geometry). None = compute on load.
     pub sdf_cache: Option<Vec<SdfCache>>,
+    /// Optional per-brick color data (same order as geometry). None = no color.
+    /// One ColorBrick per allocated brick; use all-zero (intensity=0) for bricks without color.
+    pub color_bricks: Option<Vec<ColorBrick>>,
 }
 
 /// Loaded v3 LOD data.
@@ -118,6 +126,8 @@ pub struct LodDataV3 {
     pub geometry: Vec<BrickGeometry>,
     /// SDF cache per allocated brick (None if not present in file).
     pub sdf_cache: Option<Vec<SdfCache>>,
+    /// Per-brick color data (None if not present in file).
+    pub color_bricks: Option<Vec<ColorBrick>>,
 }
 
 /// V3 header info (extends ObjectHeader).
@@ -130,6 +140,7 @@ pub struct ObjectHeaderV3 {
     pub material_ids: Vec<u8>,
     pub lod_entries: Vec<LodEntryInfoV3>,
     pub has_sdf_cache: bool,
+    pub has_color: bool,
 }
 
 /// V3 LOD entry info.
@@ -143,6 +154,8 @@ pub struct LodEntryInfoV3 {
     pub geometry_compressed_size: u32,
     pub sdf_offset: u64,
     pub sdf_compressed_size: u32,
+    pub color_offset: u64,
+    pub color_compressed_size: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -216,6 +229,15 @@ fn pack_sdf_cache(caches: &[SdfCache]) -> Vec<u8> {
     buf
 }
 
+/// Pack color brick data (2048 bytes per brick).
+fn pack_color_bricks(bricks: &[ColorBrick]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(bricks.len() * 2048);
+    for brick in bricks {
+        buf.extend_from_slice(bytemuck::bytes_of(brick));
+    }
+    buf
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -230,6 +252,7 @@ pub fn save_object_v3<W: Write + Seek>(
 ) -> Result<(), AssetError> {
     let lod_count = lod_levels.len() as u32;
     let has_sdf = lod_levels.iter().any(|l| l.sdf_cache.is_some());
+    let has_color = lod_levels.iter().any(|l| l.color_bricks.is_some());
 
     // Material IDs (up to 32)
     let mut mat_ids_arr = [0u8; 32];
@@ -241,7 +264,9 @@ pub fn save_object_v3<W: Write + Seek>(
         None => (0, [0.0f32; 4]),
     };
 
-    let flags = if has_sdf { FLAG_HAS_SDF_CACHE } else { 0 };
+    let mut flags = 0u32;
+    if has_sdf { flags |= FLAG_HAS_SDF_CACHE; }
+    if has_color { flags |= FLAG_HAS_COLOR; }
 
     let header = RkfV3Header {
         magic: MAGIC_V3,
@@ -298,6 +323,18 @@ pub fn save_object_v3<W: Write + Seek>(
             (0, 0, 0)
         };
 
+        // Pack and compress color bricks (optional)
+        let (color_offset, color_compressed_size, color_uncompressed_size) = if let Some(ref colors) = lod.color_bricks {
+            let color_raw = pack_color_bricks(colors);
+            let color_uncompressed = color_raw.len() as u32;
+            let color_compressed = lz4_flex::compress_prepend_size(&color_raw);
+            let offset = writer.stream_position()?;
+            writer.write_all(&color_compressed)?;
+            (offset, color_compressed.len() as u32, color_uncompressed)
+        } else {
+            (0, 0, 0)
+        };
+
         final_entries.push(LodV3Entry {
             voxel_size: lod.voxel_size,
             brick_count,
@@ -309,6 +346,9 @@ pub fn save_object_v3<W: Write + Seek>(
             sdf_offset,
             sdf_compressed_size,
             sdf_uncompressed_size,
+            color_offset,
+            color_compressed_size,
+            color_uncompressed_size,
         });
     }
 
@@ -350,6 +390,8 @@ pub fn load_object_header_v3<R: Read>(reader: &mut R) -> Result<ObjectHeaderV3, 
             geometry_compressed_size: entry.geometry_compressed_size,
             sdf_offset: entry.sdf_offset,
             sdf_compressed_size: entry.sdf_compressed_size,
+            color_offset: entry.color_offset,
+            color_compressed_size: entry.color_compressed_size,
         });
     }
 
@@ -368,6 +410,7 @@ pub fn load_object_header_v3<R: Read>(reader: &mut R) -> Result<ObjectHeaderV3, 
         material_ids,
         lod_entries,
         has_sdf_cache: header.flags & FLAG_HAS_SDF_CACHE != 0,
+        has_color: header.flags & FLAG_HAS_COLOR != 0,
     })
 }
 
@@ -439,10 +482,33 @@ pub fn load_object_lod_v3<R: Read + Seek>(
         None
     };
 
+    // Read color bricks (optional)
+    let color_bricks = if entry.color_compressed_size > 0 {
+        reader.seek(SeekFrom::Start(entry.color_offset))?;
+        let mut color_compressed = vec![0u8; entry.color_compressed_size as usize];
+        reader.read_exact(&mut color_compressed)?;
+        let color_data = lz4_flex::decompress_size_prepended(&color_compressed)
+            .map_err(|e| AssetError::Decompression(e.to_string()))?;
+
+        let mut bricks = Vec::with_capacity(brick_count);
+        for i in 0..brick_count {
+            let start = i * 2048;
+            if start + 2048 > color_data.len() {
+                return Err(AssetError::Decompression("color brick data truncated".into()));
+            }
+            let brick: ColorBrick = *bytemuck::from_bytes(&color_data[start..start + 2048]);
+            bricks.push(brick);
+        }
+        Some(bricks)
+    } else {
+        None
+    };
+
     Ok(LodDataV3 {
         brick_map,
         geometry,
         sdf_cache,
+        color_bricks,
     })
 }
 
@@ -487,6 +553,7 @@ mod tests {
             brick_map,
             geometry: vec![geo, geo2],
             sdf_cache: None,
+            color_bricks: None,
         }
     }
 
@@ -600,6 +667,7 @@ mod tests {
             brick_map,
             geometry: vec![geo],
             sdf_cache: None,
+            color_bricks: None,
         };
 
         let mut buf = Cursor::new(Vec::new());
@@ -647,6 +715,7 @@ mod tests {
             brick_map,
             geometry: geos.clone(),
             sdf_cache: None,
+            color_bricks: None,
         };
 
         let mut buf = Cursor::new(Vec::new());
@@ -688,6 +757,48 @@ mod tests {
         assert_eq!(data.geometry[0].solid_count(), 128);
         assert_eq!(data.geometry[1].solid_count(), 256);
         assert_eq!(data.geometry[2].solid_count(), 384);
+    }
+
+    #[test]
+    fn v3_roundtrip_with_color_bricks() {
+        use crate::companion::ColorVoxel;
+
+        let mut lod = make_test_lod(0.02);
+
+        // Add color bricks — one per geometry brick
+        let mut cb0 = ColorBrick { data: [ColorVoxel::new(0, 0, 0, 0); 512] };
+        cb0.data[0] = ColorVoxel::new(255, 0, 0, 200); // red at voxel 0
+        cb0.data[42] = ColorVoxel::new(0, 255, 0, 128); // green at voxel 42
+        let cb1 = ColorBrick { data: [ColorVoxel::new(0, 0, 0, 0); 512] }; // empty
+
+        lod.color_bricks = Some(vec![cb0, cb1]);
+
+        let mut buf = Cursor::new(Vec::new());
+        save_object_v3(&mut buf, &unit_aabb(), None, &[1], &[lod]).unwrap();
+
+        let mut cursor = Cursor::new(buf.into_inner());
+        let header = load_object_header_v3(&mut cursor).unwrap();
+        assert!(header.has_color);
+
+        let data = load_object_lod_v3(&mut cursor, &header, 0).unwrap();
+        let colors = data.color_bricks.expect("should have color bricks");
+        assert_eq!(colors.len(), 2);
+
+        // Verify specific voxel colors roundtripped
+        let v0 = colors[0].data[0];
+        assert_eq!(v0.red(), 255);
+        assert_eq!(v0.green(), 0);
+        assert_eq!(v0.blue(), 0);
+        assert_eq!(v0.intensity(), 200);
+
+        let v42 = colors[0].data[42];
+        assert_eq!(v42.red(), 0);
+        assert_eq!(v42.green(), 255);
+        assert_eq!(v42.blue(), 0);
+        assert_eq!(v42.intensity(), 128);
+
+        // Second brick should be all zeros
+        assert!(colors[1].data.iter().all(|v| v.packed == 0));
     }
 
 }
