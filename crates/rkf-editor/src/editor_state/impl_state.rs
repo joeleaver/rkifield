@@ -431,15 +431,13 @@ impl EditorState {
         vp_width: f32,
         vp_height: f32,
     ) -> Option<uuid::Uuid> {
-        let (ray_o, ray_d) = crate::camera::screen_to_ray(
-            &self.editor_camera,
+        let snap = self.extract_camera_snapshot();
+        let (ray_o, ray_d) = crate::camera::screen_to_ray_snapshot(
+            &snap,
             pixel_x,
             pixel_y,
             vp_width,
             vp_height,
-            self.editor_camera_fov_y(),
-            self.editor_camera_near(),
-            self.editor_camera_far(),
         );
 
         let render_scene = self.world.build_render_scene();

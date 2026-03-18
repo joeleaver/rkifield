@@ -444,7 +444,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
 
             // Consume pending spawn.
             if let Some(prim_name) = es.pending_spawn.take() {
-                let pos = es.editor_camera.target;
+                let pos = es.camera_control.target;
                 let uuid = if prim_name == "Empty" {
                     es.world.spawn("Empty")
                         .position_vec3(pos)
