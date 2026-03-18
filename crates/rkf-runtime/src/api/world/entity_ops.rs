@@ -53,6 +53,35 @@ impl World {
 
     // ── Internal spawning ──────────────────────────────────────────────────
 
+    /// Return a name unique among siblings of `parent`.
+    ///
+    /// Siblings are entities sharing the same parent (or all root entities if
+    /// `parent` is `None`). If `name` already exists among siblings, appends
+    /// `_2`, `_3`, etc. until unique.
+    fn dedup_name(&self, name: &str, parent: Option<Uuid>) -> String {
+        let sibling_names: Vec<&str> = self
+            .entities
+            .values()
+            .filter(|r| r.parent_id == parent)
+            .map(|r| r.name.as_str())
+            .collect();
+
+        if !sibling_names.contains(&name) {
+            return name.to_string();
+        }
+
+        // Strip any existing numeric suffix to get the base name.
+        let base = strip_numeric_suffix(name);
+
+        for n in 2.. {
+            let candidate = format!("{base}_{n}");
+            if !sibling_names.contains(&candidate.as_str()) {
+                return candidate;
+            }
+        }
+        unreachable!()
+    }
+
     /// Finalize an SDF entity spawn (called by SpawnBuilder).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn finalize_sdf_spawn(
@@ -71,6 +100,9 @@ impl World {
 
         // Resolve parent
         let resolved_parent_id = parent.filter(|p| self.entities.contains_key(p));
+
+        // Enforce sibling name uniqueness.
+        let name = self.dedup_name(&name, resolved_parent_id);
 
         if let Some(bm) = blend_mode {
             root_node.blend_mode = bm;
@@ -126,6 +158,9 @@ impl World {
 
     /// Finalize an ECS-only entity spawn (called by SpawnBuilder).
     pub(crate) fn finalize_ecs_spawn(&mut self, name: String) -> Uuid {
+        // Enforce sibling name uniqueness (ECS-only entities are always root).
+        let name = self.dedup_name(&name, None);
+
         let stable_id = StableId::new();
         let uuid = stable_id.uuid();
 
@@ -152,4 +187,17 @@ impl World {
         self.entity_scene.insert(uuid, self.active_scene);
         uuid
     }
+}
+
+/// Strip a trailing `_N` numeric suffix from a name.
+///
+/// `"Guard_3"` → `"Guard"`, `"Guard"` → `"Guard"`, `"a_b_2"` → `"a_b"`.
+fn strip_numeric_suffix(name: &str) -> &str {
+    if let Some(pos) = name.rfind('_') {
+        let suffix = &name[pos + 1..];
+        if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
+            return &name[..pos];
+        }
+    }
+    name
 }

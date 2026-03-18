@@ -34,6 +34,26 @@ pub enum FieldType {
     List,
     /// `[f32; 4]` RGBA color.
     Color,
+    /// Nested struct with named sub-fields.
+    Struct,
+    /// Asset file reference (rendered as path input with extension filter).
+    /// The actual value is a `GameValue::String` — metadata drives UI.
+    AssetRef,
+    /// Typed entity reference (rendered as UUID input with component filter badge).
+    /// The actual value is a `GameValue::String` (StableId UUID) — metadata drives UI.
+    ComponentRef,
+}
+
+/// Metadata for a nested struct field type.
+///
+/// Describes the sub-fields of a `FieldType::Struct`. Recursive — sub-fields
+/// can themselves be `Struct` with their own `StructMeta`.
+#[derive(Debug, Clone)]
+pub struct StructMeta {
+    /// The struct type name (e.g., `"FogConfig"`).
+    pub name: &'static str,
+    /// Sub-field metadata.
+    pub fields: &'static [FieldMeta],
 }
 
 /// Metadata for a single field on a component.
@@ -60,6 +80,14 @@ pub struct FieldMeta {
     /// `persist` module to automatically sync all `persist: true` fields
     /// via the component's `get_field`/`set_field` function pointers.
     pub persist: bool,
+    /// Struct metadata for `FieldType::Struct` fields. `None` for non-struct fields.
+    pub struct_meta: Option<&'static StructMeta>,
+    /// File extension filter for `FieldType::AssetRef` fields (e.g., `"rkenv"`).
+    /// `None` for non-asset-ref fields.
+    pub asset_filter: Option<&'static str>,
+    /// Required component type for `FieldType::ComponentRef` fields (e.g., `"Transform"`).
+    /// `None` for non-component-ref fields.
+    pub component_filter: Option<&'static str>,
 }
 
 /// Trait for component field introspection.
@@ -387,6 +415,9 @@ mod tests {
             range: Some((0.0, 100.0)),
             default: Some(GameValue::Float(100.0)),
             persist: true,
+            struct_meta: None,
+            asset_filter: None,
+            component_filter: None,
         };
         assert_eq!(meta.name, "health");
         assert_eq!(meta.field_type, FieldType::Float);

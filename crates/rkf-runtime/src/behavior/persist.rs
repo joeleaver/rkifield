@@ -311,6 +311,9 @@ mod tests {
                 range: None,
                 default: None,
                 persist: true,
+                struct_meta: None,
+                asset_filter: None,
+                component_filter: None,
             },
             FieldMeta {
                 name: "max_health",
@@ -319,6 +322,9 @@ mod tests {
                 range: None,
                 default: None,
                 persist: false,
+                struct_meta: None,
+                asset_filter: None,
+                component_filter: None,
             },
             FieldMeta {
                 name: "timer",
@@ -327,6 +333,9 @@ mod tests {
                 range: None,
                 default: None,
                 persist: false,
+                struct_meta: None,
+                asset_filter: None,
+                component_filter: None,
             },
             FieldMeta {
                 name: "buggy",
@@ -335,6 +344,9 @@ mod tests {
                 range: None,
                 default: None,
                 persist: true, // should be excluded — transient overrides persist
+                struct_meta: None,
+                asset_filter: None,
+                component_filter: None,
             },
         ];
 
@@ -352,6 +364,9 @@ mod tests {
                 range: None,
                 default: None,
                 persist: false,
+                struct_meta: None,
+                asset_filter: None,
+                component_filter: None,
             },
             FieldMeta {
                 name: "b",
@@ -360,6 +375,9 @@ mod tests {
                 range: None,
                 default: None,
                 persist: false,
+                struct_meta: None,
+                asset_filter: None,
+                component_filter: None,
             },
         ];
         assert!(persisted_field_names(&META).is_empty());
@@ -472,6 +490,9 @@ mod tests {
             range: None,
             default: None,
             persist: true,
+            struct_meta: None,
+            asset_filter: None,
+            component_filter: None,
         },
         FieldMeta {
             name: "max",
@@ -480,6 +501,9 @@ mod tests {
             range: None,
             default: None,
             persist: false,
+            struct_meta: None,
+            asset_filter: None,
+            component_filter: None,
         },
     ];
 
@@ -616,6 +640,9 @@ mod tests {
                 range: None,
                 default: None,
                 persist: true,
+                struct_meta: None,
+                asset_filter: None,
+                component_filter: None,
             },
         ];
 
@@ -697,6 +724,9 @@ mod tests {
                 range: None,
                 default: None,
                 persist: true,
+                struct_meta: None,
+                asset_filter: None,
+                component_filter: None,
             }],
             serialize: |_, _| None,
             deserialize_insert: |_, _, _| Ok(()),

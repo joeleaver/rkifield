@@ -354,10 +354,28 @@ pub struct ComponentInfo {
 pub struct FieldInfo {
     /// Field name.
     pub name: String,
-    /// Type description (e.g. `"f32"`, `"Vec3"`, `"String"`).
+    /// Type description (e.g. `"f32"`, `"Vec3"`, `"String"`, `"Struct"`, `"AssetRef"`, `"ComponentRef"`).
     pub field_type: String,
     /// Optional valid range `(min, max)` for numeric fields.
     pub range: Option<(f64, f64)>,
+    /// Sub-fields for `Struct` type fields.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub struct_meta: Option<StructFieldInfo>,
+    /// File extension filter for `AssetRef` fields (e.g., `"rkenv"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asset_filter: Option<String>,
+    /// Required component type for `ComponentRef` fields (e.g., `"Transform"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub component_filter: Option<String>,
+}
+
+/// Describes the structure of a nested struct field.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StructFieldInfo {
+    /// Struct type name (e.g., `"FogConfig"`).
+    pub name: String,
+    /// Sub-fields within this struct.
+    pub fields: Vec<FieldInfo>,
 }
 
 /// Info about a registered behavior system.

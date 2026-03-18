@@ -172,7 +172,6 @@ impl BuildWatcher {
                 self._stderr_thread = Some(handle);
                 self.child = Some(child);
                 self.current_state = BuildState::Compiling;
-                eprintln!("[BUILD] cargo build spawned in {}", self.game_crate_dir.display());
             }
             Err(e) => {
                 let msg = format!("Failed to spawn cargo build: {e}");
@@ -193,7 +192,6 @@ impl BuildWatcher {
 
         match child.try_wait() {
             Ok(Some(status)) => {
-                eprintln!("[BUILD] cargo exited with status: {status}");
                 let mut child = self.child.take().unwrap();
                 // Join the stderr reader thread so all lines are flushed.
                 if let Some(handle) = self._stderr_thread.take() {

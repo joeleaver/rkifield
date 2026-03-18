@@ -69,10 +69,10 @@ pub use entity_lookup::{LookupError, find_one, find_path, find_relative, find_ta
 pub use entity_ref::{deserialize_entity, serialize_entity};
 pub use executor::BehaviorExecutor;
 pub use game_store::{GameStore, StoreEvent, StoreSnapshot};
-pub use game_value::GameValue;
+pub use game_value::{GameValue, get_nested_field, set_nested_field};
 pub use registry::{
     ComponentEntry, ComponentMeta, FieldMeta, FieldType, GameplayRegistry, Phase, QueryError,
-    SystemMeta,
+    StructMeta, SystemMeta,
 };
 pub use build_watcher::{
     BuildState, BuildWatcher, CompileError, parse_cargo_errors,

@@ -260,6 +260,9 @@ mod tests {
             range: Some((0.0, 100.0)),
             default: None,
             persist: false,
+            struct_meta: None,
+            asset_filter: None,
+            component_filter: None,
         }];
         ComponentEntry {
             name: "MockHealth",
@@ -298,6 +301,9 @@ mod tests {
             range: None,
             default: None,
             persist: false,
+            struct_meta: None,
+            asset_filter: None,
+            component_filter: None,
         }];
         ComponentEntry {
             name: "MockArmor",

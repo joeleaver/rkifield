@@ -57,6 +57,9 @@ mod tests {
             range: Some((0.0, 1000.0)),
             default: None,
             persist: true,
+            struct_meta: None,
+            asset_filter: None,
+            component_filter: None,
         },
         FieldMeta {
             name: "max",
@@ -65,6 +68,9 @@ mod tests {
             range: Some((0.0, 1000.0)),
             default: None,
             persist: false,
+            struct_meta: None,
+            asset_filter: None,
+            component_filter: None,
         },
     ];
 
@@ -75,6 +81,9 @@ mod tests {
         range: Some((0.0, 9999.0)),
         default: None,
         persist: true,
+        struct_meta: None,
+        asset_filter: None,
+        component_filter: None,
     }];
 
     static TEST_DOOR_FIELDS: [FieldMeta; 1] = [FieldMeta {
@@ -84,6 +93,9 @@ mod tests {
         range: None,
         default: None,
         persist: true,
+        struct_meta: None,
+        asset_filter: None,
+        component_filter: None,
     }];
 
     // ─── ComponentEntry constructors ─────────────────────────────────────

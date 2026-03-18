@@ -181,6 +181,9 @@ fn component_impl_struct(attrs: ComponentAttrs, mut input: ItemStruct) -> syn::R
                     range: None,
                     default: None,
                     persist: #persist,
+                    struct_meta: None,
+                    asset_filter: None,
+                    component_filter: None,
                 }
             }
         })

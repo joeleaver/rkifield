@@ -26,6 +26,8 @@ pub enum GameValue {
     Color([f32; 4]),
     /// Ordered list of values.
     List(Vec<GameValue>),
+    /// Nested struct with named sub-fields (ordered name-value pairs).
+    Struct(Vec<(String, GameValue)>),
     /// Arbitrary serde type as RON string (escape hatch).
     Ron(String),
 }
@@ -101,6 +103,14 @@ impl GameValue {
     pub fn as_list(&self) -> Option<&[GameValue]> {
         match self {
             GameValue::List(v) => Some(v.as_slice()),
+            _ => None,
+        }
+    }
+
+    /// Returns the contained struct fields, or `None` if not a `Struct`.
+    pub fn as_struct(&self) -> Option<&[(String, GameValue)]> {
+        match self {
+            GameValue::Struct(fields) => Some(fields.as_slice()),
             _ => None,
         }
     }
@@ -212,6 +222,7 @@ impl GameValue {
             GameValue::Quat(_) => "Quat",
             GameValue::Color(_) => "Color",
             GameValue::List(_) => "List",
+            GameValue::Struct(_) => "Struct",
             GameValue::Ron(_) => "Ron",
         }
     }
@@ -360,6 +371,102 @@ impl TryFrom<GameValue> for Vec<GameValue> {
                 actual: other.variant_name(),
             }),
         }
+    }
+}
+
+impl From<Vec<(String, GameValue)>> for GameValue {
+    fn from(val: Vec<(String, GameValue)>) -> Self {
+        GameValue::Struct(val)
+    }
+}
+
+impl TryFrom<GameValue> for Vec<(String, GameValue)> {
+    type Error = GameValueTypeError;
+    fn try_from(v: GameValue) -> Result<Self, Self::Error> {
+        match v {
+            GameValue::Struct(fields) => Ok(fields),
+            other => Err(GameValueTypeError {
+                expected: "Struct",
+                actual: other.variant_name(),
+            }),
+        }
+    }
+}
+
+// ─── Dot-notation nested field access ─────────────────────────────────────
+
+/// Read a nested field from a `GameValue::Struct` using dot-notation.
+///
+/// For example, `get_nested_field(val, "fog.density")` navigates into the
+/// `fog` sub-struct and returns the `density` field's value.
+pub fn get_nested_field(val: &GameValue, path: &str) -> Result<GameValue, String> {
+    let parts: Vec<&str> = path.split('.').collect();
+    get_nested_field_parts(val, &parts)
+}
+
+fn get_nested_field_parts(val: &GameValue, parts: &[&str]) -> Result<GameValue, String> {
+    if parts.is_empty() {
+        return Ok(val.clone());
+    }
+
+    let fields = val
+        .as_struct()
+        .ok_or_else(|| format!("expected Struct, got {}", val.variant_name()))?;
+
+    let name = parts[0];
+    let field_val = fields
+        .iter()
+        .find(|(n, _)| n == name)
+        .map(|(_, v)| v)
+        .ok_or_else(|| format!("field '{}' not found in struct", name))?;
+
+    if parts.len() == 1 {
+        Ok(field_val.clone())
+    } else {
+        get_nested_field_parts(field_val, &parts[1..])
+    }
+}
+
+/// Write a nested field in a `GameValue::Struct` using dot-notation.
+///
+/// For example, `set_nested_field(val, "fog.density", GameValue::Float(0.5))`
+/// navigates into the `fog` sub-struct and sets the `density` field.
+pub fn set_nested_field(val: &mut GameValue, path: &str, new_val: GameValue) -> Result<(), String> {
+    let parts: Vec<&str> = path.split('.').collect();
+    set_nested_field_parts(val, &parts, new_val)
+}
+
+fn set_nested_field_parts(
+    val: &mut GameValue,
+    parts: &[&str],
+    new_val: GameValue,
+) -> Result<(), String> {
+    if parts.is_empty() {
+        *val = new_val;
+        return Ok(());
+    }
+
+    let fields = match val {
+        GameValue::Struct(fields) => fields,
+        other => {
+            return Err(format!(
+                "expected Struct, got {}",
+                other.variant_name()
+            ))
+        }
+    };
+
+    let name = parts[0];
+    let field_entry = fields
+        .iter_mut()
+        .find(|(n, _)| n == name)
+        .ok_or_else(|| format!("field '{}' not found in struct", name))?;
+
+    if parts.len() == 1 {
+        field_entry.1 = new_val;
+        Ok(())
+    } else {
+        set_nested_field_parts(&mut field_entry.1, &parts[1..], new_val)
     }
 }
 
@@ -557,6 +664,10 @@ mod tests {
             GameValue::Quat(Quat::IDENTITY),
             GameValue::Color([1.0, 0.5, 0.0, 1.0]),
             GameValue::List(vec![GameValue::Int(1)]),
+            GameValue::Struct(vec![
+                ("x".into(), GameValue::Float(1.0)),
+                ("y".into(), GameValue::Float(2.0)),
+            ]),
             GameValue::Ron("(x: 1)".into()),
         ];
 
@@ -565,5 +676,145 @@ mod tests {
             let back: GameValue = ron::from_str(&ron).unwrap();
             assert_eq!(&back, v, "failed round-trip for {:?}", v);
         }
+    }
+
+    // ── Struct tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn struct_value_construction_and_access() {
+        let v = GameValue::Struct(vec![
+            ("density".into(), GameValue::Float(0.5)),
+            ("enabled".into(), GameValue::Bool(true)),
+        ]);
+        let fields = v.as_struct().unwrap();
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].0, "density");
+        assert_eq!(fields[0].1, GameValue::Float(0.5));
+        assert_eq!(fields[1].0, "enabled");
+        assert_eq!(fields[1].1, GameValue::Bool(true));
+    }
+
+    #[test]
+    fn struct_from_conversion() {
+        let fields: Vec<(String, GameValue)> = vec![
+            ("a".into(), GameValue::Int(1)),
+        ];
+        let v: GameValue = fields.clone().into();
+        assert_eq!(v, GameValue::Struct(fields));
+    }
+
+    #[test]
+    fn struct_try_from() {
+        let v = GameValue::Struct(vec![("x".into(), GameValue::Int(1))]);
+        let fields = Vec::<(String, GameValue)>::try_from(v).unwrap();
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].0, "x");
+
+        // Wrong type
+        let v = GameValue::Bool(true);
+        let err = Vec::<(String, GameValue)>::try_from(v).unwrap_err();
+        assert_eq!(err.expected, "Struct");
+        assert_eq!(err.actual, "Bool");
+    }
+
+    #[test]
+    fn struct_variant_name() {
+        let v = GameValue::Struct(vec![]);
+        assert_eq!(v.variant_name(), "Struct");
+    }
+
+    // ── Dot-notation tests ───────────────────────────────────────────────
+
+    #[test]
+    fn get_nested_single_level() {
+        use super::get_nested_field;
+        let v = GameValue::Struct(vec![
+            ("density".into(), GameValue::Float(0.5)),
+            ("color".into(), GameValue::Vec3(Vec3::ONE)),
+        ]);
+        let d = get_nested_field(&v, "density").unwrap();
+        assert_eq!(d, GameValue::Float(0.5));
+    }
+
+    #[test]
+    fn get_nested_multi_level() {
+        use super::get_nested_field;
+        let v = GameValue::Struct(vec![(
+            "fog".into(),
+            GameValue::Struct(vec![(
+                "atmosphere".into(),
+                GameValue::Struct(vec![(
+                    "rayleigh_scale".into(),
+                    GameValue::Float(1.5),
+                )]),
+            )]),
+        )]);
+        let r = get_nested_field(&v, "fog.atmosphere.rayleigh_scale").unwrap();
+        assert_eq!(r, GameValue::Float(1.5));
+    }
+
+    #[test]
+    fn get_nested_field_not_found() {
+        use super::get_nested_field;
+        let v = GameValue::Struct(vec![("a".into(), GameValue::Int(1))]);
+        let err = get_nested_field(&v, "b").unwrap_err();
+        assert!(err.contains("not found"));
+    }
+
+    #[test]
+    fn get_nested_non_struct() {
+        use super::get_nested_field;
+        let v = GameValue::Float(1.0);
+        let err = get_nested_field(&v, "x").unwrap_err();
+        assert!(err.contains("expected Struct"));
+    }
+
+    #[test]
+    fn set_nested_single_level() {
+        use super::set_nested_field;
+        let mut v = GameValue::Struct(vec![
+            ("density".into(), GameValue::Float(0.5)),
+        ]);
+        set_nested_field(&mut v, "density", GameValue::Float(0.9)).unwrap();
+        assert_eq!(
+            v.as_struct().unwrap()[0].1,
+            GameValue::Float(0.9)
+        );
+    }
+
+    #[test]
+    fn set_nested_multi_level() {
+        use super::set_nested_field;
+        let mut v = GameValue::Struct(vec![(
+            "fog".into(),
+            GameValue::Struct(vec![
+                ("density".into(), GameValue::Float(0.1)),
+                ("color".into(), GameValue::Vec3(Vec3::ZERO)),
+            ]),
+        )]);
+        set_nested_field(&mut v, "fog.density", GameValue::Float(0.8)).unwrap();
+
+        use super::get_nested_field;
+        let d = get_nested_field(&v, "fog.density").unwrap();
+        assert_eq!(d, GameValue::Float(0.8));
+        // Other field unchanged.
+        let c = get_nested_field(&v, "fog.color").unwrap();
+        assert_eq!(c, GameValue::Vec3(Vec3::ZERO));
+    }
+
+    #[test]
+    fn set_nested_field_not_found() {
+        use super::set_nested_field;
+        let mut v = GameValue::Struct(vec![("a".into(), GameValue::Int(1))]);
+        let err = set_nested_field(&mut v, "b", GameValue::Int(2)).unwrap_err();
+        assert!(err.contains("not found"));
+    }
+
+    #[test]
+    fn set_nested_non_struct() {
+        use super::set_nested_field;
+        let mut v = GameValue::Int(1);
+        let err = set_nested_field(&mut v, "x", GameValue::Int(2)).unwrap_err();
+        assert!(err.contains("expected Struct"));
     }
 }

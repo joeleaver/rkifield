@@ -26,11 +26,7 @@ impl EditorAutomationApi {
                     .meta
                     .iter()
                     .filter(|f| !f.transient)
-                    .map(|f| FieldInfo {
-                        name: f.name.to_string(),
-                        field_type: field_type_string(f.field_type),
-                        range: f.range,
-                    })
+                    .map(|f| field_meta_to_info(f))
                     .collect();
                 ComponentInfo {
                     name: name.to_string(),
@@ -106,17 +102,35 @@ impl EditorAutomationApi {
         }
 
         for (field_name, value_str) in &fields {
-            // Find the field metadata to know the expected type.
-            let field_meta = entry
-                .meta
-                .iter()
-                .find(|f| f.name == field_name.as_str())
-                .ok_or_else(|| {
-                    format!("unknown field '{field_name}' on component '{component_name}'")
-                })?;
+            if field_name.contains('.') {
+                // Dot-notation: find top-level field, read→modify→write.
+                let top_field = field_name.split('.').next().unwrap();
+                let rest = &field_name[top_field.len() + 1..];
 
-            let value = parse_game_value(value_str, field_meta.field_type)?;
-            (entry.set_field)(es.world.ecs_mut(), ecs_entity, field_meta.name, value)?;
+                // Find the leaf field type by traversing struct metadata.
+                let leaf_type = find_nested_field_type(entry.meta, field_name)
+                    .ok_or_else(|| {
+                        format!("unknown dotted field '{field_name}' on '{component_name}'")
+                    })?;
+                let value = parse_game_value(value_str, leaf_type)?;
+
+                let mut parent_val =
+                    (entry.get_field)(es.world.ecs_ref(), ecs_entity, top_field)?;
+                rkf_runtime::behavior::set_nested_field(&mut parent_val, rest, value)?;
+                (entry.set_field)(es.world.ecs_mut(), ecs_entity, top_field, parent_val)?;
+            } else {
+                // Simple flat field.
+                let field_meta = entry
+                    .meta
+                    .iter()
+                    .find(|f| f.name == field_name.as_str())
+                    .ok_or_else(|| {
+                        format!("unknown field '{field_name}' on component '{component_name}'")
+                    })?;
+
+                let value = parse_game_value(value_str, field_meta.field_type)?;
+                (entry.set_field)(es.world.ecs_mut(), ecs_entity, field_meta.name, value)?;
+            }
         }
         Ok(())
     }
@@ -304,6 +318,50 @@ impl EditorAutomationApi {
 
 // ── Helper functions ──────────────────────────────────────────────────────
 
+/// Resolve a dot-notation field path to the leaf `FieldType`.
+///
+/// For example, `find_nested_field_type(meta, "fog.density")` returns `FieldType::Float`.
+fn find_nested_field_type(
+    meta: &[rkf_runtime::behavior::registry::FieldMeta],
+    path: &str,
+) -> Option<FieldType> {
+    let mut parts = path.split('.');
+    let first = parts.next()?;
+    let field = meta.iter().find(|f| f.name == first)?;
+
+    let rest: Vec<&str> = parts.collect();
+    if rest.is_empty() {
+        return Some(field.field_type);
+    }
+
+    // Recurse into struct metadata.
+    let sm = field.struct_meta?;
+    find_nested_field_type(sm.fields, &rest.join("."))
+}
+
+/// Convert a `FieldMeta` to a `FieldInfo` for MCP, including struct/asset/component metadata.
+fn field_meta_to_info(f: &rkf_runtime::behavior::registry::FieldMeta) -> FieldInfo {
+    let struct_meta = f.struct_meta.map(|sm| {
+        StructFieldInfo {
+            name: sm.name.to_string(),
+            fields: sm
+                .fields
+                .iter()
+                .map(|sf| field_meta_to_info(sf))
+                .collect(),
+        }
+    });
+
+    FieldInfo {
+        name: f.name.to_string(),
+        field_type: field_type_string(f.field_type),
+        range: f.range,
+        struct_meta,
+        asset_filter: f.asset_filter.map(|s| s.to_string()),
+        component_filter: f.component_filter.map(|s| s.to_string()),
+    }
+}
+
 /// Convert a FieldType enum to a human-readable string.
 fn field_type_string(ft: FieldType) -> String {
     match ft {
@@ -318,6 +376,9 @@ fn field_type_string(ft: FieldType) -> String {
         FieldType::Enum => "Enum".to_string(),
         FieldType::List => "List".to_string(),
         FieldType::Color => "Color".to_string(),
+        FieldType::Struct => "Struct".to_string(),
+        FieldType::AssetRef => "AssetRef".to_string(),
+        FieldType::ComponentRef => "ComponentRef".to_string(),
     }
 }
 
@@ -340,6 +401,13 @@ fn game_value_to_string(v: &GameValue) -> String {
         GameValue::List(items) => {
             let parts: Vec<String> = items.iter().map(game_value_to_string).collect();
             format!("[{}]", parts.join(", "))
+        }
+        GameValue::Struct(fields) => {
+            let parts: Vec<String> = fields
+                .iter()
+                .map(|(name, val)| format!("{}: {}", name, game_value_to_string(val)))
+                .collect();
+            format!("{{{}}}", parts.join(", "))
         }
         GameValue::Ron(s) => s.clone(),
     }
@@ -423,6 +491,14 @@ fn parse_game_value(s: &str, field_type: FieldType) -> Result<GameValue, String>
         FieldType::Entity | FieldType::List => {
             // For entity references and lists, just store as string.
             Ok(GameValue::String(s.to_string()))
+        }
+        FieldType::AssetRef | FieldType::ComponentRef => {
+            // Asset refs and component refs are stored as strings.
+            Ok(GameValue::String(s.to_string()))
+        }
+        FieldType::Struct => {
+            // Struct values can't be parsed from a flat string.
+            Err("cannot parse Struct from string — use dot-notation for sub-fields".to_string())
         }
     }
 }

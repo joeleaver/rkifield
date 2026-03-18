@@ -476,7 +476,7 @@ mod tests {
     #[test]
     fn list_library_components() {
         let items = list_library_items("component").expect("list");
-        assert_eq!(items.len(), 8, "expected 8 library components");
+        assert_eq!(items.len(), 9, "expected 9 library components");
         let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
         assert!(names.contains(&"Health"), "should contain Health");
         assert!(names.contains(&"Spin"), "should contain Spin");

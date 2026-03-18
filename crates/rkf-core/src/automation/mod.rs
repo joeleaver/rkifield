@@ -19,6 +19,6 @@ pub use types::{
     AssetStatusReport, AutomationError, AutomationResult, BlueprintInfo, BrickPoolStats,
     CameraSnapshot, ComponentDef, ComponentInfo, EntityDef, EntityNode, EntitySnapshot, FieldInfo,
     LogEntry, LogLevel, MaterialDef, MaterialInfo, MaterialSnapshot, ObjectShapeResult,
-    QualityPreset, RenderStats, SceneGraphSnapshot, ShaderInfo, SpatialQueryResult, SystemInfo,
-    VoxelSliceResult,
+    QualityPreset, RenderStats, SceneGraphSnapshot, ShaderInfo, SpatialQueryResult,
+    StructFieldInfo, SystemInfo, VoxelSliceResult,
 };
