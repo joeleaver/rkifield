@@ -250,7 +250,6 @@ impl SliderSignals {
         // Camera
         es.set_editor_camera_component_field(|c| c.fov_degrees = self.fov.get() as f32);
         es.camera_control.fly_speed = self.fly_speed.get() as f32;
-        es.editor_camera.fly_speed = self.fly_speed.get() as f32; // legacy sync
         es.set_editor_camera_component_field(|c| { c.near = self.near.get() as f32; c.far = self.far.get() as f32; });
 
         // Brush — sync to both sculpt and paint settings

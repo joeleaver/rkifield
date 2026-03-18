@@ -173,9 +173,14 @@ pub(crate) fn load_scene_v3(
     let scene_v3 = scene_file_v3::deserialize_scene_v3(&ron_str)
         .map_err(|e| anyhow::anyhow!("parse scene: {e}"))?;
 
+    let saved_snap = if es.editor_camera_entity.is_some() {
+        Some(es.extract_camera_snapshot())
+    } else {
+        None
+    };
     engine.clear_scene();
     es.world.clear();
-    es.respawn_editor_camera();
+    es.respawn_editor_camera(saved_snap);
 
     // Load entities into hecs.
     let mut stable_index = StableIdIndex::new();
@@ -292,12 +297,6 @@ fn restore_properties_v3(es: &mut EditorState, scene_v3: &SceneFileV3) {
                     }
                 }
             }
-            // Legacy sync.
-            es.editor_camera.position = cam.position;
-            es.editor_camera.fly_yaw = cam.yaw;
-            es.editor_camera.fly_pitch = cam.pitch;
-            let dir = crate::camera::fly_direction_pub(cam.yaw, cam.pitch);
-            es.editor_camera.target = cam.position + dir * es.camera_control.orbit_distance;
         }
     }
     // Environment is restored from the EnvironmentSettings component
@@ -457,9 +456,12 @@ pub(crate) fn handle_new_project(
                                 Err(e) => log::error!("Failed to load default scene: {e}"),
                             }
                         } else {
+                            let saved = if es.editor_camera_entity.is_some() {
+                                Some(es.extract_camera_snapshot())
+                            } else { None };
                             ctx.engine.clear_scene();
                             es.world.clear();
-                            es.respawn_editor_camera();
+                            es.respawn_editor_camera(saved);
                             es.current_scene_path = None;
                         }
 
@@ -523,9 +525,12 @@ pub(crate) fn handle_open_project(
                         Err(e) => log::error!("Failed to load scene: {e}"),
                     }
                 } else {
+                    let saved = if es.editor_camera_entity.is_some() {
+                        Some(es.extract_camera_snapshot())
+                    } else { None };
                     ctx.engine.clear_scene();
                     es.world.clear();
-                    es.respawn_editor_camera();
+                    es.respawn_editor_camera(saved);
                     es.current_scene_path = None;
                 }
 

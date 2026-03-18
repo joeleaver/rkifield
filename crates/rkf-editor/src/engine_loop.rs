@@ -323,17 +323,14 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                         }
                     }
                 }
-                // Sync legacy SceneCamera.
-                es.editor_camera.position = cam.position;
-                es.editor_camera.fly_yaw = cam.yaw;
-                es.editor_camera.fly_pitch = cam.pitch;
+                // Update orbit target so spawned objects appear at the right place.
                 let dir = glam::Vec3::new(
                     -cam.yaw.sin() * cam.pitch.cos(),
                     cam.pitch.sin(),
                     -cam.yaw.cos() * cam.pitch.cos(),
                 );
-                es.editor_camera.target = es.editor_camera.position
-                    + dir * es.editor_camera.orbit_distance;
+                es.camera_control.target = cam.position
+                    + dir * es.camera_control.orbit_distance;
             }
             if let Some(mode) = pending_debug {
                 es.pending_debug_mode = Some(mode);

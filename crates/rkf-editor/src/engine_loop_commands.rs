@@ -175,7 +175,6 @@ pub(crate) fn apply_editor_command(es: &mut EditorState, cmd: crate::editor_comm
         }
         SetCameraSpeed { speed } => {
             es.camera_control.fly_speed = speed;
-            es.editor_camera.fly_speed = speed; // legacy sync
         }
         SetCameraNearFar { near, far } => {
             es.set_editor_camera_component_field(|c| { c.near = near; c.far = far; });
@@ -205,12 +204,6 @@ pub(crate) fn apply_editor_command(es: &mut EditorState, cmd: crate::editor_comm
                     }
                 }
             }
-            // Legacy sync.
-            es.editor_camera.position = pos;
-            es.editor_camera.fly_yaw = cur_yaw;
-            es.editor_camera.fly_pitch = cur_pitch;
-            es.editor_camera.target = es.camera_control.target;
-            es.editor_camera.mode = es.camera_control.mode;
         }
 
         // -- Environment -------------------------------------------------
@@ -371,11 +364,6 @@ pub(crate) fn apply_editor_command(es: &mut EditorState, cmd: crate::editor_comm
                     }
                 }
             }
-            // Legacy sync.
-            es.editor_camera.position = snap.position;
-            es.editor_camera.fly_yaw = snap.yaw;
-            es.editor_camera.fly_pitch = snap.pitch;
-            es.editor_camera.target = snap.position + crate::camera::fly_direction_pub(snap.yaw, snap.pitch);
         }
         CreateCameraFromView => {
             let snap = es.extract_camera_snapshot();

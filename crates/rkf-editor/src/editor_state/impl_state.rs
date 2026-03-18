@@ -8,13 +8,6 @@ impl EditorState {
     /// Create a new editor state with default values and fly-mode camera
     /// positioned to match the engine's initial viewpoint.
     pub fn new() -> Self {
-        let mut cam = SceneCamera::new();
-        cam.mode = CameraMode::Fly;
-        cam.position = Vec3::new(0.0, 2.5, 5.0);
-        cam.fly_yaw = 0.0;
-        cam.fly_pitch = -0.15;
-        cam.fly_speed = 5.0;
-
         let mut world = World::new("editor");
 
         // Spawn the editor's own camera entity with EditorCameraMarker.
@@ -43,7 +36,6 @@ impl EditorState {
 
         Self {
             mode: EditorMode::Default,
-            editor_camera: cam,
             camera_control,
             editor_input: InputState::new(),
             selected_entity: None,
@@ -134,17 +126,10 @@ impl EditorState {
     ///
     /// Reads position/yaw/pitch from the editor camera entity, applies
     /// `CameraControlState` controls, then writes the result back to the entity.
-    /// Also updates the legacy `editor_camera` (SceneCamera) for callers that
-    /// still read it directly — will be removed once migration is complete.
     pub fn update_camera(&mut self, dt: f32) {
-        // Read current transform from the editor camera entity.
         let uuid = match self.editor_camera_entity {
             Some(u) => u,
-            None => {
-                // Fallback: update legacy SceneCamera directly.
-                self.editor_camera.update(&self.editor_input, dt);
-                return;
-            }
+            None => return,
         };
 
         let ecs_entity = self.world.ecs_entity_for(uuid);
@@ -156,7 +141,7 @@ impl EditorState {
                     .ok()
                     .map(|t| t.position.to_vec3())
             })
-            .unwrap_or(self.editor_camera.position);
+            .unwrap_or(Vec3::new(0.0, 2.5, 5.0));
 
         let (mut yaw, mut pitch) = ecs_entity
             .and_then(|e| {
@@ -165,7 +150,7 @@ impl EditorState {
                     .ok()
                     .map(|c| (c.yaw.to_radians(), c.pitch.to_radians()))
             })
-            .unwrap_or((self.editor_camera.fly_yaw, self.editor_camera.fly_pitch));
+            .unwrap_or((0.0, 0.0));
 
         // Apply control state.
         self.camera_control.update(&self.editor_input, dt, &mut position, &mut yaw, &mut pitch);
@@ -181,14 +166,6 @@ impl EditorState {
                 cam.pitch = pitch.to_degrees();
             }
         }
-
-        // Sync legacy SceneCamera (temporary, until all readers migrate).
-        self.editor_camera.position = position;
-        self.editor_camera.fly_yaw = yaw;
-        self.editor_camera.fly_pitch = pitch;
-        self.editor_camera.target = position + crate::camera::fly_direction_pub(yaw, pitch);
-        self.editor_camera.mode = self.camera_control.mode;
-        self.editor_camera.orbit_distance = self.camera_control.orbit_distance;
     }
 
     /// Read fov_degrees from the editor camera entity's CameraComponent.
@@ -273,24 +250,28 @@ impl EditorState {
 
     /// Re-spawn the editor camera entity after a world clear.
     ///
-    /// Preserves the current SceneCamera control state (position, yaw, pitch)
-    /// and camera component settings (fov, near, far). Call this immediately
-    /// after `world.clear()` to restore the editor camera entity.
-    pub fn respawn_editor_camera(&mut self) {
-        let saved_fov = self.editor_camera_fov_degrees();
-        let saved_near = self.editor_camera_near();
-        let saved_far = self.editor_camera_far();
+    /// `saved` must be captured BEFORE `world.clear()` since the old entity
+    /// will be gone. If `None`, uses defaults.
+    pub fn respawn_editor_camera(&mut self, saved: Option<CameraSnapshot>) {
+        let snap = saved.unwrap_or(CameraSnapshot {
+            position: Vec3::new(0.0, 2.5, 5.0),
+            yaw: 0.0,
+            pitch: -0.15,
+            fov_degrees: 70.0,
+            near: 0.1,
+            far: 1000.0,
+        });
 
         let editor_cam_pos = rkf_core::WorldPosition::new(
             glam::IVec3::ZERO,
-            self.editor_camera.position,
+            snap.position,
         );
         let editor_cam_uuid = self.world.spawn_camera(
             "Editor Camera",
             editor_cam_pos,
-            self.editor_camera.fly_yaw.to_degrees(),
-            self.editor_camera.fly_pitch.to_degrees(),
-            saved_fov,
+            snap.yaw.to_degrees(),
+            snap.pitch.to_degrees(),
+            snap.fov_degrees,
             None,
         );
         if let Some(ecs_entity) = self.world.ecs_entity_for(editor_cam_uuid) {
@@ -301,8 +282,8 @@ impl EditorState {
             if let Ok(mut cam) = self.world.ecs_mut()
                 .get::<&mut rkf_runtime::components::CameraComponent>(ecs_entity)
             {
-                cam.near = saved_near;
-                cam.far = saved_far;
+                cam.near = snap.near;
+                cam.far = snap.far;
             }
         }
         self.editor_camera_entity = Some(editor_cam_uuid);
@@ -455,8 +436,13 @@ impl EditorState {
         let scene_v3 = scene_file_v3::deserialize_scene_v3(&ron_str)
             .map_err(|e| format!("Failed to parse scene file: {e}"))?;
 
+        let saved_snap = if self.editor_camera_entity.is_some() {
+            Some(self.extract_camera_snapshot())
+        } else {
+            None
+        };
         self.world.clear();
-        self.respawn_editor_camera();
+        self.respawn_editor_camera(saved_snap);
 
         let registry = GameplayRegistry::new();
         let mut stable_index = StableIdIndex::new();
