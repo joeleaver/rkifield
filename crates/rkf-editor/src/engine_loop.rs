@@ -310,6 +310,20 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
 
             // Apply pending MCP commands (mutate before read).
             if let Some(cam) = pending_camera {
+                // Write to the editor camera entity (source of truth).
+                if let Some(uuid) = es.editor_camera_entity {
+                    let wp = rkf_core::WorldPosition::new(glam::IVec3::ZERO, cam.position);
+                    let _ = es.world.set_position(uuid, wp);
+                    if let Some(e) = es.world.ecs_entity_for(uuid) {
+                        if let Ok(mut cc) = es.world.ecs_mut()
+                            .get::<&mut rkf_runtime::components::CameraComponent>(e)
+                        {
+                            cc.yaw = cam.yaw.to_degrees();
+                            cc.pitch = cam.pitch.to_degrees();
+                        }
+                    }
+                }
+                // Sync legacy SceneCamera.
                 es.editor_camera.position = cam.position;
                 es.editor_camera.fly_yaw = cam.yaw;
                 es.editor_camera.fly_pitch = cam.pitch;
@@ -325,11 +339,8 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                 es.pending_debug_mode = Some(mode);
             }
 
-            // Camera update (mutates EditorState input state).
+            // Camera update: reads entity, applies controls, writes back to entity.
             es.update_camera(dt);
-
-            // Write editor camera working state back to the editor camera entity.
-            es.write_camera_to_entity();
 
             // Pilot mode: write editor camera state back to the piloted entity.
             if let Some(pilot_uuid) = es.piloting {

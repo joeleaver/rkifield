@@ -635,6 +635,13 @@ pub fn screen_to_ray_snapshot(
     (snap.position, dir)
 }
 
+/// Compute a direction vector from yaw and pitch angles (public).
+///
+/// Matches the render camera convention: yaw=0, pitch=0 → facing -Z.
+pub fn fly_direction_pub(yaw: f32, pitch: f32) -> Vec3 {
+    fly_direction(yaw, pitch)
+}
+
 /// Compute a direction vector from yaw and pitch angles.
 ///
 /// Matches the render camera convention: yaw=0, pitch=0 → facing -Z.

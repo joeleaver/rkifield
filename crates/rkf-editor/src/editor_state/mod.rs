@@ -11,7 +11,7 @@ mod tests;
 pub use slider_signals::SliderSignals;
 
 use crate::animation_preview::AnimationPreview;
-use crate::camera::{CameraMode, SceneCamera};
+use crate::camera::{CameraControlState, CameraMode, CameraSnapshot, SceneCamera};
 use crate::debug_viz::{DebugOverlay, FrameTimeHistory};
 use crate::gizmo::{GizmoMode, GizmoState};
 use crate::input::InputState;
@@ -451,6 +451,7 @@ pub struct EditorState {
 
     // ── Camera & Input ───────────────────────────────────────
     pub editor_camera: SceneCamera,
+    pub camera_control: CameraControlState,
     pub editor_input: InputState,
 
     // ── Scene ────────────────────────────────────────────────
