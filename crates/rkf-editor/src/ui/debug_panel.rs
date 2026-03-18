@@ -4,6 +4,10 @@
 //! level (info=default, warn=yellow, error=red). Filter buttons in the
 //! header toggle visibility of each level. A "Clear" button dismisses
 //! all entries.
+//!
+//! Auto-scrolls to bottom when new messages arrive, unless the user has
+//! manually scrolled up. A "scroll to bottom" indicator appears when
+//! auto-scroll is disengaged.
 
 use rinch::prelude::*;
 
@@ -29,19 +33,19 @@ const SEVERITY_DOT_STYLE: &str = "\
 
 const MESSAGE_STYLE: &str = "\
     flex:1;min-width:0;color:var(--rinch-color-text);\
-    white-space:pre-wrap;word-break:break-word;";
+    white-space:pre-wrap;word-break:break-word;user-select:text;cursor:text;";
 
 const MESSAGE_ERROR_STYLE: &str = "\
     flex:1;min-width:0;color:var(--rinch-color-red-5, #ff6b6b);\
-    white-space:pre-wrap;word-break:break-word;";
+    white-space:pre-wrap;word-break:break-word;user-select:text;cursor:text;";
 
 const MESSAGE_WARNING_STYLE: &str = "\
     flex:1;min-width:0;color:var(--rinch-color-yellow-5, #ffd43b);\
-    white-space:pre-wrap;word-break:break-word;";
+    white-space:pre-wrap;word-break:break-word;user-select:text;cursor:text;";
 
 const LOCATION_STYLE: &str = "\
     flex-shrink:0;color:var(--rinch-color-dimmed);font-size:10px;\
-    white-space:nowrap;margin-top:1px;";
+    white-space:nowrap;margin-top:1px;user-select:text;cursor:text;";
 
 const EMPTY_MSG_STYLE: &str = "\
     font-size:11px;color:var(--rinch-color-placeholder);padding:12px;";
@@ -58,7 +62,16 @@ const FILTER_BTN_BASE: &str = "\
 
 const TIMESTAMP_STYLE: &str = "\
     flex-shrink:0;color:var(--rinch-color-dimmed);font-size:10px;\
-    white-space:nowrap;margin-top:1px;min-width:48px;";
+    white-space:nowrap;margin-top:1px;min-width:48px;user-select:text;cursor:text;";
+
+const SCROLL_BTN_STYLE: &str = "\
+    position:absolute;bottom:8px;right:16px;\
+    font-size:10px;color:var(--rinch-color-text);\
+    background:var(--rinch-color-dark-7, #2a2a2a);\
+    border:1px solid var(--rinch-color-border);\
+    border-radius:3px;padding:2px 10px;cursor:pointer;\
+    font-family:var(--rinch-font-family-monospace);\
+    box-shadow:0 2px 6px rgba(0,0,0,0.3);z-index:10;";
 
 // ── Component ──────────────────────────────────────────────────────────────
 
@@ -67,215 +80,227 @@ const TIMESTAMP_STYLE: &str = "\
 pub fn DebugPanel() -> NodeHandle {
     let ui = use_context::<UiSignals>();
 
-    let filtered_entries = Memo::new(move || {
-        let entries = ui.console_entries.get();
-        let filter = ui.console_filter.get();
-        entries.into_iter().filter(|e| filter.accepts(e.level)).collect::<Vec<_>>()
-    });
+    // Auto-scroll state: true = pinned to bottom, false = user scrolled up.
+    // set_scroll_top() is programmatic and does NOT fire onscroll, so the
+    // onscroll handler only fires on genuine user interaction.
+    let pinned = Signal::new(true);
 
-    rsx! {
-        div { style: "flex:1;min-height:0;display:flex;flex-direction:column;",
+    let root = rsx! {
+        div { style: "flex:1;min-height:0;display:flex;flex-direction:column;position:relative;" }
+    };
 
-            // Header bar: filter buttons + counts + clear button.
-            div { style: {HEADER_STYLE},
+    // Header bar: filter buttons + counts + clear button.
+    let header = rsx! {
+        div { style: HEADER_STYLE }
+    };
 
-                // Info filter button.
-                button {
-                    style: {
-                        let ui = ui;
-                        move || {
-                            let f = ui.console_filter.get();
-                            if f.show_info {
-                                format!("{FILTER_BTN_BASE}color:var(--rinch-color-blue-5, #339af0);background:rgba(51,154,240,0.15);")
-                            } else {
-                                format!("{FILTER_BTN_BASE}color:var(--rinch-color-dimmed);background:none;")
-                            }
-                        }
-                    },
-                    onclick: {
-                        let ui = ui;
-                        move || {
-                            let mut f = ui.console_filter.get();
-                            f.show_info = !f.show_info;
-                            ui.console_filter.set(f);
-                        }
-                    },
-                    "Info"
-                }
-
-                // Warn filter button.
-                button {
-                    style: {
-                        let ui = ui;
-                        move || {
-                            let f = ui.console_filter.get();
-                            if f.show_warn {
-                                format!("{FILTER_BTN_BASE}color:var(--rinch-color-yellow-5, #ffd43b);background:rgba(255,212,59,0.15);")
-                            } else {
-                                format!("{FILTER_BTN_BASE}color:var(--rinch-color-dimmed);background:none;")
-                            }
-                        }
-                    },
-                    onclick: {
-                        let ui = ui;
-                        move || {
-                            let mut f = ui.console_filter.get();
-                            f.show_warn = !f.show_warn;
-                            ui.console_filter.set(f);
-                        }
-                    },
-                    "Warn"
-                }
-
-                // Error filter button.
-                button {
-                    style: {
-                        let ui = ui;
-                        move || {
-                            let f = ui.console_filter.get();
-                            if f.show_error {
-                                format!("{FILTER_BTN_BASE}color:var(--rinch-color-red-5, #ff6b6b);background:rgba(255,107,107,0.15);")
-                            } else {
-                                format!("{FILTER_BTN_BASE}color:var(--rinch-color-dimmed);background:none;")
-                            }
-                        }
-                    },
-                    onclick: {
-                        let ui = ui;
-                        move || {
-                            let mut f = ui.console_filter.get();
-                            f.show_error = !f.show_error;
-                            ui.console_filter.set(f);
-                        }
-                    },
-                    "Error"
-                }
-
-                // Count text.
-                div {
-                    style: "flex:1;",
-                    {move || {
-                        let entries = ui.console_entries.get();
-                        let filter = ui.console_filter.get();
-                        let visible = entries.iter().filter(|e| filter.accepts(e.level)).count();
-                        let total = entries.len();
-                        if total == 0 {
-                            "No messages".to_string()
-                        } else if visible == total {
-                            format!("{total} message{}", if total == 1 { "" } else { "s" })
-                        } else {
-                            format!("{visible}/{total} shown")
-                        }
-                    }}
-                }
-
-                // Clear button.
-                button {
-                    style: {
-                        let ui = ui;
-                        move || {
-                            if ui.console_entries.get().is_empty() {
-                                format!("{CLEAR_BTN_STYLE}display:none;")
-                            } else {
-                                CLEAR_BTN_STYLE.to_string()
-                            }
-                        }
-                    },
-                    onclick: {
-                        let ui = ui;
-                        move || {
-                            ui.console_entries.set(Vec::new());
-                        }
-                    },
-                    "Clear"
-                }
-            }
-
-            // Empty state hint.
-            div {
-                style: {
-                    let ui = ui;
-                    move || {
-                        if ui.console_entries.get().is_empty() {
-                            EMPTY_MSG_STYLE.to_string()
-                        } else {
-                            "display:none;".to_string()
-                        }
-                    }
-                },
-                "Script output and build messages will appear here."
-            }
-
-            // Scrollable list of console entries (filtered).
-            div { style: "display:flex;flex-direction:column;overflow-y:auto;flex:1;min-height:0;",
-                for entry in filtered_entries.get() {
-                    ConsoleRow {
-                        key: console_entry_key(&entry),
-                        timestamp: entry.timestamp,
-                        level: match entry.level {
-                            ConsoleLevel::Info => 0,
-                            ConsoleLevel::Warn => 1,
-                            ConsoleLevel::Error => 2,
-                        },
-                        message: entry.message.clone(),
-                        location: entry.file.as_ref().map(|file| {
-                            match (entry.line, entry.column) {
-                                (Some(line), Some(col)) => format!("{file}:{line}:{col}"),
-                                (Some(line), None) => format!("{file}:{line}"),
-                                _ => file.clone(),
-                            }
-                        }).unwrap_or_default(),
+    // Filter toggle buttons.
+    let info_btn = rsx! {
+        button {
+            style: {
+                let ui = ui;
+                move || {
+                    let f = ui.console_filter.get();
+                    if f.show_info {
+                        format!("{FILTER_BTN_BASE}color:var(--rinch-color-blue-5, #339af0);background:rgba(51,154,240,0.15);")
+                    } else {
+                        format!("{FILTER_BTN_BASE}color:var(--rinch-color-dimmed);background:none;")
                     }
                 }
-            }
+            },
+            onclick: {
+                let ui = ui;
+                move || {
+                    let mut f = ui.console_filter.get();
+                    f.show_info = !f.show_info;
+                    ui.console_filter.set(f);
+                }
+            },
+            "Info"
         }
-    }
-}
-
-/// Single console entry row component.
-///
-/// `level`: 0=Info, 1=Warn, 2=Error.
-#[component]
-fn ConsoleRow(
-    timestamp: f64,
-    level: u8,
-    message: String,
-    location: String,
-) -> NodeHandle {
-    let timestamp_text = format!("{}:{:05.2}", (timestamp / 60.0) as u32, timestamp % 60.0);
-    let dot_style = format!("{SEVERITY_DOT_STYLE}{}", match level {
-        2 => "background:var(--rinch-color-red-5, #ff6b6b);",
-        1 => "background:var(--rinch-color-yellow-5, #ffd43b);",
-        _ => "background:var(--rinch-color-blue-5, #339af0);",
-    });
-    let msg_style = match level {
-        2 => MESSAGE_ERROR_STYLE,
-        1 => MESSAGE_WARNING_STYLE,
-        _ => MESSAGE_STYLE,
     };
-    let loc_style = if location.is_empty() {
-        "display:none;".to_string()
-    } else {
-        LOCATION_STYLE.to_string()
-    };
+    header.append_child(&info_btn);
 
-    rsx! {
+    let warn_btn = rsx! {
+        button {
+            style: {
+                let ui = ui;
+                move || {
+                    let f = ui.console_filter.get();
+                    if f.show_warn {
+                        format!("{FILTER_BTN_BASE}color:var(--rinch-color-yellow-5, #ffd43b);background:rgba(255,212,59,0.15);")
+                    } else {
+                        format!("{FILTER_BTN_BASE}color:var(--rinch-color-dimmed);background:none;")
+                    }
+                }
+            },
+            onclick: {
+                let ui = ui;
+                move || {
+                    let mut f = ui.console_filter.get();
+                    f.show_warn = !f.show_warn;
+                    ui.console_filter.set(f);
+                }
+            },
+            "Warn"
+        }
+    };
+    header.append_child(&warn_btn);
+
+    let error_btn = rsx! {
+        button {
+            style: {
+                let ui = ui;
+                move || {
+                    let f = ui.console_filter.get();
+                    if f.show_error {
+                        format!("{FILTER_BTN_BASE}color:var(--rinch-color-red-5, #ff6b6b);background:rgba(255,107,107,0.15);")
+                    } else {
+                        format!("{FILTER_BTN_BASE}color:var(--rinch-color-dimmed);background:none;")
+                    }
+                }
+            },
+            onclick: {
+                let ui = ui;
+                move || {
+                    let mut f = ui.console_filter.get();
+                    f.show_error = !f.show_error;
+                    ui.console_filter.set(f);
+                }
+            },
+            "Error"
+        }
+    };
+    header.append_child(&error_btn);
+
+    let count_text = rsx! {
         div {
-            style: {ROW_STYLE},
-
-            // Timestamp.
-            div { style: {TIMESTAMP_STYLE}, {timestamp_text} }
-
-            // Severity dot.
-            div { style: {dot_style.as_str()} }
-
-            // Message text.
-            div { style: {msg_style}, {message} }
-
-            // File location (if available).
-            div { style: {loc_style.as_str()}, {location} }
+            style: "flex:1;",
+            {move || {
+                let entries = ui.console_entries.get();
+                let filter = ui.console_filter.get();
+                let visible = entries.iter().filter(|e| filter.accepts(e.level)).count();
+                let total = entries.len();
+                if total == 0 {
+                    "No messages".to_string()
+                } else if visible == total {
+                    format!("{total} message{}", if total == 1 { "" } else { "s" })
+                } else {
+                    format!("{visible}/{total} shown")
+                }
+            }}
         }
+    };
+    header.append_child(&count_text);
+
+    let clear_btn = rsx! {
+        button {
+            style: {
+                let ui = ui;
+                move || {
+                    if ui.console_entries.get().is_empty() {
+                        format!("{CLEAR_BTN_STYLE}display:none;")
+                    } else {
+                        CLEAR_BTN_STYLE.to_string()
+                    }
+                }
+            },
+            onclick: {
+                let ui = ui;
+                move || {
+                    ui.console_entries.set(Vec::new());
+                }
+            },
+            "Clear"
+        }
+    };
+    header.append_child(&clear_btn);
+    root.append_child(&header);
+
+    // Empty state hint.
+    let hint = rsx! {
+        div {
+            style: {
+                let ui = ui;
+                move || {
+                    if ui.console_entries.get().is_empty() {
+                        EMPTY_MSG_STYLE.to_string()
+                    } else {
+                        "display:none;".to_string()
+                    }
+                }
+            },
+            "Script output and build messages will appear here."
+        }
+    };
+    root.append_child(&hint);
+
+    // Scrollable list of console entries (filtered).
+    let list = rsx! {
+        div {
+            style: "display:flex;flex-direction:column;overflow-y:auto;flex:1;min-height:0;",
+            onscroll: {
+                move |_scroll_top: f64| {
+                    // Any user-initiated scroll disengages auto-scroll.
+                    // (set_scroll_top is programmatic and does NOT fire this handler.)
+                    pinned.set(false);
+                }
+            }
+        }
+    };
+
+    // Use for_each_dom_typed with a derived filtered list.
+    rinch::core::for_each_dom_typed(
+        __scope,
+        &list,
+        move || {
+            let entries = ui.console_entries.get();
+            let filter = ui.console_filter.get();
+            entries.into_iter().filter(|e| filter.accepts(e.level)).collect::<Vec<_>>()
+        },
+        |entry| console_entry_key(entry),
+        move |entry, scope| render_console_row(scope, &entry),
+    );
+
+    // Auto-scroll effect: when entries change and we're pinned, scroll to bottom.
+    {
+        let list_handle = list.clone();
+        __scope.create_effect(move || {
+            // Subscribe to entry changes (the .get() creates the dependency).
+            let _entries = ui.console_entries.get();
+            if pinned.get() {
+                list_handle.set_scroll_top(f64::MAX);
+            }
+        });
     }
+
+    root.append_child(&list);
+
+    // "Scroll to bottom" button — shown only when auto-scroll is disengaged.
+    let scroll_btn = rsx! {
+        button {
+            style: {
+                move || {
+                    if pinned.get() {
+                        "display:none;".to_string()
+                    } else {
+                        SCROLL_BTN_STYLE.to_string()
+                    }
+                }
+            },
+            onclick: {
+                let list_handle = list.clone();
+                move || {
+                    pinned.set(true);
+                    list_handle.set_scroll_top(f64::MAX);
+                }
+            },
+            "\u{2193} Scroll to bottom"
+        }
+    };
+    root.append_child(&scroll_btn);
+
+    root
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -293,4 +318,55 @@ fn console_entry_key(entry: &ConsoleEntry) -> String {
         _ => String::new(),
     };
     format!("{level}-{:.3}-{}-{loc}", entry.timestamp, entry.message)
+}
+
+/// Render a single console entry row.
+fn render_console_row(scope: &mut RenderScope, entry: &ConsoleEntry) -> NodeHandle {
+    let row = scope.create_element("div");
+    row.set_attribute("style", ROW_STYLE);
+
+    // Timestamp.
+    let ts_el = scope.create_element("div");
+    ts_el.set_attribute("style", TIMESTAMP_STYLE);
+    let secs = entry.timestamp;
+    let mins = (secs / 60.0) as u32;
+    let secs_rem = secs % 60.0;
+    ts_el.append_child(&scope.create_text(&format!("{mins}:{secs_rem:05.2}")));
+    row.append_child(&ts_el);
+
+    // Severity dot.
+    let dot = scope.create_element("div");
+    let dot_bg = match entry.level {
+        ConsoleLevel::Error => "background:var(--rinch-color-red-5, #ff6b6b);",
+        ConsoleLevel::Warn => "background:var(--rinch-color-yellow-5, #ffd43b);",
+        ConsoleLevel::Info => "background:var(--rinch-color-blue-5, #339af0);",
+    };
+    dot.set_attribute("style", &format!("{SEVERITY_DOT_STYLE}{dot_bg}"));
+    row.append_child(&dot);
+
+    // Message text.
+    let msg_el = scope.create_element("div");
+    let msg_style = match entry.level {
+        ConsoleLevel::Error => MESSAGE_ERROR_STYLE,
+        ConsoleLevel::Warn => MESSAGE_WARNING_STYLE,
+        ConsoleLevel::Info => MESSAGE_STYLE,
+    };
+    msg_el.set_attribute("style", msg_style);
+    msg_el.append_child(&scope.create_text(&entry.message));
+    row.append_child(&msg_el);
+
+    // File location (if available).
+    if let Some(ref file) = entry.file {
+        let loc_el = scope.create_element("div");
+        loc_el.set_attribute("style", LOCATION_STYLE);
+        let loc_text = match (entry.line, entry.column) {
+            (Some(line), Some(col)) => format!("{file}:{line}:{col}"),
+            (Some(line), None) => format!("{file}:{line}"),
+            _ => file.clone(),
+        };
+        loc_el.append_child(&scope.create_text(&loc_text));
+        row.append_child(&loc_el);
+    }
+
+    row.into()
 }
