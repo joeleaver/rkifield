@@ -27,7 +27,6 @@ pub enum PanelId {
     Materials,
     Shaders,
     Console,
-    DebugOverlay,
     Systems,
     Library,
     // Canvas panels (center only)
@@ -56,7 +55,6 @@ impl PanelId {
         Self::Materials,
         Self::Shaders,
         Self::Console,
-        Self::DebugOverlay,
         Self::Systems,
         Self::Library,
         Self::SceneView,
@@ -83,7 +81,6 @@ impl PanelId {
             Self::Materials => "Materials",
             Self::Shaders => "Shaders",
             Self::Console => "Console",
-            Self::DebugOverlay => "Console",
             Self::Systems => "Systems",
             Self::Library => "Library",
             Self::SceneView => "Scene",
@@ -97,7 +94,7 @@ impl PanelId {
         match self {
             Self::SceneTree => ContainerKind::Left,
             Self::EditorCamera | Self::Environment | Self::ObjectProperties | Self::AssetProperties => ContainerKind::Right,
-            Self::Materials | Self::Shaders | Self::Console | Self::DebugOverlay | Self::Systems | Self::Library => ContainerKind::Bottom,
+            Self::Materials | Self::Shaders | Self::Console | Self::Systems | Self::Library => ContainerKind::Bottom,
             Self::SceneView | Self::GameView | Self::AnimationEditor => ContainerKind::Center,
         }
     }
@@ -358,11 +355,11 @@ mod tests {
         );
         assert_eq!(
             layout.find_panel(PanelId::ObjectProperties),
-            Some((ContainerKind::Right, 0, 1))
+            Some((ContainerKind::Right, 0, 2))
         );
         assert_eq!(
             layout.find_panel(PanelId::AssetProperties),
-            Some((ContainerKind::Right, 0, 2))
+            Some((ContainerKind::Right, 0, 3))
         );
         assert_eq!(
             layout.find_panel(PanelId::Console),

@@ -336,7 +336,7 @@ mod tests {
     fn remove_tab_found() {
         let mut layout = default_layout();
         let result = remove_tab(&mut layout, PanelId::ObjectProperties);
-        assert_eq!(result, Ok((ContainerKind::Right, 0, 0)));
+        assert_eq!(result, Ok((ContainerKind::Right, 0, 2)));
         assert!(!layout.right.zones[0]
             .tabs
             .contains(&PanelId::ObjectProperties));
@@ -352,31 +352,27 @@ mod tests {
     #[test]
     fn split_zone_before() {
         let mut layout = default_layout();
-        // Add DebugOverlay to layout first
-        layout.bottom.zones[0].tabs.push(PanelId::DebugOverlay);
-
-        // Split bottom zone 0, putting DebugOverlay before it
+        // Move SceneTree from left to bottom zone 0 (split before)
         let result = split_zone(
             &mut layout,
-            PanelId::DebugOverlay,
+            PanelId::SceneTree,
             ContainerKind::Bottom,
             0,
             true,
         );
         assert!(result.is_ok());
         assert_eq!(layout.bottom.zones.len(), 2);
-        assert_eq!(layout.bottom.zones[0].tabs, vec![PanelId::DebugOverlay]);
+        assert_eq!(layout.bottom.zones[0].tabs, vec![PanelId::SceneTree]);
         assert_eq!(layout.bottom.zones[1].tabs, vec![PanelId::Materials, PanelId::Shaders, PanelId::Systems, PanelId::Library, PanelId::Console]);
     }
 
     #[test]
     fn split_zone_after() {
         let mut layout = default_layout();
-        layout.bottom.zones[0].tabs.push(PanelId::DebugOverlay);
-
+        // Move SceneTree from left to bottom zone 0 (split after)
         let result = split_zone(
             &mut layout,
-            PanelId::DebugOverlay,
+            PanelId::SceneTree,
             ContainerKind::Bottom,
             0,
             false,
@@ -384,7 +380,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(layout.bottom.zones.len(), 2);
         assert_eq!(layout.bottom.zones[0].tabs, vec![PanelId::Materials, PanelId::Shaders, PanelId::Systems, PanelId::Library, PanelId::Console]);
-        assert_eq!(layout.bottom.zones[1].tabs, vec![PanelId::DebugOverlay]);
+        assert_eq!(layout.bottom.zones[1].tabs, vec![PanelId::SceneTree]);
     }
 
     #[test]

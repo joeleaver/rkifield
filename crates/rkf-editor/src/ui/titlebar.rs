@@ -155,6 +155,7 @@ pub fn TitleBar() -> NodeHandle {
         }));
 
     let spawn_primitives: &[(&str, &str)] = &[
+        ("Empty", "Empty"),
         ("Box", "Box"),
         ("Sphere", "Sphere"),
         ("Capsule", "Capsule"),
@@ -391,6 +392,7 @@ pub fn TitleBar() -> NodeHandle {
                 MenuEntryRef::Submenu { label, menu: submenu } => {
                     let sub_node = __scope.create_element("div");
                     sub_node.set_attribute("class", "rinch-app-menu-submenu");
+                    sub_node.set_attribute("style", "position:relative;");
 
                     let trigger = __scope.create_element("div");
                     trigger.set_attribute("class", "rinch-app-menu-submenu__trigger");
@@ -406,17 +408,30 @@ pub fn TitleBar() -> NodeHandle {
                     trigger.append_child(&arrow);
                     sub_node.append_child(&trigger);
 
-                    // Avoid rinch-app-menu-submenu__dropdown class — its
-                    // visibility:hidden cascades to children and blocks hit testing.
-                    // Use inline styles matching the visual appearance instead.
+                    // Show nested dropdown on hover over the submenu container.
+                    let sub_open: Signal<bool> = Signal::new(false);
+                    let enter_id = __scope.register_handler(move || sub_open.set(true));
+                    let leave_id = __scope.register_handler(move || sub_open.set(false));
+                    sub_node.set_attribute("data-onenter", &enter_id.to_string());
+                    sub_node.set_attribute("data-onleave", &leave_id.to_string());
+
                     let nested = __scope.create_element("div");
-                    nested.set_attribute("style",
-                        "position:absolute;left:100%;top:0;min-width:200px;\
-                         background:var(--rinch-color-body);\
-                         border:1px solid var(--rinch-color-border,var(--rinch-color-gray-3));\
-                         border-radius:var(--rinch-radius-md);\
-                         box-shadow:0 4px 12px rgba(0,0,0,0.15);\
-                         padding:4px;z-index:200;");
+                    {
+                        let nh = nested.clone();
+                        __scope.create_effect(move || {
+                            if sub_open.get() {
+                                nh.set_attribute("style",
+                                    "position:absolute;left:100%;top:0;min-width:200px;\
+                                     background:var(--rinch-color-body);\
+                                     border:1px solid var(--rinch-color-border,var(--rinch-color-gray-3));\
+                                     border-radius:var(--rinch-radius-md);\
+                                     box-shadow:0 4px 12px rgba(0,0,0,0.15);\
+                                     padding:4px;z-index:200;");
+                            } else {
+                                nh.set_attribute("style", "display:none;");
+                            }
+                        });
+                    }
                     for sub_entry in submenu.iter_entries() {
                         match sub_entry {
                             MenuEntryRef::Item { label, shortcut, enabled, callback } => {

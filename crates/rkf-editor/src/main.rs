@@ -273,7 +273,6 @@ fn main() -> anyhow::Result<()> {
                 ui_signals.console_entries.set(buf2.snapshot());
             }
             create_context(slider_signals);
-            create_context(crate::editor_state::FpsSignal::new());
             // Command channel for UI→engine communication.
             create_context(cmd_sender);
             // Layout state — zone-based configurable layout.

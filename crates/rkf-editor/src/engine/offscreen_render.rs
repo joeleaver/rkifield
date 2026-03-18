@@ -542,25 +542,9 @@ impl EditorEngine {
         // Log timing every 60 frames.
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if n % 60 == 0 {
-            eprintln!(
-                "[READBACK] poll_wait: {:.2}ms  memcpy: {:.2}ms  total: {:.2}ms  ({}x{})",
-                (t1 - t0).as_secs_f64() * 1000.0,
-                (t2 - t1).as_secs_f64() * 1000.0,
-                (t2 - t0).as_secs_f64() * 1000.0,
-                w, h,
-            );
-            // Per-pass GPU timing.
-            if !self.gpu_profiler.results.is_empty() {
-                let mut total_gpu = 0.0;
-                eprint!("[GPU PASSES]");
-                for (name, ms) in &self.gpu_profiler.results {
-                    eprint!("  {}:{:.2}ms", name, ms);
-                    total_gpu += ms;
-                }
-                eprintln!("  TOTAL:{:.2}ms", total_gpu);
-            }
-        }
+        // (Profiling log suppressed — uncomment to debug GPU timing.)
+        // if n % 60 == 0 { ... }
+        let _ = (n, t0, t1, t2, w, h);
 
         (rgba8, w, h)
     }

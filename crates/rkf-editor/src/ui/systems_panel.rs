@@ -102,19 +102,17 @@ pub fn SystemsPanel() -> NodeHandle {
     root.append_child(&hint);
 
     // Systems list — rebuilt when the systems signal changes.
+    // Build a flat list of renderable items from the systems signal.
     let list_container = rsx! {
-        div { style: "display:flex;flex-direction:column;" }
+        div { style: "display:flex;flex-direction:column;",
+            for item in build_display_items(ui.systems.get()) {
+                div {
+                    key: item.key(),
+                    DisplayItemRow { item: item }
+                }
+            }
+        }
     };
-
-    rinch::core::for_each_dom_typed(
-        __scope,
-        &list_container,
-        move || build_display_items(ui.systems.get()),
-        |item| item.key(),
-        move |item, scope| {
-            render_display_item(scope, &item)
-        },
-    );
 
     root.append_child(&list_container);
     root
@@ -127,6 +125,12 @@ pub fn SystemsPanel() -> NodeHandle {
 enum DisplayItem {
     PhaseHeader(String),
     SystemRow(SystemSummary),
+}
+
+impl Default for DisplayItem {
+    fn default() -> Self {
+        DisplayItem::PhaseHeader(String::new())
+    }
 }
 
 impl DisplayItem {
@@ -161,57 +165,50 @@ fn build_display_items(systems: Vec<SystemSummary>) -> Vec<DisplayItem> {
 }
 
 /// Render a single display item (phase header or system row).
-fn render_display_item(scope: &mut RenderScope, item: &DisplayItem) -> NodeHandle {
-    match item {
+#[component]
+fn DisplayItemRow(item: DisplayItem) -> NodeHandle {
+    match &item {
         DisplayItem::PhaseHeader(phase) => {
-            let el = scope.create_element("div");
-            el.set_attribute("style", PHASE_HEADER_STYLE);
-            el.append_child(&scope.create_text(phase));
-            el.into()
+            let phase = phase.clone();
+            rsx! {
+                div { style: {PHASE_HEADER_STYLE}, {phase} }
+            }
         }
         DisplayItem::SystemRow(sys) => {
-            let row = scope.create_element("div");
-            row.set_attribute("style", SYSTEM_ROW_STYLE);
-
-            // Order index.
-            let order_el = scope.create_element("div");
-            order_el.set_attribute("style", ORDER_STYLE);
-            order_el.append_child(&scope.create_text(&format!("{}", sys.order)));
-            row.append_child(&order_el);
-
-            // Fault indicator dot.
-            let dot = scope.create_element("div");
-            let dot_bg = if sys.faulted {
-                "background:var(--rinch-color-red-5, #ff6b6b);"
+            let order_text = format!("{}", sys.order);
+            let dot_style: &'static str = if sys.faulted {
+                const FAULTED: &str = concat!(
+                    "width:6px;height:6px;border-radius:50%;flex-shrink:0;",
+                    "background:var(--rinch-color-red-5, #ff6b6b);"
+                );
+                FAULTED
             } else {
-                "background:var(--rinch-color-green-5, #51cf66);"
+                const HEALTHY: &str = concat!(
+                    "width:6px;height:6px;border-radius:50%;flex-shrink:0;",
+                    "background:var(--rinch-color-green-5, #51cf66);"
+                );
+                HEALTHY
             };
-            dot.set_attribute("style", &format!("{FAULT_DOT_STYLE}{dot_bg}"));
-            row.append_child(&dot);
-
-            // System name.
-            let name_el = scope.create_element("div");
             let name_style = if sys.faulted {
                 SYSTEM_NAME_FAULTED_STYLE
             } else {
                 SYSTEM_NAME_STYLE
             };
-            name_el.set_attribute("style", name_style);
-            name_el.append_child(&scope.create_text(&sys.name));
-            row.append_child(&name_el);
-
-            // Frame timing.
-            let timing_el = scope.create_element("div");
-            timing_el.set_attribute("style", TIMING_STYLE);
+            let name = sys.name.clone();
             let timing_text = match sys.last_frame_us {
                 Some(us) if us >= 1000 => format!("{:.1}ms", us as f64 / 1000.0),
                 Some(us) => format!("{}us", us),
                 None => "--".to_string(),
             };
-            timing_el.append_child(&scope.create_text(&timing_text));
-            row.append_child(&timing_el);
 
-            row.into()
+            rsx! {
+                div { style: {SYSTEM_ROW_STYLE},
+                    div { style: {ORDER_STYLE}, {order_text} }
+                    div { style: {dot_style} }
+                    div { style: {name_style}, {name} }
+                    div { style: {TIMING_STYLE}, {timing_text} }
+                }
+            }
         }
     }
 }

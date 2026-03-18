@@ -11,7 +11,7 @@ use crate::editor_command::EditorCommand;
 use crate::editor_state::{EditorMode, SliderSignals, UiSignals};
 use crate::layout::state::{LayoutBacking, LayoutState};
 use crate::CommandSender;
-use super::slider_helpers::{build_slider_row, build_log_slider_row};
+use super::slider_helpers::{SliderRow, LogSliderRow};
 
 /// Floating brush palette — compact overlay positioned at top-right of the render viewport.
 /// Hidden when not in Sculpt or Paint mode.
@@ -264,11 +264,16 @@ pub fn BrushPalette() -> NodeHandle {
     }
 
     // ── Radius slider (both modes) — logarithmic for fine control at small values ──
-    build_log_slider_row(
-        __scope, &root, "Radius", "",
-        sliders.brush_radius, 0.01, 10.0, 2,
-        { let cmd = cmd.clone(); move |_v| { sliders.send_brush_commands(&cmd); } },
-    );
+    let radius_slider = rsx! {
+        LogSliderRow {
+            label: "Radius",
+            suffix: "",
+            signal: Some(sliders.brush_radius),
+            min: 0.01, max: 10.0, decimals: 2,
+            on_change: { let cmd = cmd.clone(); move |_v: f64| { sliders.send_brush_commands(&cmd); } },
+        }
+    };
+    root.append_child(&radius_slider);
 
     // ── Strength slider (Sculpt only — does nothing in Paint) ──
     {
@@ -283,20 +288,30 @@ pub fn BrushPalette() -> NodeHandle {
                 );
             });
         }
-        build_slider_row(
-            __scope, &strength_wrap, "Strength", "",
-            sliders.brush_strength, 0.0, 1.0, 0.01, 2,
-            { let cmd = cmd.clone(); move |_v| { sliders.send_brush_commands(&cmd); } },
-        );
+        let strength_slider = rsx! {
+            SliderRow {
+                label: "Strength",
+                suffix: "",
+                signal: Some(sliders.brush_strength),
+                min: 0.0, max: 1.0, step: 0.01, decimals: 2,
+                on_change: { let cmd = cmd.clone(); move |_v: f64| { sliders.send_brush_commands(&cmd); } },
+            }
+        };
+        strength_wrap.append_child(&strength_slider);
         root.append_child(&strength_wrap);
     }
 
     // ── Falloff slider (both modes) ──
-    build_slider_row(
-        __scope, &root, "Falloff", "",
-        sliders.brush_falloff, 0.0, 1.0, 0.01, 2,
-        { let cmd = cmd.clone(); move |_v| { sliders.send_brush_commands(&cmd); } },
-    );
+    let falloff_slider = rsx! {
+        SliderRow {
+            label: "Falloff",
+            suffix: "",
+            signal: Some(sliders.brush_falloff),
+            min: 0.0, max: 1.0, step: 0.01, decimals: 2,
+            on_change: { let cmd = cmd.clone(); move |_v: f64| { sliders.send_brush_commands(&cmd); } },
+        }
+    };
+    root.append_child(&falloff_slider);
 
     root.into()
 }

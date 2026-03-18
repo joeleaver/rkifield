@@ -10,7 +10,7 @@ use crate::editor_state::{SliderSignals, UiSignals};
 use crate::CommandSender;
 
 use super::components::ToggleRow;
-use super::slider_helpers::build_slider_row;
+use super::slider_helpers::SliderRow;
 use super::{DIVIDER_STYLE, LABEL_STYLE, SECTION_STYLE};
 
 // ── Atmosphere section ──────────────────────────────────────────────────────
@@ -22,51 +22,49 @@ pub fn AtmosphereSection() -> NodeHandle {
     let cmd = use_context::<CommandSender>();
     let ui = use_context::<UiSignals>();
 
-    let pre_toggle = __scope.create_element("div");
-    build_slider_row(
-        __scope, &pre_toggle, "Sun Azimuth", "\u{00b0}",
-        sliders.sun_azimuth, 0.0, 360.0, 1.0, 0,
-        { let cmd = cmd.clone(); move |_v| { sliders.send_atmosphere_commands(&cmd, &ui); } },
-    );
-    build_slider_row(
-        __scope, &pre_toggle, "Sun Elevation", "\u{00b0}",
-        sliders.sun_elevation, -90.0, 90.0, 1.0, 0,
-        { let cmd = cmd.clone(); move |_v| { sliders.send_atmosphere_commands(&cmd, &ui); } },
-    );
-    build_slider_row(
-        __scope, &pre_toggle, "Sun Intensity", "",
-        sliders.sun_intensity, 0.0, 10.0, 0.1, 1,
-        { let cmd = cmd.clone(); move |_v| { sliders.send_atmosphere_commands(&cmd, &ui); } },
-    );
-
-    let atmo_toggle = ToggleRow {
-        label: "Atmosphere".to_string(),
-        enabled: Some(ui.atmo_enabled),
-        on_change: Some(Callback::new({
-            let cmd = cmd.clone();
-            move || { sliders.send_atmosphere_commands(&cmd, &ui); }
-        })),
-    }
-    .render(__scope, &[]);
-
-    let post_toggle = __scope.create_element("div");
-    build_slider_row(
-        __scope, &post_toggle, "Rayleigh Scale", "",
-        sliders.rayleigh_scale, 0.0, 5.0, 0.1, 1,
-        { let cmd = cmd.clone(); move |_v| { sliders.send_atmosphere_commands(&cmd, &ui); } },
-    );
-    build_slider_row(
-        __scope, &post_toggle, "Mie Scale", "",
-        sliders.mie_scale, 0.0, 5.0, 0.1, 1,
-        { let cmd = cmd.clone(); move |_v| { sliders.send_atmosphere_commands(&cmd, &ui); } },
-    );
-
     rsx! {
         div {
             div { style: {LABEL_STYLE}, "Atmosphere" }
-            {pre_toggle}
-            {atmo_toggle}
-            {post_toggle}
+            SliderRow {
+                label: "Sun Azimuth",
+                suffix: "\u{00b0}",
+                signal: Some(sliders.sun_azimuth),
+                min: 0.0, max: 360.0, step: 1.0, decimals: 0,
+                on_change: { let cmd = cmd.clone(); move |_v: f64| { sliders.send_atmosphere_commands(&cmd, &ui); } },
+            }
+            SliderRow {
+                label: "Sun Elevation",
+                suffix: "\u{00b0}",
+                signal: Some(sliders.sun_elevation),
+                min: Some(-90.0), max: 90.0, step: 1.0, decimals: 0,
+                on_change: { let cmd = cmd.clone(); move |_v: f64| { sliders.send_atmosphere_commands(&cmd, &ui); } },
+            }
+            SliderRow {
+                label: "Sun Intensity",
+                suffix: "",
+                signal: Some(sliders.sun_intensity),
+                min: 0.0, max: 10.0, step: 0.1, decimals: 1,
+                on_change: { let cmd = cmd.clone(); move |_v: f64| { sliders.send_atmosphere_commands(&cmd, &ui); } },
+            }
+            ToggleRow {
+                label: "Atmosphere",
+                enabled: Some(ui.atmo_enabled),
+                on_change: { let cmd = cmd.clone(); move || { sliders.send_atmosphere_commands(&cmd, &ui); } },
+            }
+            SliderRow {
+                label: "Rayleigh Scale",
+                suffix: "",
+                signal: Some(sliders.rayleigh_scale),
+                min: 0.0, max: 5.0, step: 0.1, decimals: 1,
+                on_change: { let cmd = cmd.clone(); move |_v: f64| { sliders.send_atmosphere_commands(&cmd, &ui); } },
+            }
+            SliderRow {
+                label: "Mie Scale",
+                suffix: "",
+                signal: Some(sliders.mie_scale),
+                min: 0.0, max: 5.0, step: 0.1, decimals: 1,
+                on_change: { let cmd = cmd.clone(); move |_v: f64| { sliders.send_atmosphere_commands(&cmd, &ui); } },
+            }
         }
     }
 }
@@ -80,43 +78,42 @@ pub fn FogSection() -> NodeHandle {
     let cmd = use_context::<CommandSender>();
     let ui = use_context::<UiSignals>();
 
-    let fog_toggle = ToggleRow {
-        label: "Fog".to_string(),
-        enabled: Some(ui.fog_enabled),
-        on_change: Some(Callback::new({
-            let cmd = cmd.clone();
-            move || { sliders.send_fog_commands(&cmd, &ui); }
-        })),
-    }
-    .render(__scope, &[]);
-
-    let sliders_div = __scope.create_element("div");
-    build_slider_row(
-        __scope, &sliders_div, "Fog Density", "",
-        sliders.fog_density, 0.0, 0.5, 0.001, 3,
-        { let cmd = cmd.clone(); move |_v| { sliders.send_fog_commands(&cmd, &ui); } },
-    );
-    build_slider_row(
-        __scope, &sliders_div, "Height Falloff", "",
-        sliders.fog_height_falloff, 0.0, 1.0, 0.01, 2,
-        { let cmd = cmd.clone(); move |_v| { sliders.send_fog_commands(&cmd, &ui); } },
-    );
-    build_slider_row(
-        __scope, &sliders_div, "Dust Density", "",
-        sliders.dust_density, 0.0, 0.1, 0.001, 3,
-        { let cmd = cmd.clone(); move |_v| { sliders.send_fog_commands(&cmd, &ui); } },
-    );
-    build_slider_row(
-        __scope, &sliders_div, "Dust Asymmetry", "",
-        sliders.dust_asymmetry, 0.0, 0.95, 0.05, 2,
-        { let cmd = cmd.clone(); move |_v| { sliders.send_fog_commands(&cmd, &ui); } },
-    );
-
     rsx! {
         div {
             div { style: {LABEL_STYLE}, "Fog" }
-            {fog_toggle}
-            {sliders_div}
+            ToggleRow {
+                label: "Fog",
+                enabled: Some(ui.fog_enabled),
+                on_change: { let cmd = cmd.clone(); move || { sliders.send_fog_commands(&cmd, &ui); } },
+            }
+            SliderRow {
+                label: "Fog Density",
+                suffix: "",
+                signal: Some(sliders.fog_density),
+                min: 0.0, max: 0.5, step: 0.001, decimals: 3,
+                on_change: { let cmd = cmd.clone(); move |_v: f64| { sliders.send_fog_commands(&cmd, &ui); } },
+            }
+            SliderRow {
+                label: "Height Falloff",
+                suffix: "",
+                signal: Some(sliders.fog_height_falloff),
+                min: 0.0, max: 1.0, step: 0.01, decimals: 2,
+                on_change: { let cmd = cmd.clone(); move |_v: f64| { sliders.send_fog_commands(&cmd, &ui); } },
+            }
+            SliderRow {
+                label: "Dust Density",
+                suffix: "",
+                signal: Some(sliders.dust_density),
+                min: 0.0, max: 0.1, step: 0.001, decimals: 3,
+                on_change: { let cmd = cmd.clone(); move |_v: f64| { sliders.send_fog_commands(&cmd, &ui); } },
+            }
+            SliderRow {
+                label: "Dust Asymmetry",
+                suffix: "",
+                signal: Some(sliders.dust_asymmetry),
+                min: 0.0, max: 0.95, step: 0.05, decimals: 2,
+                on_change: { let cmd = cmd.clone(); move |_v: f64| { sliders.send_fog_commands(&cmd, &ui); } },
+            }
         }
     }
 }
@@ -130,48 +127,49 @@ pub fn CloudsSection() -> NodeHandle {
     let cmd = use_context::<CommandSender>();
     let ui = use_context::<UiSignals>();
 
-    let cloud_toggle = ToggleRow {
-        label: "Clouds".to_string(),
-        enabled: Some(ui.clouds_enabled),
-        on_change: Some(Callback::new({
-            let cmd = cmd.clone();
-            move || { sliders.send_cloud_commands(&cmd, &ui); }
-        })),
-    }
-    .render(__scope, &[]);
-
-    let sliders_div = __scope.create_element("div");
-    build_slider_row(
-        __scope, &sliders_div, "Coverage", "",
-        sliders.cloud_coverage, 0.0, 1.0, 0.01, 2,
-        { let cmd = cmd.clone(); move |_v| { sliders.send_cloud_commands(&cmd, &ui); } },
-    );
-    build_slider_row(
-        __scope, &sliders_div, "Cloud Density", "",
-        sliders.cloud_density, 0.0, 5.0, 0.1, 1,
-        { let cmd = cmd.clone(); move |_v| { sliders.send_cloud_commands(&cmd, &ui); } },
-    );
-    build_slider_row(
-        __scope, &sliders_div, "Altitude", "m",
-        sliders.cloud_altitude, 0.0, 5000.0, 50.0, 0,
-        { let cmd = cmd.clone(); move |_v| { sliders.send_cloud_commands(&cmd, &ui); } },
-    );
-    build_slider_row(
-        __scope, &sliders_div, "Thickness", "m",
-        sliders.cloud_thickness, 10.0, 10000.0, 50.0, 0,
-        { let cmd = cmd.clone(); move |_v| { sliders.send_cloud_commands(&cmd, &ui); } },
-    );
-    build_slider_row(
-        __scope, &sliders_div, "Wind Speed", "",
-        sliders.cloud_wind_speed, 0.0, 50.0, 0.5, 1,
-        { let cmd = cmd.clone(); move |_v| { sliders.send_cloud_commands(&cmd, &ui); } },
-    );
-
     rsx! {
         div {
             div { style: {LABEL_STYLE}, "Clouds" }
-            {cloud_toggle}
-            {sliders_div}
+            ToggleRow {
+                label: "Clouds",
+                enabled: Some(ui.clouds_enabled),
+                on_change: { let cmd = cmd.clone(); move || { sliders.send_cloud_commands(&cmd, &ui); } },
+            }
+            SliderRow {
+                label: "Coverage",
+                suffix: "",
+                signal: Some(sliders.cloud_coverage),
+                min: 0.0, max: 1.0, step: 0.01, decimals: 2,
+                on_change: { let cmd = cmd.clone(); move |_v: f64| { sliders.send_cloud_commands(&cmd, &ui); } },
+            }
+            SliderRow {
+                label: "Cloud Density",
+                suffix: "",
+                signal: Some(sliders.cloud_density),
+                min: 0.0, max: 5.0, step: 0.1, decimals: 1,
+                on_change: { let cmd = cmd.clone(); move |_v: f64| { sliders.send_cloud_commands(&cmd, &ui); } },
+            }
+            SliderRow {
+                label: "Altitude",
+                suffix: "m",
+                signal: Some(sliders.cloud_altitude),
+                min: 0.0, max: 5000.0, step: 50.0, decimals: 0,
+                on_change: { let cmd = cmd.clone(); move |_v: f64| { sliders.send_cloud_commands(&cmd, &ui); } },
+            }
+            SliderRow {
+                label: "Thickness",
+                suffix: "m",
+                signal: Some(sliders.cloud_thickness),
+                min: 10.0, max: 10000.0, step: 50.0, decimals: 0,
+                on_change: { let cmd = cmd.clone(); move |_v: f64| { sliders.send_cloud_commands(&cmd, &ui); } },
+            }
+            SliderRow {
+                label: "Wind Speed",
+                suffix: "",
+                signal: Some(sliders.cloud_wind_speed),
+                min: 0.0, max: 50.0, step: 0.5, decimals: 1,
+                on_change: { let cmd = cmd.clone(); move |_v: f64| { sliders.send_cloud_commands(&cmd, &ui); } },
+            }
         }
     }
 }
@@ -186,107 +184,37 @@ pub fn PostProcessSection() -> NodeHandle {
     let cmd = use_context::<CommandSender>();
     let ui = use_context::<UiSignals>();
 
-    // Bloom toggle (rendered imperatively — ToggleRow props don't work inline in rsx!).
-    let bloom_toggle = ToggleRow {
-        label: "Bloom".to_string(),
-        enabled: Some(ui.bloom_enabled),
-        on_change: Some(Callback::new({
-            let cmd = cmd.clone();
-            move || { sliders.send_post_process_commands(&cmd, &ui); }
-        })),
-    }
-    .render(__scope, &[]);
-
-    // Bloom sliders.
-    let bloom_sliders = __scope.create_element("div");
-    build_slider_row(
-        __scope, &bloom_sliders, "Bloom Intensity", "",
-        sliders.bloom_intensity, 0.0, 2.0, 0.01, 2,
-        { let cmd = cmd.clone(); move |_v| { sliders.send_post_process_commands(&cmd, &ui); } },
-    );
-    build_slider_row(
-        __scope, &bloom_sliders, "Bloom Threshold", "",
-        sliders.bloom_threshold, 0.0, 5.0, 0.1, 1,
-        { let cmd = cmd.clone(); move |_v| { sliders.send_post_process_commands(&cmd, &ui); } },
-    );
-    build_slider_row(
-        __scope, &bloom_sliders, "Exposure", "",
-        sliders.exposure, 0.1, 10.0, 0.1, 1,
-        { let cmd = cmd.clone(); move |_v| { sliders.send_post_process_commands(&cmd, &ui); } },
-    );
-
-    // Sharpen slider.
-    let sharpen_slider = __scope.create_element("div");
-    build_slider_row(
-        __scope, &sharpen_slider, "Sharpen", "",
-        sliders.sharpen, 0.0, 2.0, 0.05, 2,
-        { let cmd = cmd.clone(); move |_v| { sliders.send_post_process_commands(&cmd, &ui); } },
-    );
-
-    // DoF toggle.
-    let dof_toggle = ToggleRow {
-        label: "DoF".to_string(),
-        enabled: Some(ui.dof_enabled),
-        on_change: Some(Callback::new({
-            let cmd = cmd.clone();
-            move || { sliders.send_post_process_commands(&cmd, &ui); }
-        })),
-    }
-    .render(__scope, &[]);
-
-    // DoF + remaining sliders.
-    let dof_sliders = __scope.create_element("div");
-    build_slider_row(
-        __scope, &dof_sliders, "Focus Distance", "",
-        sliders.dof_focus_dist, 0.1, 50.0, 0.1, 1,
-        { let cmd = cmd.clone(); move |_v| { sliders.send_post_process_commands(&cmd, &ui); } },
-    );
-    build_slider_row(
-        __scope, &dof_sliders, "Focus Range", "",
-        sliders.dof_focus_range, 0.1, 20.0, 0.1, 1,
-        { let cmd = cmd.clone(); move |_v| { sliders.send_post_process_commands(&cmd, &ui); } },
-    );
-    build_slider_row(
-        __scope, &dof_sliders, "Max CoC", "px",
-        sliders.dof_max_coc, 1.0, 32.0, 1.0, 0,
-        { let cmd = cmd.clone(); move |_v| { sliders.send_post_process_commands(&cmd, &ui); } },
-    );
-    build_slider_row(
-        __scope, &dof_sliders, "Motion Blur", "",
-        sliders.motion_blur, 0.0, 3.0, 0.1, 1,
-        { let cmd = cmd.clone(); move |_v| { sliders.send_post_process_commands(&cmd, &ui); } },
-    );
-    build_slider_row(
-        __scope, &dof_sliders, "God Rays", "",
-        sliders.god_rays, 0.0, 2.0, 0.05, 2,
-        { let cmd = cmd.clone(); move |_v| { sliders.send_post_process_commands(&cmd, &ui); } },
-    );
-    build_slider_row(
-        __scope, &dof_sliders, "Vignette", "",
-        sliders.vignette, 0.0, 1.0, 0.01, 2,
-        { let cmd = cmd.clone(); move |_v| { sliders.send_post_process_commands(&cmd, &ui); } },
-    );
-    build_slider_row(
-        __scope, &dof_sliders, "Grain", "",
-        sliders.grain, 0.0, 1.0, 0.01, 2,
-        { let cmd = cmd.clone(); move |_v| { sliders.send_post_process_commands(&cmd, &ui); } },
-    );
-    build_slider_row(
-        __scope, &dof_sliders, "Chromatic Ab.", "",
-        sliders.chromatic_ab, 0.0, 1.0, 0.01, 2,
-        { let cmd = cmd.clone(); move |_v| { sliders.send_post_process_commands(&cmd, &ui); } },
-    );
-
-    // Tone map mode toggle (ACES / AgX).
-    let tm_mode = ui.tone_map_mode.get();
     let tm_signal = ui.tone_map_mode;
-    let tm_label = if tm_mode == 0 { "Tone Map: ACES" } else { "Tone Map: AgX" };
 
     rsx! {
         div {
             div { style: {LABEL_STYLE}, "Post-Processing" }
-            {bloom_toggle}
-            {bloom_sliders}
+            ToggleRow {
+                label: "Bloom",
+                enabled: Some(ui.bloom_enabled),
+                on_change: { let cmd = cmd.clone(); move || { sliders.send_post_process_commands(&cmd, &ui); } },
+            }
+            SliderRow {
+                label: "Bloom Intensity",
+                suffix: "",
+                signal: Some(sliders.bloom_intensity),
+                min: 0.0, max: 2.0, step: 0.01, decimals: 2,
+                on_change: { let cmd = cmd.clone(); move |_v: f64| { sliders.send_post_process_commands(&cmd, &ui); } },
+            }
+            SliderRow {
+                label: "Bloom Threshold",
+                suffix: "",
+                signal: Some(sliders.bloom_threshold),
+                min: 0.0, max: 5.0, step: 0.1, decimals: 1,
+                on_change: { let cmd = cmd.clone(); move |_v: f64| { sliders.send_post_process_commands(&cmd, &ui); } },
+            }
+            SliderRow {
+                label: "Exposure",
+                suffix: "",
+                signal: Some(sliders.exposure),
+                min: 0.1, max: 10.0, step: 0.1, decimals: 1,
+                on_change: { let cmd = cmd.clone(); move |_v: f64| { sliders.send_post_process_commands(&cmd, &ui); } },
+            }
             div {
                 style: "padding:3px 12px;font-size:11px;color:var(--rinch-color-dimmed);\
                         cursor:pointer;user-select:none;",
@@ -297,11 +225,76 @@ pub fn PostProcessSection() -> NodeHandle {
                         sliders.send_post_process_commands(&cmd, &ui);
                     }
                 },
-                {tm_label}
+                {|| if tm_signal.get() == 0 { "Tone Map: ACES".to_string() } else { "Tone Map: AgX".to_string() }}
             }
-            {sharpen_slider}
-            {dof_toggle}
-            {dof_sliders}
+            SliderRow {
+                label: "Sharpen",
+                suffix: "",
+                signal: Some(sliders.sharpen),
+                min: 0.0, max: 2.0, step: 0.05, decimals: 2,
+                on_change: { let cmd = cmd.clone(); move |_v: f64| { sliders.send_post_process_commands(&cmd, &ui); } },
+            }
+            ToggleRow {
+                label: "DoF",
+                enabled: Some(ui.dof_enabled),
+                on_change: { let cmd = cmd.clone(); move || { sliders.send_post_process_commands(&cmd, &ui); } },
+            }
+            SliderRow {
+                label: "Focus Distance",
+                suffix: "",
+                signal: Some(sliders.dof_focus_dist),
+                min: 0.1, max: 50.0, step: 0.1, decimals: 1,
+                on_change: { let cmd = cmd.clone(); move |_v: f64| { sliders.send_post_process_commands(&cmd, &ui); } },
+            }
+            SliderRow {
+                label: "Focus Range",
+                suffix: "",
+                signal: Some(sliders.dof_focus_range),
+                min: 0.1, max: 20.0, step: 0.1, decimals: 1,
+                on_change: { let cmd = cmd.clone(); move |_v: f64| { sliders.send_post_process_commands(&cmd, &ui); } },
+            }
+            SliderRow {
+                label: "Max CoC",
+                suffix: "px",
+                signal: Some(sliders.dof_max_coc),
+                min: 1.0, max: 32.0, step: 1.0, decimals: 0,
+                on_change: { let cmd = cmd.clone(); move |_v: f64| { sliders.send_post_process_commands(&cmd, &ui); } },
+            }
+            SliderRow {
+                label: "Motion Blur",
+                suffix: "",
+                signal: Some(sliders.motion_blur),
+                min: 0.0, max: 3.0, step: 0.1, decimals: 1,
+                on_change: { let cmd = cmd.clone(); move |_v: f64| { sliders.send_post_process_commands(&cmd, &ui); } },
+            }
+            SliderRow {
+                label: "God Rays",
+                suffix: "",
+                signal: Some(sliders.god_rays),
+                min: 0.0, max: 2.0, step: 0.05, decimals: 2,
+                on_change: { let cmd = cmd.clone(); move |_v: f64| { sliders.send_post_process_commands(&cmd, &ui); } },
+            }
+            SliderRow {
+                label: "Vignette",
+                suffix: "",
+                signal: Some(sliders.vignette),
+                min: 0.0, max: 1.0, step: 0.01, decimals: 2,
+                on_change: { let cmd = cmd.clone(); move |_v: f64| { sliders.send_post_process_commands(&cmd, &ui); } },
+            }
+            SliderRow {
+                label: "Grain",
+                suffix: "",
+                signal: Some(sliders.grain),
+                min: 0.0, max: 1.0, step: 0.01, decimals: 2,
+                on_change: { let cmd = cmd.clone(); move |_v: f64| { sliders.send_post_process_commands(&cmd, &ui); } },
+            }
+            SliderRow {
+                label: "Chromatic Ab.",
+                suffix: "",
+                signal: Some(sliders.chromatic_ab),
+                min: 0.0, max: 1.0, step: 0.01, decimals: 2,
+                on_change: { let cmd = cmd.clone(); move |_v: f64| { sliders.send_post_process_commands(&cmd, &ui); } },
+            }
         }
     }
 }
@@ -315,39 +308,7 @@ pub fn AnimationSection() -> NodeHandle {
     let ui = use_context::<UiSignals>();
 
     let anim_state_signal = ui.animation_state;
-    let cur_state = ui.animation_state.get();
     let anim_speed_signal: Signal<f64> = Signal::new(1.0);
-
-    let speed_slider = __scope.create_element("div");
-    build_slider_row(
-        __scope,
-        &speed_slider,
-        "Speed",
-        "x",
-        anim_speed_signal,
-        0.0,
-        4.0,
-        0.1,
-        1,
-        {
-            let cmd = cmd.clone();
-            move |v| {
-                let _ = cmd.0.send(EditorCommand::SetAnimationSpeed { speed: v as f32 });
-            }
-        },
-    );
-
-    let btn_style = |active: bool| {
-        let bg = if active {
-            "var(--rinch-primary-color)"
-        } else {
-            "var(--rinch-color-dark-7)"
-        };
-        format!(
-            "padding:2px 8px;border-radius:3px;cursor:pointer;\
-             background:{bg};font-size:11px;color:var(--rinch-color-text);",
-        )
-    };
 
     rsx! {
         div {
@@ -356,7 +317,11 @@ pub fn AnimationSection() -> NodeHandle {
             div {
                 style: "display:flex;gap:6px;padding:2px 12px;",
                 div {
-                    style: {btn_style(cur_state == 1)},
+                    style: {|| {
+                        let cur = anim_state_signal.get();
+                        let bg = if cur == 1 { "var(--rinch-primary-color)" } else { "var(--rinch-color-dark-7)" };
+                        format!("padding:2px 8px;border-radius:3px;cursor:pointer;background:{bg};font-size:11px;color:var(--rinch-color-text);")
+                    }},
                     onclick: {
                         let cmd = cmd.clone();
                         move || {
@@ -367,7 +332,11 @@ pub fn AnimationSection() -> NodeHandle {
                     "Play"
                 }
                 div {
-                    style: {btn_style(cur_state == 2)},
+                    style: {|| {
+                        let cur = anim_state_signal.get();
+                        let bg = if cur == 2 { "var(--rinch-primary-color)" } else { "var(--rinch-color-dark-7)" };
+                        format!("padding:2px 8px;border-radius:3px;cursor:pointer;background:{bg};font-size:11px;color:var(--rinch-color-text);")
+                    }},
                     onclick: {
                         let cmd = cmd.clone();
                         move || {
@@ -378,7 +347,11 @@ pub fn AnimationSection() -> NodeHandle {
                     "Pause"
                 }
                 div {
-                    style: {btn_style(cur_state == 0)},
+                    style: {|| {
+                        let cur = anim_state_signal.get();
+                        let bg = if cur == 0 { "var(--rinch-primary-color)" } else { "var(--rinch-color-dark-7)" };
+                        format!("padding:2px 8px;border-radius:3px;cursor:pointer;background:{bg};font-size:11px;color:var(--rinch-color-text);")
+                    }},
                     onclick: {
                         let cmd = cmd.clone();
                         move || {
@@ -389,7 +362,18 @@ pub fn AnimationSection() -> NodeHandle {
                     "Stop"
                 }
             }
-            {speed_slider}
+            SliderRow {
+                label: "Speed",
+                suffix: "x",
+                signal: Some(anim_speed_signal),
+                min: 0.0, max: 4.0, step: 0.1, decimals: 1,
+                on_change: {
+                    let cmd = cmd.clone();
+                    move |v: f64| {
+                        let _ = cmd.0.send(EditorCommand::SetAnimationSpeed { speed: v as f32 });
+                    }
+                },
+            }
         }
     }
 }

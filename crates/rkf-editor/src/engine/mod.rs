@@ -422,14 +422,8 @@ impl EditorEngine {
 
         // Poll build watcher for completion (stderr streams directly to console via reader thread).
         if let Some(ref mut bw) = self.build_watcher {
-            let state_before = format!("{:?}", bw.state());
             bw.poll();
-            let state_after = bw.state();
-            if !matches!(state_after, rkf_runtime::behavior::BuildState::Idle | rkf_runtime::behavior::BuildState::Compiling) {
-                eprintln!("[BUILD] state: {state_before} -> {:?}", state_after);
-            }
             if let Some(path) = bw.take_success() {
-                eprintln!("[BUILD] Success: {}", path.display());
                 self.console.info("Build succeeded");
                 return Some(path);
             }

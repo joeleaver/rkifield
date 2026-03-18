@@ -11,7 +11,7 @@ use crate::editor_command::EditorCommand;
 use crate::editor_state::UiSignals;
 use crate::CommandSender;
 
-use super::slider_helpers::build_slider_row;
+use super::slider_helpers::SliderRow;
 use super::{DIVIDER_STYLE, LABEL_STYLE, SECTION_STYLE, VALUE_STYLE};
 
 /// Material properties panel — editable PBR properties with shader drag-drop.
@@ -148,101 +148,105 @@ pub fn MaterialProperties(
     shader_row.set_attribute("data-ondragleave", &leave_hid.to_string());
 
     // ── PBR Sliders ──
-    // Helper: build a material slider that sends the full material on change.
-    let build_mat_slider = |scope: &mut RenderScope,
-                            container: &NodeHandle,
-                            label: &str,
-                            suffix: &str,
-                            initial: f64,
-                            min: f64,
-                            max: f64,
-                            step: f64,
-                            decimals: usize,
-                            field_setter: fn(&mut rkf_core::material::Material, f32),
-                            cmd: CommandSender,
-                            mat_snapshot: &crate::ui_snapshot::MaterialSummary,
-                            ss: Arc<Mutex<SharedState>>| {
-        let sig: Signal<f64> = Signal::new(initial);
-        let mat_copy = mat_snapshot.clone();
-        build_slider_row(
-            scope, container, label, suffix, sig, min, max, step, decimals,
-            move |v| {
+    // Helper: create an on_change callback for a material slider.
+    macro_rules! mat_on_change {
+        ($field_setter:expr) => {{
+            let mat_copy = mat.clone();
+            let cmd = cmd.clone();
+            let ss = shared_state.clone();
+            move |v: f64| {
                 let mut m = snapshot_to_material(&mat_copy);
-                field_setter(&mut m, v as f32);
+                ($field_setter)(&mut m, v as f32);
                 let _ = cmd.0.send(EditorCommand::SetMaterial { slot, material: m });
                 if let Ok(mut ss) = ss.lock() {
                     ss.preview_dirty = true;
                 }
-            },
-        );
+            }
+        }};
+    }
+
+    // Signal per slider (initialized from snapshot, local to this render).
+    let sig_r: Signal<f64> = Signal::new(mat.albedo[0] as f64);
+    let sig_g: Signal<f64> = Signal::new(mat.albedo[1] as f64);
+    let sig_b: Signal<f64> = Signal::new(mat.albedo[2] as f64);
+    let sig_rough: Signal<f64> = Signal::new(mat.roughness as f64);
+    let sig_metal: Signal<f64> = Signal::new(mat.metallic as f64);
+    let sig_em_str: Signal<f64> = Signal::new(mat.emission_strength as f64);
+    let sig_em_r: Signal<f64> = Signal::new(mat.emission_color[0] as f64);
+    let sig_em_g: Signal<f64> = Signal::new(mat.emission_color[1] as f64);
+    let sig_em_b: Signal<f64> = Signal::new(mat.emission_color[2] as f64);
+    let sig_sss: Signal<f64> = Signal::new(mat.subsurface as f64);
+    let sig_opacity: Signal<f64> = Signal::new(mat.opacity as f64);
+    let sig_ior: Signal<f64> = Signal::new(mat.ior as f64);
+    let sig_noise_scale: Signal<f64> = Signal::new(mat.noise_scale as f64);
+    let sig_noise_str: Signal<f64> = Signal::new(mat.noise_strength as f64);
+
+    let albedo_sliders = rsx! {
+        div {
+            SliderRow { label: "R", suffix: "", signal: Some(sig_r), min: 0.0, max: 1.0, step: 0.01, decimals: 2,
+                on_change: mat_on_change!(|m: &mut rkf_core::material::Material, v: f32| m.albedo[0] = v),
+            }
+            SliderRow { label: "G", suffix: "", signal: Some(sig_g), min: 0.0, max: 1.0, step: 0.01, decimals: 2,
+                on_change: mat_on_change!(|m: &mut rkf_core::material::Material, v: f32| m.albedo[1] = v),
+            }
+            SliderRow { label: "B", suffix: "", signal: Some(sig_b), min: 0.0, max: 1.0, step: 0.01, decimals: 2,
+                on_change: mat_on_change!(|m: &mut rkf_core::material::Material, v: f32| m.albedo[2] = v),
+            }
+        }
     };
 
-    // Build slider containers imperatively (build_slider_row appends to a container).
-    let albedo_sliders = __scope.create_element("div");
-    build_mat_slider(
-        __scope, &albedo_sliders, "R", "", mat.albedo[0] as f64, 0.0, 1.0, 0.01, 2,
-        |m, v| m.albedo[0] = v, cmd.clone(), mat, shared_state.clone(),
-    );
-    build_mat_slider(
-        __scope, &albedo_sliders, "G", "", mat.albedo[1] as f64, 0.0, 1.0, 0.01, 2,
-        |m, v| m.albedo[1] = v, cmd.clone(), mat, shared_state.clone(),
-    );
-    build_mat_slider(
-        __scope, &albedo_sliders, "B", "", mat.albedo[2] as f64, 0.0, 1.0, 0.01, 2,
-        |m, v| m.albedo[2] = v, cmd.clone(), mat, shared_state.clone(),
-    );
+    let pbr_sliders = rsx! {
+        div {
+            SliderRow { label: "Roughness", suffix: "", signal: Some(sig_rough), min: 0.0, max: 1.0, step: 0.01, decimals: 2,
+                on_change: mat_on_change!(|m: &mut rkf_core::material::Material, v: f32| m.roughness = v),
+            }
+            SliderRow { label: "Metallic", suffix: "", signal: Some(sig_metal), min: 0.0, max: 1.0, step: 0.01, decimals: 2,
+                on_change: mat_on_change!(|m: &mut rkf_core::material::Material, v: f32| m.metallic = v),
+            }
+        }
+    };
 
-    let pbr_sliders = __scope.create_element("div");
-    build_mat_slider(
-        __scope, &pbr_sliders, "Roughness", "", mat.roughness as f64, 0.0, 1.0, 0.01, 2,
-        |m, v| m.roughness = v, cmd.clone(), mat, shared_state.clone(),
-    );
-    build_mat_slider(
-        __scope, &pbr_sliders, "Metallic", "", mat.metallic as f64, 0.0, 1.0, 0.01, 2,
-        |m, v| m.metallic = v, cmd.clone(), mat, shared_state.clone(),
-    );
+    let emission_sliders = rsx! {
+        div {
+            SliderRow { label: "Strength", suffix: "", signal: Some(sig_em_str), min: 0.0, max: 20.0, step: 0.1, decimals: 1,
+                on_change: mat_on_change!(|m: &mut rkf_core::material::Material, v: f32| m.emission_strength = v),
+            }
+            SliderRow { label: "Em. R", suffix: "", signal: Some(sig_em_r), min: 0.0, max: 1.0, step: 0.01, decimals: 2,
+                on_change: mat_on_change!(|m: &mut rkf_core::material::Material, v: f32| m.emission_color[0] = v),
+            }
+            SliderRow { label: "Em. G", suffix: "", signal: Some(sig_em_g), min: 0.0, max: 1.0, step: 0.01, decimals: 2,
+                on_change: mat_on_change!(|m: &mut rkf_core::material::Material, v: f32| m.emission_color[1] = v),
+            }
+            SliderRow { label: "Em. B", suffix: "", signal: Some(sig_em_b), min: 0.0, max: 1.0, step: 0.01, decimals: 2,
+                on_change: mat_on_change!(|m: &mut rkf_core::material::Material, v: f32| m.emission_color[2] = v),
+            }
+        }
+    };
 
-    let emission_sliders = __scope.create_element("div");
-    build_mat_slider(
-        __scope, &emission_sliders, "Strength", "", mat.emission_strength as f64, 0.0, 20.0, 0.1, 1,
-        |m, v| m.emission_strength = v, cmd.clone(), mat, shared_state.clone(),
-    );
-    build_mat_slider(
-        __scope, &emission_sliders, "Em. R", "", mat.emission_color[0] as f64, 0.0, 1.0, 0.01, 2,
-        |m, v| m.emission_color[0] = v, cmd.clone(), mat, shared_state.clone(),
-    );
-    build_mat_slider(
-        __scope, &emission_sliders, "Em. G", "", mat.emission_color[1] as f64, 0.0, 1.0, 0.01, 2,
-        |m, v| m.emission_color[1] = v, cmd.clone(), mat, shared_state.clone(),
-    );
-    build_mat_slider(
-        __scope, &emission_sliders, "Em. B", "", mat.emission_color[2] as f64, 0.0, 1.0, 0.01, 2,
-        |m, v| m.emission_color[2] = v, cmd.clone(), mat, shared_state.clone(),
-    );
+    let misc_sliders = rsx! {
+        div {
+            SliderRow { label: "Subsurface", suffix: "", signal: Some(sig_sss), min: 0.0, max: 1.0, step: 0.01, decimals: 2,
+                on_change: mat_on_change!(|m: &mut rkf_core::material::Material, v: f32| m.subsurface = v),
+            }
+            SliderRow { label: "Opacity", suffix: "", signal: Some(sig_opacity), min: 0.0, max: 1.0, step: 0.01, decimals: 2,
+                on_change: mat_on_change!(|m: &mut rkf_core::material::Material, v: f32| m.opacity = v),
+            }
+            SliderRow { label: "IOR", suffix: "", signal: Some(sig_ior), min: 1.0, max: 3.0, step: 0.01, decimals: 2,
+                on_change: mat_on_change!(|m: &mut rkf_core::material::Material, v: f32| m.ior = v),
+            }
+        }
+    };
 
-    let misc_sliders = __scope.create_element("div");
-    build_mat_slider(
-        __scope, &misc_sliders, "Subsurface", "", mat.subsurface as f64, 0.0, 1.0, 0.01, 2,
-        |m, v| m.subsurface = v, cmd.clone(), mat, shared_state.clone(),
-    );
-    build_mat_slider(
-        __scope, &misc_sliders, "Opacity", "", mat.opacity as f64, 0.0, 1.0, 0.01, 2,
-        |m, v| m.opacity = v, cmd.clone(), mat, shared_state.clone(),
-    );
-    build_mat_slider(
-        __scope, &misc_sliders, "IOR", "", mat.ior as f64, 1.0, 3.0, 0.01, 2,
-        |m, v| m.ior = v, cmd.clone(), mat, shared_state.clone(),
-    );
-
-    let noise_sliders = __scope.create_element("div");
-    build_mat_slider(
-        __scope, &noise_sliders, "Scale", "", mat.noise_scale as f64, 0.0, 50.0, 0.1, 1,
-        |m, v| m.noise_scale = v, cmd.clone(), mat, shared_state.clone(),
-    );
-    build_mat_slider(
-        __scope, &noise_sliders, "Noise Str", "", mat.noise_strength as f64, 0.0, 2.0, 0.01, 2,
-        |m, v| m.noise_strength = v, cmd.clone(), mat, shared_state.clone(),
-    );
+    let noise_sliders = rsx! {
+        div {
+            SliderRow { label: "Scale", suffix: "", signal: Some(sig_noise_scale), min: 0.0, max: 50.0, step: 0.1, decimals: 1,
+                on_change: mat_on_change!(|m: &mut rkf_core::material::Material, v: f32| m.noise_scale = v),
+            }
+            SliderRow { label: "Noise Str", suffix: "", signal: Some(sig_noise_str), min: 0.0, max: 2.0, step: 0.01, decimals: 2,
+                on_change: mat_on_change!(|m: &mut rkf_core::material::Material, v: f32| m.noise_strength = v),
+            }
+        }
+    };
 
     let mat_name_display = format!("{} (#{slot})", mat.name);
     let category = mat.category.clone();
