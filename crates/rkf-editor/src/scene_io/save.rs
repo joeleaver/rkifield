@@ -78,6 +78,7 @@ pub fn export_voxelized_to_rkf_v3(
         brick_map,
         geometry,
         sdf_cache,
+        color_bricks: None, // TODO: save per-voxel color from editor
     };
 
     let file = std::fs::File::create(path)?;
