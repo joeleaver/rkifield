@@ -261,9 +261,12 @@ pub(crate) fn push_dirty_ui_signals(
                 let scene_name = es.world.scene_name(es.world.active_scene_index())
                     .unwrap_or("default").to_string();
                 let scene_path = es.current_scene_path.clone();
-                let scene_env_uuid = es.world.scene_environment_uuid();
+                // Active environment entity = viewport camera or editor camera.
+                let active_env_uuid = es.viewport_camera.or(es.editor_camera_entity);
+                let scene_env_uuid = active_env_uuid;
                 // Read environment settings for slider sync.
-                let env_for_sliders = es.world.scene_environment_entity()
+                let env_for_sliders = active_env_uuid
+                    .and_then(|uuid| es.world.ecs_entity_for(uuid))
                     .and_then(|ee| es.world.ecs_ref()
                         .get::<&rkf_runtime::environment::EnvironmentSettings>(ee)
                         .ok()

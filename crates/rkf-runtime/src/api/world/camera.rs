@@ -37,6 +37,8 @@ impl World {
         let record = self.entities.get(&uuid).unwrap();
         let ecs_entity = record.ecs_entity;
         let _ = self.ecs.insert_one(ecs_entity, cam);
+        // Every camera gets its own EnvironmentSettings.
+        let _ = self.ecs.insert_one(ecs_entity, crate::environment::EnvironmentSettings::default());
         // Store position in both EntityRecord and hecs Transform
         if let Some(r) = self.entities.get_mut(&uuid) {
             r.position = position;

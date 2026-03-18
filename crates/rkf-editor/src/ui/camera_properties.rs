@@ -107,55 +107,7 @@ fn LinkedCameraDropdown() -> NodeHandle {
     let cmd = use_context::<CommandSender>();
 
     rsx! {
-        div {
-            style: "display:flex;align-items:center;gap:8px;padding:4px 12px;",
-            div {
-                style: "font-size:10px;color:var(--rinch-color-dimmed);width:80px;flex-shrink:0;",
-                "Linked Camera"
-            }
-            div {
-                style: "flex:1;font-size:10px;padding:3px 8px;\
-                        background:var(--rinch-color-dark-6);color:var(--rinch-color-text);\
-                        border:1px solid var(--rinch-color-border);border-radius:3px;\
-                        cursor:pointer;user-select:none;",
-                onclick: {
-                    let cmd = cmd.clone();
-                    let ui = ui;
-                    move || {
-                        let objects = ui.objects.get();
-                        let cameras: Vec<_> = objects.iter()
-                            .filter(|o| o.is_camera)
-                            .collect();
-
-                        let current = ui.linked_camera.get();
-                        // Find current index, then advance to next (or None).
-                        let current_idx = current.and_then(|id| cameras.iter().position(|c| c.id == id));
-                        let next = match current_idx {
-                            Some(i) if i + 1 < cameras.len() => Some(cameras[i + 1].id),
-                            Some(_) => None, // wrap around to None
-                            None if !cameras.is_empty() => Some(cameras[0].id),
-                            None => None, // no cameras available
-                        };
-
-                        let _ = cmd.0.send(EditorCommand::LinkCamera { camera_id: next });
-                        ui.linked_camera.set(next);
-                    }
-                },
-                {move || {
-                    let linked = ui.linked_camera.get();
-                    match linked {
-                        None => "None".to_string(),
-                        Some(id) => {
-                            let objects = ui.objects.get();
-                            objects.iter()
-                                .find(|o| o.id == id)
-                                .map(|o| o.name.clone())
-                                .unwrap_or_else(|| format!("{}...", &id.to_string()[..8]))
-                        }
-                    }
-                }}
-            }
-        }
+        div {}
     }
 }
 

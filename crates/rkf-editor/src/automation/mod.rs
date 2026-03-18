@@ -276,8 +276,10 @@ impl EditorAutomationApi {
         let mut es = self.editor_state.lock()
             .map_err(|e| AutomationError::EngineError(format!("lock poisoned: {e}")))?;
 
-        let env_entity = es.world.scene_environment_entity()
-            .ok_or_else(|| AutomationError::EngineError("no scene environment entity".into()))?;
+        let active_env_uuid = es.viewport_camera.or(es.editor_camera_entity)
+            .ok_or_else(|| AutomationError::EngineError("no active camera entity".into()))?;
+        let env_entity = es.world.ecs_entity_for(active_env_uuid)
+            .ok_or_else(|| AutomationError::EngineError("active camera entity not found".into()))?;
 
         // Parse value based on field type.
         let game_value = if prop.ends_with(".enabled") {
@@ -316,8 +318,10 @@ impl EditorAutomationApi {
         let es = self.editor_state.lock()
             .map_err(|e| AutomationError::EngineError(format!("lock poisoned: {e}")))?;
 
-        let env_entity = es.world.scene_environment_entity()
-            .ok_or_else(|| AutomationError::EngineError("no scene environment entity".into()))?;
+        let active_env_uuid = es.viewport_camera.or(es.editor_camera_entity)
+            .ok_or_else(|| AutomationError::EngineError("no active camera entity".into()))?;
+        let env_entity = es.world.ecs_entity_for(active_env_uuid)
+            .ok_or_else(|| AutomationError::EngineError("active camera entity not found".into()))?;
 
         let reg = self.gameplay_registry.lock()
             .map_err(|e| AutomationError::EngineError(format!("registry lock: {e}")))?;

@@ -238,8 +238,10 @@ impl EditorAutomationApi {
             other => other, // pass through dot-paths like "fog.density" directly
         };
 
-        let env_entity = es.world.scene_environment_entity()
-            .ok_or("no scene environment entity")?;
+        let active_env_uuid = es.viewport_camera.or(es.editor_camera_entity)
+            .ok_or("no active camera entity")?;
+        let env_entity = es.world.ecs_entity_for(active_env_uuid)
+            .ok_or("active camera entity not found")?;
 
         // Determine value type based on field (bool fields use != 0.0).
         let game_value = if field_name.ends_with(".enabled") {

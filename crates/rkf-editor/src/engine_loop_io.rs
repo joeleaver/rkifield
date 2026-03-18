@@ -177,18 +177,28 @@ pub(crate) fn load_scene_v3(
     // Rebuild World entity tracking from hecs components.
     es.world.rebuild_entity_tracking_from_ecs();
 
-    // Ensure scene environment singleton exists (may already exist from the
-    // loaded scene file; ensure_scene_environment is a no-op if so).
-    es.world.ensure_scene_environment();
-
-    // Migrate old scenes: if the properties bag has an "environment" entry
-    // but the loaded scene doesn't have an EnvironmentSettings component,
-    // convert the old EnvironmentState to EnvironmentSettings on the singleton.
+    // Migrate old scenes: restore environment to editor camera entity.
     if let Some(env_str) = scene_v3.properties.get("environment") {
         if let Ok(old_env) = ron::from_str::<crate::environment::EnvironmentState>(env_str) {
-            if let Some(env_entity) = es.world.scene_environment_entity() {
-                let settings = old_env.to_settings();
-                let _ = es.world.ecs_mut().insert_one(env_entity, settings);
+            if let Some(editor_cam) = es.editor_camera_entity {
+                if let Some(ee) = es.world.ecs_entity_for(editor_cam) {
+                    let settings = old_env.to_settings();
+                    let _ = es.world.ecs_mut().insert_one(ee, settings);
+                }
+            }
+        }
+    }
+    // Migrate SceneEnvironment entities: copy EnvironmentSettings to editor camera.
+    if let Some(scene_env_e) = es.world.scene_environment_entity() {
+        let settings = es.world.ecs_ref()
+            .get::<&rkf_runtime::environment::EnvironmentSettings>(scene_env_e)
+            .ok()
+            .map(|s| (*s).clone());
+        if let Some(settings) = settings {
+            if let Some(editor_cam) = es.editor_camera_entity {
+                if let Some(ee) = es.world.ecs_entity_for(editor_cam) {
+                    let _ = es.world.ecs_mut().insert_one(ee, settings);
+                }
             }
         }
     }

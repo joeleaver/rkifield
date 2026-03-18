@@ -726,45 +726,23 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                 }
             }
 
-            // ── Environment: ECS singleton → renderer ────────────────────
+            // ── Environment: per-camera → renderer ─────────────────────
             //
-            // Environment settings live on the SceneEnvironment ECS entity.
-            // The panel writes via SetComponentField. Linked camera overrides
-            // write directly. We detect changes and push to the renderer.
+            // Environment settings live on each camera entity. The active
+            // camera is the viewport camera (if set) or the editor camera.
 
-            // Linked camera override: resolve profile → ECS entity.
-            if let Some(linked_uuid) = es.linked_camera {
-                if let Some(hecs_entity) = es.world.ecs_entity_for(linked_uuid) {
-                    let profile_path = es.world.ecs_ref()
-                        .get::<&rkf_runtime::components::CameraComponent>(hecs_entity)
-                        .ok()
-                        .map(|c| c.environment_profile.clone())
-                        .unwrap_or_default();
+            // Determine active environment entity.
+            let active_env_uuid = es.viewport_camera.or(es.editor_camera_entity);
+            let active_env_entity = active_env_uuid
+                .and_then(|uuid| es.world.ecs_entity_for(uuid));
 
-                    if !profile_path.is_empty() {
-                        if let Ok(profile) = rkf_runtime::environment::load_environment(&profile_path) {
-                            let settings = rkf_runtime::environment::EnvironmentSettings::from_profile(&profile);
-                            if let Some(env_entity) = es.world.scene_environment_entity() {
-                                let _ = es.world.ecs_mut().insert_one(env_entity, settings);
-                            }
-                        }
-                    }
-                } else {
-                    es.linked_camera = None;
-                }
-            }
-
-            // Read from ECS singleton → EnvironmentState for the renderer.
-            // dirty.scene is set by SetComponentField, so environment changes
-            // are detected via the scene dirty flag.
+            // Read from active camera entity → EnvironmentSettings for the renderer.
             let environment: Option<rkf_runtime::environment::EnvironmentSettings> = if dirty.scene {
-                let env_entity = es.world.scene_environment_entity();
-                if let Some(ee) = env_entity {
-                    let cloned = es.world.ecs_ref()
+                if let Some(ee) = active_env_entity {
+                    es.world.ecs_ref()
                         .get::<&rkf_runtime::environment::EnvironmentSettings>(ee)
                         .ok()
-                        .map(|s| (*s).clone());
-                    cloned
+                        .map(|s| (*s).clone())
                 } else {
                     None
                 }

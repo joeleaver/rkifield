@@ -30,10 +30,9 @@ impl EditorState {
             70.0,  // fov_degrees
             None,
         );
-        // Insert EditorCameraMarker + EnvironmentSettings on the entity.
+        // Insert EditorCameraMarker on the entity (EnvironmentSettings added by spawn_camera).
         if let Some(ecs_entity) = world.ecs_entity_for(editor_cam_uuid) {
             let _ = world.ecs_mut().insert_one(ecs_entity, rkf_runtime::components::EditorCameraMarker);
-            let _ = world.ecs_mut().insert_one(ecs_entity, rkf_runtime::environment::EnvironmentSettings::default());
         }
 
         Self {
@@ -100,7 +99,6 @@ impl EditorState {
             pending_paint_undo: None,
             world,
             editor_camera_entity: Some(editor_cam_uuid),
-            linked_camera: None,
             viewport_camera: None,
             piloting: None,
         }
@@ -373,14 +371,29 @@ impl EditorState {
         scene_file_v3::load_scene(&scene_v3, self.world.ecs_mut(), &mut stable_index, &registry);
         self.world.rebuild_entity_tracking_from_ecs();
 
-        // Ensure scene environment entity exists.
-        self.world.ensure_scene_environment();
-        // Migrate old scenes: restore environment from properties bag.
+        // Migrate old scenes: restore environment from properties bag to editor camera.
         if let Some(env_str) = scene_v3.properties.get("environment") {
             if let Ok(old_env) = ron::from_str::<crate::environment::EnvironmentState>(env_str) {
-                if let Some(env_entity) = self.world.scene_environment_entity() {
-                    let settings = old_env.to_settings();
-                    let _ = self.world.ecs_mut().insert_one(env_entity, settings);
+                if let Some(editor_cam) = self.editor_camera_entity {
+                    if let Some(ee) = self.world.ecs_entity_for(editor_cam) {
+                        let settings = old_env.to_settings();
+                        let _ = self.world.ecs_mut().insert_one(ee, settings);
+                    }
+                }
+            }
+        }
+        // Migrate SceneEnvironment entities: copy their EnvironmentSettings
+        // to the editor camera, then remove them.
+        if let Some(scene_env_e) = self.world.scene_environment_entity() {
+            let settings = self.world.ecs_ref()
+                .get::<&rkf_runtime::environment::EnvironmentSettings>(scene_env_e)
+                .ok()
+                .map(|s| (*s).clone());
+            if let Some(settings) = settings {
+                if let Some(editor_cam) = self.editor_camera_entity {
+                    if let Some(ee) = self.world.ecs_entity_for(editor_cam) {
+                        let _ = self.world.ecs_mut().insert_one(ee, settings);
+                    }
                 }
             }
         }

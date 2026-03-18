@@ -229,7 +229,7 @@ pub(crate) fn tick_play_mode(
                 if let Ok(mut es) = editor_state.lock() {
                     es.editor_camera.sync_from_entity(world, cam_entity);
 
-                    // Resolve environment from the active camera's profile → ECS singleton.
+                    // Resolve environment from the active camera's profile → editor camera entity.
                     let profile_path = world
                         .get::<&rkf_runtime::components::CameraComponent>(cam_entity)
                         .ok()
@@ -238,8 +238,10 @@ pub(crate) fn tick_play_mode(
                     if !profile_path.is_empty() {
                         if let Ok(profile) = rkf_runtime::environment::load_environment(&profile_path) {
                             let settings = rkf_runtime::environment::EnvironmentSettings::from_profile(&profile);
-                            if let Some(env_entity) = es.world.scene_environment_entity() {
-                                let _ = es.world.ecs_mut().insert_one(env_entity, settings);
+                            if let Some(editor_cam_uuid) = es.editor_camera_entity {
+                                if let Some(ee) = es.world.ecs_entity_for(editor_cam_uuid) {
+                                    let _ = es.world.ecs_mut().insert_one(ee, settings);
+                                }
                             }
                         }
                     }

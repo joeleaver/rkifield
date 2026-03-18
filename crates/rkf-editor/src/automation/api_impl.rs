@@ -550,8 +550,10 @@ impl AutomationApi for EditorAutomationApi {
             .lock()
             .map_err(|e| format!("lock poisoned: {e}"))?;
 
-        // Read from ECS singleton.
-        if let Some(env_entity) = es.world.scene_environment_entity() {
+        // Read from active camera entity (editor camera or viewport camera).
+        let active_env_uuid = es.viewport_camera.or(es.editor_camera_entity);
+        let env_entity_opt = active_env_uuid.and_then(|uuid| es.world.ecs_entity_for(uuid));
+        if let Some(env_entity) = env_entity_opt {
             if let Ok(s) = es.world.ecs_ref()
                 .get::<&rkf_runtime::environment::EnvironmentSettings>(env_entity)
             {
