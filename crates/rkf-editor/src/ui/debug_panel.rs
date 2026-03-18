@@ -64,15 +64,6 @@ const TIMESTAMP_STYLE: &str = "\
     flex-shrink:0;color:var(--rinch-color-dimmed);font-size:10px;\
     white-space:nowrap;margin-top:1px;min-width:48px;user-select:text;cursor:text;";
 
-const SCROLL_BTN_STYLE: &str = "\
-    position:absolute;bottom:8px;right:16px;\
-    font-size:10px;color:var(--rinch-color-text);\
-    background:var(--rinch-color-dark-7, #2a2a2a);\
-    border:1px solid var(--rinch-color-border);\
-    border-radius:3px;padding:2px 10px;cursor:pointer;\
-    font-family:var(--rinch-font-family-monospace);\
-    box-shadow:0 2px 6px rgba(0,0,0,0.3);z-index:10;";
-
 // ── Component ──────────────────────────────────────────────────────────────
 
 /// Console panel — lists info, warning, and error messages from scripts and builds.
@@ -80,13 +71,8 @@ const SCROLL_BTN_STYLE: &str = "\
 pub fn DebugPanel() -> NodeHandle {
     let ui = use_context::<UiSignals>();
 
-    // Auto-scroll state: true = pinned to bottom, false = user scrolled up.
-    // set_scroll_top() is programmatic and does NOT fire onscroll, so the
-    // onscroll handler only fires on genuine user interaction.
-    let pinned = Signal::new(true);
-
     let root = rsx! {
-        div { style: "flex:1;min-height:0;display:flex;flex-direction:column;position:relative;" }
+        div { style: "flex:1;min-height:0;display:flex;flex-direction:column;" }
     };
 
     // Header bar: filter buttons + counts + clear button.
@@ -237,19 +223,9 @@ pub fn DebugPanel() -> NodeHandle {
 
     // Scrollable list of console entries (filtered).
     let list = rsx! {
-        div {
-            style: "display:flex;flex-direction:column;overflow-y:auto;flex:1;min-height:0;",
-            onscroll: {
-                move |_scroll_top: f64| {
-                    // Any user-initiated scroll disengages auto-scroll.
-                    // (set_scroll_top is programmatic and does NOT fire this handler.)
-                    pinned.set(false);
-                }
-            }
-        }
+        div { style: "display:flex;flex-direction:column;overflow-y:auto;flex:1;min-height:0;" }
     };
 
-    // Use for_each_dom_typed with a derived filtered list.
     rinch::core::for_each_dom_typed(
         __scope,
         &list,
@@ -262,43 +238,7 @@ pub fn DebugPanel() -> NodeHandle {
         move |entry, scope| render_console_row(scope, &entry),
     );
 
-    // Auto-scroll effect: when entries change and we're pinned, scroll to bottom.
-    {
-        let list_handle = list.clone();
-        __scope.create_effect(move || {
-            // Subscribe to entry changes (the .get() creates the dependency).
-            let _entries = ui.console_entries.get();
-            if pinned.get() {
-                list_handle.set_scroll_top(f64::MAX);
-            }
-        });
-    }
-
     root.append_child(&list);
-
-    // "Scroll to bottom" button — shown only when auto-scroll is disengaged.
-    let scroll_btn = rsx! {
-        button {
-            style: {
-                move || {
-                    if pinned.get() {
-                        "display:none;".to_string()
-                    } else {
-                        SCROLL_BTN_STYLE.to_string()
-                    }
-                }
-            },
-            onclick: {
-                let list_handle = list.clone();
-                move || {
-                    pinned.set(true);
-                    list_handle.set_scroll_top(f64::MAX);
-                }
-            },
-            "\u{2193} Scroll to bottom"
-        }
-    };
-    root.append_child(&scroll_btn);
 
     root
 }
