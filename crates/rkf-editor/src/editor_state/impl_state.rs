@@ -193,6 +193,43 @@ impl EditorState {
         }
     }
 
+    /// Re-spawn the editor camera entity after a world clear.
+    ///
+    /// Preserves the current SceneCamera control state (position, yaw, pitch)
+    /// and camera component settings (fov, near, far). Call this immediately
+    /// after `world.clear()` to restore the editor camera entity.
+    pub fn respawn_editor_camera(&mut self) {
+        let saved_fov = self.editor_camera_fov_degrees();
+        let saved_near = self.editor_camera_near();
+        let saved_far = self.editor_camera_far();
+
+        let editor_cam_pos = rkf_core::WorldPosition::new(
+            glam::IVec3::ZERO,
+            self.editor_camera.position,
+        );
+        let editor_cam_uuid = self.world.spawn_camera(
+            "Editor Camera",
+            editor_cam_pos,
+            self.editor_camera.fly_yaw.to_degrees(),
+            self.editor_camera.fly_pitch.to_degrees(),
+            saved_fov,
+            None,
+        );
+        if let Some(ecs_entity) = self.world.ecs_entity_for(editor_cam_uuid) {
+            let _ = self.world.ecs_mut().insert_one(
+                ecs_entity,
+                rkf_runtime::components::EditorCameraMarker,
+            );
+            if let Ok(mut cam) = self.world.ecs_mut()
+                .get::<&mut rkf_runtime::components::CameraComponent>(ecs_entity)
+            {
+                cam.near = saved_near;
+                cam.far = saved_far;
+            }
+        }
+        self.editor_camera_entity = Some(editor_cam_uuid);
+    }
+
     /// Write the editor camera's position/yaw/pitch back to its entity.
     ///
     /// Called each frame after update_camera() to keep the entity in sync
@@ -365,6 +402,7 @@ impl EditorState {
             .map_err(|e| format!("Failed to parse scene file: {e}"))?;
 
         self.world.clear();
+        self.respawn_editor_camera();
 
         let registry = GameplayRegistry::new();
         let mut stable_index = StableIdIndex::new();

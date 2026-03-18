@@ -18,7 +18,8 @@ use super::scene_ownership::SceneOwnership;
 use super::stable_id::StableId;
 use super::stable_id_index::StableIdIndex;
 use crate::components::{
-    CameraComponent, EditorMetadata, FogVolumeComponent, Parent, SdfTree, Transform,
+    CameraComponent, EditorCameraMarker, EditorMetadata, FogVolumeComponent, Parent, SdfTree,
+    Transform,
 };
 
 // ─── PlayState ───────────────────────────────────────────────────────────────
@@ -58,7 +59,12 @@ pub fn clone_world_for_play(
     let mut entity_map: HashMap<hecs::Entity, hecs::Entity> = HashMap::new();
 
     // Phase 1: Spawn play entities with StableId + cloned components (no Parent yet).
+    // Skip editor-only entities (EditorCameraMarker) — they are transient and
+    // must not exist in the play world.
     for (edit_entity, stable_id) in edit_ecs.query::<&StableId>().iter() {
+        if edit_ecs.get::<&EditorCameraMarker>(edit_entity).is_ok() {
+            continue;
+        }
         let play_entity = play_world.spawn((*stable_id,));
         play_stable_index.insert(stable_id.uuid(), play_entity);
         entity_map.insert(edit_entity, play_entity);

@@ -57,6 +57,11 @@ fn save_scene_v3(
     // Serialize hecs entities to v3 format.
     let mut scene_v3 = scene_file_v3::save_scene(es.world.ecs(), &stable_index, registry);
 
+    // Filter out the editor camera entity — it's transient, not part of the scene.
+    if let Some(editor_cam_id) = es.editor_camera_entity {
+        scene_v3.entities.retain(|e| e.stable_id != editor_cam_id);
+    }
+
     // Store editor state in properties bag.
     let cam_snap = CameraSnapshot {
         position: es.editor_camera.position,
@@ -169,6 +174,7 @@ pub(crate) fn load_scene_v3(
 
     engine.clear_scene();
     es.world.clear();
+    es.respawn_editor_camera();
 
     // Load entities into hecs.
     let mut stable_index = StableIdIndex::new();
@@ -443,6 +449,7 @@ pub(crate) fn handle_new_project(
                         } else {
                             ctx.engine.clear_scene();
                             es.world.clear();
+                            es.respawn_editor_camera();
                             es.current_scene_path = None;
                         }
 
@@ -508,6 +515,7 @@ pub(crate) fn handle_open_project(
                 } else {
                     ctx.engine.clear_scene();
                     es.world.clear();
+                    es.respawn_editor_camera();
                     es.current_scene_path = None;
                 }
 
