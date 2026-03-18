@@ -180,6 +180,38 @@ pub(crate) fn apply_editor_command(es: &mut EditorState, cmd: crate::editor_comm
         SetCameraNearFar { near, far } => {
             es.set_editor_camera_component_field(|c| { c.near = near; c.far = far; });
         }
+        SetCameraOrbitAngles { yaw, pitch } => {
+            let mut pos = glam::Vec3::ZERO;
+            let mut cur_yaw = 0.0f32;
+            let mut cur_pitch = 0.0f32;
+            // Read current transform, then set_orbit_angles writes back.
+            if let Some(uuid) = es.editor_camera_entity {
+                let snap = es.extract_camera_snapshot_for(uuid);
+                pos = snap.position;
+                cur_yaw = snap.yaw;
+                cur_pitch = snap.pitch;
+            }
+            es.camera_control.set_orbit_angles(yaw, pitch, &mut pos, &mut cur_yaw, &mut cur_pitch);
+            // Write back to entity.
+            if let Some(uuid) = es.editor_camera_entity {
+                let wp = rkf_core::WorldPosition::new(glam::IVec3::ZERO, pos);
+                let _ = es.world.set_position(uuid, wp);
+                if let Some(e) = es.world.ecs_entity_for(uuid) {
+                    if let Ok(mut cam) = es.world.ecs_mut()
+                        .get::<&mut rkf_runtime::components::CameraComponent>(e)
+                    {
+                        cam.yaw = cur_yaw.to_degrees();
+                        cam.pitch = cur_pitch.to_degrees();
+                    }
+                }
+            }
+            // Legacy sync.
+            es.editor_camera.position = pos;
+            es.editor_camera.fly_yaw = cur_yaw;
+            es.editor_camera.fly_pitch = cur_pitch;
+            es.editor_camera.target = es.camera_control.target;
+            es.editor_camera.mode = es.camera_control.mode;
+        }
 
         // -- Environment -------------------------------------------------
         // Environment settings now flow through SetComponentField targeting

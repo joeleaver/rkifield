@@ -172,12 +172,10 @@ pub fn editor_ui() -> NodeHandle {
                         if mode == EditorMode::Default {
                             let (vp_w, vp_h) = vp_size();
                             if state.gizmo.dragging {
-                                let (ray_o, ray_d) = crate::camera::screen_to_ray(
-                                    &state.editor_camera, x, y, vp_w, vp_h,
-                                    state.editor_camera_fov_y(),
-                                    state.editor_camera_near(),
-                                    state.editor_camera_far(),
-                                );
+                                let (ray_o, ray_d) = {
+                                    let snap = state.extract_camera_snapshot();
+                                    crate::camera::screen_to_ray_snapshot(&snap, x, y, vp_w, vp_h)
+                                };
                                 if let Some(SelectedEntity::Object(eid)) = state.selected_entity {
                                     let gizmo_mode = state.gizmo.mode;
                                     let pivot = state.gizmo.pivot;
@@ -262,7 +260,7 @@ pub fn editor_ui() -> NodeHandle {
                                     _ => None,
                                 };
                                 if let Some(gc) = gc {
-                                    let cam_dist = (gc - state.editor_camera.position).length();
+                                    let cam_dist = (gc - state.extract_camera_snapshot().position).length();
                                     let gizmo_size = cam_dist * 0.12;
                                     let (ray_o, ray_d) = crate::camera::screen_to_ray(
                                         &state.editor_camera, x, y, vp_w, vp_h,
@@ -340,7 +338,7 @@ pub fn editor_ui() -> NodeHandle {
                                     };
 
                                 if let Some((gc, entity_pos, entity_rot, entity_scale)) = gizmo_info {
-                                    let cam_dist = (gc - state.editor_camera.position).length();
+                                    let cam_dist = (gc - state.extract_camera_snapshot().position).length();
                                     let gizmo_size = cam_dist * 0.12;
                                     let (ray_o, ray_d) = crate::camera::screen_to_ray(
                                         &state.editor_camera, x, y, vp_w, vp_h,
@@ -355,7 +353,7 @@ pub fn editor_ui() -> NodeHandle {
                                         let start_point = match state.gizmo.mode {
                                             gizmo::GizmoMode::Translate | gizmo::GizmoMode::Scale => {
                                                 if axis == gizmo::GizmoAxis::View {
-                                                    let vn = (state.editor_camera.position - gc).normalize();
+                                                    let vn = (state.extract_camera_snapshot().position - gc).normalize();
                                                     gizmo::project_to_plane(ray_o, ray_d, gc, vn)
                                                         .unwrap_or(gc)
                                                 } else {
@@ -373,7 +371,7 @@ pub fn editor_ui() -> NodeHandle {
                                             }
                                         };
                                         let view_normal =
-                                            (state.editor_camera.position - gc).normalize();
+                                            (state.extract_camera_snapshot().position - gc).normalize();
                                         state.gizmo.begin_drag(
                                             axis, start_point, entity_pos, entity_rot, entity_scale,
                                             view_normal,

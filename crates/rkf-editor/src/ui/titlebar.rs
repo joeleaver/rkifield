@@ -234,11 +234,9 @@ pub fn TitleBar() -> NodeHandle {
     ];
     for &(label, yaw, pitch) in cam_presets {
         view_menu = view_menu.item(MenuItem::new(label).on_click({
-            let es = es.clone();
+            let cmd = cmd.clone();
             move || {
-                if let Ok(mut s) = es.lock() {
-                    s.editor_camera.set_orbit_angles(yaw, pitch);
-                }
+                let _ = cmd.0.send(EditorCommand::SetCameraOrbitAngles { yaw, pitch });
             }
         }));
     }
