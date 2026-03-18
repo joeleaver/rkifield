@@ -25,6 +25,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use glam::Vec3;
+use rayon::prelude::*;
 
 use rkf_core::aabb::Aabb;
 use rkf_core::asset_file_v3::{SaveLodV3, save_object_v3};
@@ -225,6 +226,76 @@ fn auto_voxel_size(mesh: &MeshData) -> f32 {
 ///
 /// Produces BrickGeometry (occupancy + surface voxels with material),
 /// SdfCache (computed from geometry), and ColorBricks (from mesh textures).
+/// Result of processing a single brick (produced in parallel).
+struct BrickResult {
+    geo: BrickGeometry,
+    color: ColorBrick,
+}
+
+/// Process a single brick: winding number sign test + material/color transfer.
+fn process_brick(
+    mesh: &MeshData,
+    bvh: &TriangleBvh,
+    brick_min: Vec3,
+    voxel_size: f32,
+    material_id_override: Option<u8>,
+    sample_color: bool,
+) -> BrickResult {
+    let half_voxel = voxel_size * 0.5;
+    let mut geo = BrickGeometry::new();
+    let mut color_brick = ColorBrick { data: [ColorVoxel::new(0, 0, 0, 0); 512] };
+    let mut voxel_material_ids = [0u8; 512];
+
+    for vz in 0..BRICK_DIM as u8 {
+        for vy in 0..BRICK_DIM as u8 {
+            for vx in 0..BRICK_DIM as u8 {
+                let pos = brick_min
+                    + Vec3::new(
+                        vx as f32 * voxel_size + half_voxel,
+                        vy as f32 * voxel_size + half_voxel,
+                        vz as f32 * voxel_size + half_voxel,
+                    );
+
+                // BVH-accelerated winding number for robust sign test
+                let winding = bvh.winding_number(pos);
+                geo.set_solid(vx, vy, vz, winding > 0.5);
+
+                // BVH nearest query for material and color transfer
+                let nearest = bvh.nearest(pos);
+                let flat = voxel_index(vx, vy, vz) as usize;
+
+                let mat_id = if let Some(override_id) = material_id_override {
+                    override_id
+                } else {
+                    let tri_idx = nearest.triangle_index;
+                    let mesh_mat = if tri_idx < mesh.material_indices.len() {
+                        mesh.material_indices[tri_idx] as u8
+                    } else {
+                        0
+                    };
+                    mesh_mat.min(63)
+                };
+                voxel_material_ids[flat] = mat_id;
+
+                if sample_color {
+                    if let Some(c) = sample_texture_at_triangle(
+                        mesh, nearest.triangle_index, &nearest.barycentric,
+                    ) {
+                        color_brick.data[flat] = ColorVoxel::new(c.r, c.g, c.b, 255);
+                    }
+                }
+            }
+        }
+    }
+
+    geo.rebuild_surface_list();
+    for sv in &mut geo.surface_voxels {
+        sv.material_id = voxel_material_ids[sv.index() as usize];
+    }
+
+    BrickResult { geo, color: color_brick }
+}
+
 fn voxelize_to_lod(
     mesh: &MeshData,
     bvh: &TriangleBvh,
@@ -237,7 +308,6 @@ fn voxelize_to_lod(
 ) -> Result<SaveLodV3> {
     let brick_world_size = voxel_size * BRICK_DIM as f32;
 
-    // Compute brick grid dimensions from the (padded) AABB.
     let aabb_size = aabb.max - aabb.min;
     let dims = glam::UVec3::new(
         ((aabb_size.x / brick_world_size).ceil() as u32).max(1),
@@ -245,116 +315,64 @@ fn voxelize_to_lod(
         ((aabb_size.z / brick_world_size).ceil() as u32).max(1),
     );
 
-    // Narrow-band threshold
     let narrow_band = brick_world_size * 1.8;
 
+    // Phase 1 (serial): narrow-band cull to find which bricks need allocation.
     let mut brick_map = BrickMap::new(dims);
-    let mut geometry_vec: Vec<BrickGeometry> = Vec::new();
-    let mut color_vec: Vec<ColorBrick> = Vec::new();
-    let mut next_slot: u32 = 0;
+    let mut brick_coords: Vec<(u32, u32, u32)> = Vec::new();
 
     for bz in 0..dims.z {
         for by in 0..dims.y {
             for bx in 0..dims.x {
-                let brick_min = aabb.min
+                let brick_center = aabb.min
                     + Vec3::new(
-                        bx as f32 * brick_world_size,
-                        by as f32 * brick_world_size,
-                        bz as f32 * brick_world_size,
+                        (bx as f32 + 0.5) * brick_world_size,
+                        (by as f32 + 0.5) * brick_world_size,
+                        (bz as f32 + 0.5) * brick_world_size,
                     );
-                let brick_center = brick_min + Vec3::splat(brick_world_size * 0.5);
 
-                // Narrow-band cull: sample unsigned distance at brick center.
                 let center_nearest = bvh.nearest(brick_center);
-                if center_nearest.distance >= narrow_band {
-                    continue;
-                }
-
-                if next_slot >= pool_size {
-                    bail!(
-                        "Brick count exceeded pool_size={pool_size} at ({bx},{by},{bz}). \
-                         Use --pool-size to increase the limit."
-                    );
-                }
-
-                let slot = next_slot;
-                next_slot += 1;
-                brick_map.set(bx, by, bz, slot);
-
-                let mut geo = BrickGeometry::new();
-                let mut color_brick = ColorBrick { data: [ColorVoxel::new(0, 0, 0, 0); 512] };
-                let half_voxel = voxel_size * 0.5;
-
-                // Single pass: determine occupancy + sample material/color.
-                // We reuse a single BVH query per voxel for both sign test
-                // and material/color transfer, avoiding redundant lookups.
-                let sample_color = has_textures && material_id_override.is_none();
-
-                // Temporary storage for per-voxel material IDs (for surface voxel assignment)
-                let mut voxel_material_ids = [0u8; 512];
-
-                for vz in 0..BRICK_DIM as u8 {
-                    for vy in 0..BRICK_DIM as u8 {
-                        for vx in 0..BRICK_DIM as u8 {
-                            let pos = brick_min
-                                + Vec3::new(
-                                    vx as f32 * voxel_size + half_voxel,
-                                    vy as f32 * voxel_size + half_voxel,
-                                    vz as f32 * voxel_size + half_voxel,
-                                );
-
-                            // BVH-accelerated winding number for robust sign test
-                            let winding = bvh.winding_number(pos);
-                            geo.set_solid(vx, vy, vz, winding > 0.5);
-
-                            // BVH nearest query for material and color transfer
-                            let nearest = bvh.nearest(pos);
-
-                            let flat = voxel_index(vx, vy, vz) as usize;
-
-                            // Material ID from nearest triangle
-                            let mat_id = if let Some(override_id) = material_id_override {
-                                override_id
-                            } else {
-                                let tri_idx = nearest.triangle_index;
-                                let mesh_mat = if tri_idx < mesh.material_indices.len() {
-                                    mesh.material_indices[tri_idx] as u8
-                                } else {
-                                    0
-                                };
-                                mesh_mat.min(63)
-                            };
-                            voxel_material_ids[flat] = mat_id;
-
-                            // Sample texture color using the BVH result we already have
-                            if sample_color {
-                                if let Some(c) = sample_texture_at_triangle(
-                                    mesh, nearest.triangle_index, &nearest.barycentric,
-                                ) {
-                                    color_brick.data[flat] =
-                                        ColorVoxel::new(c.r, c.g, c.b, 255);
-                                }
-                            }
-                        }
+                if center_nearest.distance < narrow_band {
+                    let slot = brick_coords.len() as u32;
+                    if slot >= pool_size {
+                        bail!(
+                            "Brick count exceeded pool_size={pool_size} at ({bx},{by},{bz}). \
+                             Use --pool-size to increase the limit."
+                        );
                     }
+                    brick_map.set(bx, by, bz, slot);
+                    brick_coords.push((bx, by, bz));
                 }
-
-                // Build surface voxel list and assign cached material IDs
-                geo.rebuild_surface_list();
-
-                for sv in &mut geo.surface_voxels {
-                    let flat = sv.index() as usize;
-                    sv.material_id = voxel_material_ids[flat];
-                }
-
-                geometry_vec.push(geo);
-                color_vec.push(color_brick);
             }
         }
     }
 
-    // Compute SDF from geometry using Fast Sweeping Method
-    let brick_count = geometry_vec.len();
+    let sample_color = has_textures && material_id_override.is_none();
+
+    // Phase 2 (parallel): process each brick independently.
+    let results: Vec<BrickResult> = brick_coords
+        .par_iter()
+        .map(|&(bx, by, bz)| {
+            let brick_min = aabb.min
+                + Vec3::new(
+                    bx as f32 * brick_world_size,
+                    by as f32 * brick_world_size,
+                    bz as f32 * brick_world_size,
+                );
+            process_brick(mesh, bvh, brick_min, voxel_size, material_id_override, sample_color)
+        })
+        .collect();
+
+    // Collect results in slot order.
+    let brick_count = results.len();
+    let mut geometry_vec = Vec::with_capacity(brick_count);
+    let mut color_vec = Vec::with_capacity(brick_count);
+    for r in results {
+        geometry_vec.push(r.geo);
+        color_vec.push(r.color);
+    }
+
+    // Compute SDF from geometry using Fast Sweeping Method (serial — needs global context)
     let mut sdf_caches: Vec<SdfCache> = vec![SdfCache::empty(); brick_count];
     let slot_mappings: Vec<SlotMapping> = (0..brick_count as u32)
         .map(|i| SlotMapping {
@@ -379,12 +397,7 @@ fn voxelize_to_lod(
         );
     }
 
-    // Only include color bricks if we have textures and no material override
-    let color_bricks = if has_textures && material_id_override.is_none() {
-        Some(color_vec)
-    } else {
-        None
-    };
+    let color_bricks = if sample_color { Some(color_vec) } else { None };
 
     Ok(SaveLodV3 {
         voxel_size,
