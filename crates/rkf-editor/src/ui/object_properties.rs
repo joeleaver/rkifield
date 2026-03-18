@@ -13,14 +13,16 @@ use super::{DIVIDER_STYLE, LABEL_STYLE, SECTION_STYLE, VALUE_STYLE};
 /// Object properties panel — shows name, entity ID, transform editor,
 /// convert-to-voxel button, and material usage for the selected object.
 #[component]
-pub fn ObjectProperties(
-    entity_id: uuid::Uuid,
-) -> NodeHandle {
+pub fn ObjectProperties() -> NodeHandle {
     let cmd = use_context::<CommandSender>();
     let ui = use_context::<UiSignals>();
 
+    let eid = match ui.selection.get() {
+        Some(crate::editor_state::SelectedEntity::Object(id)) => id,
+        _ => return rsx! { div {} },
+    };
+
     let objects = ui.objects.get();
-    let eid = entity_id;
 
     let obj_info = objects.iter().find(|o| o.id == eid).map(|o| {
         let name = o.name.clone();

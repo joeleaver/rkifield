@@ -147,6 +147,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
 
         // Track scene changes for incremental GPU updates.
         let mut frame_topology_changed = false; // Only for scene open / new project.
+        let mut viewport_resized = false;
         let mut frame_dirty_objects: Vec<u32> = Vec::new();
         let mut frame_spawned: Vec<u32> = Vec::new();
         let mut frame_despawned: Vec<u32> = Vec::new();
@@ -160,9 +161,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             if let Some(_view) = engine.resize_viewport(desired_vp.0, desired_vp.1) {
                 current_vp = desired_vp;
                 log::debug!("Engine: resized to {}x{}", desired_vp.0, desired_vp.1);
-                if let Ok(mut es) = editor_state.lock() {
-                    es.environment.mark_dirty();
-                }
+                viewport_resized = true;
             }
         }
 
@@ -178,6 +177,12 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
 
         // b2. Drain UI commands and apply to EditorState (brief lock).
         let mut dirty = DirtyFlags::default();
+        if viewport_resized || first_frame {
+            dirty.scene = true;
+            dirty.lights = true;
+            dirty.materials = true;
+            dirty.shaders = true;
+        }
         {
             if let Ok(mut es) = editor_state.lock() {
                 let mut key_downs = Vec::new();
@@ -271,6 +276,13 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                     }
                     match cmd {
                         EditorCommand::KeyDown { .. } => key_downs.push(cmd),
+                        EditorCommand::SelectEntity { .. } => {
+                            let prev = es.selected_entity;
+                            apply_editor_command(&mut es, cmd);
+                            if es.selected_entity != prev {
+                                dirty.scene = true; // rebuild inspector for new selection
+                            }
+                        }
                         _ => apply_editor_command(&mut es, cmd),
                     }
                 }
@@ -315,6 +327,55 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
 
             // Camera update (mutates EditorState input state).
             es.update_camera(dt);
+
+            // Pilot mode: write editor camera state back to the piloted entity.
+            if let Some(pilot_uuid) = es.editor_camera.piloting {
+                if let Some(hecs_entity) = es.world.ecs_entity_for(pilot_uuid) {
+                    let pos = es.editor_camera.position;
+                    let yaw_deg = es.editor_camera.fly_yaw.to_degrees();
+                    let pitch_deg = es.editor_camera.fly_pitch.to_degrees();
+                    let fov_deg = es.editor_camera.fov_y.to_degrees();
+                    let wp = rkf_core::WorldPosition::new(glam::IVec3::ZERO, pos);
+                    let _ = es.world.set_position(pilot_uuid, wp);
+                    if let Ok(mut cam) = es.world.ecs_mut()
+                        .get::<&mut rkf_runtime::components::CameraComponent>(hecs_entity)
+                    {
+                        cam.yaw = yaw_deg;
+                        cam.pitch = pitch_deg;
+                        cam.fov_degrees = fov_deg;
+                    }
+                } else {
+                    // Piloted camera was deleted — stop piloting.
+                    es.editor_camera.piloting = None;
+                }
+            }
+
+            // Viewport camera: render from a scene camera instead of the editor camera.
+            if es.editor_camera.piloting.is_none() {
+                if let Some(vp_uuid) = es.editor_camera.viewport_camera {
+                    if let Some(hecs_entity) = es.world.ecs_entity_for(vp_uuid) {
+                        let cam_data = {
+                            let ecs = es.world.ecs_ref();
+                            let pos = ecs.get::<&rkf_runtime::components::Transform>(hecs_entity)
+                                .ok().map(|t| t.position.to_vec3());
+                            let params = ecs.get::<&rkf_runtime::components::CameraComponent>(hecs_entity)
+                                .ok().map(|c| (c.yaw, c.pitch, c.fov_degrees));
+                            (pos, params)
+                        };
+                        if let Some(pos) = cam_data.0 {
+                            es.editor_camera.position = pos;
+                            es.editor_camera.target = pos + glam::Vec3::new(0.0, 0.0, -1.0);
+                        }
+                        if let Some((yaw, pitch, fov)) = cam_data.1 {
+                            es.editor_camera.fly_yaw = yaw.to_radians();
+                            es.editor_camera.fly_pitch = pitch.to_radians();
+                            es.editor_camera.fov_y = fov.to_radians();
+                        }
+                    } else {
+                        es.editor_camera.viewport_camera = None;
+                    }
+                }
+            }
 
             // Consume pending commands.
             let debug_mode = es.pending_debug_mode.take();
@@ -383,12 +444,18 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             // Consume pending spawn.
             if let Some(prim_name) = es.pending_spawn.take() {
                 let pos = es.editor_camera.target;
-                let primitive = primitive_from_name(&prim_name);
-                let uuid = es.world.spawn(&prim_name)
-                    .position_vec3(pos)
-                    .sdf(primitive)
-                    .material(0)
-                    .build();
+                let uuid = if prim_name == "Empty" {
+                    es.world.spawn("Empty")
+                        .position_vec3(pos)
+                        .build()
+                } else {
+                    let primitive = primitive_from_name(&prim_name);
+                    es.world.spawn(&prim_name)
+                        .position_vec3(pos)
+                        .sdf(primitive)
+                        .material(0)
+                        .build()
+                };
                 es.selected_entity = Some(crate::editor_state::SelectedEntity::Object(uuid));
                 es.undo.push(crate::undo::UndoAction {
                     kind: crate::undo::UndoActionKind::SpawnEntity {
@@ -423,6 +490,12 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                         });
                         let _ = es.world.despawn(uuid);
                         es.selected_entity = None;
+                        // Push cleared selection to UI.
+                        rinch::shell::rinch_runtime::run_on_main_thread(|| {
+                            if let Some(ui) = rinch::core::context::try_use_context::<crate::editor_state::UiSignals>() {
+                                ui.selection.set(None);
+                            }
+                        });
                         if let Some(oid) = sdf_oid {
                             frame_despawned.push(oid);
                         }
@@ -650,11 +723,48 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                 }
             }
 
-            // Environment: clone only when dirty.
-            let environment = if es.environment.is_dirty() {
-                let env = es.environment.clone();
-                es.environment.clear_dirty();
-                Some(env)
+            // ── Environment: ECS singleton → renderer ────────────────────
+            //
+            // Environment settings live on the SceneEnvironment ECS entity.
+            // The panel writes via SetComponentField. Linked camera overrides
+            // write directly. We detect changes and push to the renderer.
+
+            // Linked camera override: resolve profile → ECS entity.
+            if let Some(linked_uuid) = es.editor_camera.linked_camera {
+                if let Some(hecs_entity) = es.world.ecs_entity_for(linked_uuid) {
+                    let profile_path = es.world.ecs_ref()
+                        .get::<&rkf_runtime::components::CameraComponent>(hecs_entity)
+                        .ok()
+                        .map(|c| c.environment_profile.clone())
+                        .unwrap_or_default();
+
+                    if !profile_path.is_empty() {
+                        if let Ok(profile) = rkf_runtime::environment::load_environment(&profile_path) {
+                            let settings = rkf_runtime::environment::EnvironmentSettings::from_profile(&profile);
+                            if let Some(env_entity) = es.world.scene_environment_entity() {
+                                let _ = es.world.ecs_mut().insert_one(env_entity, settings);
+                            }
+                        }
+                    }
+                } else {
+                    es.editor_camera.linked_camera = None;
+                }
+            }
+
+            // Read from ECS singleton → EnvironmentState for the renderer.
+            // dirty.scene is set by SetComponentField, so environment changes
+            // are detected via the scene dirty flag.
+            let environment: Option<rkf_runtime::environment::EnvironmentSettings> = if dirty.scene {
+                let env_entity = es.world.scene_environment_entity();
+                if let Some(ee) = env_entity {
+                    let cloned = es.world.ecs_ref()
+                        .get::<&rkf_runtime::environment::EnvironmentSettings>(ee)
+                        .ok()
+                        .map(|s| (*s).clone());
+                    cloned
+                } else {
+                    None
+                }
             } else {
                 None
             };
@@ -754,7 +864,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             engine.set_debug_mode(mode);
         }
         if let Some(ref env) = f_environment {
-            engine.apply_environment_snapshot(env);
+            engine.apply_environment_settings(env);
             engine.lights_dirty = true;
         }
         if let Some(lights) = f_lights {
@@ -928,14 +1038,16 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         // Log frame breakdown every 60 frames.
         static FRAME_N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let fn_ = FRAME_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if fn_ % 60 == 0 {
-            eprintln!(
-                "[FRAME] cpu_submit: {:.2}ms  submit_frame: {:.2}ms  dt: {:.2}ms",
-                (t_render_end - t_render_start).as_secs_f64() * 1000.0,
-                (t_submit_end - t_submit_start).as_secs_f64() * 1000.0,
-                dt as f64 * 1000.0,
-            );
-        }
+        // (Frame profiling log suppressed — uncomment to debug frame timing.)
+        // if fn_ % 60 == 0 {
+        //     eprintln!(
+        //         "[FRAME] cpu_submit: {:.2}ms  submit_frame: {:.2}ms  dt: {:.2}ms",
+        //         (t_render_end - t_render_start).as_secs_f64() * 1000.0,
+        //         (t_submit_end - t_submit_start).as_secs_f64() * 1000.0,
+        //         dt as f64 * 1000.0,
+        //     );
+        // }
+        let _ = fn_;
 
         // i2. If screenshot was requested, store the pixels in shared_state.
         if let Ok(mut ss) = shared_state.lock() {
@@ -990,10 +1102,6 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
 
         // n0. Push dirty data into UI signals.
         if first_frame {
-            dirty.scene = true;
-            dirty.lights = true;
-            dirty.materials = true;
-            dirty.shaders = true;
             first_frame = false;
         }
         engine_loop_ui::push_dirty_ui_signals(&dirty, &editor_state, &engine, &gameplay_registry);

@@ -25,6 +25,7 @@ pub mod loading_modal;
 pub mod titlebar;
 pub mod right_panel;
 pub mod status_bar;
+pub mod viewport_toolbar;
 
 use std::sync::{Arc, Mutex};
 
@@ -552,15 +553,13 @@ pub fn editor_ui() -> NodeHandle {
             // Inject dark theme CSS overrides for rinch components.
             style { {DARK_OVERRIDES} }
 
-            // ── RenderSurface overlay — absolute-positioned over center viewport ──
-            // Lives outside any structural rebuild scope so it's never destroyed on
-            // layout rebuilds. Position updates reactively via closure syntax.
+            // ── Viewport overlay — absolute-positioned over center viewport ──
+            // Contains the viewport toolbar + RenderSurface. Lives outside any
+            // structural rebuild scope so it's never destroyed on layout rebuilds.
             div {
                 style: {
                     let backing = backing_for_surface.clone();
                     move || {
-                        // Subscribe to structure_rev so we re-evaluate when
-                        // containers are collapsed/expanded/zones added/removed.
                         let _ = layout_for_surface.structure_rev.get();
                         let lw = layout_for_surface.left_width.get();
                         let rw = layout_for_surface.right_width.get();
@@ -569,10 +568,14 @@ pub fn editor_ui() -> NodeHandle {
                         let left = if cfg.left.collapsed || cfg.left.zones.is_empty() { 0.0 } else { lw + 4.0 };
                         let right = if cfg.right.collapsed || cfg.right.zones.is_empty() { 0.0 } else { rw + 4.0 };
                         let bottom = 25.0 + if cfg.bottom.collapsed || cfg.bottom.zones.is_empty() { 0.0 } else { bh + 4.0 };
-                        format!("position:absolute;z-index:1;top:36px;left:{left:.0}px;right:{right:.0}px;bottom:{bottom:.0}px;")
+                        format!("position:absolute;z-index:1;top:36px;left:{left:.0}px;right:{right:.0}px;bottom:{bottom:.0}px;\
+                                 display:flex;flex-direction:column;")
                     }
                 },
-                RenderSurface { surface: Some(surface_handle.clone()) }
+                {viewport_toolbar::ViewportToolbar::default().render(__scope, &[])}
+                div { style: "flex:1;min-height:0;",
+                    RenderSurface { surface: Some(surface_handle.clone()) }
+                }
             }
 
             // ── Titlebar spacer (36px) ──

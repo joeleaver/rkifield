@@ -49,45 +49,8 @@ pub enum EditorCommand {
     SetCameraNearFar { near: f32, far: f32 },
 
     // ── Environment ──────────────────────────────────────────────────────
-    SetAtmosphere {
-        sun_direction: Vec3,
-        sun_intensity: f32,
-        rayleigh_scale: f32,
-        mie_scale: f32,
-    },
-    SetFog {
-        density: f32,
-        height_falloff: f32,
-        dust_density: f32,
-        dust_asymmetry: f32,
-    },
-    SetClouds {
-        coverage: f32,
-        density: f32,
-        altitude: f32,
-        thickness: f32,
-        wind_speed: f32,
-    },
-    SetPostProcess {
-        bloom_intensity: f32,
-        bloom_threshold: f32,
-        exposure: f32,
-        sharpen: f32,
-        dof_focus_distance: f32,
-        dof_focus_range: f32,
-        dof_max_coc: f32,
-        motion_blur: f32,
-        god_rays: f32,
-        vignette: f32,
-        grain: f32,
-        chromatic_aberration: f32,
-    },
-    ToggleAtmosphere { enabled: bool },
-    ToggleFog { enabled: bool },
-    ToggleClouds { enabled: bool },
-    ToggleBloom { enabled: bool },
-    ToggleDof { enabled: bool },
-    SetToneMapMode { mode: u32 },
+    // Environment settings flow through SetComponentField targeting the
+    // SceneEnvironment entity's EnvironmentSettings component.
 
     // ── Lights ────────────────────────────────────────────────────────────
     SetLightPosition { light_id: u64, position: Vec3 },
@@ -152,6 +115,18 @@ pub enum EditorCommand {
         entity_id: Uuid,
         component_name: String,
     },
+
+    // ── Camera linking ─────────────────────────────────────────────────
+    /// Link the editor camera to a scene camera for environment resolution (or unlink with None).
+    LinkCamera { camera_id: Option<Uuid> },
+    /// Set which scene camera drives the viewport (or None for editor camera).
+    SetViewportCamera { camera_id: Option<Uuid> },
+    /// Copy a scene camera's transform + FOV to the editor camera.
+    SnapToCamera { camera_id: Uuid },
+    /// Spawn a new camera entity at the editor camera's current position/rotation/FOV.
+    CreateCameraFromView,
+    /// Enter/exit pilot mode (editor viewport drives a scene camera entity).
+    PilotCamera { camera_id: Option<Uuid> },
 
     // ── Window management ────────────────────────────────────────────────
     WindowDrag,

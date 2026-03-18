@@ -9,6 +9,7 @@
 
 use crate::input::{InputState, KeyCode};
 use glam::{Mat4, Vec3};
+use uuid::Uuid;
 
 /// Camera interaction mode.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -73,6 +74,20 @@ pub struct SceneCamera {
     pub min_pitch: f32,
     /// Maximum pitch angle (radians). Prevents looking straight up.
     pub max_pitch: f32,
+
+    // ── Camera linking ────────────────────────────────────────────
+    /// Optional soft-link to a scene camera entity UUID for environment resolution.
+    /// When set, the editor uses that camera's environment profile.
+    /// Invalid/deleted UUIDs are gracefully ignored (falls back to editor defaults).
+    pub linked_camera: Option<Uuid>,
+
+    /// Active viewport camera — scene camera entity that drives the viewport.
+    /// When set, the renderer uses this camera's position/rotation/fov instead
+    /// of the editor camera's. `None` = free editor camera.
+    pub viewport_camera: Option<Uuid>,
+
+    /// Optional piloting mode — editor viewport drives this scene camera entity.
+    pub piloting: Option<Uuid>,
 }
 
 impl Default for SceneCamera {
@@ -107,9 +122,33 @@ impl SceneCamera {
             max_orbit_distance: 500.0,
             min_pitch: -1.4, // ~-80 degrees
             max_pitch: 1.4,  // ~+80 degrees
+            linked_camera: None,
+            viewport_camera: None,
+            piloting: None,
         };
         cam.update_from_orbit();
         cam
+    }
+
+    /// Sync this editor camera to match a scene camera entity's transform.
+    ///
+    /// Reads position from `Transform` and yaw/pitch/fov from `CameraComponent`
+    /// on the given hecs entity. Used by linked camera, play mode camera switching,
+    /// and snap-to-camera.
+    ///
+    /// Takes `&hecs::World` directly (not `&World`) to allow split borrows when
+    /// both `editor_camera` and `world` live on `EditorState`.
+    pub fn sync_from_entity(&mut self, ecs: &hecs::World, entity: hecs::Entity) {
+        if let Ok(t) = ecs.get::<&rkf_runtime::components::Transform>(entity) {
+            let pos = t.position.to_vec3();
+            self.position = pos;
+            self.target = pos + Vec3::new(0.0, 0.0, -1.0);
+        }
+        if let Ok(cam) = ecs.get::<&rkf_runtime::components::CameraComponent>(entity) {
+            self.fly_yaw = cam.yaw.to_radians();
+            self.fly_pitch = cam.pitch.to_radians();
+            self.fov_y = cam.fov_degrees.to_radians();
+        }
     }
 
     /// Rotate the orbit camera by a mouse delta (in pixels).

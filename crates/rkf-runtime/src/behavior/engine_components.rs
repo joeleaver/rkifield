@@ -9,6 +9,7 @@
 use super::game_value::GameValue;
 use super::registry::{ComponentEntry, FieldMeta, FieldType, GameplayRegistry};
 use crate::components::{CameraComponent, EditorMetadata, FogVolumeComponent, Transform};
+use crate::environment::{EnvironmentSettings, SceneEnvironment};
 
 // ─── Field metadata (static) ─────────────────────────────────────────────
 
@@ -20,6 +21,9 @@ static TRANSFORM_FIELDS: [FieldMeta; 3] = [
         range: None,
         default: None,
         persist: false,
+        struct_meta: None,
+        asset_filter: None,
+        component_filter: None,
     },
     FieldMeta {
         name: "rotation",
@@ -28,6 +32,9 @@ static TRANSFORM_FIELDS: [FieldMeta; 3] = [
         range: None,
         default: None,
         persist: false,
+        struct_meta: None,
+        asset_filter: None,
+        component_filter: None,
     },
     FieldMeta {
         name: "scale",
@@ -36,10 +43,13 @@ static TRANSFORM_FIELDS: [FieldMeta; 3] = [
         range: None,
         default: None,
         persist: false,
+        struct_meta: None,
+        asset_filter: None,
+        component_filter: None,
     },
 ];
 
-static CAMERA_FIELDS: [FieldMeta; 7] = [
+static CAMERA_FIELDS: [FieldMeta; 8] = [
     FieldMeta {
         name: "fov_degrees",
         field_type: FieldType::Float,
@@ -47,6 +57,9 @@ static CAMERA_FIELDS: [FieldMeta; 7] = [
         range: Some((1.0, 179.0)),
         default: None,
         persist: false,
+        struct_meta: None,
+        asset_filter: None,
+        component_filter: None,
     },
     FieldMeta {
         name: "near",
@@ -55,6 +68,9 @@ static CAMERA_FIELDS: [FieldMeta; 7] = [
         range: Some((0.001, 100.0)),
         default: None,
         persist: false,
+        struct_meta: None,
+        asset_filter: None,
+        component_filter: None,
     },
     FieldMeta {
         name: "far",
@@ -63,6 +79,9 @@ static CAMERA_FIELDS: [FieldMeta; 7] = [
         range: Some((1.0, 100000.0)),
         default: None,
         persist: false,
+        struct_meta: None,
+        asset_filter: None,
+        component_filter: None,
     },
     FieldMeta {
         name: "active",
@@ -71,6 +90,9 @@ static CAMERA_FIELDS: [FieldMeta; 7] = [
         range: None,
         default: None,
         persist: false,
+        struct_meta: None,
+        asset_filter: None,
+        component_filter: None,
     },
     FieldMeta {
         name: "label",
@@ -79,6 +101,9 @@ static CAMERA_FIELDS: [FieldMeta; 7] = [
         range: None,
         default: None,
         persist: false,
+        struct_meta: None,
+        asset_filter: None,
+        component_filter: None,
     },
     FieldMeta {
         name: "yaw",
@@ -87,6 +112,9 @@ static CAMERA_FIELDS: [FieldMeta; 7] = [
         range: None,
         default: None,
         persist: false,
+        struct_meta: None,
+        asset_filter: None,
+        component_filter: None,
     },
     FieldMeta {
         name: "pitch",
@@ -95,6 +123,20 @@ static CAMERA_FIELDS: [FieldMeta; 7] = [
         range: None,
         default: None,
         persist: false,
+        struct_meta: None,
+        asset_filter: None,
+        component_filter: None,
+    },
+    FieldMeta {
+        name: "environment_profile",
+        field_type: FieldType::AssetRef,
+        transient: false,
+        range: None,
+        default: None,
+        persist: true,
+        struct_meta: None,
+        asset_filter: Some("rkenv"),
+        component_filter: None,
     },
 ];
 
@@ -106,6 +148,9 @@ static FOG_VOLUME_FIELDS: [FieldMeta; 3] = [
         range: Some((0.0, 10.0)),
         default: None,
         persist: false,
+        struct_meta: None,
+        asset_filter: None,
+        component_filter: None,
     },
     FieldMeta {
         name: "phase_g",
@@ -114,6 +159,9 @@ static FOG_VOLUME_FIELDS: [FieldMeta; 3] = [
         range: Some((-1.0, 1.0)),
         default: None,
         persist: false,
+        struct_meta: None,
+        asset_filter: None,
+        component_filter: None,
     },
     FieldMeta {
         name: "half_extents",
@@ -122,6 +170,9 @@ static FOG_VOLUME_FIELDS: [FieldMeta; 3] = [
         range: None,
         default: None,
         persist: false,
+        struct_meta: None,
+        asset_filter: None,
+        component_filter: None,
     },
 ];
 
@@ -133,6 +184,9 @@ static EDITOR_METADATA_FIELDS: [FieldMeta; 2] = [
         range: None,
         default: None,
         persist: false,
+        struct_meta: None,
+        asset_filter: None,
+        component_filter: None,
     },
     FieldMeta {
         name: "locked",
@@ -141,6 +195,9 @@ static EDITOR_METADATA_FIELDS: [FieldMeta; 2] = [
         range: None,
         default: None,
         persist: false,
+        struct_meta: None,
+        asset_filter: None,
+        component_filter: None,
     },
 ];
 
@@ -241,6 +298,7 @@ fn camera_entry() -> ComponentEntry {
                 "label" => Ok(GameValue::String(c.label.clone())),
                 "yaw" => Ok(GameValue::Float(c.yaw as f64)),
                 "pitch" => Ok(GameValue::Float(c.pitch as f64)),
+                "environment_profile" => Ok(GameValue::String(c.environment_profile.clone())),
                 _ => Err(format!(
                     "unknown field '{}' on component 'CameraComponent'",
                     field_name
@@ -279,6 +337,10 @@ fn camera_entry() -> ComponentEntry {
                 "pitch" => match value {
                     GameValue::Float(f) => c.pitch = f as f32,
                     _ => return Err("type mismatch for field 'pitch'".into()),
+                },
+                "environment_profile" => match value {
+                    GameValue::String(s) => c.environment_profile = s,
+                    _ => return Err("type mismatch for field 'environment_profile'".into()),
                 },
                 _ => {
                     return Err(format!(
@@ -413,6 +475,238 @@ fn editor_metadata_entry() -> ComponentEntry {
     }
 }
 
+// ─── EnvironmentSettings (full scene environment) ─────────────────────────
+
+// Top-level metadata: 4 struct fields (fog, atmosphere, clouds, post_process).
+// Actual field access uses dot-notation: "fog.density", "atmosphere.enabled", etc.
+static ENV_SETTINGS_FIELDS: [FieldMeta; 4] = [
+    FieldMeta {
+        name: "fog",
+        field_type: FieldType::Struct,
+        transient: false,
+        range: None,
+        default: None,
+        persist: true,
+        struct_meta: None, // TODO: wire StructMeta for inspector sub-field rendering
+        asset_filter: None,
+        component_filter: None,
+    },
+    FieldMeta {
+        name: "atmosphere",
+        field_type: FieldType::Struct,
+        transient: false,
+        range: None,
+        default: None,
+        persist: true,
+        struct_meta: None,
+        asset_filter: None,
+        component_filter: None,
+    },
+    FieldMeta {
+        name: "clouds",
+        field_type: FieldType::Struct,
+        transient: false,
+        range: None,
+        default: None,
+        persist: true,
+        struct_meta: None,
+        asset_filter: None,
+        component_filter: None,
+    },
+    FieldMeta {
+        name: "post_process",
+        field_type: FieldType::Struct,
+        transient: false,
+        range: None,
+        default: None,
+        persist: true,
+        struct_meta: None,
+        asset_filter: None,
+        component_filter: None,
+    },
+];
+
+/// Get a field from `EnvironmentSettings` using dot-notation.
+fn env_settings_get_field(
+    c: &EnvironmentSettings,
+    field_name: &str,
+) -> Result<GameValue, String> {
+    match field_name {
+        // Fog
+        "fog.enabled" => Ok(GameValue::Bool(c.fog.enabled)),
+        "fog.density" => Ok(GameValue::Float(c.fog.density as f64)),
+        "fog.color" => Ok(GameValue::Vec3(glam::Vec3::new(c.fog.color[0], c.fog.color[1], c.fog.color[2]))),
+        "fog.start_distance" => Ok(GameValue::Float(c.fog.start_distance as f64)),
+        "fog.end_distance" => Ok(GameValue::Float(c.fog.end_distance as f64)),
+        "fog.height_falloff" => Ok(GameValue::Float(c.fog.height_falloff as f64)),
+        "fog.ambient_dust_density" => Ok(GameValue::Float(c.fog.ambient_dust_density as f64)),
+        "fog.dust_asymmetry" => Ok(GameValue::Float(c.fog.dust_asymmetry as f64)),
+        // Atmosphere
+        "atmosphere.enabled" => Ok(GameValue::Bool(c.atmosphere.enabled)),
+        "atmosphere.rayleigh_scale" => Ok(GameValue::Float(c.atmosphere.rayleigh_scale as f64)),
+        "atmosphere.mie_scale" => Ok(GameValue::Float(c.atmosphere.mie_scale as f64)),
+        "atmosphere.sun_direction" => Ok(GameValue::Vec3(glam::Vec3::new(
+            c.atmosphere.sun_direction[0], c.atmosphere.sun_direction[1], c.atmosphere.sun_direction[2],
+        ))),
+        "atmosphere.sun_intensity" => Ok(GameValue::Float(c.atmosphere.sun_intensity as f64)),
+        "atmosphere.sun_color" => Ok(GameValue::Vec3(glam::Vec3::new(
+            c.atmosphere.sun_color[0], c.atmosphere.sun_color[1], c.atmosphere.sun_color[2],
+        ))),
+        // Clouds
+        "clouds.enabled" => Ok(GameValue::Bool(c.clouds.enabled)),
+        "clouds.coverage" => Ok(GameValue::Float(c.clouds.coverage as f64)),
+        "clouds.density" => Ok(GameValue::Float(c.clouds.density as f64)),
+        "clouds.altitude" => Ok(GameValue::Float(c.clouds.altitude as f64)),
+        "clouds.thickness" => Ok(GameValue::Float(c.clouds.thickness as f64)),
+        "clouds.wind_direction" => Ok(GameValue::Vec3(glam::Vec3::new(
+            c.clouds.wind_direction[0], c.clouds.wind_direction[1], c.clouds.wind_direction[2],
+        ))),
+        "clouds.wind_speed" => Ok(GameValue::Float(c.clouds.wind_speed as f64)),
+        // Post-process
+        "post_process.bloom_enabled" => Ok(GameValue::Bool(c.post_process.bloom_enabled)),
+        "post_process.bloom_intensity" => Ok(GameValue::Float(c.post_process.bloom_intensity as f64)),
+        "post_process.bloom_threshold" => Ok(GameValue::Float(c.post_process.bloom_threshold as f64)),
+        "post_process.exposure" => Ok(GameValue::Float(c.post_process.exposure as f64)),
+        "post_process.contrast" => Ok(GameValue::Float(c.post_process.contrast as f64)),
+        "post_process.saturation" => Ok(GameValue::Float(c.post_process.saturation as f64)),
+        "post_process.vignette_intensity" => Ok(GameValue::Float(c.post_process.vignette_intensity as f64)),
+        "post_process.tone_map_mode" => Ok(GameValue::Int(c.post_process.tone_map_mode as i64)),
+        "post_process.sharpen_strength" => Ok(GameValue::Float(c.post_process.sharpen_strength as f64)),
+        "post_process.dof_enabled" => Ok(GameValue::Bool(c.post_process.dof_enabled)),
+        "post_process.dof_focus_distance" => Ok(GameValue::Float(c.post_process.dof_focus_distance as f64)),
+        "post_process.dof_focus_range" => Ok(GameValue::Float(c.post_process.dof_focus_range as f64)),
+        "post_process.dof_max_coc" => Ok(GameValue::Float(c.post_process.dof_max_coc as f64)),
+        "post_process.motion_blur_intensity" => Ok(GameValue::Float(c.post_process.motion_blur_intensity as f64)),
+        "post_process.god_rays_intensity" => Ok(GameValue::Float(c.post_process.god_rays_intensity as f64)),
+        "post_process.grain_intensity" => Ok(GameValue::Float(c.post_process.grain_intensity as f64)),
+        "post_process.chromatic_aberration" => Ok(GameValue::Float(c.post_process.chromatic_aberration as f64)),
+        _ => Err(format!("unknown field '{}' on component 'EnvironmentSettings'", field_name)),
+    }
+}
+
+/// Set a field on `EnvironmentSettings` using dot-notation.
+fn env_settings_set_field(
+    c: &mut EnvironmentSettings,
+    field_name: &str,
+    value: GameValue,
+) -> Result<(), String> {
+    match field_name {
+        // Fog
+        "fog.enabled" => { c.fog.enabled = value.as_bool().ok_or("type mismatch")?; }
+        "fog.density" => { c.fog.density = value.as_float().ok_or("type mismatch")? as f32; }
+        "fog.color" => {
+            let v = value.as_vec3().ok_or("type mismatch")?;
+            c.fog.color = [v.x, v.y, v.z];
+        }
+        "fog.start_distance" => { c.fog.start_distance = value.as_float().ok_or("type mismatch")? as f32; }
+        "fog.end_distance" => { c.fog.end_distance = value.as_float().ok_or("type mismatch")? as f32; }
+        "fog.height_falloff" => { c.fog.height_falloff = value.as_float().ok_or("type mismatch")? as f32; }
+        "fog.ambient_dust_density" => { c.fog.ambient_dust_density = value.as_float().ok_or("type mismatch")? as f32; }
+        "fog.dust_asymmetry" => { c.fog.dust_asymmetry = value.as_float().ok_or("type mismatch")? as f32; }
+        // Atmosphere
+        "atmosphere.enabled" => { c.atmosphere.enabled = value.as_bool().ok_or("type mismatch")?; }
+        "atmosphere.rayleigh_scale" => { c.atmosphere.rayleigh_scale = value.as_float().ok_or("type mismatch")? as f32; }
+        "atmosphere.mie_scale" => { c.atmosphere.mie_scale = value.as_float().ok_or("type mismatch")? as f32; }
+        "atmosphere.sun_direction" => {
+            let v = value.as_vec3().ok_or("type mismatch")?;
+            c.atmosphere.sun_direction = [v.x, v.y, v.z];
+        }
+        "atmosphere.sun_intensity" => { c.atmosphere.sun_intensity = value.as_float().ok_or("type mismatch")? as f32; }
+        "atmosphere.sun_color" => {
+            let v = value.as_vec3().ok_or("type mismatch")?;
+            c.atmosphere.sun_color = [v.x, v.y, v.z];
+        }
+        // Clouds
+        "clouds.enabled" => { c.clouds.enabled = value.as_bool().ok_or("type mismatch")?; }
+        "clouds.coverage" => { c.clouds.coverage = value.as_float().ok_or("type mismatch")? as f32; }
+        "clouds.density" => { c.clouds.density = value.as_float().ok_or("type mismatch")? as f32; }
+        "clouds.altitude" => { c.clouds.altitude = value.as_float().ok_or("type mismatch")? as f32; }
+        "clouds.thickness" => { c.clouds.thickness = value.as_float().ok_or("type mismatch")? as f32; }
+        "clouds.wind_direction" => {
+            let v = value.as_vec3().ok_or("type mismatch")?;
+            c.clouds.wind_direction = [v.x, v.y, v.z];
+        }
+        "clouds.wind_speed" => { c.clouds.wind_speed = value.as_float().ok_or("type mismatch")? as f32; }
+        // Post-process
+        "post_process.bloom_enabled" => { c.post_process.bloom_enabled = value.as_bool().ok_or("type mismatch")?; }
+        "post_process.bloom_intensity" => { c.post_process.bloom_intensity = value.as_float().ok_or("type mismatch")? as f32; }
+        "post_process.bloom_threshold" => { c.post_process.bloom_threshold = value.as_float().ok_or("type mismatch")? as f32; }
+        "post_process.exposure" => { c.post_process.exposure = value.as_float().ok_or("type mismatch")? as f32; }
+        "post_process.contrast" => { c.post_process.contrast = value.as_float().ok_or("type mismatch")? as f32; }
+        "post_process.saturation" => { c.post_process.saturation = value.as_float().ok_or("type mismatch")? as f32; }
+        "post_process.vignette_intensity" => { c.post_process.vignette_intensity = value.as_float().ok_or("type mismatch")? as f32; }
+        "post_process.tone_map_mode" => { c.post_process.tone_map_mode = value.as_int().ok_or("type mismatch")? as u32; }
+        "post_process.sharpen_strength" => { c.post_process.sharpen_strength = value.as_float().ok_or("type mismatch")? as f32; }
+        "post_process.dof_enabled" => { c.post_process.dof_enabled = value.as_bool().ok_or("type mismatch")?; }
+        "post_process.dof_focus_distance" => { c.post_process.dof_focus_distance = value.as_float().ok_or("type mismatch")? as f32; }
+        "post_process.dof_focus_range" => { c.post_process.dof_focus_range = value.as_float().ok_or("type mismatch")? as f32; }
+        "post_process.dof_max_coc" => { c.post_process.dof_max_coc = value.as_float().ok_or("type mismatch")? as f32; }
+        "post_process.motion_blur_intensity" => { c.post_process.motion_blur_intensity = value.as_float().ok_or("type mismatch")? as f32; }
+        "post_process.god_rays_intensity" => { c.post_process.god_rays_intensity = value.as_float().ok_or("type mismatch")? as f32; }
+        "post_process.grain_intensity" => { c.post_process.grain_intensity = value.as_float().ok_or("type mismatch")? as f32; }
+        "post_process.chromatic_aberration" => { c.post_process.chromatic_aberration = value.as_float().ok_or("type mismatch")? as f32; }
+        _ => return Err(format!("unknown field '{}' on component 'EnvironmentSettings'", field_name)),
+    }
+    Ok(())
+}
+
+/// Create the `ComponentEntry` for `EnvironmentSettings`.
+fn env_settings_entry() -> ComponentEntry {
+    ComponentEntry {
+        name: "EnvironmentSettings",
+        meta: &ENV_SETTINGS_FIELDS,
+        serialize: |world, entity| {
+            world.get::<&EnvironmentSettings>(entity).ok()
+                .map(|c| ron::to_string(&*c).unwrap())
+        },
+        deserialize_insert: |world, entity, ron_str| {
+            let c: EnvironmentSettings = ron::from_str(ron_str).map_err(|e| e.to_string())?;
+            world.insert_one(entity, c).map_err(|e| e.to_string())?;
+            Ok(())
+        },
+        has: |world, entity| world.get::<&EnvironmentSettings>(entity).is_ok(),
+        remove: |world, entity| { let _ = world.remove_one::<EnvironmentSettings>(entity); },
+        get_field: |world, entity, field_name| {
+            let c = world.get::<&EnvironmentSettings>(entity)
+                .map_err(|_| "entity does not have 'EnvironmentSettings'".to_string())?;
+            env_settings_get_field(&*c, field_name)
+        },
+        set_field: |world, entity, field_name, value| {
+            let mut c = world.get::<&mut EnvironmentSettings>(entity)
+                .map_err(|_| "entity does not have 'EnvironmentSettings'".to_string())?;
+            env_settings_set_field(&mut *c, field_name, value)
+        },
+    }
+}
+
+// ─── SceneEnvironment (marker) ───────────────────────────────────────────
+
+static SCENE_ENV_FIELDS: [FieldMeta; 0] = [];
+
+/// Create the `ComponentEntry` for the `SceneEnvironment` marker.
+fn scene_env_entry() -> ComponentEntry {
+    ComponentEntry {
+        name: "SceneEnvironment",
+        meta: &SCENE_ENV_FIELDS,
+        serialize: |world, entity| {
+            world.get::<&SceneEnvironment>(entity).ok()
+                .map(|_| "()".to_string())
+        },
+        deserialize_insert: |world, entity, _ron_str| {
+            world.insert_one(entity, SceneEnvironment).map_err(|e| e.to_string())?;
+            Ok(())
+        },
+        has: |world, entity| world.get::<&SceneEnvironment>(entity).is_ok(),
+        remove: |world, entity| { let _ = world.remove_one::<SceneEnvironment>(entity); },
+        get_field: |_world, _entity, field_name| {
+            Err(format!("SceneEnvironment has no field '{}'", field_name))
+        },
+        set_field: |_world, _entity, field_name, _value| {
+            Err(format!("SceneEnvironment has no field '{}'", field_name))
+        },
+    }
+}
+
 // ─── Registration ────────────────────────────────────────────────────────
 
 /// All engine component names, for distinguishing engine vs gameplay entries.
@@ -421,6 +715,8 @@ pub const ENGINE_COMPONENT_NAMES: &[&str] = &[
     "CameraComponent",
     "FogVolumeComponent",
     "EditorMetadata",
+    "EnvironmentSettings",
+    "SceneEnvironment",
 ];
 
 /// Register all engine components into the given registry.
@@ -433,6 +729,8 @@ pub fn engine_register(registry: &mut GameplayRegistry) {
         camera_entry(),
         fog_volume_entry(),
         editor_metadata_entry(),
+        env_settings_entry(),
+        scene_env_entry(),
     ];
     for entry in entries {
         registry
@@ -459,11 +757,13 @@ mod tests {
     fn engine_register_populates_registry() {
         let mut reg = GameplayRegistry::new();
         engine_register(&mut reg);
-        assert_eq!(reg.component_count(), 4);
+        assert_eq!(reg.component_count(), 6);
         assert!(reg.has_component("Transform"));
         assert!(reg.has_component("CameraComponent"));
         assert!(reg.has_component("FogVolumeComponent"));
         assert!(reg.has_component("EditorMetadata"));
+        assert!(reg.has_component("EnvironmentSettings"));
+        assert!(reg.has_component("SceneEnvironment"));
     }
 
     // ── 2. Transform get_field ──────────────────────────────────────────
@@ -536,6 +836,7 @@ mod tests {
             label: "Main".to_string(),
             yaw: 45.0,
             pitch: -15.0,
+            ..Default::default()
         };
         let entity = world.spawn((cam,));
         let entry = camera_entry();
@@ -720,6 +1021,7 @@ mod tests {
             label: "Cinematic".into(),
             yaw: 30.0,
             pitch: -10.0,
+            ..Default::default()
         };
         let entity = world.spawn((cam,));
         let entry = camera_entry();
@@ -789,7 +1091,7 @@ mod tests {
         assert_eq!(entry.meta[2].field_type, FieldType::Vec3);
 
         let entry = camera_entry();
-        assert_eq!(entry.meta.len(), 7);
+        assert_eq!(entry.meta.len(), 8);
         assert_eq!(entry.meta[0].name, "fov_degrees");
         assert_eq!(entry.meta[0].field_type, FieldType::Float);
         assert!(entry.meta[0].range.is_some());

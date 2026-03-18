@@ -83,6 +83,10 @@ pub struct CameraComponent {
     pub yaw: f32,
     /// Pitch in degrees.
     pub pitch: f32,
+    /// Path to an `.rkenv` environment profile file.
+    /// Empty string means no profile (use editor defaults).
+    #[serde(default)]
+    pub environment_profile: String,
 }
 
 impl Default for CameraComponent {
@@ -95,6 +99,7 @@ impl Default for CameraComponent {
             label: String::new(),
             yaw: 0.0,
             pitch: 0.0,
+            environment_profile: String::new(),
         }
     }
 }
@@ -267,6 +272,7 @@ mod tests {
             label: "Main".to_string(),
             yaw: 45.0,
             pitch: -15.0,
+            ..Default::default()
         };
         assert!((c.fov_degrees - 90.0).abs() < 1e-6);
         assert!((c.yaw - 45.0).abs() < 1e-6);

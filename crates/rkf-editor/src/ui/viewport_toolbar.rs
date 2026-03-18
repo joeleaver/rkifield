@@ -1,0 +1,223 @@
+//! Viewport toolbar — sits above the render surface in the center viewport.
+//!
+//! Contains: camera selector, gizmo mode buttons, editor mode buttons.
+
+use rinch::prelude::*;
+use rinch_tabler_icons::{TablerIcon, TablerIconStyle, render_tabler_icon};
+
+use crate::editor_command::EditorCommand;
+use crate::editor_state::{EditorMode, SelectedEntity, UiSignals};
+use crate::gizmo::GizmoMode;
+use crate::CommandSender;
+
+const TOOLBAR_STYLE: &str = "\
+    display:flex;align-items:center;gap:2px;padding:2px 8px;\
+    height:28px;flex-shrink:0;\
+    background:var(--rinch-color-dark-8);border-bottom:1px solid var(--rinch-color-border);\
+    pointer-events:auto;z-index:2;";
+
+const BTN_SIZE: &str = "22px";
+
+/// Viewport toolbar component.
+#[component]
+pub fn ViewportToolbar() -> NodeHandle {
+    rsx! {
+        div { style: {TOOLBAR_STYLE},
+            // ── Gizmo mode buttons ───────────────────────────
+            GizmoModeButtons {}
+
+            Separator {}
+
+            // ── Editor mode buttons (Sculpt, Paint) ──────────
+            EditorModeButtons {}
+
+            Separator {}
+
+            // ── Camera selector ──────────────────────────────
+            CameraSelector {}
+
+            // ── Spacer ───────────────────────────────────────
+            div { style: "flex:1;" }
+        }
+    }
+}
+
+/// Vertical separator line.
+#[component]
+fn Separator() -> NodeHandle {
+    rsx! {
+        div { style: "width:1px;height:16px;background:var(--rinch-color-border);margin:0 4px;" }
+    }
+}
+
+/// Translate / Rotate / Scale toggle buttons.
+#[component]
+fn GizmoModeButtons() -> NodeHandle {
+    let ui = use_context::<UiSignals>();
+    let cmd = use_context::<CommandSender>();
+
+    let modes = [
+        (GizmoMode::Translate, TablerIcon::ArrowsMove, "Move (G)"),
+        (GizmoMode::Rotate, TablerIcon::Rotate, "Rotate (R)"),
+        (GizmoMode::Scale, TablerIcon::Resize, "Scale (L)"),
+    ];
+
+    rsx! {
+        div { style: "display:flex;gap:1px;",
+            for (mode, icon, tooltip) in modes {
+                div {
+                    key: format!("{mode:?}"),
+                    style: {
+                        let ui = ui;
+                        move || {
+                            let active = ui.gizmo_mode.get() == mode;
+                            toolbar_btn_style(active)
+                        }
+                    },
+                    title: {tooltip},
+                    onclick: {
+                        let cmd = cmd.clone();
+                        let ui = ui;
+                        move || {
+                            let _ = cmd.0.send(EditorCommand::SetGizmoMode { mode });
+                            ui.gizmo_mode.set(mode);
+                        }
+                    },
+                    {render_tabler_icon(__scope, icon, TablerIconStyle::Outline)}
+                }
+            }
+        }
+    }
+}
+
+/// Sculpt / Paint toggle buttons.
+#[component]
+fn EditorModeButtons() -> NodeHandle {
+    let ui = use_context::<UiSignals>();
+    let cmd = use_context::<CommandSender>();
+
+    let modes = [
+        (EditorMode::Sculpt, TablerIcon::Brush, "Sculpt"),
+        (EditorMode::Paint, TablerIcon::Paint, "Paint"),
+    ];
+
+    rsx! {
+        div { style: "display:flex;gap:1px;",
+            for (mode, icon, tooltip) in modes {
+                div {
+                    key: format!("{mode:?}"),
+                    style: {
+                        let ui = ui;
+                        move || {
+                            let active = ui.editor_mode.get() == mode;
+                            toolbar_btn_style(active)
+                        }
+                    },
+                    title: {tooltip},
+                    onclick: {
+                        let cmd = cmd.clone();
+                        let ui = ui;
+                        move || {
+                            let current = ui.editor_mode.get();
+                            let new_mode = if current == mode {
+                                EditorMode::Default
+                            } else {
+                                mode
+                            };
+                            let _ = cmd.0.send(EditorCommand::SetEditorMode { mode: new_mode });
+                            ui.editor_mode.set(new_mode);
+                        }
+                    },
+                    {render_tabler_icon(__scope, icon, TablerIconStyle::Outline)}
+                }
+            }
+        }
+    }
+}
+
+/// Camera selector — switch viewport between scene cameras.
+///
+/// Rebuilds the Select when the camera list changes (keyed by camera count + ids).
+#[component]
+fn CameraSelector() -> NodeHandle {
+    let ui = use_context::<UiSignals>();
+
+    rsx! {
+        div { style: "display:flex;align-items:center;gap:4px;",
+            div { style: "font-size:10px;color:var(--rinch-color-dimmed);", "Camera:" }
+            // Key by camera fingerprint so the Select rebuilds when cameras change.
+            for camera_key in vec![camera_list_key(&ui)] {
+                div {
+                    key: camera_key,
+                    style: "display:contents;",
+                    CameraSelectorInner {}
+                }
+            }
+        }
+    }
+}
+
+/// Compute a fingerprint of the current camera list for keyed rebuild.
+fn camera_list_key(ui: &UiSignals) -> String {
+    let objects = ui.objects.get();
+    let cameras: Vec<_> = objects.iter().filter(|o| o.is_camera).collect();
+    let mut key = format!("cam:{}", cameras.len());
+    for c in &cameras {
+        key.push(':');
+        key.push_str(&c.id.to_string()[..8]);
+    }
+    key
+}
+
+/// Inner Select component — rendered fresh each time the camera list changes.
+#[component]
+fn CameraSelectorInner() -> NodeHandle {
+    let ui = use_context::<UiSignals>();
+    let cmd = use_context::<CommandSender>();
+
+    let objects = ui.objects.get();
+    let mut options = vec![SelectOption::new("", "Editor Camera")];
+    for obj in objects.iter().filter(|o| o.is_camera) {
+        options.push(SelectOption::new(obj.id.to_string(), obj.name.clone()));
+    }
+
+    rsx! {
+        Select {
+            size: "xs",
+            placeholder: "Editor",
+            value_fn: {
+                let ui = ui;
+                move || {
+                    ui.viewport_camera.get()
+                        .map(|id| id.to_string())
+                        .unwrap_or_default()
+                }
+            },
+            onchange: {
+                let cmd = cmd.clone();
+                let ui = ui;
+                move |value: String| {
+                    if value.is_empty() {
+                        let _ = cmd.0.send(EditorCommand::SetViewportCamera { camera_id: None });
+                        ui.viewport_camera.set(None);
+                    } else if let Ok(uuid) = uuid::Uuid::parse_str(&value) {
+                        let _ = cmd.0.send(EditorCommand::SetViewportCamera { camera_id: Some(uuid) });
+                        ui.viewport_camera.set(Some(uuid));
+                    }
+                }
+            },
+            data: options,
+        }
+    }
+}
+
+fn toolbar_btn_style(active: bool) -> String {
+    let bg = if active { "var(--rinch-primary-color)" } else { "transparent" };
+    let color = if active { "var(--rinch-color-dark-9)" } else { "var(--rinch-color-dimmed)" };
+    format!(
+        "display:flex;align-items:center;justify-content:center;\
+         width:{BTN_SIZE};height:{BTN_SIZE};border-radius:3px;\
+         background:{bg};color:{color};cursor:pointer;\
+         border:1px solid transparent;"
+    )
+}

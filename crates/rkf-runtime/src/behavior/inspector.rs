@@ -15,7 +15,10 @@ pub const MANDATORY_COMPONENTS: &[&str] = &["Transform", "EditorMetadata"];
 
 /// Engine components that are rendered by dedicated UI panels (ObjectProperties).
 /// The generic component inspector should hide these to avoid duplication.
-pub const ENGINE_UI_COMPONENTS: &[&str] = &["Transform", "EditorMetadata", "SdfTree"];
+pub const ENGINE_UI_COMPONENTS: &[&str] = &[
+    "Transform", "EditorMetadata", "SdfTree",
+    "EnvironmentSettings", "SceneEnvironment",
+];
 
 // ─── Inspector data types ───────────────────────────────────────────────────
 
@@ -53,6 +56,12 @@ pub struct FieldInspectorData {
     pub range: Option<(f64, f64)>,
     /// True if the field is transient (runtime state, not persisted).
     pub transient: bool,
+    /// Sub-fields for `FieldType::Struct` fields. `None` for non-struct fields.
+    pub sub_fields: Option<Vec<FieldInspectorData>>,
+    /// File extension filter for `FieldType::AssetRef` fields.
+    pub asset_filter: Option<String>,
+    /// Required component type for `FieldType::ComponentRef` fields.
+    pub component_filter: Option<String>,
 }
 
 // ─── Build inspector data ───────────────────────────────────────────────────
@@ -105,19 +114,52 @@ fn build_component_data(
             Err(_) => continue, // Skip fields we can't read.
         };
 
-        fields.push(FieldInspectorData {
-            name: meta.name.to_string(),
-            field_type: meta.field_type,
-            value,
-            range: meta.range,
-            transient: meta.transient,
-        });
+        fields.push(build_field_inspector_data(meta, value));
     }
 
     ComponentInspectorData {
         name: entry.name.to_string(),
         fields,
         removable,
+    }
+}
+
+/// Build inspector data for a single field, recursing into struct sub-fields.
+fn build_field_inspector_data(
+    meta: &super::registry::FieldMeta,
+    value: GameValue,
+) -> FieldInspectorData {
+    let sub_fields = if meta.field_type == FieldType::Struct {
+        if let (Some(struct_meta), Some(struct_fields)) = (meta.struct_meta, value.as_struct()) {
+            Some(
+                struct_meta
+                    .fields
+                    .iter()
+                    .filter_map(|sub_meta| {
+                        let sub_val = struct_fields
+                            .iter()
+                            .find(|(n, _)| n == sub_meta.name)
+                            .map(|(_, v)| v.clone())?;
+                        Some(build_field_inspector_data(sub_meta, sub_val))
+                    })
+                    .collect(),
+            )
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    FieldInspectorData {
+        name: meta.name.to_string(),
+        field_type: meta.field_type,
+        value,
+        range: meta.range,
+        transient: meta.transient,
+        sub_fields,
+        asset_filter: meta.asset_filter.map(|s| s.to_string()),
+        component_filter: meta.component_filter.map(|s| s.to_string()),
     }
 }
 

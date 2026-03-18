@@ -107,7 +107,6 @@ pub fn StatusBar() -> NodeHandle {
                                     })
                                     .unwrap_or_else(|| format!("Light {lid}"))
                             }
-                            SelectedEntity::Camera => "Camera".to_string(),
                             SelectedEntity::Scene => "Scene".to_string(),
                             SelectedEntity::Project => "Project".to_string(),
                         }).unwrap_or_default()

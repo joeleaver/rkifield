@@ -53,6 +53,7 @@ fn build_test_world() -> (hecs::World, StableIdIndex) {
             label: "MainCam".to_string(),
             yaw: 45.0,
             pitch: -10.0,
+            ..Default::default()
         },
     ));
     index.insert(id_b.uuid(), entity_b);

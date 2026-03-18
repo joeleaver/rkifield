@@ -39,6 +39,8 @@ pub struct ObjectSummary {
     pub object_type: ObjectType,
     /// Analytical primitive type (if this is an analytical object).
     pub primitive: Option<rkf_core::SdfPrimitive>,
+    /// Whether this entity has a CameraComponent.
+    pub is_camera: bool,
 }
 
 /// Lightweight summary of a material slot for UI display.

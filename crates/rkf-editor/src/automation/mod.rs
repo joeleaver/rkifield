@@ -269,216 +269,78 @@ impl EditorAutomationApi {
         }
     }
 
-    /// Set an environment property by name.
+    /// Set an environment property by name via the ECS singleton.
     fn env_set(&self, prop: &str, val: &str) -> AutomationResult<String> {
+        use rkf_runtime::behavior::game_value::GameValue;
+
         let mut es = self.editor_state.lock()
             .map_err(|e| AutomationError::EngineError(format!("lock poisoned: {e}")))?;
-        let env = &mut es.environment;
-        match prop {
-            // --- Atmosphere ---
-            "atmosphere.enabled" => {
-                env.atmosphere.enabled = Self::parse_bool(val, prop)?;
+
+        let env_entity = es.world.scene_environment_entity()
+            .ok_or_else(|| AutomationError::EngineError("no scene environment entity".into()))?;
+
+        // Parse value based on field type.
+        let game_value = if prop.ends_with(".enabled") {
+            GameValue::Bool(Self::parse_bool(val, prop)?)
+        } else if prop == "post_process.tone_map_mode" {
+            let v = val.parse::<u32>().map_err(|_| {
+                AutomationError::InvalidParameter(format!("invalid u32 for {prop}: {val}"))
+            })?;
+            GameValue::Int(v as i64)
+        } else if prop == "atmosphere.sun_direction" {
+            // Accept "x,y,z" format.
+            let parts: Vec<f32> = val.split(',')
+                .map(|s| s.trim().parse::<f32>())
+                .collect::<Result<_, _>>()
+                .map_err(|_| AutomationError::InvalidParameter(format!("invalid Vec3 for {prop}: {val}")))?;
+            if parts.len() != 3 {
+                return Err(AutomationError::InvalidParameter(format!("expected 3 components for {prop}")));
             }
-            "atmosphere.rayleigh_scale" => {
-                env.atmosphere.rayleigh_scale = Self::parse_f32(val, prop)?;
-            }
-            "atmosphere.mie_scale" => {
-                env.atmosphere.mie_scale = Self::parse_f32(val, prop)?;
-            }
-            "atmosphere.sun_intensity" => {
-                env.atmosphere.sun_intensity = Self::parse_f32(val, prop)?;
-            }
-            "atmosphere.sun_azimuth" => {
-                let az = Self::parse_f32(val, prop)?.to_radians();
-                let el = env.atmosphere.sun_direction.y.asin();
-                env.atmosphere.sun_direction = glam::Vec3::new(
-                    el.cos() * az.sin(), el.sin(), el.cos() * az.cos(),
-                ).normalize();
-            }
-            "atmosphere.sun_elevation" => {
-                let el = Self::parse_f32(val, prop)?.to_radians();
-                let cur = env.atmosphere.sun_direction;
-                let az = cur.x.atan2(cur.z);
-                env.atmosphere.sun_direction = glam::Vec3::new(
-                    el.cos() * az.sin(), el.sin(), el.cos() * az.cos(),
-                ).normalize();
-            }
-            // --- Fog ---
-            "fog.enabled" => {
-                env.fog.enabled = Self::parse_bool(val, prop)?;
-            }
-            "fog.density" => {
-                env.fog.density = Self::parse_f32(val, prop)?;
-            }
-            "fog.start_distance" => {
-                env.fog.start_distance = Self::parse_f32(val, prop)?;
-            }
-            "fog.end_distance" => {
-                env.fog.end_distance = Self::parse_f32(val, prop)?;
-            }
-            "fog.height_falloff" => {
-                env.fog.height_falloff = Self::parse_f32(val, prop)?;
-            }
-            "fog.ambient_dust_density" => {
-                env.fog.ambient_dust_density = Self::parse_f32(val, prop)?;
-            }
-            "fog.dust_asymmetry" => {
-                env.fog.dust_asymmetry = Self::parse_f32(val, prop)?;
-            }
-            // --- Clouds ---
-            "clouds.enabled" => {
-                env.clouds.enabled = Self::parse_bool(val, prop)?;
-            }
-            "clouds.coverage" => {
-                env.clouds.coverage = Self::parse_f32(val, prop)?;
-            }
-            "clouds.density" => {
-                env.clouds.density = Self::parse_f32(val, prop)?;
-            }
-            "clouds.altitude" => {
-                env.clouds.altitude = Self::parse_f32(val, prop)?;
-            }
-            "clouds.thickness" => {
-                env.clouds.thickness = Self::parse_f32(val, prop)?;
-            }
-            "clouds.wind_speed" => {
-                env.clouds.wind_speed = Self::parse_f32(val, prop)?;
-            }
-            // --- Post-processing ---
-            "post_process.bloom_enabled" => {
-                env.post_process.bloom_enabled = Self::parse_bool(val, prop)?;
-            }
-            "post_process.bloom_intensity" => {
-                env.post_process.bloom_intensity = Self::parse_f32(val, prop)?;
-            }
-            "post_process.bloom_threshold" => {
-                env.post_process.bloom_threshold = Self::parse_f32(val, prop)?;
-            }
-            "post_process.exposure" => {
-                env.post_process.exposure = Self::parse_f32(val, prop)?;
-            }
-            "post_process.contrast" => {
-                env.post_process.contrast = Self::parse_f32(val, prop)?;
-            }
-            "post_process.saturation" => {
-                env.post_process.saturation = Self::parse_f32(val, prop)?;
-            }
-            "post_process.vignette_intensity" => {
-                env.post_process.vignette_intensity = Self::parse_f32(val, prop)?;
-            }
-            "post_process.tone_map_mode" => {
-                env.post_process.tone_map_mode = val.parse::<u32>().map_err(|_| {
-                    AutomationError::InvalidParameter(format!("invalid u32 for {prop}: {val}"))
-                })?;
-            }
-            "post_process.sharpen_strength" => {
-                env.post_process.sharpen_strength = Self::parse_f32(val, prop)?;
-            }
-            "post_process.dof_enabled" => {
-                env.post_process.dof_enabled = Self::parse_bool(val, prop)?;
-            }
-            "post_process.dof_focus_distance" => {
-                env.post_process.dof_focus_distance = Self::parse_f32(val, prop)?;
-            }
-            "post_process.dof_focus_range" => {
-                env.post_process.dof_focus_range = Self::parse_f32(val, prop)?;
-            }
-            "post_process.dof_max_coc" => {
-                env.post_process.dof_max_coc = Self::parse_f32(val, prop)?;
-            }
-            "post_process.motion_blur_intensity" => {
-                env.post_process.motion_blur_intensity = Self::parse_f32(val, prop)?;
-            }
-            "post_process.grain_intensity" => {
-                env.post_process.grain_intensity = Self::parse_f32(val, prop)?;
-            }
-            "post_process.chromatic_aberration" => {
-                env.post_process.chromatic_aberration = Self::parse_f32(val, prop)?;
-            }
-            _ => {
-                return Err(AutomationError::InvalidParameter(format!(
-                    "unknown environment property: {prop}"
-                )));
-            }
+            GameValue::Vec3(glam::Vec3::new(parts[0], parts[1], parts[2]))
+        } else {
+            GameValue::Float(Self::parse_f32(val, prop)? as f64)
+        };
+
+        let reg = self.gameplay_registry.lock()
+            .map_err(|e| AutomationError::EngineError(format!("registry lock: {e}")))?;
+        if let Some(entry) = reg.component_entry("EnvironmentSettings") {
+            (entry.set_field)(es.world.ecs_mut(), env_entity, prop, game_value)
+                .map_err(|e| AutomationError::EngineError(format!("set_field: {e}")))?;
         }
-        env.mark_dirty();
+
         Ok(format!("{prop} = {val}"))
     }
 
-    /// Get an environment property value by name.
+    /// Get an environment property value by name via the ECS singleton.
     fn env_get(&self, prop: &str) -> AutomationResult<String> {
         let es = self.editor_state.lock()
             .map_err(|e| AutomationError::EngineError(format!("lock poisoned: {e}")))?;
-        let env = &es.environment;
-        let val = match prop {
-            // --- Atmosphere ---
-            "atmosphere.enabled" => format!("{}", env.atmosphere.enabled),
-            "atmosphere.rayleigh_scale" => format!("{}", env.atmosphere.rayleigh_scale),
-            "atmosphere.mie_scale" => format!("{}", env.atmosphere.mie_scale),
-            "atmosphere.sun_intensity" => format!("{}", env.atmosphere.sun_intensity),
-            "atmosphere.sun_direction" => format!(
-                "[{}, {}, {}]",
-                env.atmosphere.sun_direction.x,
-                env.atmosphere.sun_direction.y,
-                env.atmosphere.sun_direction.z,
-            ),
-            // --- Fog ---
-            "fog.enabled" => format!("{}", env.fog.enabled),
-            "fog.density" => format!("{}", env.fog.density),
-            "fog.start_distance" => format!("{}", env.fog.start_distance),
-            "fog.end_distance" => format!("{}", env.fog.end_distance),
-            "fog.height_falloff" => format!("{}", env.fog.height_falloff),
-            "fog.ambient_dust_density" => format!("{}", env.fog.ambient_dust_density),
-            "fog.dust_asymmetry" => format!("{}", env.fog.dust_asymmetry),
-            // --- Clouds ---
-            "clouds.enabled" => format!("{}", env.clouds.enabled),
-            "clouds.coverage" => format!("{}", env.clouds.coverage),
-            "clouds.density" => format!("{}", env.clouds.density),
-            "clouds.altitude" => format!("{}", env.clouds.altitude),
-            "clouds.thickness" => format!("{}", env.clouds.thickness),
-            "clouds.wind_speed" => format!("{}", env.clouds.wind_speed),
-            // --- Post-processing ---
-            "post_process.bloom_enabled" => format!("{}", env.post_process.bloom_enabled),
-            "post_process.bloom_intensity" => format!("{}", env.post_process.bloom_intensity),
-            "post_process.bloom_threshold" => format!("{}", env.post_process.bloom_threshold),
-            "post_process.exposure" => format!("{}", env.post_process.exposure),
-            "post_process.contrast" => format!("{}", env.post_process.contrast),
-            "post_process.saturation" => format!("{}", env.post_process.saturation),
-            "post_process.vignette_intensity" => format!("{}", env.post_process.vignette_intensity),
-            "post_process.tone_map_mode" => format!("{}", env.post_process.tone_map_mode),
-            "post_process.sharpen_strength" => format!("{}", env.post_process.sharpen_strength),
-            "post_process.dof_enabled" => format!("{}", env.post_process.dof_enabled),
-            "post_process.dof_focus_distance" => format!("{}", env.post_process.dof_focus_distance),
-            "post_process.dof_focus_range" => format!("{}", env.post_process.dof_focus_range),
-            "post_process.dof_max_coc" => format!("{}", env.post_process.dof_max_coc),
-            "post_process.motion_blur_intensity" => format!("{}", env.post_process.motion_blur_intensity),
-            "post_process.grain_intensity" => format!("{}", env.post_process.grain_intensity),
-            "post_process.chromatic_aberration" => format!("{}", env.post_process.chromatic_aberration),
-            "all" => {
-                // Return all properties as JSON-like summary.
-                format!(
-                    "atmosphere: enabled={} rayleigh={} mie={} sun_intensity={}\n\
-                     fog: enabled={} density={} dust={} dust_g={}\n\
-                     clouds: enabled={} coverage={} density={} altitude={} thickness={}\n\
-                     post_process: bloom={}/{} exposure={} contrast={} saturation={} sharpen={} dof={} vignette={}",
-                    env.atmosphere.enabled, env.atmosphere.rayleigh_scale,
-                    env.atmosphere.mie_scale, env.atmosphere.sun_intensity,
-                    env.fog.enabled, env.fog.density,
-                    env.fog.ambient_dust_density, env.fog.dust_asymmetry,
-                    env.clouds.enabled, env.clouds.coverage, env.clouds.density,
-                    env.clouds.altitude, env.clouds.thickness,
-                    env.post_process.bloom_enabled, env.post_process.bloom_intensity,
-                    env.post_process.exposure, env.post_process.contrast,
-                    env.post_process.saturation, env.post_process.sharpen_strength,
-                    env.post_process.dof_enabled, env.post_process.vignette_intensity,
-                )
+
+        let env_entity = es.world.scene_environment_entity()
+            .ok_or_else(|| AutomationError::EngineError("no scene environment entity".into()))?;
+
+        let reg = self.gameplay_registry.lock()
+            .map_err(|e| AutomationError::EngineError(format!("registry lock: {e}")))?;
+        let entry = reg.component_entry("EnvironmentSettings")
+            .ok_or_else(|| AutomationError::EngineError("EnvironmentSettings not registered".into()))?;
+
+        if prop == "all" {
+            // Return a summary of key fields.
+            let mut parts = Vec::new();
+            for field in &["atmosphere.enabled", "atmosphere.sun_intensity",
+                           "fog.enabled", "fog.density",
+                           "clouds.enabled", "clouds.coverage",
+                           "post_process.bloom_enabled", "post_process.exposure"]
+            {
+                if let Ok(v) = (entry.get_field)(es.world.ecs_ref(), env_entity, field) {
+                    parts.push(format!("{field}={}", crate::engine_loop_commands::format_game_value_short(&v)));
+                }
             }
-            _ => {
-                return Err(AutomationError::InvalidParameter(format!(
-                    "unknown environment property: {prop}"
-                )));
-            }
-        };
-        Ok(val)
+            return Ok(parts.join(", "));
+        }
+
+        let val = (entry.get_field)(es.world.ecs_ref(), env_entity, prop)
+            .map_err(|e| AutomationError::InvalidParameter(e))?;
+        Ok(crate::engine_loop_commands::format_game_value_short(&val))
     }
 }

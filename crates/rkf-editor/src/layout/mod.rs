@@ -15,10 +15,13 @@ use serde::{Deserialize, Serialize};
 // ── Panel identifiers ───────────────────────────────────────────────────────
 
 /// Identifies a unique panel type in the layout system.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PanelId {
     // Regular panels (left/right/bottom)
+    #[default]
     SceneTree,
+    EditorCamera,
+    Environment,
     ObjectProperties,
     AssetProperties,
     Materials,
@@ -46,6 +49,8 @@ impl PanelId {
     /// All panel variants, for iteration (e.g. building View > Panels menu).
     pub const ALL: &[PanelId] = &[
         Self::SceneTree,
+        Self::EditorCamera,
+        Self::Environment,
         Self::ObjectProperties,
         Self::AssetProperties,
         Self::Materials,
@@ -71,12 +76,14 @@ impl PanelId {
     pub fn display_name(self) -> &'static str {
         match self {
             Self::SceneTree => "Scene Tree",
+            Self::EditorCamera => "Editor Camera",
+            Self::Environment => "Environment",
             Self::ObjectProperties => "Object Properties",
             Self::AssetProperties => "Asset Properties",
             Self::Materials => "Materials",
             Self::Shaders => "Shaders",
             Self::Console => "Console",
-            Self::DebugOverlay => "Debug Log",
+            Self::DebugOverlay => "Console",
             Self::Systems => "Systems",
             Self::Library => "Library",
             Self::SceneView => "Scene",
@@ -89,7 +96,7 @@ impl PanelId {
     pub fn default_container(self) -> ContainerKind {
         match self {
             Self::SceneTree => ContainerKind::Left,
-            Self::ObjectProperties | Self::AssetProperties => ContainerKind::Right,
+            Self::EditorCamera | Self::Environment | Self::ObjectProperties | Self::AssetProperties => ContainerKind::Right,
             Self::Materials | Self::Shaders | Self::Console | Self::DebugOverlay | Self::Systems | Self::Library => ContainerKind::Bottom,
             Self::SceneView | Self::GameView | Self::AnimationEditor => ContainerKind::Center,
         }
@@ -290,7 +297,7 @@ impl Default for LayoutConfig {
 pub fn default_layout() -> LayoutConfig {
     LayoutConfig {
         left: ContainerConfig::single_zone(vec![PanelId::SceneTree]),
-        right: ContainerConfig::single_zone(vec![PanelId::ObjectProperties, PanelId::AssetProperties]),
+        right: ContainerConfig::single_zone(vec![PanelId::EditorCamera, PanelId::Environment, PanelId::ObjectProperties, PanelId::AssetProperties]),
         bottom: ContainerConfig::single_zone(vec![PanelId::Materials, PanelId::Shaders, PanelId::Systems, PanelId::Library, PanelId::Console]),
         center: ContainerConfig::single_zone(vec![PanelId::SceneView]),
         floating: Vec::new(),
@@ -330,7 +337,7 @@ mod tests {
         assert_eq!(layout.left.zones.len(), 1);
         assert_eq!(layout.left.zones[0].tabs, vec![PanelId::SceneTree]);
         assert_eq!(layout.right.zones.len(), 1);
-        assert_eq!(layout.right.zones[0].tabs, vec![PanelId::ObjectProperties, PanelId::AssetProperties]);
+        assert_eq!(layout.right.zones[0].tabs, vec![PanelId::EditorCamera, PanelId::Environment, PanelId::ObjectProperties, PanelId::AssetProperties]);
         assert_eq!(layout.center.zones.len(), 1);
         assert_eq!(layout.center.zones[0].tabs, vec![PanelId::SceneView]);
         assert_eq!(layout.bottom.zones.len(), 1);
@@ -346,12 +353,16 @@ mod tests {
             Some((ContainerKind::Left, 0, 0))
         );
         assert_eq!(
-            layout.find_panel(PanelId::ObjectProperties),
+            layout.find_panel(PanelId::EditorCamera),
             Some((ContainerKind::Right, 0, 0))
         );
         assert_eq!(
-            layout.find_panel(PanelId::AssetProperties),
+            layout.find_panel(PanelId::ObjectProperties),
             Some((ContainerKind::Right, 0, 1))
+        );
+        assert_eq!(
+            layout.find_panel(PanelId::AssetProperties),
+            Some((ContainerKind::Right, 0, 2))
         );
         assert_eq!(
             layout.find_panel(PanelId::Console),

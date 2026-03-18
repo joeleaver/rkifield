@@ -67,9 +67,8 @@ fn save_scene_v3(
     if let Ok(s) = ron::to_string(&cam_snap) {
         scene_v3.properties.insert("camera".into(), s);
     }
-    if let Ok(s) = ron::to_string(&es.environment) {
-        scene_v3.properties.insert("environment".into(), s);
-    }
+    // Environment settings are serialized as the EnvironmentSettings component
+    // on the SceneEnvironment entity — no separate properties bag entry needed.
     if let Ok(s) = ron::to_string(es.light_editor.all_lights()) {
         scene_v3.properties.insert("lights".into(), s);
     }
@@ -178,6 +177,22 @@ pub(crate) fn load_scene_v3(
     // Rebuild World entity tracking from hecs components.
     es.world.rebuild_entity_tracking_from_ecs();
 
+    // Ensure scene environment singleton exists (may already exist from the
+    // loaded scene file; ensure_scene_environment is a no-op if so).
+    es.world.ensure_scene_environment();
+
+    // Migrate old scenes: if the properties bag has an "environment" entry
+    // but the loaded scene doesn't have an EnvironmentSettings component,
+    // convert the old EnvironmentState to EnvironmentSettings on the singleton.
+    if let Some(env_str) = scene_v3.properties.get("environment") {
+        if let Ok(old_env) = ron::from_str::<crate::environment::EnvironmentState>(env_str) {
+            if let Some(env_entity) = es.world.scene_environment_entity() {
+                let settings = old_env.to_settings();
+                let _ = es.world.ecs_mut().insert_one(env_entity, settings);
+            }
+        }
+    }
+
     // Load .rkf assets for voxelized objects.
     let scene_dir = std::path::Path::new(path)
         .parent()
@@ -185,7 +200,7 @@ pub(crate) fn load_scene_v3(
     load_rkf_assets_from_hecs(engine, es, scene_dir);
     engine.reupload_brick_data();
 
-    // Restore editor state from properties.
+    // Restore editor state from properties (camera, lights — NOT environment).
     restore_properties_v3(es, &scene_v3);
 
     Ok(())
@@ -259,12 +274,8 @@ fn restore_properties_v3(es: &mut EditorState, scene_v3: &SceneFileV3) {
                 + dir * es.editor_camera.orbit_distance;
         }
     }
-    if let Some(s) = scene_v3.properties.get("environment") {
-        if let Ok(env) = ron::from_str::<crate::environment::EnvironmentState>(s) {
-            es.environment = env;
-            es.environment.mark_dirty();
-        }
-    }
+    // Environment is now restored from the EnvironmentSettings component
+    // on the SceneEnvironment entity (handled in load_scene_v3).
     if let Some(s) = scene_v3.properties.get("lights") {
         if let Ok(lights) = ron::from_str::<Vec<crate::light_editor::SceneLight>>(s) {
             es.light_editor.replace_lights(lights);

@@ -152,6 +152,7 @@ mod tests {
                 label: "Main".to_string(),
                 yaw: 45.0,
                 pitch: -10.0,
+                ..Default::default()
             },
             FogVolumeComponent {
                 density: 0.5,

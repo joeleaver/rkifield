@@ -1,9 +1,8 @@
 //! Centralized reactive signals for all persistent slider properties.
 //!
 //! Each signal holds the actual slider value (f64). The UI creates sliders
-//! bound to these signals via `build_synced_slider`, and a single batch
-//! `Effect` in `RightPanel` syncs all values to `EditorState` in one lock
-//! per frame — eliminating per-slider lock closures.
+//! bound to these signals via `SliderRow` / `SyncedSliderRow` components,
+//! and targeted `send_*_commands()` methods push changes to the engine.
 
 use glam::Vec3;
 use rinch::prelude::Signal;
@@ -12,17 +11,6 @@ use super::EditorState;
 use super::UiSignals;
 
 /// Centralized reactive signals for all persistent slider properties.
-///
-/// Each signal holds the actual slider value (f64). The UI creates sliders
-/// bound to these signals via `build_synced_slider`, and a single batch
-/// `Effect` in `RightPanel` syncs all values to `EditorState` in one lock
-/// per frame — eliminating per-slider lock closures.
-///
-/// **Adding a new slider property:**
-/// 1. Add `pub field_name: Signal<f64>` here
-/// 2. Init from `EditorState` in `new()`
-/// 3. Add sync line in `sync_to_state()`
-/// 4. Call `build_synced_slider()` in the UI
 #[derive(Clone, Copy)]
 pub struct SliderSignals {
     // Camera
@@ -64,37 +52,77 @@ pub struct SliderSignals {
     pub brush_radius: Signal<f64>,
     pub brush_strength: Signal<f64>,
     pub brush_falloff: Signal<f64>,
+}
 
-    // Object transform and light properties are NO LONGER here.
-    // They read from UiSignals via Memo (single source of truth).
-    // See TransformEditor and LightProperties components.
+/// Send a single `SetComponentField` command for the scene environment entity.
+fn send_env_field(
+    cmd: &crate::CommandSender,
+    ui: &UiSignals,
+    field: &str,
+    value: rkf_runtime::behavior::game_value::GameValue,
+) {
+    use crate::editor_command::EditorCommand;
+    if let Some(uuid) = ui.scene_env_uuid.get() {
+        let _ = cmd.0.send(EditorCommand::SetComponentField {
+            entity_id: uuid,
+            component_name: "EnvironmentSettings".to_string(),
+            field_name: field.to_string(),
+            value,
+        });
+    }
+}
+
+/// Shorthand for sending a float field to the scene environment.
+fn send_env_float(cmd: &crate::CommandSender, ui: &UiSignals, field: &str, v: f64) {
+    send_env_field(cmd, ui, field, rkf_runtime::behavior::game_value::GameValue::Float(v));
+}
+
+/// Shorthand for sending a bool field to the scene environment.
+fn send_env_bool(cmd: &crate::CommandSender, ui: &UiSignals, field: &str, v: bool) {
+    send_env_field(cmd, ui, field, rkf_runtime::behavior::game_value::GameValue::Bool(v));
+}
+
+/// Shorthand for sending an int field to the scene environment.
+fn send_env_int(cmd: &crate::CommandSender, ui: &UiSignals, field: &str, v: i64) {
+    send_env_field(cmd, ui, field, rkf_runtime::behavior::game_value::GameValue::Int(v));
+}
+
+/// Shorthand for sending a Vec3 field to the scene environment.
+fn send_env_vec3(cmd: &crate::CommandSender, ui: &UiSignals, field: &str, v: Vec3) {
+    send_env_field(cmd, ui, field, rkf_runtime::behavior::game_value::GameValue::Vec3(v));
 }
 
 impl SliderSignals {
     /// Create slider signals initialized from the current `EditorState`.
     /// Must be called on the main thread (signals use thread-local reactive state).
+    ///
+    /// Environment sliders init from `EnvironmentSettings::default()` — the
+    /// engine thread will push actual values from the ECS singleton on first frame.
     pub fn new(es: &EditorState) -> Self {
-        let d = &es.environment.atmosphere.sun_direction;
-        let pp = &es.environment.post_process;
+        let env = rkf_runtime::environment::EnvironmentSettings::default();
+        let d = &env.atmosphere.sun_direction;
+        let pp = &env.post_process;
+        let az = d[0].atan2(d[2]).to_degrees().rem_euclid(360.0);
+        let el = d[1].asin().to_degrees();
         Self {
             fov: Signal::new(es.editor_camera.fov_y.to_degrees() as f64),
             fly_speed: Signal::new(es.editor_camera.fly_speed as f64),
             near: Signal::new(es.editor_camera.near as f64),
             far: Signal::new(es.editor_camera.far as f64),
-            sun_azimuth: Signal::new(d.x.atan2(d.z).to_degrees().rem_euclid(360.0) as f64),
-            sun_elevation: Signal::new(d.y.asin().to_degrees() as f64),
-            sun_intensity: Signal::new(es.environment.atmosphere.sun_intensity as f64),
-            rayleigh_scale: Signal::new(es.environment.atmosphere.rayleigh_scale as f64),
-            mie_scale: Signal::new(es.environment.atmosphere.mie_scale as f64),
-            fog_density: Signal::new(es.environment.fog.density as f64),
-            fog_height_falloff: Signal::new(es.environment.fog.height_falloff as f64),
-            dust_density: Signal::new(es.environment.fog.ambient_dust_density as f64),
-            dust_asymmetry: Signal::new(es.environment.fog.dust_asymmetry as f64),
-            cloud_coverage: Signal::new(es.environment.clouds.coverage as f64),
-            cloud_density: Signal::new(es.environment.clouds.density as f64),
-            cloud_altitude: Signal::new(es.environment.clouds.altitude as f64),
-            cloud_thickness: Signal::new(es.environment.clouds.thickness as f64),
-            cloud_wind_speed: Signal::new(es.environment.clouds.wind_speed as f64),
+            sun_azimuth: Signal::new(az as f64),
+            sun_elevation: Signal::new(el as f64),
+            sun_intensity: Signal::new(env.atmosphere.sun_intensity as f64),
+            rayleigh_scale: Signal::new(env.atmosphere.rayleigh_scale as f64),
+            mie_scale: Signal::new(env.atmosphere.mie_scale as f64),
+            fog_density: Signal::new(env.fog.density as f64),
+            fog_height_falloff: Signal::new(env.fog.height_falloff as f64),
+            dust_density: Signal::new(env.fog.ambient_dust_density as f64),
+            dust_asymmetry: Signal::new(env.fog.dust_asymmetry as f64),
+            cloud_coverage: Signal::new(env.clouds.coverage as f64),
+            cloud_density: Signal::new(env.clouds.density as f64),
+            cloud_altitude: Signal::new(env.clouds.altitude as f64),
+            cloud_thickness: Signal::new(env.clouds.thickness as f64),
+            cloud_wind_speed: Signal::new(env.clouds.wind_speed as f64),
             bloom_intensity: Signal::new(pp.bloom_intensity as f64),
             bloom_threshold: Signal::new(pp.bloom_threshold as f64),
             exposure: Signal::new(pp.exposure as f64),
@@ -113,25 +141,6 @@ impl SliderSignals {
         }
     }
 
-    /// Send all slider and toggle values as EditorCommands.
-    ///
-    /// Called from slider onchange callbacks (replacing the batch sync Effect).
-    /// Each slider calls this when its value changes, which sends all commands.
-    /// This is a store method per the rinch store pattern.
-    ///
-    /// Prefer the targeted `send_*_commands()` methods when only one UI section
-    /// changed — they avoid sending unrelated commands.
-    pub fn send_all_commands(&self, cmd: &crate::CommandSender, ui: &UiSignals) {
-        self.send_camera_commands(cmd);
-        self.send_atmosphere_commands(cmd, ui);
-        self.send_fog_commands(cmd, ui);
-        self.send_cloud_commands(cmd, ui);
-        self.send_post_process_commands(cmd, ui);
-        self.send_brush_commands(cmd);
-        // Object transform and light properties are handled by their
-        // respective UI components via EditorCommands (single source of truth).
-    }
-
     /// Send camera-related commands (FOV, speed, near/far).
     pub fn send_camera_commands(&self, cmd: &crate::CommandSender) {
         use crate::editor_command::EditorCommand;
@@ -147,84 +156,55 @@ impl SliderSignals {
         });
     }
 
-    /// Send atmosphere commands (sun direction, intensity, scattering).
-    /// Also sends the atmosphere toggle from `ui`.
+    /// Send atmosphere fields to the scene environment ECS entity.
     pub fn send_atmosphere_commands(&self, cmd: &crate::CommandSender, ui: &UiSignals) {
-        use crate::editor_command::EditorCommand;
         let az = (self.sun_azimuth.get() as f32).to_radians();
         let el = (self.sun_elevation.get() as f32).to_radians();
         let cos_el = el.cos();
-        let sun_dir =
-            Vec3::new(az.sin() * cos_el, el.sin(), az.cos() * cos_el).normalize();
-        let _ = cmd.0.send(EditorCommand::SetAtmosphere {
-            sun_direction: sun_dir,
-            sun_intensity: self.sun_intensity.get() as f32,
-            rayleigh_scale: self.rayleigh_scale.get() as f32,
-            mie_scale: self.mie_scale.get() as f32,
-        });
-        let _ = cmd.0.send(EditorCommand::ToggleAtmosphere {
-            enabled: ui.atmo_enabled.get(),
-        });
+        let sun_dir = Vec3::new(az.sin() * cos_el, el.sin(), az.cos() * cos_el).normalize();
+        send_env_vec3(cmd, ui, "atmosphere.sun_direction", sun_dir);
+        send_env_float(cmd, ui, "atmosphere.sun_intensity", self.sun_intensity.get());
+        send_env_float(cmd, ui, "atmosphere.rayleigh_scale", self.rayleigh_scale.get());
+        send_env_float(cmd, ui, "atmosphere.mie_scale", self.mie_scale.get());
+        send_env_bool(cmd, ui, "atmosphere.enabled", ui.atmo_enabled.get());
     }
 
-    /// Send fog commands (density, height falloff, dust).
-    /// Also sends the fog toggle from `ui`.
+    /// Send fog fields to the scene environment ECS entity.
     pub fn send_fog_commands(&self, cmd: &crate::CommandSender, ui: &UiSignals) {
-        use crate::editor_command::EditorCommand;
-        let _ = cmd.0.send(EditorCommand::SetFog {
-            density: self.fog_density.get() as f32,
-            height_falloff: self.fog_height_falloff.get() as f32,
-            dust_density: self.dust_density.get() as f32,
-            dust_asymmetry: self.dust_asymmetry.get() as f32,
-        });
-        let _ = cmd.0.send(EditorCommand::ToggleFog {
-            enabled: ui.fog_enabled.get(),
-        });
+        send_env_float(cmd, ui, "fog.density", self.fog_density.get());
+        send_env_float(cmd, ui, "fog.height_falloff", self.fog_height_falloff.get());
+        send_env_float(cmd, ui, "fog.ambient_dust_density", self.dust_density.get());
+        send_env_float(cmd, ui, "fog.dust_asymmetry", self.dust_asymmetry.get());
+        send_env_bool(cmd, ui, "fog.enabled", ui.fog_enabled.get());
     }
 
-    /// Send cloud commands (coverage, density, altitude, thickness, wind).
-    /// Also sends the clouds toggle from `ui`.
+    /// Send cloud fields to the scene environment ECS entity.
     pub fn send_cloud_commands(&self, cmd: &crate::CommandSender, ui: &UiSignals) {
-        use crate::editor_command::EditorCommand;
-        let _ = cmd.0.send(EditorCommand::SetClouds {
-            coverage: self.cloud_coverage.get() as f32,
-            density: self.cloud_density.get() as f32,
-            altitude: self.cloud_altitude.get() as f32,
-            thickness: self.cloud_thickness.get() as f32,
-            wind_speed: self.cloud_wind_speed.get() as f32,
-        });
-        let _ = cmd.0.send(EditorCommand::ToggleClouds {
-            enabled: ui.clouds_enabled.get(),
-        });
+        send_env_float(cmd, ui, "clouds.coverage", self.cloud_coverage.get());
+        send_env_float(cmd, ui, "clouds.density", self.cloud_density.get());
+        send_env_float(cmd, ui, "clouds.altitude", self.cloud_altitude.get());
+        send_env_float(cmd, ui, "clouds.thickness", self.cloud_thickness.get());
+        send_env_float(cmd, ui, "clouds.wind_speed", self.cloud_wind_speed.get());
+        send_env_bool(cmd, ui, "clouds.enabled", ui.clouds_enabled.get());
     }
 
-    /// Send post-processing commands (bloom, exposure, DoF, etc.).
-    /// Also sends bloom/DoF toggles and tone map mode from `ui`.
+    /// Send post-processing fields to the scene environment ECS entity.
     pub fn send_post_process_commands(&self, cmd: &crate::CommandSender, ui: &UiSignals) {
-        use crate::editor_command::EditorCommand;
-        let _ = cmd.0.send(EditorCommand::SetPostProcess {
-            bloom_intensity: self.bloom_intensity.get() as f32,
-            bloom_threshold: self.bloom_threshold.get() as f32,
-            exposure: self.exposure.get() as f32,
-            sharpen: self.sharpen.get() as f32,
-            dof_focus_distance: self.dof_focus_dist.get() as f32,
-            dof_focus_range: self.dof_focus_range.get() as f32,
-            dof_max_coc: self.dof_max_coc.get() as f32,
-            motion_blur: self.motion_blur.get() as f32,
-            god_rays: self.god_rays.get() as f32,
-            vignette: self.vignette.get() as f32,
-            grain: self.grain.get() as f32,
-            chromatic_aberration: self.chromatic_ab.get() as f32,
-        });
-        let _ = cmd.0.send(EditorCommand::ToggleBloom {
-            enabled: ui.bloom_enabled.get(),
-        });
-        let _ = cmd.0.send(EditorCommand::ToggleDof {
-            enabled: ui.dof_enabled.get(),
-        });
-        let _ = cmd.0.send(EditorCommand::SetToneMapMode {
-            mode: ui.tone_map_mode.get(),
-        });
+        send_env_float(cmd, ui, "post_process.bloom_intensity", self.bloom_intensity.get());
+        send_env_float(cmd, ui, "post_process.bloom_threshold", self.bloom_threshold.get());
+        send_env_float(cmd, ui, "post_process.exposure", self.exposure.get());
+        send_env_float(cmd, ui, "post_process.sharpen_strength", self.sharpen.get());
+        send_env_float(cmd, ui, "post_process.dof_focus_distance", self.dof_focus_dist.get());
+        send_env_float(cmd, ui, "post_process.dof_focus_range", self.dof_focus_range.get());
+        send_env_float(cmd, ui, "post_process.dof_max_coc", self.dof_max_coc.get());
+        send_env_float(cmd, ui, "post_process.motion_blur_intensity", self.motion_blur.get());
+        send_env_float(cmd, ui, "post_process.god_rays_intensity", self.god_rays.get());
+        send_env_float(cmd, ui, "post_process.vignette_intensity", self.vignette.get());
+        send_env_float(cmd, ui, "post_process.grain_intensity", self.grain.get());
+        send_env_float(cmd, ui, "post_process.chromatic_aberration", self.chromatic_ab.get());
+        send_env_bool(cmd, ui, "post_process.bloom_enabled", ui.bloom_enabled.get());
+        send_env_bool(cmd, ui, "post_process.dof_enabled", ui.dof_enabled.get());
+        send_env_int(cmd, ui, "post_process.tone_map_mode", ui.tone_map_mode.get() as i64);
     }
 
     /// Send brush/sculpt/paint settings commands.
@@ -242,117 +222,36 @@ impl SliderSignals {
         });
     }
 
+    /// Send all slider and toggle values as EditorCommands.
+    pub fn send_all_commands(&self, cmd: &crate::CommandSender, ui: &UiSignals) {
+        self.send_camera_commands(cmd);
+        self.send_atmosphere_commands(cmd, ui);
+        self.send_fog_commands(cmd, ui);
+        self.send_cloud_commands(cmd, ui);
+        self.send_post_process_commands(cmd, ui);
+        self.send_brush_commands(cmd);
+    }
 
-    /// Send toggle/state commands (atmosphere, fog, clouds, bloom, DoF, tone map mode).
+    /// Send toggle/state commands for environment sections.
     pub fn send_toggle_commands(&self, cmd: &crate::CommandSender, ui: &UiSignals) {
-        use crate::editor_command::EditorCommand;
-        let _ = cmd.0.send(EditorCommand::ToggleAtmosphere {
-            enabled: ui.atmo_enabled.get(),
-        });
-        let _ = cmd.0.send(EditorCommand::ToggleFog {
-            enabled: ui.fog_enabled.get(),
-        });
-        let _ = cmd.0.send(EditorCommand::ToggleClouds {
-            enabled: ui.clouds_enabled.get(),
-        });
-        let _ = cmd.0.send(EditorCommand::ToggleBloom {
-            enabled: ui.bloom_enabled.get(),
-        });
-        let _ = cmd.0.send(EditorCommand::ToggleDof {
-            enabled: ui.dof_enabled.get(),
-        });
-        let _ = cmd.0.send(EditorCommand::SetToneMapMode {
-            mode: ui.tone_map_mode.get(),
-        });
+        send_env_bool(cmd, ui, "atmosphere.enabled", ui.atmo_enabled.get());
+        send_env_bool(cmd, ui, "fog.enabled", ui.fog_enabled.get());
+        send_env_bool(cmd, ui, "clouds.enabled", ui.clouds_enabled.get());
+        send_env_bool(cmd, ui, "post_process.bloom_enabled", ui.bloom_enabled.get());
+        send_env_bool(cmd, ui, "post_process.dof_enabled", ui.dof_enabled.get());
+        send_env_int(cmd, ui, "post_process.tone_map_mode", ui.tone_map_mode.get() as i64);
     }
 
-    /// Subscribe the current reactive scope to every signal.
-    /// Call inside an `Effect` to re-run whenever any slider changes.
-    #[allow(dead_code)]
-    pub fn track_all(&self) {
-        let _ = self.fov.get();
-        let _ = self.fly_speed.get();
-        let _ = self.near.get();
-        let _ = self.far.get();
-        let _ = self.sun_azimuth.get();
-        let _ = self.sun_elevation.get();
-        let _ = self.sun_intensity.get();
-        let _ = self.rayleigh_scale.get();
-        let _ = self.mie_scale.get();
-        let _ = self.fog_density.get();
-        let _ = self.fog_height_falloff.get();
-        let _ = self.dust_density.get();
-        let _ = self.dust_asymmetry.get();
-        let _ = self.cloud_coverage.get();
-        let _ = self.cloud_density.get();
-        let _ = self.cloud_altitude.get();
-        let _ = self.cloud_thickness.get();
-        let _ = self.cloud_wind_speed.get();
-        let _ = self.bloom_intensity.get();
-        let _ = self.bloom_threshold.get();
-        let _ = self.exposure.get();
-        let _ = self.sharpen.get();
-        let _ = self.dof_focus_dist.get();
-        let _ = self.dof_focus_range.get();
-        let _ = self.dof_max_coc.get();
-        let _ = self.motion_blur.get();
-        let _ = self.god_rays.get();
-        let _ = self.vignette.get();
-        let _ = self.grain.get();
-        let _ = self.chromatic_ab.get();
-        let _ = self.brush_radius.get();
-        let _ = self.brush_strength.get();
-        let _ = self.brush_falloff.get();
-    }
-
-    /// Write all signal values back to `EditorState` in one shot.
+    /// Write camera + brush slider values back to `EditorState`.
     ///
-    /// Called from the batch sync `Effect` after `track_all()`. Toggle
-    /// signals (atmosphere enabled, fog enabled, etc.) are synced by the
-    /// caller from `UiSignals`.
+    /// Environment values are no longer synced here — they flow through the
+    /// ECS `EnvironmentSettings` component via `SetComponentField` commands.
     pub fn sync_to_state(&self, es: &mut EditorState) {
         // Camera
         es.editor_camera.fov_y = (self.fov.get() as f32).to_radians();
         es.editor_camera.fly_speed = self.fly_speed.get() as f32;
         es.editor_camera.near = self.near.get() as f32;
         es.editor_camera.far = self.far.get() as f32;
-
-        // Atmosphere — compute sun_direction from azimuth + elevation
-        let az = (self.sun_azimuth.get() as f32).to_radians();
-        let el = (self.sun_elevation.get() as f32).to_radians();
-        let cos_el = el.cos();
-        es.environment.atmosphere.sun_direction =
-            Vec3::new(az.sin() * cos_el, el.sin(), az.cos() * cos_el).normalize();
-        es.environment.atmosphere.sun_intensity = self.sun_intensity.get() as f32;
-        es.environment.atmosphere.rayleigh_scale = self.rayleigh_scale.get() as f32;
-        es.environment.atmosphere.mie_scale = self.mie_scale.get() as f32;
-
-        // Fog
-        es.environment.fog.density = self.fog_density.get() as f32;
-        es.environment.fog.height_falloff = self.fog_height_falloff.get() as f32;
-        es.environment.fog.ambient_dust_density = self.dust_density.get() as f32;
-        es.environment.fog.dust_asymmetry = self.dust_asymmetry.get() as f32;
-
-        // Clouds
-        es.environment.clouds.coverage = self.cloud_coverage.get() as f32;
-        es.environment.clouds.density = self.cloud_density.get() as f32;
-        es.environment.clouds.altitude = self.cloud_altitude.get() as f32;
-        es.environment.clouds.thickness = self.cloud_thickness.get() as f32;
-        es.environment.clouds.wind_speed = self.cloud_wind_speed.get() as f32;
-
-        // Post-processing
-        es.environment.post_process.bloom_intensity = self.bloom_intensity.get() as f32;
-        es.environment.post_process.bloom_threshold = self.bloom_threshold.get() as f32;
-        es.environment.post_process.exposure = self.exposure.get() as f32;
-        es.environment.post_process.sharpen_strength = self.sharpen.get() as f32;
-        es.environment.post_process.dof_focus_distance = self.dof_focus_dist.get() as f32;
-        es.environment.post_process.dof_focus_range = self.dof_focus_range.get() as f32;
-        es.environment.post_process.dof_max_coc = self.dof_max_coc.get() as f32;
-        es.environment.post_process.motion_blur_intensity = self.motion_blur.get() as f32;
-        es.environment.post_process.god_rays_intensity = self.god_rays.get() as f32;
-        es.environment.post_process.vignette_intensity = self.vignette.get() as f32;
-        es.environment.post_process.grain_intensity = self.grain.get() as f32;
-        es.environment.post_process.chromatic_aberration = self.chromatic_ab.get() as f32;
 
         // Brush — sync to both sculpt and paint settings
         let radius = self.brush_radius.get() as f32;
@@ -364,12 +263,5 @@ impl SliderSignals {
         es.paint.current_settings.radius = radius;
         es.paint.current_settings.strength = strength;
         es.paint.current_settings.falloff = falloff;
-
-        // Mark environment dirty so the engine picks up changes.
-        es.environment.mark_dirty();
-
-        // Object transform and light properties are handled by their
-        // respective UI components via EditorCommands (single source of truth).
     }
-
 }

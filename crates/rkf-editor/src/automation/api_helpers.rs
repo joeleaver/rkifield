@@ -220,67 +220,43 @@ impl EditorAutomationApi {
 
 
     pub(super) fn env_override_impl(&self, property: &str, value: f32) -> Result<(), String> {
+        use rkf_runtime::behavior::game_value::GameValue;
+
         let mut es = self
             .editor_state
             .lock()
             .map_err(|e| format!("lock poisoned: {e}"))?;
 
-        match property {
-            "sun.intensity" | "atmosphere.sun_intensity" => {
-                es.environment.atmosphere.sun_intensity = value;
-            }
-            "fog.density" => {
-                es.environment.fog.density = value;
-            }
-            "fog.enabled" => {
-                es.environment.fog.enabled = value != 0.0;
-            }
-            "fog.start_distance" => {
-                es.environment.fog.start_distance = value;
-            }
-            "fog.end_distance" => {
-                es.environment.fog.end_distance = value;
-            }
-            "fog.height_falloff" => {
-                es.environment.fog.height_falloff = value;
-            }
-            "clouds.enabled" => {
-                es.environment.clouds.enabled = value != 0.0;
-            }
-            "clouds.coverage" => {
-                es.environment.clouds.coverage = value;
-            }
-            "clouds.density" => {
-                es.environment.clouds.density = value;
-            }
-            "post.bloom_enabled" | "post_process.bloom_enabled" => {
-                es.environment.post_process.bloom_enabled = value != 0.0;
-            }
-            "post.bloom_intensity" | "post_process.bloom_intensity" => {
-                es.environment.post_process.bloom_intensity = value;
-            }
-            "post.exposure" | "post_process.exposure" => {
-                es.environment.post_process.exposure = value;
-            }
-            "post.contrast" | "post_process.contrast" => {
-                es.environment.post_process.contrast = value;
-            }
-            "post.saturation" | "post_process.saturation" => {
-                es.environment.post_process.saturation = value;
-            }
-            other => {
-                return Err(format!(
-                    "unknown environment property: {other}. \
-                     Known properties: sun.intensity, fog.density, fog.enabled, \
-                     fog.start_distance, fog.end_distance, fog.height_falloff, \
-                     clouds.enabled, clouds.coverage, clouds.density, \
-                     post.bloom_enabled, post.bloom_intensity, post.exposure, \
-                     post.contrast, post.saturation"
-                ));
-            }
+        // Normalize legacy property names to EnvironmentSettings dot-paths.
+        let field_name = match property {
+            "sun.intensity" => "atmosphere.sun_intensity",
+            "post.bloom_enabled" => "post_process.bloom_enabled",
+            "post.bloom_intensity" => "post_process.bloom_intensity",
+            "post.exposure" => "post_process.exposure",
+            "post.contrast" => "post_process.contrast",
+            "post.saturation" => "post_process.saturation",
+            other => other, // pass through dot-paths like "fog.density" directly
+        };
+
+        let env_entity = es.world.scene_environment_entity()
+            .ok_or("no scene environment entity")?;
+
+        // Determine value type based on field (bool fields use != 0.0).
+        let game_value = if field_name.ends_with(".enabled") {
+            GameValue::Bool(value != 0.0)
+        } else {
+            GameValue::Float(value as f64)
+        };
+
+        let reg = self.gameplay_registry.lock()
+            .map_err(|e| format!("registry lock: {e}"))?;
+        if let Some(entry) = reg.component_entry("EnvironmentSettings") {
+            (entry.set_field)(es.world.ecs_mut(), env_entity, field_name, game_value)
+                .map_err(|e| format!("set_field: {e}"))?;
+        } else {
+            return Err("EnvironmentSettings component not registered".to_string());
         }
 
-        es.environment.mark_dirty();
         Ok(())
     }
 

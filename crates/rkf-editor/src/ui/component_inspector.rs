@@ -53,258 +53,204 @@ const DROPDOWN_ITEM_HOVER: &str = "padding:4px 8px;font-size:11px;\
 /// When the game plugin dylib is not yet loaded (`dylib_ready == false`),
 /// shows a "Building scripts..." placeholder instead of the component list.
 #[component]
-pub fn ComponentInspector(entity_id: uuid::Uuid) -> NodeHandle {
+pub fn ComponentInspector() -> NodeHandle {
     let ui = use_context::<UiSignals>();
     let cmd = use_context::<CommandSender>();
-    let eid = entity_id;
+    let eid = match ui.selection.get() {
+        Some(crate::editor_state::SelectedEntity::Object(id)) => id,
+        _ => return rsx! { div {} },
+    };
 
     // Signal to control add-component dropdown visibility.
     let dropdown_open = Signal::new(false);
 
-    // Build container imperatively — the content reacts to inspector_data signal.
-    let container = __scope.create_element("div");
-    container.set_attribute("style", "display:flex;flex-direction:column;");
+    rsx! {
+        div { style: "display:flex;flex-direction:column;",
+            // Divider before the component section.
+            div { style: {DIVIDER_STYLE} }
 
-    // Divider before the component section.
-    let divider = __scope.create_element("div");
-    divider.set_attribute("style", DIVIDER_STYLE);
-    container.append_child(&divider);
+            // Section header.
+            div { style: {LABEL_STYLE}, "Components" }
 
-    // Section header.
-    let header = __scope.create_element("div");
-    header.set_attribute("style", LABEL_STYLE);
-    header.append_child(&__scope.create_text("Components"));
-    container.append_child(&header);
-
-    // "Building scripts..." placeholder — shown when dylib not ready.
-    let building_msg = __scope.create_element("div");
-    building_msg.set_attribute(
-        "style",
-        "font-size:11px;color:var(--rinch-color-placeholder);padding:8px 12px;",
-    );
-    building_msg.append_child(&__scope.create_text("Building scripts..."));
-    {
-        let msg = building_msg.clone();
-        __scope.create_effect(move || {
-            if ui.dylib_ready.get() {
-                msg.set_attribute("style", "display:none;");
-            } else {
-                msg.set_attribute(
-                    "style",
-                    "font-size:11px;color:var(--rinch-color-placeholder);padding:8px 12px;",
-                );
+            // "Building scripts..." placeholder — shown when dylib not ready.
+            div {
+                style: {|| if ui.dylib_ready.get() {
+                    "display:none;"
+                } else {
+                    "font-size:11px;color:var(--rinch-color-placeholder);padding:8px 12px;"
+                }},
+                "Building scripts..."
             }
-        });
+
+            // Content wrapper — hidden when dylib not ready.
+            div {
+                style: {|| if ui.dylib_ready.get() {
+                    "display:flex;flex-direction:column;"
+                } else {
+                    "display:none;"
+                }},
+
+                // Reactive component list.
+                div { style: "display:flex;flex-direction:column;",
+                    for comp in get_components(ui, eid) {
+                        div {
+                            key: comp.name.clone(),
+                            {build_component_section(__scope, &comp, eid, cmd.clone())}
+                        }
+                    }
+                }
+
+                // Add Component section.
+                div { style: "padding:6px 12px;position:relative;",
+                    button {
+                        style: {ADD_BTN_STYLE},
+                        onclick: move || dropdown_open.update(|v| *v = !*v),
+                        "+ Add Component"
+                    }
+
+                    // Dropdown list (reactive visibility).
+                    div {
+                        style: {move || if dropdown_open.get() {
+                            DROPDOWN_STYLE.to_string()
+                        } else {
+                            format!("{DROPDOWN_STYLE}display:none;")
+                        }},
+
+                        for comp_name in ui.available_components.get() {
+                            DropdownItem {
+                                key: comp_name.clone(),
+                                comp_name: comp_name,
+                                entity_id: eid,
+                                dropdown_open: dropdown_open,
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
-    container.append_child(&building_msg);
+}
 
-    // Content wrapper — hidden when dylib not ready.
-    let content = __scope.create_element("div");
-    {
-        let c = content.clone();
-        __scope.create_effect(move || {
-            if ui.dylib_ready.get() {
-                c.set_attribute("style", "display:flex;flex-direction:column;");
-            } else {
-                c.set_attribute("style", "display:none;");
-            }
-        });
+/// Get the component list for the current entity from inspector data.
+fn get_components(ui: UiSignals, eid: uuid::Uuid) -> Vec<ComponentSnapshot> {
+    let data = ui.inspector_data.get();
+    match data {
+        Some(ref snap) if snap.entity_id == eid => snap.components.clone(),
+        _ => Vec::new(),
     }
+}
 
-    // Reactive component list — rebuilds when inspector_data changes.
-    let components_container = __scope.create_element("div");
-    components_container.set_attribute("style", "display:flex;flex-direction:column;");
-    content.append_child(&components_container.clone());
+/// A single dropdown item for the add-component menu.
+#[component]
+fn DropdownItem(
+    comp_name: String,
+    entity_id: uuid::Uuid,
+    dropdown_open: Option<Signal<bool>>,
+) -> NodeHandle {
+    let cmd = use_context::<CommandSender>();
+    let hovered = Signal::new(false);
+    let dropdown_open = dropdown_open.unwrap_or_else(|| Signal::new(false));
+    let name_for_click = comp_name.clone();
+    let name_display = comp_name.clone();
 
-    let cmd_for_list = cmd.clone();
-    rinch::core::for_each_dom_typed(
-        __scope,
-        &components_container,
-        move || {
-            let data = ui.inspector_data.get();
-            match data {
-                Some(ref snap) if snap.entity_id == eid => snap.components.clone(),
-                _ => Vec::new(),
-            }
-        },
-        |comp| comp.name.clone(),
-        move |comp, scope| build_component_section(scope, &comp, eid, cmd_for_list.clone()),
-    );
-
-    // Add Component section.
-    let add_section = __scope.create_element("div");
-    add_section.set_attribute("style", "padding:6px 12px;position:relative;");
-
-    // Add Component button.
-    let add_btn = __scope.create_element("button");
-    add_btn.set_attribute("style", ADD_BTN_STYLE);
-    add_btn.append_child(&__scope.create_text("+ Add Component"));
-    let toggle_hid = __scope.register_handler(move || {
-        dropdown_open.update(|v| *v = !*v);
-    });
-    add_btn.set_attribute("data-rid", &toggle_hid.to_string());
-    add_section.append_child(&add_btn);
-
-    // Dropdown list (reactive visibility).
-    let dropdown = __scope.create_element("div");
-    {
-        let dropdown_clone = dropdown.clone();
-        __scope.create_effect(move || {
-            if dropdown_open.get() {
-                dropdown_clone.set_attribute("style", DROPDOWN_STYLE);
-            } else {
-                dropdown_clone.set_attribute("style", &format!("{DROPDOWN_STYLE}display:none;"));
-            }
-        });
-    }
-    add_section.append_child(&dropdown.clone());
-
-    // Populate dropdown with available components (reactive).
-    let cmd_for_dropdown = cmd.clone();
-    rinch::core::for_each_dom_typed(
-        __scope,
-        &dropdown,
-        move || ui.available_components.get(),
-        |name| name.clone(),
-        move |comp_name, scope| {
-            let item = scope.create_element("div");
-            item.set_attribute("style", DROPDOWN_ITEM_STYLE);
-            item.append_child(&scope.create_text(&comp_name));
-
-            let name_for_click = comp_name.clone();
-            let cmd = cmd_for_dropdown.clone();
-            let hid = scope.register_handler(move || {
+    rsx! {
+        div {
+            style: {move || if hovered.get() { DROPDOWN_ITEM_HOVER } else { DROPDOWN_ITEM_STYLE }},
+            onclick: move || {
+                eprintln!("\n\n!!! ADD_COMPONENT entity_id={entity_id} component={} !!!\n", name_for_click);
                 let _ = cmd.0.send(EditorCommand::AddComponent {
-                    entity_id: eid,
+                    entity_id,
                     component_name: name_for_click.clone(),
                 });
                 dropdown_open.set(false);
-            });
-            item.set_attribute("data-rid", &hid.to_string());
-
-            // Hover highlight.
-            let item_for_enter = item.clone();
-            let enter_hid = scope.register_handler(move || {
-                item_for_enter.set_attribute("style", DROPDOWN_ITEM_HOVER);
-            });
-            item.set_attribute("data-onmouseenter", &enter_hid.to_string());
-
-            let item_for_leave = item.clone();
-            let leave_hid = scope.register_handler(move || {
-                item_for_leave.set_attribute("style", DROPDOWN_ITEM_STYLE);
-            });
-            item.set_attribute("data-onmouseleave", &leave_hid.to_string());
-
-            item
-        },
-    );
-
-    content.append_child(&add_section);
-    container.append_child(&content);
-
-    container
+            },
+            onmouseenter: move || hovered.set(true),
+            onmouseleave: move || hovered.set(false),
+            {name_display}
+        }
+    }
 }
 
 // ── Component section builder ────────────────────────────────────────────
 
 /// Build a collapsible section for a single component.
 fn build_component_section(
-    scope: &mut RenderScope,
+    __scope: &mut RenderScope,
     comp: &ComponentSnapshot,
     entity_id: uuid::Uuid,
     cmd: CommandSender,
 ) -> NodeHandle {
-    let section = scope.create_element("div");
-    section.set_attribute(
-        "style",
-        "display:flex;flex-direction:column;margin-bottom:2px;",
-    );
-
-    // Component header row.
     let collapsed = Signal::new(false);
-    let header = scope.create_element("div");
-    header.set_attribute(
-        "style",
-        "display:flex;align-items:center;padding:4px 12px;cursor:pointer;\
-         user-select:none;gap:4px;",
-    );
+    let comp_name_str = comp.name.clone();
+    let removable = comp.removable;
+    let comp_name_display = comp.name.clone();
 
-    // Collapse triangle.
-    let triangle = scope.create_element("span");
-    {
-        let tri = triangle.clone();
-        scope.create_effect(move || {
-            if collapsed.get() {
-                tri.set_attribute(
-                    "style",
-                    "font-size:8px;color:var(--rinch-color-dimmed);",
-                );
-                tri.set_text("\u{25B6}"); // right-pointing triangle
-            } else {
-                tri.set_attribute(
-                    "style",
+    // Build header.
+    let header = rsx! {
+        div {
+            style: "display:flex;align-items:center;padding:4px 12px;cursor:pointer;\
+                    user-select:none;gap:4px;",
+            onclick: move || collapsed.update(|v| *v = !*v),
+
+            // Collapse triangle.
+            span {
+                style: {|| if collapsed.get() {
+                    "font-size:8px;color:var(--rinch-color-dimmed);"
+                } else {
                     "font-size:8px;color:var(--rinch-color-dimmed);\
-                     transform:rotate(90deg);display:inline-block;",
-                );
-                tri.set_text("\u{25B6}");
+                     transform:rotate(90deg);display:inline-block;"
+                }},
+                "\u{25B6}"
             }
-        });
-    }
-    header.append_child(&triangle);
 
-    // Component name.
-    let name_span = scope.create_element("span");
-    name_span.set_attribute(
-        "style",
-        "font-size:12px;font-weight:600;color:var(--rinch-color-text);flex:1;",
-    );
-    name_span.append_child(&scope.create_text(&comp.name));
-    header.append_child(&name_span);
+            // Component name.
+            span {
+                style: "font-size:12px;font-weight:600;color:var(--rinch-color-text);flex:1;",
+                {comp_name_display}
+            }
+        }
+    };
 
-    // Toggle collapse on header click.
-    let toggle_hid = scope.register_handler(move || {
-        collapsed.update(|v| *v = !*v);
-    });
-    header.set_attribute("data-rid", &toggle_hid.to_string());
-
-    // Remove button (only for removable components).
-    if comp.removable {
-        let remove_btn = scope.create_element("span");
-        remove_btn.set_attribute("style", REMOVE_BTN_STYLE);
-        remove_btn.append_child(&scope.create_text("\u{2715}")); // ×
-
-        let comp_name = comp.name.clone();
+    // Add remove button if removable.
+    if removable {
         let cmd_clone = cmd.clone();
-        let remove_hid = scope.register_handler(move || {
-            let _ = cmd_clone.0.send(EditorCommand::RemoveComponent {
-                entity_id,
-                component_name: comp_name.clone(),
-            });
-        });
-        remove_btn.set_attribute("data-rid", &remove_hid.to_string());
+        let name_for_remove = comp_name_str.clone();
+        let remove_btn = rsx! {
+            span {
+                style: {REMOVE_BTN_STYLE},
+                onclick: move || {
+                    let _ = cmd_clone.0.send(EditorCommand::RemoveComponent {
+                        entity_id,
+                        component_name: name_for_remove.clone(),
+                    });
+                },
+                "\u{2715}"
+            }
+        };
         header.append_child(&remove_btn);
     }
 
-    section.append_child(&header);
-
-    // Fields container (hidden when collapsed).
-    let fields_container = scope.create_element("div");
-    {
-        let fc = fields_container.clone();
-        scope.create_effect(move || {
-            if collapsed.get() {
-                fc.set_attribute("style", "display:none;");
+    // Build fields container.
+    let fields_container = rsx! {
+        div {
+            style: {|| if collapsed.get() {
+                "display:none;"
             } else {
-                fc.set_attribute("style", "display:flex;flex-direction:column;");
-            }
-        });
-    }
+                "display:flex;flex-direction:column;"
+            }},
+        }
+    };
 
     for field in &comp.fields {
-        let row = build_field_row(scope, field, entity_id, &comp.name, cmd.clone());
+        let row = build_field_row(__scope, field, entity_id, &comp_name_str, cmd.clone());
         fields_container.append_child(&row);
     }
 
+    // Assemble section.
+    let section = rsx! {
+        div { style: "display:flex;flex-direction:column;margin-bottom:2px;" }
+    };
+    section.append_child(&header);
     section.append_child(&fields_container);
     section
 }
@@ -313,7 +259,7 @@ fn build_component_section(
 
 /// Build a single field row with an appropriate editor for the field type.
 fn build_field_row(
-    scope: &mut RenderScope,
+    __scope: &mut RenderScope,
     field: &FieldSnapshot,
     entity_id: uuid::Uuid,
     component_name: &str,
@@ -321,50 +267,56 @@ fn build_field_row(
 ) -> NodeHandle {
     use rkf_runtime::behavior::registry::FieldType;
 
-    let row = scope.create_element("div");
-    row.set_attribute("style", FIELD_ROW_STYLE);
-
-    // Field label.
-    let label = scope.create_element("span");
-    label.set_attribute("style", FIELD_LABEL_STYLE);
-    label.append_child(&scope.create_text(&field.name));
-    row.append_child(&label);
+    let row = rsx! {
+        div { style: {FIELD_ROW_STYLE},
+            span { style: {FIELD_LABEL_STYLE}, {field.name.clone()} }
+        }
+    };
 
     match field.field_type {
         FieldType::Float => {
-            build_float_editor(scope, &row, field, entity_id, component_name, cmd);
+            build_float_editor(__scope, &row, field, entity_id, component_name, cmd);
         }
         FieldType::Int => {
-            build_int_editor(scope, &row, field, entity_id, component_name, cmd);
+            build_int_editor(__scope, &row, field, entity_id, component_name, cmd);
         }
         FieldType::Bool => {
-            build_bool_editor(scope, &row, field, entity_id, component_name, cmd);
+            build_bool_editor(__scope, &row, field, entity_id, component_name, cmd);
         }
         FieldType::Vec3 => {
-            build_vec3_editor(scope, &row, field, entity_id, component_name, cmd);
+            build_vec3_editor(__scope, &row, field, entity_id, component_name, cmd);
         }
         FieldType::String => {
-            build_string_editor(scope, &row, field, entity_id, component_name, cmd);
+            build_string_editor(__scope, &row, field, entity_id, component_name, cmd);
+        }
+        FieldType::Struct => {
+            return build_struct_editor(
+                __scope, field, entity_id, component_name, &field.name, cmd,
+            );
+        }
+        FieldType::AssetRef => {
+            build_asset_ref_editor(__scope, &row, field, entity_id, component_name, cmd);
+        }
+        FieldType::ComponentRef => {
+            build_component_ref_editor(__scope, &row, field, entity_id, component_name, cmd);
         }
         _ => {
-            // Read-only display for unsupported types.
-            let val_span = scope.create_element("span");
-            val_span.set_attribute("style", FIELD_VALUE_STYLE);
-            val_span.append_child(&scope.create_text(&field.display_value));
+            let val_span = rsx! {
+                span { style: {FIELD_VALUE_STYLE}, {field.display_value.clone()} }
+            };
             row.append_child(&val_span);
         }
     }
 
-    // Transient badge.
     if field.transient {
-        let badge = scope.create_element("span");
-        badge.set_attribute(
-            "style",
-            "font-size:9px;color:var(--rinch-color-placeholder);\
-             border:1px solid var(--rinch-color-border);border-radius:2px;\
-             padding:0 3px;flex-shrink:0;",
-        );
-        badge.append_child(&scope.create_text("rt"));
+        let badge = rsx! {
+            span {
+                style: "font-size:9px;color:var(--rinch-color-placeholder);\
+                        border:1px solid var(--rinch-color-border);border-radius:2px;\
+                        padding:0 3px;flex-shrink:0;",
+                "rt"
+            }
+        };
         row.append_child(&badge);
     }
 
@@ -374,7 +326,7 @@ fn build_field_row(
 // ── Float editor ──────────────────────────────────────────────────────────
 
 fn build_float_editor(
-    scope: &mut RenderScope,
+    __scope: &mut RenderScope,
     row: &NodeHandle,
     field: &FieldSnapshot,
     entity_id: uuid::Uuid,
@@ -384,54 +336,42 @@ fn build_float_editor(
     let current_val = field.float_value.unwrap_or(0.0);
 
     if let Some((min, max)) = field.range {
-        // Slider for ranged values.
         let signal = Signal::new(current_val);
         let comp_name = component_name.to_string();
         let field_name = field.name.clone();
 
-        let slider = Slider {
-            min: Some(min),
-            max: Some(max),
-            step: Some((max - min) / 200.0),
-            value_signal: Some(signal),
-            size: "xs".to_string(),
-            onchange: Some(ValueCallback::new(move |v: f64| {
-                signal.set(v);
-                let _ = cmd.0.send(EditorCommand::SetComponentField {
-                    entity_id,
-                    component_name: comp_name.clone(),
-                    field_name: field_name.clone(),
-                    value: rkf_runtime::behavior::game_value::GameValue::Float(v),
-                });
-            })),
-            ..Default::default()
+        let slider_container = rsx! {
+            div { style: "flex:1;min-width:60px;",
+                Slider {
+                    min: Some(min),
+                    max: Some(max),
+                    step: Some((max - min) / 200.0),
+                    value_signal: Some(signal),
+                    size: "xs",
+                    onchange: move |v: f64| {
+                        signal.set(v);
+                        let _ = cmd.0.send(EditorCommand::SetComponentField {
+                            entity_id,
+                            component_name: comp_name.clone(),
+                            field_name: field_name.clone(),
+                            value: rkf_runtime::behavior::game_value::GameValue::Float(v),
+                        });
+                    },
+                }
+            }
         };
-        let slider_container = scope.create_element("div");
-        slider_container.set_attribute("style", "flex:1;min-width:60px;");
-        let slider_node = rinch::core::untracked(|| slider.render(scope, &[]));
-        slider_container.append_child(&slider_node);
         row.append_child(&slider_container);
 
-        // Value readout.
-        let val_text = scope.create_text("");
-        {
-            let val_text = val_text.clone();
-            scope.create_effect(move || {
-                let v = signal.get();
-                val_text.set_text(&format!("{v:.2}"));
-            });
-        }
-        let val_span = scope.create_element("span");
-        val_span.set_attribute(
-            "style",
-            "font-size:10px;color:var(--rinch-color-dimmed);\
-             font-family:var(--rinch-font-family-monospace);\
-             min-width:40px;text-align:right;flex-shrink:0;",
-        );
-        val_span.append_child(&val_text);
+        let val_span = rsx! {
+            span {
+                style: "font-size:10px;color:var(--rinch-color-dimmed);\
+                        font-family:var(--rinch-font-family-monospace);\
+                        min-width:40px;text-align:right;flex-shrink:0;",
+                {|| format!("{:.2}", signal.get())}
+            }
+        };
         row.append_child(&val_span);
     } else {
-        // DragValue for unranged floats.
         let signal = Signal::new(current_val);
         let comp_name = component_name.to_string();
         let field_name = field.name.clone();
@@ -446,9 +386,11 @@ fn build_float_editor(
         })));
         dv.step = 0.01;
         dv.decimals = 3;
-        let dv_container = scope.create_element("div");
-        dv_container.set_attribute("style", "flex:1;min-width:60px;");
-        dv_container.append_child(&dv.render(scope, &[]));
+
+        let dv_container = rsx! {
+            div { style: "flex:1;min-width:60px;" }
+        };
+        dv_container.append_child(&dv.render(__scope, &[]));
         row.append_child(&dv_container);
     }
 }
@@ -456,7 +398,7 @@ fn build_float_editor(
 // ── Int editor ────────────────────────────────────────────────────────────
 
 fn build_int_editor(
-    scope: &mut RenderScope,
+    __scope: &mut RenderScope,
     row: &NodeHandle,
     field: &FieldSnapshot,
     entity_id: uuid::Uuid,
@@ -469,28 +411,27 @@ fn build_int_editor(
     let field_name = field.name.clone();
 
     if let Some((min, max)) = field.range {
-        let slider = Slider {
-            min: Some(min),
-            max: Some(max),
-            step: Some(1.0),
-            value_signal: Some(signal),
-            size: "xs".to_string(),
-            onchange: Some(ValueCallback::new(move |v: f64| {
-                let iv = v.round() as i64;
-                signal.set(iv as f64);
-                let _ = cmd.0.send(EditorCommand::SetComponentField {
-                    entity_id,
-                    component_name: comp_name.clone(),
-                    field_name: field_name.clone(),
-                    value: rkf_runtime::behavior::game_value::GameValue::Int(iv),
-                });
-            })),
-            ..Default::default()
+        let slider_container = rsx! {
+            div { style: "flex:1;min-width:60px;",
+                Slider {
+                    min: Some(min),
+                    max: Some(max),
+                    step: Some(1.0),
+                    value_signal: Some(signal),
+                    size: "xs",
+                    onchange: move |v: f64| {
+                        let iv = v.round() as i64;
+                        signal.set(iv as f64);
+                        let _ = cmd.0.send(EditorCommand::SetComponentField {
+                            entity_id,
+                            component_name: comp_name.clone(),
+                            field_name: field_name.clone(),
+                            value: rkf_runtime::behavior::game_value::GameValue::Int(iv),
+                        });
+                    },
+                }
+            }
         };
-        let slider_container = scope.create_element("div");
-        slider_container.set_attribute("style", "flex:1;min-width:60px;");
-        let slider_node = rinch::core::untracked(|| slider.render(scope, &[]));
-        slider_container.append_child(&slider_node);
         row.append_child(&slider_container);
     } else {
         let mut dv = super::components::DragValue::from_signal(signal, Some(ValueCallback::new(move |v: f64| {
@@ -504,9 +445,11 @@ fn build_int_editor(
         })));
         dv.step = 1.0;
         dv.decimals = 0;
-        let dv_container = scope.create_element("div");
-        dv_container.set_attribute("style", "flex:1;min-width:60px;");
-        dv_container.append_child(&dv.render(scope, &[]));
+
+        let dv_container = rsx! {
+            div { style: "flex:1;min-width:60px;" }
+        };
+        dv_container.append_child(&dv.render(__scope, &[]));
         row.append_child(&dv_container);
     }
 }
@@ -514,7 +457,7 @@ fn build_int_editor(
 // ── Bool editor ───────────────────────────────────────────────────────────
 
 fn build_bool_editor(
-    scope: &mut RenderScope,
+    __scope: &mut RenderScope,
     row: &NodeHandle,
     field: &FieldSnapshot,
     entity_id: uuid::Uuid,
@@ -522,73 +465,54 @@ fn build_bool_editor(
     cmd: CommandSender,
 ) {
     let current_val = field.bool_value.unwrap_or(false);
+    let checked = Signal::new(current_val);
     let comp_name = component_name.to_string();
     let field_name = field.name.clone();
 
-    let checkbox = scope.create_element("div");
-    checkbox.set_attribute(
-        "style",
-        &format!(
-            "width:16px;height:16px;border-radius:3px;cursor:pointer;\
-             border:1px solid var(--rinch-color-border);\
-             background:{};flex-shrink:0;",
-            if current_val {
-                "var(--rinch-primary-color)"
-            } else {
-                "rgba(255,255,255,0.06)"
-            }
-        ),
-    );
-
-    // Checkmark text.
-    if current_val {
-        let check = scope.create_element("span");
-        check.set_attribute(
-            "style",
-            "color:#fff;font-size:11px;display:flex;\
-             align-items:center;justify-content:center;height:100%;",
-        );
-        check.append_child(&scope.create_text("\u{2713}"));
-        checkbox.append_child(&check);
-    }
-
-    let cb_clone = checkbox.clone();
-    let toggle_hid = scope.register_handler(move || {
-        let new_val = !current_val;
-        let _ = cmd.0.send(EditorCommand::SetComponentField {
-            entity_id,
-            component_name: comp_name.clone(),
-            field_name: field_name.clone(),
-            value: rkf_runtime::behavior::game_value::GameValue::Bool(new_val),
-        });
-        // Optimistic update.
-        let bg = if new_val {
-            "var(--rinch-primary-color)"
-        } else {
-            "rgba(255,255,255,0.06)"
-        };
-        cb_clone.set_attribute(
-            "style",
-            &format!(
-                "width:16px;height:16px;border-radius:3px;cursor:pointer;\
-                 border:1px solid var(--rinch-color-border);\
-                 background:{bg};flex-shrink:0;"
-            ),
-        );
-    });
-    checkbox.set_attribute("data-rid", &toggle_hid.to_string());
-
-    // Spacer to push checkbox to the right.
-    let spacer = scope.create_element("div");
-    spacer.set_attribute("style", "flex:1;");
+    let spacer = rsx! { div { style: "flex:1;" } };
     row.append_child(&spacer);
+
+    let checkbox = rsx! {
+        div {
+            style: {|| {
+                let bg = if checked.get() {
+                    "var(--rinch-primary-color)"
+                } else {
+                    "rgba(255,255,255,0.06)"
+                };
+                format!(
+                    "width:16px;height:16px;border-radius:3px;cursor:pointer;\
+                     border:1px solid var(--rinch-color-border);\
+                     background:{bg};flex-shrink:0;"
+                )
+            }},
+            onclick: move || {
+                let new_val = !checked.get();
+                checked.set(new_val);
+                let _ = cmd.0.send(EditorCommand::SetComponentField {
+                    entity_id,
+                    component_name: comp_name.clone(),
+                    field_name: field_name.clone(),
+                    value: rkf_runtime::behavior::game_value::GameValue::Bool(new_val),
+                });
+            },
+
+            if checked.get() {
+                span {
+                    style: "color:#fff;font-size:11px;display:flex;\
+                            align-items:center;justify-content:center;height:100%;",
+                    "\u{2713}"
+                }
+            }
+        }
+    };
     row.append_child(&checkbox);
 }
 
 // ── Vec3 editor ──────────────────────────────────────────────────────────
 
 fn build_vec3_editor(
-    scope: &mut RenderScope,
+    __scope: &mut RenderScope,
     row: &NodeHandle,
     field: &FieldSnapshot,
     entity_id: uuid::Uuid,
@@ -629,16 +553,17 @@ fn build_vec3_editor(
         suffix: String::new(),
     };
 
-    let editor_container = scope.create_element("div");
-    editor_container.set_attribute("style", "flex:1;");
-    editor_container.append_child(&editor.render(scope, &[]));
+    let editor_container = rsx! {
+        div { style: "flex:1;" }
+    };
+    editor_container.append_child(&editor.render(__scope, &[]));
     row.append_child(&editor_container);
 }
 
 // ── String editor ────────────────────────────────────────────────────────
 
 fn build_string_editor(
-    scope: &mut RenderScope,
+    __scope: &mut RenderScope,
     row: &NodeHandle,
     field: &FieldSnapshot,
     entity_id: uuid::Uuid,
@@ -653,25 +578,212 @@ fn build_string_editor(
     let comp_name = component_name.to_string();
     let field_name = field.name.clone();
 
-    let input = scope.create_element("input");
-    input.set_attribute("type", "text");
-    input.set_attribute("value", &current_val);
-    input.set_attribute(
-        "style",
-        "flex:1;background:rgba(255,255,255,0.06);border:1px solid var(--rinch-color-border);\
-         border-radius:3px;padding:1px 4px;font-size:11px;color:var(--rinch-color-text);\
-         outline:none;min-width:40px;height:18px;font-family:var(--rinch-font-family-monospace);",
-    );
-
-    let input_hid = scope.register_input_handler(move |text: String| {
-        let _ = cmd.0.send(EditorCommand::SetComponentField {
-            entity_id,
-            component_name: comp_name.clone(),
-            field_name: field_name.clone(),
-            value: rkf_runtime::behavior::game_value::GameValue::String(text),
-        });
-    });
-    input.set_attribute("data-oninput", &input_hid.to_string());
-
+    let input = rsx! {
+        input {
+            r#type: "text",
+            value: {current_val.clone()},
+            style: "flex:1;background:rgba(255,255,255,0.06);border:1px solid var(--rinch-color-border);\
+                    border-radius:3px;padding:1px 4px;font-size:11px;color:var(--rinch-color-text);\
+                    outline:none;min-width:40px;height:18px;font-family:var(--rinch-font-family-monospace);",
+            oninput: move |text: String| {
+                let _ = cmd.0.send(EditorCommand::SetComponentField {
+                    entity_id,
+                    component_name: comp_name.clone(),
+                    field_name: field_name.clone(),
+                    value: rkf_runtime::behavior::game_value::GameValue::String(text),
+                });
+            },
+        }
+    };
     row.append_child(&input);
+}
+
+// ── Struct editor ────────────────────────────────────────────────────────
+
+const STRUCT_HEADER_STYLE: &str = "display:flex;align-items:center;padding:2px 12px;\
+    cursor:pointer;user-select:none;gap:4px;";
+
+/// Build a collapsible struct editor that recursively renders sub-fields.
+/// Each sub-field sends dot-notated field names in `SetComponentField`.
+fn build_struct_editor(
+    __scope: &mut RenderScope,
+    field: &FieldSnapshot,
+    entity_id: uuid::Uuid,
+    component_name: &str,
+    field_path: &str,
+    cmd: CommandSender,
+) -> NodeHandle {
+    let collapsed = Signal::new(false);
+    let field_display = field.name.clone();
+
+    let section = rsx! {
+        div { style: "display:flex;flex-direction:column;margin-left:8px;",
+            // Collapsible header.
+            div {
+                style: {STRUCT_HEADER_STYLE},
+                onclick: move || collapsed.update(|v| *v = !*v),
+
+                span {
+                    style: {|| if collapsed.get() {
+                        "font-size:8px;color:var(--rinch-color-dimmed);"
+                    } else {
+                        "font-size:8px;color:var(--rinch-color-dimmed);\
+                         transform:rotate(90deg);display:inline-block;"
+                    }},
+                    "\u{25B6}"
+                }
+
+                span {
+                    style: "font-size:11px;color:var(--rinch-color-dimmed);flex:1;",
+                    {field_display}
+                }
+            }
+        }
+    };
+
+    // Sub-fields container (hidden when collapsed).
+    let fields_container = rsx! {
+        div {
+            style: {|| if collapsed.get() {
+                "display:none;"
+            } else {
+                "display:flex;flex-direction:column;margin-left:12px;\
+                 border-left:1px solid var(--rinch-color-border);padding-left:4px;"
+            }},
+        }
+    };
+
+    if let Some(sub_fields) = &field.sub_fields {
+        for sub in sub_fields {
+            let dotted_path = format!("{}.{}", field_path, sub.name);
+
+            if sub.field_type == rkf_runtime::behavior::registry::FieldType::Struct {
+                // Recurse for nested structs.
+                let nested = build_struct_editor(
+                    __scope,
+                    sub,
+                    entity_id,
+                    component_name,
+                    &dotted_path,
+                    cmd.clone(),
+                );
+                fields_container.append_child(&nested);
+            } else {
+                // Build a sub-field row with the dot-notated path.
+                let mut sub_with_dotted_name = sub.clone();
+                sub_with_dotted_name.name = sub.name.clone();
+                let row = build_field_row_with_path(
+                    __scope,
+                    &sub_with_dotted_name,
+                    entity_id,
+                    component_name,
+                    &dotted_path,
+                    cmd.clone(),
+                );
+                fields_container.append_child(&row);
+            }
+        }
+    }
+
+    section.append_child(&fields_container);
+    section
+}
+
+/// Build a field row that sends a specific dot-notated path as the field name.
+fn build_field_row_with_path(
+    __scope: &mut RenderScope,
+    field: &FieldSnapshot,
+    entity_id: uuid::Uuid,
+    component_name: &str,
+    dotted_path: &str,
+    cmd: CommandSender,
+) -> NodeHandle {
+    use rkf_runtime::behavior::registry::FieldType;
+
+    let row = rsx! {
+        div { style: {FIELD_ROW_STYLE},
+            span { style: {FIELD_LABEL_STYLE}, {field.name.clone()} }
+        }
+    };
+
+    // Create a temporary FieldSnapshot with the dotted path as the name,
+    // so the editor callbacks send the correct path.
+    let mut path_field = field.clone();
+    path_field.name = dotted_path.to_string();
+
+    match field.field_type {
+        FieldType::Float => {
+            build_float_editor(__scope, &row, &path_field, entity_id, component_name, cmd);
+        }
+        FieldType::Int => {
+            build_int_editor(__scope, &row, &path_field, entity_id, component_name, cmd);
+        }
+        FieldType::Bool => {
+            build_bool_editor(__scope, &row, &path_field, entity_id, component_name, cmd);
+        }
+        FieldType::Vec3 => {
+            build_vec3_editor(__scope, &row, &path_field, entity_id, component_name, cmd);
+        }
+        FieldType::String | FieldType::AssetRef | FieldType::ComponentRef => {
+            build_string_editor(__scope, &row, &path_field, entity_id, component_name, cmd);
+        }
+        _ => {
+            let val_span = rsx! {
+                span { style: {FIELD_VALUE_STYLE}, {field.display_value.clone()} }
+            };
+            row.append_child(&val_span);
+        }
+    }
+
+    row
+}
+
+// ── Asset ref editor ─────────────────────────────────────────────────────
+
+const BADGE_STYLE: &str = "font-size:9px;color:var(--rinch-color-placeholder);\
+    border:1px solid var(--rinch-color-border);border-radius:2px;\
+    padding:0 3px;flex-shrink:0;";
+
+fn build_asset_ref_editor(
+    __scope: &mut RenderScope,
+    row: &NodeHandle,
+    field: &FieldSnapshot,
+    entity_id: uuid::Uuid,
+    component_name: &str,
+    cmd: CommandSender,
+) {
+    // Reuse string editor for the path input.
+    build_string_editor(__scope, row, field, entity_id, component_name, cmd);
+
+    // Add filter badge showing allowed extension.
+    if let Some(ext) = &field.asset_filter {
+        let badge_text = format!(".{ext}");
+        let badge = rsx! {
+            span { style: {BADGE_STYLE}, {badge_text} }
+        };
+        row.append_child(&badge);
+    }
+}
+
+// ── Component ref editor ─────────────────────────────────────────────────
+
+fn build_component_ref_editor(
+    __scope: &mut RenderScope,
+    row: &NodeHandle,
+    field: &FieldSnapshot,
+    entity_id: uuid::Uuid,
+    component_name: &str,
+    cmd: CommandSender,
+) {
+    // Reuse string editor for the UUID input.
+    build_string_editor(__scope, row, field, entity_id, component_name, cmd);
+
+    // Add component type badge.
+    if let Some(comp) = &field.component_filter {
+        let badge_text = comp.clone();
+        let badge = rsx! {
+            span { style: {BADGE_STYLE}, {badge_text} }
+        };
+        row.append_child(&badge);
+    }
 }

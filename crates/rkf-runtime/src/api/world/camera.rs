@@ -12,6 +12,8 @@ impl World {
     // ── Camera entities ─────────────────────────────────────────────────
 
     /// Spawn a camera entity (ECS-only, no SDF geometry).
+    ///
+    /// `environment_profile` is an optional path to a `.rkenv` file.
     pub fn spawn_camera(
         &mut self,
         label: impl Into<String>,
@@ -19,6 +21,7 @@ impl World {
         yaw: f32,
         pitch: f32,
         fov_degrees: f32,
+        environment_profile: Option<&str>,
     ) -> Uuid {
         let label = label.into();
         let uuid = self.finalize_ecs_spawn(label.clone());
@@ -28,6 +31,7 @@ impl World {
             label,
             yaw,
             pitch,
+            environment_profile: environment_profile.unwrap_or("").to_string(),
             ..Default::default()
         };
         let record = self.entities.get(&uuid).unwrap();

@@ -253,6 +253,185 @@ impl EnvironmentState {
     pub fn deserialize_from_ron(s: &str) -> Result<Self, String> {
         ron::from_str(s).map_err(|e| e.to_string())
     }
+
+    /// Create an `EnvironmentState` from a runtime `EnvironmentProfile`.
+    ///
+    /// Maps the runtime profile's settings to the editor's richer data model.
+    /// Fields not present in the profile (e.g. clouds, most post-process)
+    /// use editor defaults.
+    pub fn from_profile(profile: &rkf_runtime::environment::EnvironmentProfile) -> Self {
+        let mut state = Self::default();
+
+        // Fog
+        state.fog.enabled = profile.fog.enabled;
+        state.fog.density = profile.fog.density;
+        state.fog.color = Vec3::new(
+            profile.fog.color[0],
+            profile.fog.color[1],
+            profile.fog.color[2],
+        );
+        state.fog.start_distance = profile.fog.start_distance;
+        state.fog.end_distance = profile.fog.end_distance;
+        state.fog.height_falloff = profile.fog.height_falloff;
+
+        // Atmosphere (from sky mode if Atmosphere variant)
+        if let rkf_runtime::environment::SkyMode::Atmosphere {
+            sun_direction,
+            sun_intensity,
+            rayleigh_coefficient,
+            mie_coefficient,
+        } = &profile.sky
+        {
+            state.atmosphere.enabled = true;
+            state.atmosphere.sun_direction =
+                Vec3::new(sun_direction[0], sun_direction[1], sun_direction[2]);
+            state.atmosphere.sun_intensity = *sun_intensity;
+            state.atmosphere.rayleigh_scale = *rayleigh_coefficient;
+            state.atmosphere.mie_scale = *mie_coefficient;
+        }
+
+        // Post-process hints
+        state.post_process.exposure = profile.post_hints.exposure_compensation;
+        state.post_process.bloom_intensity = profile.post_hints.bloom_intensity;
+
+        state.mark_dirty();
+        state
+    }
+
+    /// Create an `EnvironmentState` from an `EnvironmentSettings` ECS component.
+    ///
+    /// This is the canonical conversion from the single source of truth (ECS)
+    /// to the renderer-facing format.
+    pub fn from_settings(s: &rkf_runtime::environment::EnvironmentSettings) -> Self {
+        Self {
+            fog: FogSettings {
+                enabled: s.fog.enabled,
+                density: s.fog.density,
+                color: Vec3::new(s.fog.color[0], s.fog.color[1], s.fog.color[2]),
+                start_distance: s.fog.start_distance,
+                end_distance: s.fog.end_distance,
+                height_falloff: s.fog.height_falloff,
+                ambient_dust_density: s.fog.ambient_dust_density,
+                dust_asymmetry: s.fog.dust_asymmetry,
+            },
+            atmosphere: AtmosphereSettings {
+                enabled: s.atmosphere.enabled,
+                rayleigh_scale: s.atmosphere.rayleigh_scale,
+                mie_scale: s.atmosphere.mie_scale,
+                sun_direction: Vec3::new(
+                    s.atmosphere.sun_direction[0],
+                    s.atmosphere.sun_direction[1],
+                    s.atmosphere.sun_direction[2],
+                ),
+                sun_intensity: s.atmosphere.sun_intensity,
+                sun_color: Vec3::new(
+                    s.atmosphere.sun_color[0],
+                    s.atmosphere.sun_color[1],
+                    s.atmosphere.sun_color[2],
+                ),
+            },
+            clouds: CloudSettings {
+                enabled: s.clouds.enabled,
+                coverage: s.clouds.coverage,
+                density: s.clouds.density,
+                altitude: s.clouds.altitude,
+                thickness: s.clouds.thickness,
+                wind_direction: Vec3::new(
+                    s.clouds.wind_direction[0],
+                    s.clouds.wind_direction[1],
+                    s.clouds.wind_direction[2],
+                ),
+                wind_speed: s.clouds.wind_speed,
+            },
+            post_process: PostProcessSettings {
+                bloom_enabled: s.post_process.bloom_enabled,
+                bloom_intensity: s.post_process.bloom_intensity,
+                bloom_threshold: s.post_process.bloom_threshold,
+                exposure: s.post_process.exposure,
+                contrast: s.post_process.contrast,
+                saturation: s.post_process.saturation,
+                vignette_intensity: s.post_process.vignette_intensity,
+                tone_map_mode: s.post_process.tone_map_mode,
+                sharpen_strength: s.post_process.sharpen_strength,
+                dof_enabled: s.post_process.dof_enabled,
+                dof_focus_distance: s.post_process.dof_focus_distance,
+                dof_focus_range: s.post_process.dof_focus_range,
+                dof_max_coc: s.post_process.dof_max_coc,
+                motion_blur_intensity: s.post_process.motion_blur_intensity,
+                god_rays_intensity: s.post_process.god_rays_intensity,
+                grain_intensity: s.post_process.grain_intensity,
+                chromatic_aberration: s.post_process.chromatic_aberration,
+            },
+            dirty: true,
+        }
+    }
+
+    /// Convert this `EnvironmentState` to an `EnvironmentSettings` ECS component.
+    ///
+    /// Used to sync editor state back to the ECS singleton.
+    pub fn to_settings(&self) -> rkf_runtime::environment::EnvironmentSettings {
+        rkf_runtime::environment::EnvironmentSettings {
+            fog: rkf_runtime::environment::FogSettings {
+                enabled: self.fog.enabled,
+                density: self.fog.density,
+                color: [self.fog.color.x, self.fog.color.y, self.fog.color.z],
+                start_distance: self.fog.start_distance,
+                end_distance: self.fog.end_distance,
+                height_falloff: self.fog.height_falloff,
+                ambient_dust_density: self.fog.ambient_dust_density,
+                dust_asymmetry: self.fog.dust_asymmetry,
+            },
+            atmosphere: rkf_runtime::environment::AtmosphereSettings {
+                enabled: self.atmosphere.enabled,
+                rayleigh_scale: self.atmosphere.rayleigh_scale,
+                mie_scale: self.atmosphere.mie_scale,
+                sun_direction: [
+                    self.atmosphere.sun_direction.x,
+                    self.atmosphere.sun_direction.y,
+                    self.atmosphere.sun_direction.z,
+                ],
+                sun_intensity: self.atmosphere.sun_intensity,
+                sun_color: [
+                    self.atmosphere.sun_color.x,
+                    self.atmosphere.sun_color.y,
+                    self.atmosphere.sun_color.z,
+                ],
+            },
+            clouds: rkf_runtime::environment::CloudSettings {
+                enabled: self.clouds.enabled,
+                coverage: self.clouds.coverage,
+                density: self.clouds.density,
+                altitude: self.clouds.altitude,
+                thickness: self.clouds.thickness,
+                wind_direction: [
+                    self.clouds.wind_direction.x,
+                    self.clouds.wind_direction.y,
+                    self.clouds.wind_direction.z,
+                ],
+                wind_speed: self.clouds.wind_speed,
+            },
+            post_process: rkf_runtime::environment::PostProcessSettings {
+                bloom_enabled: self.post_process.bloom_enabled,
+                bloom_intensity: self.post_process.bloom_intensity,
+                bloom_threshold: self.post_process.bloom_threshold,
+                exposure: self.post_process.exposure,
+                contrast: self.post_process.contrast,
+                saturation: self.post_process.saturation,
+                vignette_intensity: self.post_process.vignette_intensity,
+                tone_map_mode: self.post_process.tone_map_mode,
+                sharpen_strength: self.post_process.sharpen_strength,
+                dof_enabled: self.post_process.dof_enabled,
+                dof_focus_distance: self.post_process.dof_focus_distance,
+                dof_focus_range: self.post_process.dof_focus_range,
+                dof_max_coc: self.post_process.dof_max_coc,
+                motion_blur_intensity: self.post_process.motion_blur_intensity,
+                god_rays_intensity: self.post_process.god_rays_intensity,
+                grain_intensity: self.post_process.grain_intensity,
+                chromatic_aberration: self.post_process.chromatic_aberration,
+            },
+        }
+    }
+
 }
 
 #[cfg(test)]

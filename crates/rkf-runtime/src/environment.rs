@@ -2,9 +2,11 @@
 //!
 //! An [`EnvironmentProfile`] captures sky rendering mode, fog, ambient lighting,
 //! volumetric hints, and post-processing hints. Profiles can be blended with
-//! [`lerp_profiles`], augmented with per-property [`EnvironmentOverrides`] via
-//! [`apply_overrides`], and resolved through the full chain with
-//! [`resolve_environment`]. Serialisation uses RON (`.rkenv` files).
+//! [`lerp_profiles`]. Serialisation uses RON (`.rkenv` files).
+//!
+//! [`EnvironmentSettings`] is the full ECS component that lives on the scene
+//! environment singleton entity — the single source of truth for all environment
+//! parameters. [`SceneEnvironment`] is the marker component that tags that entity.
 
 use serde::{Deserialize, Serialize};
 
@@ -188,27 +190,6 @@ impl Default for EnvironmentProfile {
     }
 }
 
-// ─── Overrides ────────────────────────────────────────────────────────────────
-
-/// Per-property overrides that can be layered on top of a resolved profile.
-///
-/// Only `Some` fields are applied; `None` fields leave the base value unchanged.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct EnvironmentOverrides {
-    /// Override for [`FogConfig::density`].
-    pub fog_density: Option<f32>,
-    /// Override for [`FogConfig::color`].
-    pub fog_color: Option<[f32; 3]>,
-    /// Override for [`AmbientConfig::intensity`].
-    pub ambient_intensity: Option<f32>,
-    /// Override for [`PostProcessHints::exposure_compensation`].
-    pub exposure_compensation: Option<f32>,
-    /// Override for [`PostProcessHints::bloom_intensity`].
-    pub bloom_intensity: Option<f32>,
-    /// Override for [`VolumetricHints::scattering_coefficient`].
-    pub volumetric_scattering: Option<f32>,
-}
-
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 #[inline]
@@ -351,53 +332,6 @@ pub fn lerp_profiles(a: &EnvironmentProfile, b: &EnvironmentProfile, t: f32) -> 
     EnvironmentProfile { name, sky, fog, ambient, volumetric, post_hints }
 }
 
-/// Apply per-property overrides to a profile, returning a new profile.
-///
-/// Only fields that are `Some(...)` in `overrides` are modified; the rest are
-/// copied unchanged from `base`.
-pub fn apply_overrides(
-    base: &EnvironmentProfile,
-    overrides: &EnvironmentOverrides,
-) -> EnvironmentProfile {
-    let mut out = base.clone();
-    if let Some(d) = overrides.fog_density {
-        out.fog.density = d;
-    }
-    if let Some(c) = overrides.fog_color {
-        out.fog.color = c;
-    }
-    if let Some(i) = overrides.ambient_intensity {
-        out.ambient.intensity = i;
-    }
-    if let Some(e) = overrides.exposure_compensation {
-        out.post_hints.exposure_compensation = e;
-    }
-    if let Some(bl) = overrides.bloom_intensity {
-        out.post_hints.bloom_intensity = bl;
-    }
-    if let Some(s) = overrides.volumetric_scattering {
-        out.volumetric.scattering_coefficient = s;
-    }
-    out
-}
-
-/// Resolve the final environment: `base` → blend toward `target` at `blend_t` →
-/// apply `overrides`.
-///
-/// If `target` is `None`, `blend_t` is ignored and `base` is used directly.
-pub fn resolve_environment(
-    base: &EnvironmentProfile,
-    target: Option<&EnvironmentProfile>,
-    blend_t: f32,
-    overrides: &EnvironmentOverrides,
-) -> EnvironmentProfile {
-    let blended = match target {
-        Some(tgt) => lerp_profiles(base, tgt, blend_t),
-        None => base.clone(),
-    };
-    apply_overrides(&blended, overrides)
-}
-
 /// Load an environment profile from a `.rkenv` file (RON format).
 pub fn load_environment(path: &str) -> anyhow::Result<EnvironmentProfile> {
     let text = std::fs::read_to_string(path)
@@ -415,6 +349,231 @@ pub fn save_environment(path: &str, env: &EnvironmentProfile) -> anyhow::Result<
         .map_err(|e| anyhow::anyhow!("failed to write {}: {}", path, e))?;
     Ok(())
 }
+
+// ─── ECS environment component ───────────────────────────────────────────────
+
+/// Fog settings for `EnvironmentSettings`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FogSettings {
+    pub enabled: bool,
+    pub density: f32,
+    pub color: [f32; 3],
+    pub start_distance: f32,
+    pub end_distance: f32,
+    pub height_falloff: f32,
+    pub ambient_dust_density: f32,
+    pub dust_asymmetry: f32,
+}
+
+impl Default for FogSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            density: 0.02,
+            color: [0.7, 0.75, 0.8],
+            start_distance: 10.0,
+            end_distance: 500.0,
+            height_falloff: 0.1,
+            ambient_dust_density: 0.005,
+            dust_asymmetry: 0.3,
+        }
+    }
+}
+
+/// Atmosphere settings for `EnvironmentSettings`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AtmosphereSettings {
+    pub enabled: bool,
+    pub rayleigh_scale: f32,
+    pub mie_scale: f32,
+    pub sun_direction: [f32; 3],
+    pub sun_intensity: f32,
+    pub sun_color: [f32; 3],
+}
+
+impl Default for AtmosphereSettings {
+    fn default() -> Self {
+        let dir = {
+            let v = [0.5f32, 1.0, 0.3];
+            let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+            [v[0] / len, v[1] / len, v[2] / len]
+        };
+        Self {
+            enabled: true,
+            rayleigh_scale: 1.0,
+            mie_scale: 1.0,
+            sun_direction: dir,
+            sun_intensity: 3.0,
+            sun_color: [1.0, 0.95, 0.85],
+        }
+    }
+}
+
+/// Cloud layer settings for `EnvironmentSettings`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CloudSettings {
+    pub enabled: bool,
+    pub coverage: f32,
+    pub density: f32,
+    pub altitude: f32,
+    pub thickness: f32,
+    pub wind_direction: [f32; 3],
+    pub wind_speed: f32,
+}
+
+impl Default for CloudSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            coverage: 0.5,
+            density: 1.0,
+            altitude: 200.0,
+            thickness: 1000.0,
+            wind_direction: [1.0, 0.0, 0.0],
+            wind_speed: 5.0,
+        }
+    }
+}
+
+/// Post-processing settings for `EnvironmentSettings`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PostProcessSettings {
+    pub bloom_enabled: bool,
+    pub bloom_intensity: f32,
+    pub bloom_threshold: f32,
+    pub exposure: f32,
+    pub contrast: f32,
+    pub saturation: f32,
+    pub vignette_intensity: f32,
+    pub tone_map_mode: u32,
+    pub sharpen_strength: f32,
+    pub dof_enabled: bool,
+    pub dof_focus_distance: f32,
+    pub dof_focus_range: f32,
+    pub dof_max_coc: f32,
+    pub motion_blur_intensity: f32,
+    pub god_rays_intensity: f32,
+    pub grain_intensity: f32,
+    pub chromatic_aberration: f32,
+}
+
+impl Default for PostProcessSettings {
+    fn default() -> Self {
+        Self {
+            bloom_enabled: true,
+            bloom_intensity: 0.3,
+            bloom_threshold: 1.0,
+            exposure: 1.0,
+            contrast: 1.0,
+            saturation: 1.0,
+            vignette_intensity: 0.0,
+            tone_map_mode: 0,
+            sharpen_strength: 0.5,
+            dof_enabled: false,
+            dof_focus_distance: 2.0,
+            dof_focus_range: 3.0,
+            dof_max_coc: 8.0,
+            motion_blur_intensity: 1.0,
+            god_rays_intensity: 0.5,
+            grain_intensity: 0.0,
+            chromatic_aberration: 0.0,
+        }
+    }
+}
+
+/// Full environment settings — the ECS single source of truth.
+///
+/// Lives on a singleton entity tagged with [`SceneEnvironment`]. Matches the
+/// renderer's full parameter set. The editor environment panel and linked camera
+/// resolution both read and write this component.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct EnvironmentSettings {
+    pub fog: FogSettings,
+    pub atmosphere: AtmosphereSettings,
+    pub clouds: CloudSettings,
+    pub post_process: PostProcessSettings,
+}
+
+impl EnvironmentSettings {
+    /// Create settings from an `EnvironmentProfile` (.rkenv file).
+    ///
+    /// Maps profile fields to the full settings struct. Fields not present
+    /// in the profile (clouds, most post-process) use defaults.
+    pub fn from_profile(profile: &EnvironmentProfile) -> Self {
+        let mut s = Self::default();
+
+        // Fog
+        s.fog.enabled = profile.fog.enabled;
+        s.fog.density = profile.fog.density;
+        s.fog.color = profile.fog.color;
+        s.fog.start_distance = profile.fog.start_distance;
+        s.fog.end_distance = profile.fog.end_distance;
+        s.fog.height_falloff = profile.fog.height_falloff;
+
+        // Atmosphere (from SkyMode if Atmosphere variant)
+        if let SkyMode::Atmosphere {
+            sun_direction,
+            sun_intensity,
+            rayleigh_coefficient,
+            mie_coefficient,
+        } = &profile.sky
+        {
+            s.atmosphere.enabled = true;
+            s.atmosphere.sun_direction = *sun_direction;
+            s.atmosphere.sun_intensity = *sun_intensity;
+            s.atmosphere.rayleigh_scale = *rayleigh_coefficient;
+            s.atmosphere.mie_scale = *mie_coefficient;
+        }
+
+        // Post-process hints
+        s.post_process.exposure = profile.post_hints.exposure_compensation;
+        s.post_process.bloom_intensity = profile.post_hints.bloom_intensity;
+        s.post_process.saturation = profile.post_hints.saturation;
+
+        s
+    }
+
+    /// Convert to an `EnvironmentProfile` for .rkenv export.
+    pub fn to_profile(&self, name: &str) -> EnvironmentProfile {
+        let sky = if self.atmosphere.enabled {
+            SkyMode::Atmosphere {
+                sun_direction: self.atmosphere.sun_direction,
+                sun_intensity: self.atmosphere.sun_intensity,
+                rayleigh_coefficient: self.atmosphere.rayleigh_scale,
+                mie_coefficient: self.atmosphere.mie_scale,
+            }
+        } else {
+            SkyMode::default()
+        };
+        EnvironmentProfile {
+            name: name.to_string(),
+            sky,
+            fog: FogConfig {
+                enabled: self.fog.enabled,
+                color: self.fog.color,
+                density: self.fog.density,
+                start_distance: self.fog.start_distance,
+                end_distance: self.fog.end_distance,
+                height_falloff: self.fog.height_falloff,
+            },
+            ambient: AmbientConfig::default(),
+            volumetric: VolumetricHints::default(),
+            post_hints: PostProcessHints {
+                exposure_compensation: self.post_process.exposure,
+                bloom_intensity: self.post_process.bloom_intensity,
+                color_temperature: 6500.0,
+                saturation: self.post_process.saturation,
+            },
+        }
+    }
+}
+
+/// Marker component for the singleton scene environment entity.
+///
+/// Exactly one entity in the scene should have this. The environment panel
+/// reads/writes the `EnvironmentSettings` component on this entity.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SceneEnvironment;
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
@@ -523,58 +682,7 @@ mod tests {
         assert!(color_approx_eq(r.fog.color, expected));
     }
 
-    // 6. Override replaces fog density.
-    #[test]
-    fn override_fog_density() {
-        let base = EnvironmentProfile::default();
-        let overrides = EnvironmentOverrides {
-            fog_density: Some(0.99),
-            ..Default::default()
-        };
-        let result = apply_overrides(&base, &overrides);
-        assert!(approx_eq(result.fog.density, 0.99));
-        // Other fields unchanged.
-        assert_eq!(result.fog.color, base.fog.color);
-        assert!(approx_eq(result.ambient.intensity, base.ambient.intensity));
-    }
-
-    // 7. None overrides preserve base values.
-    #[test]
-    fn override_none_preserves() {
-        let base = EnvironmentProfile::default();
-        let overrides = EnvironmentOverrides::default(); // all None
-        let result = apply_overrides(&base, &overrides);
-        assert_eq!(result, base);
-    }
-
-    // 8. resolve with no target and no overrides returns base unchanged.
-    #[test]
-    fn resolve_no_target_no_overrides() {
-        let base = EnvironmentProfile::default();
-        let result = resolve_environment(&base, None, 0.7, &EnvironmentOverrides::default());
-        assert_eq!(result, base);
-    }
-
-    // 9. resolve with blend target and overrides applies full chain.
-    #[test]
-    fn resolve_with_blend_and_overrides() {
-        let a = EnvironmentProfile::default();
-        let b = profile_b();
-        let overrides = EnvironmentOverrides {
-            ambient_intensity: Some(0.42),
-            exposure_compensation: Some(2.0),
-            ..Default::default()
-        };
-        let result = resolve_environment(&a, Some(&b), 0.5, &overrides);
-        // Override wins over blend.
-        assert!(approx_eq(result.ambient.intensity, 0.42));
-        assert!(approx_eq(result.post_hints.exposure_compensation, 2.0));
-        // Non-overridden value should be blended.
-        let expected_bloom = (0.5 + 1.5) * 0.5;
-        assert!(approx_eq(result.post_hints.bloom_intensity, expected_bloom));
-    }
-
-    // 10. save and load roundtrip via temp file.
+    // 6. save and load roundtrip via temp file.
     #[test]
     fn save_and_load_roundtrip() {
         let original = profile_b();
@@ -586,5 +694,98 @@ mod tests {
         assert_eq!(loaded, original);
 
         let _ = std::fs::remove_file(tmp);
+    }
+
+    // ── EnvironmentSettings tests ──────────────────────────────────
+
+    #[test]
+    fn env_settings_defaults() {
+        let s = EnvironmentSettings::default();
+        assert!(!s.fog.enabled);
+        assert!(approx_eq(s.fog.density, 0.02));
+        assert!(s.atmosphere.enabled);
+        assert!(approx_eq(s.atmosphere.sun_intensity, 3.0));
+        assert!(!s.clouds.enabled);
+        assert!(approx_eq(s.clouds.coverage, 0.5));
+        assert!(s.post_process.bloom_enabled);
+        assert!(approx_eq(s.post_process.exposure, 1.0));
+    }
+
+    #[test]
+    fn env_settings_from_profile_fog() {
+        let mut p = EnvironmentProfile::default();
+        p.fog.enabled = true;
+        p.fog.density = 0.07;
+        p.fog.color = [0.1, 0.2, 0.3];
+        let s = EnvironmentSettings::from_profile(&p);
+        assert!(s.fog.enabled);
+        assert!(approx_eq(s.fog.density, 0.07));
+        assert!(color_approx_eq(s.fog.color, [0.1, 0.2, 0.3]));
+    }
+
+    #[test]
+    fn env_settings_from_profile_atmosphere() {
+        let p = EnvironmentProfile {
+            sky: SkyMode::Atmosphere {
+                sun_direction: [0.0, 1.0, 0.0],
+                sun_intensity: 5.0,
+                rayleigh_coefficient: 2.0,
+                mie_coefficient: 0.5,
+            },
+            ..Default::default()
+        };
+        let s = EnvironmentSettings::from_profile(&p);
+        assert!(s.atmosphere.enabled);
+        assert!(approx_eq(s.atmosphere.sun_intensity, 5.0));
+        assert!(approx_eq(s.atmosphere.rayleigh_scale, 2.0));
+        assert!(approx_eq(s.atmosphere.mie_scale, 0.5));
+    }
+
+    #[test]
+    fn env_settings_from_profile_non_atmosphere_sky() {
+        // Gradient sky should leave atmosphere at defaults (enabled=true from default)
+        let p = EnvironmentProfile::default(); // Gradient sky
+        let s = EnvironmentSettings::from_profile(&p);
+        // Atmosphere fields stay at defaults since sky isn't Atmosphere variant
+        assert!(s.atmosphere.enabled); // default is true
+        assert!(approx_eq(s.atmosphere.rayleigh_scale, 1.0));
+    }
+
+    #[test]
+    fn env_settings_to_profile_roundtrip() {
+        let mut s = EnvironmentSettings::default();
+        s.fog.enabled = true;
+        s.fog.density = 0.05;
+        s.atmosphere.sun_intensity = 4.0;
+        s.post_process.bloom_intensity = 0.8;
+
+        let p = s.to_profile("Test");
+        assert_eq!(p.name, "Test");
+        assert!(p.fog.enabled);
+        assert!(approx_eq(p.fog.density, 0.05));
+        assert!(approx_eq(p.post_hints.bloom_intensity, 0.8));
+        // Atmosphere enabled → SkyMode::Atmosphere
+        if let SkyMode::Atmosphere { sun_intensity, .. } = &p.sky {
+            assert!(approx_eq(*sun_intensity, 4.0));
+        } else {
+            panic!("expected SkyMode::Atmosphere");
+        }
+    }
+
+    #[test]
+    fn env_settings_serialize_roundtrip() {
+        let mut s = EnvironmentSettings::default();
+        s.fog.density = 0.05;
+        s.atmosphere.sun_intensity = 4.0;
+        let ron_str = ron::to_string(&s).unwrap();
+        let restored: EnvironmentSettings = ron::from_str(&ron_str).unwrap();
+        assert_eq!(s, restored);
+    }
+
+    #[test]
+    fn scene_environment_marker() {
+        let marker = SceneEnvironment;
+        let ron_str = ron::to_string(&marker).unwrap();
+        let _restored: SceneEnvironment = ron::from_str(&ron_str).unwrap();
     }
 }

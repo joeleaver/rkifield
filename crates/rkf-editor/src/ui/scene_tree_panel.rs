@@ -22,9 +22,6 @@ fn build_tree_data(
     scene_name: &str,
     scene_path: &Option<String>,
 ) -> Vec<TreeNodeData> {
-    let camera_node = TreeNodeData::new("camera", "Camera")
-        .with_icon(TablerIcon::Camera);
-
     let mut scene_children: Vec<TreeNodeData> = Vec::new();
 
     // Root objects (no parent).
@@ -55,7 +52,7 @@ fn build_tree_data(
 
     let project_node = TreeNodeData::new("project", project_name)
         .with_icon(TablerIcon::FolderOpen)
-        .with_children(vec![camera_node, scene_node]);
+        .with_children(vec![scene_node]);
 
     vec![project_node]
 }
@@ -66,8 +63,15 @@ fn build_snapshot_object_node(
     all_objects: &[crate::ui_snapshot::ObjectSummary],
 ) -> TreeNodeData {
     let value = format!("obj:{}", obj.id);
+    let icon = if obj.is_camera {
+        TablerIcon::Camera
+    } else if obj.object_type == crate::ui_snapshot::ObjectType::None {
+        TablerIcon::Point
+    } else {
+        TablerIcon::Cube
+    };
     let mut tree_node = TreeNodeData::new(value, &obj.name)
-        .with_icon(TablerIcon::Cube);
+        .with_icon(icon);
 
     for child in all_objects {
         if child.parent_id == Some(obj.id) {
@@ -83,7 +87,6 @@ fn selected_to_value(sel: &SelectedEntity) -> String {
     match sel {
         SelectedEntity::Object(id) => format!("obj:{id}"),
         SelectedEntity::Light(id) => format!("light:{id}"),
-        SelectedEntity::Camera => "camera".to_string(),
         SelectedEntity::Scene => "scene".to_string(),
         SelectedEntity::Project => "project".to_string(),
     }
@@ -97,7 +100,6 @@ fn parse_value(value: &str) -> Option<SelectedEntity> {
         id_str.parse::<u64>().ok().map(SelectedEntity::Light)
     } else {
         match value {
-            "camera" => Some(SelectedEntity::Camera),
             "scene" => Some(SelectedEntity::Scene),
             "project" => Some(SelectedEntity::Project),
             _ => None,

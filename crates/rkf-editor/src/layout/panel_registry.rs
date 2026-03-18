@@ -16,9 +16,15 @@ pub fn render_panel(scope: &mut RenderScope, panel: PanelId) -> NodeHandle {
             let c = crate::ui::scene_tree_panel::SceneTreePanel::default();
             c.render(scope, &[])
         }
+        PanelId::EditorCamera => {
+            let c = crate::ui::camera_properties::EditorCameraPanel::default();
+            c.render(scope, &[])
+        }
+        PanelId::Environment => {
+            let c = crate::ui::environment_panel::EnvironmentPanel::default();
+            c.render(scope, &[])
+        }
         PanelId::ObjectProperties => {
-            // Object properties shows environment settings when camera is selected,
-            // otherwise shows the selected object's transform/material properties.
             let c = crate::ui::right_panel::PropertiesPanel::default();
             c.render(scope, &[])
         }
@@ -38,9 +44,8 @@ pub fn render_panel(scope: &mut RenderScope, panel: PanelId) -> NodeHandle {
             // Scene view is an empty transparent placeholder — the actual
             // RenderSurface lives at the editor_ui level (absolute-positioned)
             // so it's never destroyed by reactive scope rebuilds.
-            let el = scope.create_element("div");
-            el.set_attribute("style", "flex:1;min-height:0;");
-            el.into()
+            let __scope = scope;
+            rsx! { div { style: "flex:1;min-height:0;" } }
         }
         PanelId::Systems => {
             let c = crate::ui::systems_panel::SystemsPanel::default();
@@ -61,12 +66,11 @@ pub fn render_panel(scope: &mut RenderScope, panel: PanelId) -> NodeHandle {
 }
 
 fn placeholder(scope: &mut RenderScope, panel: PanelId) -> NodeHandle {
-    let el = scope.create_element("div");
-    el.set_attribute(
-        "style",
-        "flex:1;min-height:0;padding:12px;color:var(--rinch-color-dimmed);",
-    );
-    let text = scope.create_text(&format!("{} (coming soon)", panel.display_name()));
-    el.append_child(&text);
-    el.into()
+    let __scope = scope;
+    rsx! {
+        div {
+            style: "flex:1;min-height:0;padding:12px;color:var(--rinch-color-dimmed);",
+            {format!("{} (coming soon)", panel.display_name())}
+        }
+    }
 }

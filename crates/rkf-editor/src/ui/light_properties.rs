@@ -18,12 +18,13 @@ const DRAG_LABEL_STYLE: &str =
 /// Light properties panel — shows type name, position Vec3Editor,
 /// intensity DragValue, and range DragValue.
 #[component]
-pub fn LightProperties(
-    light_id: u64,
-) -> NodeHandle {
+pub fn LightProperties() -> NodeHandle {
     let cmd = use_context::<CommandSender>();
     let ui = use_context::<UiSignals>();
-    let lid = light_id;
+    let lid = match ui.selection.get() {
+        Some(crate::editor_state::SelectedEntity::Light(id)) => id,
+        _ => return rsx! { div {} },
+    };
 
     let lights = ui.lights.get();
     let light_data = lights.iter().find(|l| l.id == lid);

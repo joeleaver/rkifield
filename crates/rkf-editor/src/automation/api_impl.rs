@@ -550,25 +550,27 @@ impl AutomationApi for EditorAutomationApi {
             .lock()
             .map_err(|e| format!("lock poisoned: {e}"))?;
 
-        Ok(format!(
-            "environment: sun_intensity={:.2}, fog_enabled={}, fog_density={:.4}, \
-             bloom_enabled={}, clouds_enabled={}",
-            es.environment.atmosphere.sun_intensity,
-            es.environment.fog.enabled,
-            es.environment.fog.density,
-            es.environment.post_process.bloom_enabled,
-            es.environment.clouds.enabled,
-        ))
+        // Read from ECS singleton.
+        if let Some(env_entity) = es.world.scene_environment_entity() {
+            if let Ok(s) = es.world.ecs_ref()
+                .get::<&rkf_runtime::environment::EnvironmentSettings>(env_entity)
+            {
+                return Ok(format!(
+                    "environment: sun_intensity={:.2}, fog_enabled={}, fog_density={:.4}, \
+                     bloom_enabled={}, clouds_enabled={}",
+                    s.atmosphere.sun_intensity,
+                    s.fog.enabled,
+                    s.fog.density,
+                    s.post_process.bloom_enabled,
+                    s.clouds.enabled,
+                ));
+            }
+        }
+        Ok("environment: no scene environment entity".to_string())
     }
 
     fn environment_blend(&self, _target_index: usize, _duration: f32) -> Result<(), String> {
-        // EnvironmentState has no multi-profile blend concept yet.
-        // Mark dirty so the render loop knows something changed.
-        let mut es = self
-            .editor_state
-            .lock()
-            .map_err(|e| format!("lock poisoned: {e}"))?;
-        es.environment.mark_dirty();
+        // No multi-profile blend implemented yet.
         Ok(())
     }
 
@@ -724,7 +726,7 @@ impl AutomationApi for EditorAutomationApi {
             glam::IVec3::ZERO,
             Vec3::new(position[0], position[1], position[2]),
         );
-        let entity = es.world.spawn_camera(label, wp, yaw, pitch, fov);
+        let entity = es.world.spawn_camera(label, wp, yaw, pitch, fov, None);
         Ok(entity.to_string())
     }
 

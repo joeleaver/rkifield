@@ -132,9 +132,9 @@ pub use project::{
     create_project, project_root, resolve_scene_path,
 };
 pub use environment::{
-    AmbientConfig, EnvironmentOverrides, EnvironmentProfile, FogConfig, PostProcessHints,
-    SkyMode, VolumetricHints, apply_overrides, lerp_profiles, load_environment,
-    resolve_environment, save_environment,
+    AmbientConfig, EnvironmentProfile, EnvironmentSettings, FogConfig, PostProcessHints,
+    SceneEnvironment, SkyMode, VolumetricHints, lerp_profiles, load_environment,
+    save_environment,
 };
 pub use behavior::{
     BehaviorExecutor, Blueprint, BlueprintCatalog, BuildState, BuildWatcher, CommandQueue,

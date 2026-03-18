@@ -29,11 +29,6 @@ impl EditorState {
             asset_browser: AssetBrowser::new(),
             grid_snap: GridSnap::default(),
             light_editor: LightManager::new(),
-            environment: {
-                let mut env = EnvironmentState::new();
-                env.mark_dirty(); // Ensure first frame applies defaults to engine
-                env
-            },
             animation: AnimationPreview::new(),
             overlay_config: OverlayConfig::default(),
             debug_viz: DebugOverlay::new(),
@@ -280,11 +275,15 @@ impl EditorState {
         scene_file_v3::load_scene(&scene_v3, self.world.ecs_mut(), &mut stable_index, &registry);
         self.world.rebuild_entity_tracking_from_ecs();
 
-        // Restore editor state from properties.
-        if let Some(s) = scene_v3.properties.get("environment") {
-            if let Ok(env) = ron::from_str::<crate::environment::EnvironmentState>(s) {
-                self.environment = env;
-                self.environment.mark_dirty();
+        // Ensure scene environment entity exists.
+        self.world.ensure_scene_environment();
+        // Migrate old scenes: restore environment from properties bag.
+        if let Some(env_str) = scene_v3.properties.get("environment") {
+            if let Ok(old_env) = ron::from_str::<crate::environment::EnvironmentState>(env_str) {
+                if let Some(env_entity) = self.world.scene_environment_entity() {
+                    let settings = old_env.to_settings();
+                    let _ = self.world.ecs_mut().insert_one(env_entity, settings);
+                }
             }
         }
         if let Some(s) = scene_v3.properties.get("lights") {
@@ -319,10 +318,8 @@ impl EditorState {
         let registry = GameplayRegistry::new();
         let mut scene_v3 = scene_file_v3::save_scene(self.world.ecs_ref(), &stable_index, &registry);
 
-        // Store editor state in properties.
-        if let Ok(s) = ron::to_string(&self.environment) {
-            scene_v3.properties.insert("environment".into(), s);
-        }
+        // Environment is stored as the EnvironmentSettings component on the
+        // SceneEnvironment entity — no separate properties bag entry needed.
         if let Ok(s) = ron::to_string(self.light_editor.all_lights()) {
             scene_v3.properties.insert("lights".into(), s);
         }
@@ -342,15 +339,17 @@ impl EditorState {
     /// Build object summaries from hecs (authoritative source of truth).
     pub fn build_object_summaries(&self) -> Vec<crate::ui_snapshot::ObjectSummary> {
         use crate::ui_snapshot::{ObjectSummary, ObjectType};
+
+        let mut summaries = Vec::new();
+
+        // SDF entities (have geometry).
         let render_scene = self.world.build_render_scene();
-        render_scene.objects.iter().map(|obj| {
+        for obj in &render_scene.objects {
             let (yaw, pitch, roll) = obj.rotation.to_euler(glam::EulerRot::XYZ);
-            // Resolve SDF object ID → entity UUID.
             let entity_uuid = self.world.find_by_sdf_id(obj.id)
                 .unwrap_or(uuid::Uuid::nil());
-            // Resolve parent SDF object ID → parent UUID.
             let parent_uuid = obj.parent_id.and_then(|pid| self.world.find_by_sdf_id(pid));
-            ObjectSummary {
+            summaries.push(ObjectSummary {
                 id: entity_uuid,
                 name: obj.name.clone(),
                 position: obj.position,
@@ -366,8 +365,43 @@ impl EditorState {
                     rkf_core::scene_node::SdfSource::Analytical { primitive, .. } => Some(*primitive),
                     _ => None,
                 },
+                is_camera: false,
+            });
+        }
+
+        // ECS-only entities (no geometry — empties, cameras, etc.).
+        for (uuid, record) in self.world.entity_records() {
+            if record.sdf_object_id.is_some() {
+                continue; // Already included above.
             }
-        }).collect()
+            let ecs = self.world.ecs_ref();
+            // Skip internal entities (SceneEnvironment singleton).
+            if ecs.get::<&rkf_runtime::environment::SceneEnvironment>(record.ecs_entity).is_ok() {
+                continue;
+            }
+            let transform = ecs.get::<&rkf_runtime::components::Transform>(record.ecs_entity).ok();
+            let meta = ecs.get::<&rkf_runtime::components::EditorMetadata>(record.ecs_entity).ok();
+            let is_camera = ecs.get::<&rkf_runtime::components::CameraComponent>(record.ecs_entity).is_ok();
+            let name = meta.map(|m| m.name.clone()).unwrap_or_default();
+            let (pos, rot, scl) = match transform {
+                Some(t) => (t.position.to_vec3(), t.rotation, t.scale),
+                None => (Vec3::ZERO, glam::Quat::IDENTITY, Vec3::ONE),
+            };
+            let (yaw, pitch, roll) = rot.to_euler(glam::EulerRot::XYZ);
+            summaries.push(ObjectSummary {
+                id: *uuid,
+                name,
+                position: pos,
+                rotation_degrees: Vec3::new(yaw.to_degrees(), pitch.to_degrees(), roll.to_degrees()),
+                scale: scl,
+                parent_id: None,
+                object_type: ObjectType::None,
+                primitive: None,
+                is_camera,
+            });
+        }
+
+        summaries
     }
 
     /// Build light summaries from the light editor.

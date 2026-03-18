@@ -182,71 +182,8 @@ pub(crate) fn apply_editor_command(es: &mut EditorState, cmd: crate::editor_comm
         }
 
         // -- Environment -------------------------------------------------
-        SetAtmosphere { sun_direction, sun_intensity, rayleigh_scale, mie_scale } => {
-            es.environment.atmosphere.sun_direction = sun_direction;
-            es.environment.atmosphere.sun_intensity = sun_intensity;
-            es.environment.atmosphere.rayleigh_scale = rayleigh_scale;
-            es.environment.atmosphere.mie_scale = mie_scale;
-            es.environment.mark_dirty();
-        }
-        SetFog { density, height_falloff, dust_density, dust_asymmetry } => {
-            es.environment.fog.density = density;
-            es.environment.fog.height_falloff = height_falloff;
-            es.environment.fog.ambient_dust_density = dust_density;
-            es.environment.fog.dust_asymmetry = dust_asymmetry;
-            es.environment.mark_dirty();
-        }
-        SetClouds { coverage, density, altitude, thickness, wind_speed } => {
-            es.environment.clouds.coverage = coverage;
-            es.environment.clouds.density = density;
-            es.environment.clouds.altitude = altitude;
-            es.environment.clouds.thickness = thickness;
-            es.environment.clouds.wind_speed = wind_speed;
-            es.environment.mark_dirty();
-        }
-        SetPostProcess {
-            bloom_intensity, bloom_threshold, exposure, sharpen,
-            dof_focus_distance, dof_focus_range, dof_max_coc,
-            motion_blur, god_rays, vignette, grain, chromatic_aberration,
-        } => {
-            es.environment.post_process.bloom_intensity = bloom_intensity;
-            es.environment.post_process.bloom_threshold = bloom_threshold;
-            es.environment.post_process.exposure = exposure;
-            es.environment.post_process.sharpen_strength = sharpen;
-            es.environment.post_process.dof_focus_distance = dof_focus_distance;
-            es.environment.post_process.dof_focus_range = dof_focus_range;
-            es.environment.post_process.dof_max_coc = dof_max_coc;
-            es.environment.post_process.motion_blur_intensity = motion_blur;
-            es.environment.post_process.god_rays_intensity = god_rays;
-            es.environment.post_process.vignette_intensity = vignette;
-            es.environment.post_process.grain_intensity = grain;
-            es.environment.post_process.chromatic_aberration = chromatic_aberration;
-            es.environment.mark_dirty();
-        }
-        ToggleAtmosphere { enabled } => {
-            es.environment.atmosphere.enabled = enabled;
-            es.environment.mark_dirty();
-        }
-        ToggleFog { enabled } => {
-            es.environment.fog.enabled = enabled;
-            es.environment.mark_dirty();
-        }
-        ToggleClouds { enabled } => {
-            es.environment.clouds.enabled = enabled;
-            es.environment.mark_dirty();
-        }
-        ToggleBloom { enabled } => {
-            es.environment.post_process.bloom_enabled = enabled;
-            es.environment.mark_dirty();
-        }
-        ToggleDof { enabled } => {
-            es.environment.post_process.dof_enabled = enabled;
-            es.environment.mark_dirty();
-        }
-        SetToneMapMode { mode } => {
-            es.environment.post_process.tone_map_mode = mode;
-            es.environment.mark_dirty();
-        }
+        // Environment settings now flow through SetComponentField targeting
+        // the SceneEnvironment entity. No dedicated handlers needed.
 
         // -- Lights ------------------------------------------------------
         SetLightPosition { light_id, position } => {
@@ -383,6 +320,32 @@ pub(crate) fn apply_editor_command(es: &mut EditorState, cmd: crate::editor_comm
             es.pending_play_stop = true;
         }
 
+        // -- Camera linking -----------------------------------------------
+        LinkCamera { camera_id } => {
+            es.editor_camera.linked_camera = camera_id;
+        }
+        SetViewportCamera { camera_id } => {
+            es.editor_camera.viewport_camera = camera_id;
+        }
+        SnapToCamera { camera_id } => {
+            if let Some(hecs_entity) = es.world.ecs_entity_for(camera_id) {
+                es.editor_camera.sync_from_entity(es.world.ecs_ref(), hecs_entity);
+            }
+        }
+        CreateCameraFromView => {
+            let pos = rkf_core::WorldPosition::new(
+                glam::IVec3::ZERO,
+                es.editor_camera.position,
+            );
+            let yaw = es.editor_camera.fly_yaw.to_degrees();
+            let pitch = es.editor_camera.fly_pitch.to_degrees();
+            let fov = es.editor_camera.fov_y.to_degrees();
+            let _uuid = es.world.spawn_camera("Camera", pos, yaw, pitch, fov, None);
+        }
+        PilotCamera { camera_id } => {
+            es.editor_camera.piloting = camera_id;
+        }
+
         // -- Window management -------------------------------------------
         WindowDrag => {
             es.pending_drag = true;
@@ -424,27 +387,7 @@ pub(crate) fn build_inspector_snapshot(
             let fields = comp
                 .fields
                 .into_iter()
-                .map(|f| {
-                    let display_value = format_game_value(&f.value);
-                    let float_value = f.value.as_float();
-                    let int_value = f.value.as_int();
-                    let bool_value = f.value.as_bool();
-                    let vec3_value = f.value.as_vec3();
-                    let string_value = f.value.as_string().map(|s| s.to_string());
-
-                    FieldSnapshot {
-                        name: f.name,
-                        field_type: f.field_type,
-                        display_value,
-                        float_value,
-                        int_value,
-                        bool_value,
-                        vec3_value,
-                        string_value,
-                        range: f.range,
-                        transient: f.transient,
-                    }
-                })
+                .map(|f| field_inspector_to_snapshot(f))
                 .collect();
 
             ComponentSnapshot {
@@ -499,12 +442,83 @@ pub(crate) fn apply_component_command(
         } => {
             if let Some(hecs_entity) = es.world.ecs_entity_for(*entity_id) {
                 if let Some(entry) = registry.component_entry(component_name) {
-                    let _ = (entry.set_field)(
-                        es.world.ecs_mut(),
-                        hecs_entity,
-                        field_name,
-                        value.clone(),
-                    );
+                    if field_name.contains('.') {
+                        // Dot-notation: first try the full path directly (components
+                        // like EnvironmentSettings handle flattened dot-paths in
+                        // their set_field). Fall back to the struct read-modify-write
+                        // pattern if the direct path fails.
+                        let direct_ok = (entry.set_field)(
+                            es.world.ecs_mut(),
+                            hecs_entity,
+                            field_name,
+                            value.clone(),
+                        ).is_ok();
+                        if !direct_ok {
+                            let top_field = field_name.split('.').next().unwrap();
+                            let rest = &field_name[top_field.len() + 1..];
+                            if let Ok(mut parent_val) =
+                                (entry.get_field)(es.world.ecs_ref(), hecs_entity, top_field)
+                            {
+                                if let Ok(()) = rkf_runtime::behavior::set_nested_field(
+                                    &mut parent_val,
+                                    rest,
+                                    value.clone(),
+                                ) {
+                                    let _ = (entry.set_field)(
+                                        es.world.ecs_mut(),
+                                        hecs_entity,
+                                        top_field,
+                                        parent_val,
+                                    );
+                                }
+                            }
+                        }
+                    } else {
+                        // Simple flat field.
+                        let _ = (entry.set_field)(
+                            es.world.ecs_mut(),
+                            hecs_entity,
+                            field_name,
+                            value.clone(),
+                        );
+                    }
+
+                    // Console warning for component ref pointing to entity without required component.
+                    if let Some(field_meta) = entry
+                        .meta
+                        .iter()
+                        .find(|m| m.name == field_name.split('.').next().unwrap_or(field_name))
+                    {
+                        if let (Some(filter), Some(uuid_str)) =
+                            (field_meta.component_filter, value.as_string())
+                        {
+                            if !uuid_str.is_empty() {
+                                if let Ok(target_uuid) = uuid::Uuid::parse_str(uuid_str) {
+                                    if let Some(target_entity) =
+                                        es.world.ecs_entity_for(target_uuid)
+                                    {
+                                        if let Some(target_entry) =
+                                            registry.component_entry(filter)
+                                        {
+                                            if !(target_entry.has)(
+                                                es.world.ecs_ref(),
+                                                target_entity,
+                                            ) {
+                                                eprintln!(
+                                                    "[warn] component ref '{}' on '{}': \
+                                                     target entity {} does not have '{}'",
+                                                    field_name,
+                                                    component_name,
+                                                    uuid_str,
+                                                    filter
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
             true
@@ -541,7 +555,45 @@ pub(crate) fn apply_component_command(
     }
 }
 
+/// Convert a `FieldInspectorData` to a `FieldSnapshot`, recursing into sub-fields.
+fn field_inspector_to_snapshot(
+    f: rkf_runtime::behavior::FieldInspectorData,
+) -> FieldSnapshot {
+    let display_value = format_game_value(&f.value);
+    let float_value = f.value.as_float();
+    let int_value = f.value.as_int();
+    let bool_value = f.value.as_bool();
+    let vec3_value = f.value.as_vec3();
+    let string_value = f.value.as_string().map(|s| s.to_string());
+
+    let sub_fields = f.sub_fields.map(|subs| {
+        subs.into_iter()
+            .map(|sf| field_inspector_to_snapshot(sf))
+            .collect()
+    });
+
+    FieldSnapshot {
+        name: f.name,
+        field_type: f.field_type,
+        display_value,
+        float_value,
+        int_value,
+        bool_value,
+        vec3_value,
+        string_value,
+        range: f.range,
+        transient: f.transient,
+        sub_fields,
+        asset_filter: f.asset_filter,
+        component_filter: f.component_filter,
+    }
+}
+
 /// Format a `GameValue` as a short display string for the inspector.
+pub(crate) fn format_game_value_short(val: &rkf_runtime::behavior::game_value::GameValue) -> String {
+    format_game_value(val)
+}
+
 fn format_game_value(val: &rkf_runtime::behavior::game_value::GameValue) -> String {
     use rkf_runtime::behavior::game_value::GameValue;
     match val {
@@ -565,6 +617,7 @@ fn format_game_value(val: &rkf_runtime::behavior::game_value::GameValue) -> Stri
         }
         GameValue::Color(c) => format!("({:.2}, {:.2}, {:.2}, {:.2})", c[0], c[1], c[2], c[3]),
         GameValue::List(v) => format!("[{} items]", v.len()),
+        GameValue::Struct(fields) => format!("{{{} fields}}", fields.len()),
         GameValue::Ron(s) => {
             if s.len() > 40 {
                 format!("{}...", &s[..37])

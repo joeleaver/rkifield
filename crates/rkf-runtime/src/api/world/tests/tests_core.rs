@@ -120,9 +120,11 @@ fn find_by_name_missing() {
 fn find_all_multiple() {
     let mut world = World::new("test");
     world.spawn("dup").sdf(SdfPrimitive::Sphere { radius: 0.5 }).material(1).build();
+    // Second "dup" gets deduplicated to "dup_2".
     world.spawn("dup").sdf(SdfPrimitive::Sphere { radius: 0.5 }).material(1).build();
     world.spawn("other").sdf(SdfPrimitive::Sphere { radius: 0.5 }).material(1).build();
-    assert_eq!(world.find_all("dup").len(), 2);
+    assert_eq!(world.find_all("dup").len(), 1);
+    assert_eq!(world.find_all("dup_2").len(), 1);
 }
 
 #[test]
@@ -585,7 +587,7 @@ fn set_node_sdf_source_changes_source() {
 #[test]
 fn spawn_camera_creates_entity() {
     let mut world = World::new("test");
-    let cam = world.spawn_camera("Main", WorldPosition::default(), 0.0, 0.0, 60.0);
+    let cam = world.spawn_camera("Main", WorldPosition::default(), 0.0, 0.0, 60.0, None);
     assert!(world.is_alive(cam));
     assert_eq!(world.name(cam).unwrap(), "Main");
 }
@@ -593,8 +595,8 @@ fn spawn_camera_creates_entity() {
 #[test]
 fn cameras_lists_camera_entities() {
     let mut world = World::new("test");
-    world.spawn_camera("Cam1", WorldPosition::default(), 0.0, 0.0, 60.0);
-    world.spawn_camera("Cam2", WorldPosition::default(), 0.0, 0.0, 90.0);
+    world.spawn_camera("Cam1", WorldPosition::default(), 0.0, 0.0, 60.0, None);
+    world.spawn_camera("Cam2", WorldPosition::default(), 0.0, 0.0, 90.0, None);
     world.spawn("cube").sdf(SdfPrimitive::Sphere { radius: 0.5 }).material(1).build();
     assert_eq!(world.cameras().len(), 2);
 }
@@ -602,7 +604,7 @@ fn cameras_lists_camera_entities() {
 #[test]
 fn active_camera_finds_one() {
     let mut world = World::new("test");
-    let cam = world.spawn_camera("Main", WorldPosition::default(), 0.0, 0.0, 60.0);
+    let cam = world.spawn_camera("Main", WorldPosition::default(), 0.0, 0.0, 60.0, None);
     assert!(world.active_camera().is_none());
     world.set_active_camera(cam).unwrap();
     assert_eq!(world.active_camera(), Some(cam));
@@ -611,8 +613,8 @@ fn active_camera_finds_one() {
 #[test]
 fn set_active_camera_deactivates_others() {
     let mut world = World::new("test");
-    let cam1 = world.spawn_camera("Cam1", WorldPosition::default(), 0.0, 0.0, 60.0);
-    let cam2 = world.spawn_camera("Cam2", WorldPosition::default(), 0.0, 0.0, 90.0);
+    let cam1 = world.spawn_camera("Cam1", WorldPosition::default(), 0.0, 0.0, 60.0, None);
+    let cam2 = world.spawn_camera("Cam2", WorldPosition::default(), 0.0, 0.0, 90.0, None);
     world.set_active_camera(cam1).unwrap();
     world.set_active_camera(cam2).unwrap();
     assert_eq!(world.active_camera(), Some(cam2));
@@ -624,10 +626,60 @@ fn set_active_camera_deactivates_others() {
 fn camera_round_trips_through_position() {
     let mut world = World::new("test");
     let pos = WorldPosition::new(glam::IVec3::new(1, 0, 0), Vec3::new(3.0, 2.0, 1.0));
-    let cam = world.spawn_camera("Main", pos, 45.0, -15.0, 75.0);
+    let cam = world.spawn_camera("Main", pos, 45.0, -15.0, 75.0, None);
     assert_eq!(world.position(cam).unwrap(), pos);
     let c = world.get::<CameraComponent>(cam).unwrap();
     assert!((c.fov_degrees - 75.0).abs() < 1e-6);
     assert!((c.yaw - 45.0).abs() < 1e-6);
     assert!((c.pitch - -15.0).abs() < 1e-6);
+}
+
+// ── Name deduplication ──────────────────────────────────────────────────
+
+#[test]
+fn spawn_duplicate_name_gets_suffix() {
+    let mut world = World::new("test");
+    let a = world.spawn("Guard").sdf(SdfPrimitive::Sphere { radius: 0.5 }).material(0).build();
+    let b = world.spawn("Guard").sdf(SdfPrimitive::Sphere { radius: 0.5 }).material(0).build();
+    let c = world.spawn("Guard").sdf(SdfPrimitive::Sphere { radius: 0.5 }).material(0).build();
+
+    assert_eq!(world.name(a).unwrap(), "Guard");
+    assert_eq!(world.name(b).unwrap(), "Guard_2");
+    assert_eq!(world.name(c).unwrap(), "Guard_3");
+}
+
+#[test]
+fn spawn_ecs_only_duplicate_name_gets_suffix() {
+    let mut world = World::new("test");
+    let a = world.spawn("Empty").build();
+    let b = world.spawn("Empty").build();
+
+    assert_eq!(world.name(a).unwrap(), "Empty");
+    assert_eq!(world.name(b).unwrap(), "Empty_2");
+}
+
+#[test]
+fn non_siblings_can_share_names() {
+    let mut world = World::new("test");
+    let parent = world.spawn("Parent").sdf(SdfPrimitive::Sphere { radius: 0.5 }).material(0).build();
+    let child = world.spawn("Guard").sdf(SdfPrimitive::Sphere { radius: 0.5 }).material(0).parent(parent).build();
+    // Root-level "Guard" should not conflict with child "Guard".
+    let root_guard = world.spawn("Guard").sdf(SdfPrimitive::Sphere { radius: 0.5 }).material(0).build();
+
+    assert_eq!(world.name(child).unwrap(), "Guard");
+    assert_eq!(world.name(root_guard).unwrap(), "Guard");
+}
+
+#[test]
+fn strip_numeric_suffix_on_dedup() {
+    let mut world = World::new("test");
+    world.spawn("Box").sdf(SdfPrimitive::Sphere { radius: 0.5 }).material(0).build();
+    world.spawn("Box_2").sdf(SdfPrimitive::Sphere { radius: 0.5 }).material(0).build();
+    // Spawning another "Box" should skip _2 (taken) and use _3.
+    let c = world.spawn("Box").sdf(SdfPrimitive::Sphere { radius: 0.5 }).material(0).build();
+    assert_eq!(world.name(c).unwrap(), "Box_3");
+
+    // Spawning "Box_2" again should also produce "Box_3" — wait, _3 is taken now, so _4.
+    let d = world.spawn("Box_2").sdf(SdfPrimitive::Sphere { radius: 0.5 }).material(0).build();
+    assert_eq!(world.name(d).unwrap(), "Box_4");
 }

@@ -13,7 +13,6 @@ pub use slider_signals::SliderSignals;
 use crate::animation_preview::AnimationPreview;
 use crate::camera::{CameraMode, SceneCamera};
 use crate::debug_viz::{DebugOverlay, FrameTimeHistory};
-use crate::environment::EnvironmentState;
 use crate::gizmo::{GizmoMode, GizmoState};
 use crate::input::InputState;
 use crate::light_editor::LightManager;
@@ -45,8 +44,6 @@ pub enum SelectedEntity {
     Object(Uuid),
     /// A light by light ID.
     Light(u64),
-    /// The main editor camera.
-    Camera,
     /// The scene node itself.
     Scene,
     /// The project root node.
@@ -55,17 +52,6 @@ pub enum SelectedEntity {
 
 /// Dedicated reactive signal for the FPS counter.
 ///
-/// Updated from the render thread via `run_on_main_thread`. Only the status
-/// bar's FPS text node tracks this — bumping it does NOT rebuild other panels.
-#[derive(Clone, Copy)]
-pub struct FpsSignal(pub Signal<f64>);
-
-impl FpsSignal {
-    pub fn new() -> Self {
-        Self(Signal::new(0.0))
-    }
-}
-
 /// Per-property reactive signals for fine-grained UI updates.
 ///
 /// Each signal holds the actual value (not a counter). UI components subscribe
@@ -159,7 +145,7 @@ pub struct UiSignals {
 
     // ── Loading indicator ────────────────────────────────────────
     /// Loading status message — `None` means idle, `Some("...")` shows a message
-    /// in the status bar. Engine thread uses `send()` to update from its thread.
+    /// in the status bar. Engine thread uses `.set()` via `run_on_main_thread()`.
     pub loading_status: Signal<Option<String>>,
 
     // ── Diagnostics (Debug panel) ────────────────────────────────
@@ -185,6 +171,18 @@ pub struct UiSignals {
     /// UI elements that depend on the dylib (component inspector, systems
     /// panel, play button) should check this before enabling interaction.
     pub dylib_ready: Signal<bool>,
+
+    // ── Camera linking ─────────────────────────────────────────────
+    /// UUID of the scene camera the editor is linked to, if any.
+    pub linked_camera: Signal<Option<Uuid>>,
+
+    /// UUID of the scene camera currently driving the viewport, if any.
+    pub viewport_camera: Signal<Option<Uuid>>,
+
+    // ── Scene environment ─────────────────────────────────────────
+    /// UUID of the scene environment singleton entity.
+    /// Used by the environment panel to send SetComponentField commands.
+    pub scene_env_uuid: Signal<Option<Uuid>>,
 }
 
 /// Snapshot of inspector data, safe to send to the UI thread.
@@ -233,6 +231,12 @@ pub struct FieldSnapshot {
     pub range: Option<(f64, f64)>,
     /// True if the field is transient.
     pub transient: bool,
+    /// Sub-fields for `Struct` type fields.
+    pub sub_fields: Option<Vec<FieldSnapshot>>,
+    /// File extension filter for `AssetRef` fields (e.g., `"rkenv"`).
+    pub asset_filter: Option<String>,
+    /// Required component type for `ComponentRef` fields (e.g., `"Transform"`).
+    pub component_filter: Option<String>,
 }
 
 impl UiSignals {
@@ -286,6 +290,9 @@ impl UiSignals {
             project_loaded: Signal::new(false),
             recent_projects: Signal::new(Vec::new()),
             dylib_ready: Signal::new(false),
+            linked_camera: Signal::new(None),
+            viewport_camera: Signal::new(None),
+            scene_env_uuid: Signal::new(None),
         }
     }
 
@@ -302,13 +309,6 @@ impl UiSignals {
         self.sync_tree_selection(tree_state);
     }
 
-    /// Called when selection changes. No longer needs to push to SliderSignals
-    /// since TransformEditor and LightProperties read from UiSignals directly.
-    pub fn on_selection_changed(&self) {
-        // No-op — kept for API compatibility with callers that still reference it.
-        // TODO: remove this method and inline any remaining logic.
-    }
-
     /// Sync tree selection highlight when ui.selection changes.
     ///
     /// Store method — called from event handlers that change selection,
@@ -319,7 +319,6 @@ impl UiSignals {
             let value = match sel {
                 SelectedEntity::Object(id) => format!("obj:{}", &id.to_string()[..8]),
                 SelectedEntity::Light(id) => format!("light:{id}"),
-                SelectedEntity::Camera => "camera".to_string(),
                 SelectedEntity::Scene => "scene".to_string(),
                 SelectedEntity::Project => "project".to_string(),
             };
@@ -472,9 +471,8 @@ pub struct EditorState {
     pub asset_browser: AssetBrowser,
     pub grid_snap: GridSnap,
 
-    // ── Lights & Environment ─────────────────────────────────
+    // ── Lights ────────────────────────────────────────────────
     pub light_editor: LightManager,
-    pub environment: EnvironmentState,
 
     // ── Animation ────────────────────────────────────────────
     pub animation: AnimationPreview,
