@@ -307,7 +307,11 @@ fn voxelize_to_lod(
                 let mut color_brick = ColorBrick { data: [ColorVoxel::new(0, 0, 0, 0); 512] };
                 let half_voxel = voxel_size * 0.5;
 
-                // First pass: determine occupancy using winding number
+                // Single pass: determine occupancy + sample color for every voxel.
+                // Color is sampled densely (all 512 voxels) so the GPU can
+                // sample texture at any ray hit point, not just surface voxels.
+                let sample_color = has_textures && material_id_override.is_none();
+
                 for vz in 0..BRICK_DIM as u8 {
                     for vy in 0..BRICK_DIM as u8 {
                         for vx in 0..BRICK_DIM as u8 {
@@ -321,36 +325,38 @@ fn voxelize_to_lod(
                             let winding = winding_number(mesh, pos);
                             let is_inside = winding < -0.5;
                             geo.set_solid(vx, vy, vz, is_inside);
+
+                            // Sample texture color at every voxel position
+                            if sample_color {
+                                let mat_sample = sample_material(mesh, bvh, pos);
+                                if let Some(c) = mat_sample.color {
+                                    let flat = voxel_index(vx, vy, vz);
+                                    color_brick.data[flat as usize] =
+                                        ColorVoxel::new(c.r, c.g, c.b, 255);
+                                }
+                            }
                         }
                     }
                 }
 
-                // Build surface voxel list (using brick-local surface detection)
+                // Build surface voxel list and assign material IDs
                 geo.rebuild_surface_list();
 
-                // Second pass: assign material + color to surface voxels
                 for sv in &mut geo.surface_voxels {
                     let idx = sv.index();
                     let (vx, vy, vz) = rkf_core::brick_geometry::index_to_xyz(idx);
-                    let pos = brick_min
-                        + Vec3::new(
-                            vx as f32 * voxel_size + half_voxel,
-                            vy as f32 * voxel_size + half_voxel,
-                            vz as f32 * voxel_size + half_voxel,
-                        );
 
                     if let Some(override_id) = material_id_override {
                         sv.material_id = override_id;
                     } else {
+                        let pos = brick_min
+                            + Vec3::new(
+                                vx as f32 * voxel_size + half_voxel,
+                                vy as f32 * voxel_size + half_voxel,
+                                vz as f32 * voxel_size + half_voxel,
+                            );
                         let mat_sample = sample_material(mesh, bvh, pos);
                         sv.material_id = (mat_sample.material_id as u8).min(63);
-
-                        // Store texture color in color brick
-                        if let Some(c) = mat_sample.color {
-                            let flat = voxel_index(vx, vy, vz);
-                            color_brick.data[flat as usize] =
-                                ColorVoxel::new(c.r, c.g, c.b, 255);
-                        }
                     }
                 }
 

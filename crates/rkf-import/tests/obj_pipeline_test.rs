@@ -197,6 +197,7 @@ fn obj_full_pipeline_roundtrip() {
                 };
                 let half_voxel = voxel_size * 0.5;
 
+                // Dense color sampling: every voxel gets texture color
                 for vz in 0..BRICK_DIM as u8 {
                     for vy in 0..BRICK_DIM as u8 {
                         for vx in 0..BRICK_DIM as u8 {
@@ -208,6 +209,12 @@ fn obj_full_pipeline_roundtrip() {
                                 );
                             let w = winding_number(&mesh, pos);
                             geo.set_solid(vx, vy, vz, w < -0.5);
+
+                            let mat_sample = sample_material(&mesh, &bvh, pos);
+                            if let Some(c) = mat_sample.color {
+                                let flat = voxel_index(vx, vy, vz);
+                                color_brick.data[flat as usize] = ColorVoxel::new(c.r, c.g, c.b, 255);
+                            }
                         }
                     }
                 }
@@ -225,10 +232,6 @@ fn obj_full_pipeline_roundtrip() {
                         );
                     let mat_sample = sample_material(&mesh, &bvh, pos);
                     sv.material_id = (mat_sample.material_id as u8).min(63);
-                    if let Some(c) = mat_sample.color {
-                        let flat = voxel_index(vx, vy, vz);
-                        color_brick.data[flat as usize] = ColorVoxel::new(c.r, c.g, c.b, 255);
-                    }
                 }
 
                 geometry_vec.push(geo);
