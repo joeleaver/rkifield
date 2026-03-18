@@ -353,32 +353,32 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                 }
             }
 
-            // Viewport camera: render from a scene camera instead of the editor camera.
-            if es.piloting.is_none() {
-                if let Some(vp_uuid) = es.viewport_camera {
-                    if let Some(hecs_entity) = es.world.ecs_entity_for(vp_uuid) {
-                        let cam_data = {
+            // Viewport camera: when a scene camera is active, read its transform
+            // into a separate override (don't touch es.editor_camera — it must
+            // preserve the editor camera's own position for when we switch back).
+            let viewport_cam_override: Option<(glam::Vec3, f32, f32, f32)> =
+                if es.piloting.is_none() {
+                    if let Some(vp_uuid) = es.viewport_camera {
+                        if let Some(hecs_entity) = es.world.ecs_entity_for(vp_uuid) {
                             let ecs = es.world.ecs_ref();
                             let pos = ecs.get::<&rkf_runtime::components::Transform>(hecs_entity)
                                 .ok().map(|t| t.position.to_vec3());
                             let params = ecs.get::<&rkf_runtime::components::CameraComponent>(hecs_entity)
                                 .ok().map(|c| (c.yaw, c.pitch, c.fov_degrees));
-                            (pos, params)
-                        };
-                        if let Some(pos) = cam_data.0 {
-                            es.editor_camera.position = pos;
-                            es.editor_camera.target = pos + glam::Vec3::new(0.0, 0.0, -1.0);
-                        }
-                        if let Some((yaw, pitch, _fov)) = cam_data.1 {
-                            es.editor_camera.fly_yaw = yaw.to_radians();
-                            es.editor_camera.fly_pitch = pitch.to_radians();
-                            // fov is read from the entity by sync_to_engine_camera
+                            match (pos, params) {
+                                (Some(p), Some((yaw, pitch, fov))) => Some((p, yaw, pitch, fov)),
+                                _ => None,
+                            }
+                        } else {
+                            es.viewport_camera = None;
+                            None
                         }
                     } else {
-                        es.viewport_camera = None;
+                        None
                     }
-                }
-            }
+                } else {
+                    None
+                };
 
             // Consume pending commands.
             let debug_mode = es.pending_debug_mode.take();
@@ -808,8 +808,16 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                 _ => 0.0,
             };
 
-            let cam = es.editor_camera;
-            let cam_fov_deg = es.editor_camera_fov_degrees();
+            let mut cam = es.editor_camera;
+            let mut cam_fov_deg = es.editor_camera_fov_degrees();
+            // Apply viewport camera override (scene camera driving the viewport).
+            if let Some((pos, yaw, pitch, fov)) = viewport_cam_override {
+                cam.position = pos;
+                cam.target = pos + glam::Vec3::new(0.0, 0.0, -1.0);
+                cam.fly_yaw = yaw.to_radians();
+                cam.fly_pitch = pitch.to_radians();
+                cam_fov_deg = fov;
+            }
             let sel = es.selected_entity;
             let gm = es.gizmo.mode;
             let grid = es.show_grid;
