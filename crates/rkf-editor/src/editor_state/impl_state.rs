@@ -16,6 +16,27 @@ impl EditorState {
         cam.fov_y = 70.0_f32.to_radians();
         cam.fly_speed = 5.0;
 
+        let mut world = World::new("editor");
+
+        // Spawn the editor's own camera entity with EditorCameraMarker.
+        let editor_cam_pos = rkf_core::WorldPosition::new(
+            glam::IVec3::ZERO,
+            Vec3::new(0.0, 2.5, 5.0),
+        );
+        let editor_cam_uuid = world.spawn_camera(
+            "Editor Camera",
+            editor_cam_pos,
+            0.0,   // yaw
+            -0.15_f32.to_degrees(), // pitch (radians→degrees for CameraComponent)
+            70.0,  // fov_degrees
+            None,
+        );
+        // Insert EditorCameraMarker + EnvironmentSettings on the entity.
+        if let Some(ecs_entity) = world.ecs_entity_for(editor_cam_uuid) {
+            let _ = world.ecs_mut().insert_one(ecs_entity, rkf_runtime::components::EditorCameraMarker);
+            let _ = world.ecs_mut().insert_one(ecs_entity, rkf_runtime::environment::EnvironmentSettings::default());
+        }
+
         Self {
             mode: EditorMode::Default,
             editor_camera: cam,
@@ -78,7 +99,8 @@ impl EditorState {
             pending_paint_edits: Vec::new(),
             paint_undo_accumulator: None,
             pending_paint_undo: None,
-            world: World::new("editor"),
+            world,
+            editor_camera_entity: Some(editor_cam_uuid),
         }
     }
 
@@ -318,6 +340,11 @@ impl EditorState {
         let registry = GameplayRegistry::new();
         let mut scene_v3 = scene_file_v3::save_scene(self.world.ecs_ref(), &stable_index, &registry);
 
+        // Filter out the editor camera entity — it's transient, not part of the scene.
+        if let Some(editor_cam_id) = self.editor_camera_entity {
+            scene_v3.entities.retain(|e| e.stable_id != editor_cam_id);
+        }
+
         // Environment is stored as the EnvironmentSettings component on the
         // SceneEnvironment entity — no separate properties bag entry needed.
         if let Ok(s) = ron::to_string(self.light_editor.all_lights()) {
@@ -375,8 +402,11 @@ impl EditorState {
                 continue; // Already included above.
             }
             let ecs = self.world.ecs_ref();
-            // Skip internal entities (SceneEnvironment singleton).
+            // Skip internal entities (SceneEnvironment singleton, EditorCameraMarker).
             if ecs.get::<&rkf_runtime::environment::SceneEnvironment>(record.ecs_entity).is_ok() {
+                continue;
+            }
+            if ecs.get::<&rkf_runtime::components::EditorCameraMarker>(record.ecs_entity).is_ok() {
                 continue;
             }
             let transform = ecs.get::<&rkf_runtime::components::Transform>(record.ecs_entity).ok();

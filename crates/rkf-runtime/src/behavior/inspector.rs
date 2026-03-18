@@ -18,6 +18,7 @@ pub const MANDATORY_COMPONENTS: &[&str] = &["Transform", "EditorMetadata"];
 pub const ENGINE_UI_COMPONENTS: &[&str] = &[
     "Transform", "EditorMetadata", "SdfTree",
     "EnvironmentSettings", "SceneEnvironment",
+    "EditorCameraMarker",
 ];
 
 // ─── Inspector data types ───────────────────────────────────────────────────

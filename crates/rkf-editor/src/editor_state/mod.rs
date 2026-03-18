@@ -600,4 +600,9 @@ pub struct EditorState {
     /// The unified world container. Wraps `Scene` (SDF objects) + ECS +
     /// brick pool. Replaces the former `v2_scene: Option<Scene>`.
     pub world: World,
+
+    // ── Editor camera entity ────────────────────────────────
+    /// UUID of the editor's own camera entity (has EditorCameraMarker).
+    /// Excluded from scene save/load and scene tree UI.
+    pub editor_camera_entity: Option<Uuid>,
 }

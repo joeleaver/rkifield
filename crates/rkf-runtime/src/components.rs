@@ -128,6 +128,13 @@ impl Default for FogVolumeComponent {
     }
 }
 
+/// Marker component for the editor's own camera entity.
+///
+/// The editor spawns a single camera entity with this marker on startup.
+/// It is excluded from scene save/load and from the scene tree UI.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct EditorCameraMarker;
+
 /// Editor-only metadata (not used at runtime).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EditorMetadata {

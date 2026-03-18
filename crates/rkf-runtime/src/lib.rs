@@ -78,7 +78,7 @@ pub mod file_watcher;
 
 pub use asset_registry::{AssetEntry, AssetRegistry, AssetState, Handle};
 pub use components::{
-    CameraComponent, EditorMetadata, FogVolumeComponent, Parent,
+    CameraComponent, EditorCameraMarker, EditorMetadata, FogVolumeComponent, Parent,
     SdfTree, Transform, WorldTransform,
 };
 pub use config::{
