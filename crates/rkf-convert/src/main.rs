@@ -51,6 +51,8 @@ struct Args {
     lod_levels: usize,
     material_id_override: Option<u8>,
     pool_size: u32,
+    target_size: f32,
+    no_normalize: bool,
     verbose: bool,
 }
 
@@ -69,6 +71,8 @@ fn print_help() {
     eprintln!("  --lod-levels <int>        Number of LOD levels (default: 3)");
     eprintln!("  --material-id <int>       Override material ID for all voxels (default: use mesh materials)");
     eprintln!("  --pool-size <int>         Max bricks per LOD (default: 65536)");
+    eprintln!("  --target-size <float>     Normalize longest axis to this size (default: 1.0)");
+    eprintln!("  --no-normalize            Skip normalization, keep original coordinates");
     eprintln!("  -v, --verbose             Print per-LOD progress");
     eprintln!("  -h, --help                Print this help message");
 }
@@ -93,6 +97,8 @@ fn parse_args() -> Result<Args> {
     let mut lod_levels: usize = 3;
     let mut material_id_override: Option<u8> = None;
     let mut pool_size: u32 = 65536;
+    let mut target_size: f32 = 1.0;
+    let mut no_normalize = false;
     let mut verbose = false;
 
     let mut i = 1usize;
@@ -162,6 +168,23 @@ fn parse_args() -> Result<Args> {
                     .with_context(|| format!("invalid --pool-size: '{v}'"))?;
                 i += 1;
             }
+            "--target-size" => {
+                i += 1;
+                let v = args
+                    .get(i)
+                    .with_context(|| "--target-size requires a value")?;
+                target_size = v
+                    .parse::<f32>()
+                    .with_context(|| format!("invalid --target-size: '{v}'"))?;
+                if target_size <= 0.0 {
+                    bail!("--target-size must be positive");
+                }
+                i += 1;
+            }
+            "--no-normalize" => {
+                no_normalize = true;
+                i += 1;
+            }
             arg => {
                 // Positional argument: input path
                 if input.is_some() {
@@ -183,6 +206,8 @@ fn parse_args() -> Result<Args> {
         lod_levels,
         material_id_override,
         pool_size,
+        target_size,
+        no_normalize,
         verbose,
     })
 }
@@ -480,7 +505,7 @@ fn run() -> Result<()> {
     // --- Step 1: Load mesh ---------------------------------------------------
 
     eprintln!("Loading mesh: {}", args.input);
-    let mesh = load_mesh(&args.input)
+    let mut mesh = load_mesh(&args.input)
         .with_context(|| format!("Failed to load '{}'", args.input))?;
 
     let has_textures = mesh.materials.iter().any(|m| m.albedo_texture.is_some());
@@ -504,11 +529,34 @@ fn run() -> Result<()> {
         mesh.materials.len(),
         if has_textures { "yes" } else { "no" }
     );
-    eprintln!();
 
     if mesh.triangle_count() == 0 {
         bail!("Input mesh has no triangles");
     }
+
+    // --- Step 1b: Normalize mesh to target size ------------------------------
+
+    if !args.no_normalize {
+        let extent = mesh.bounds_max - mesh.bounds_min;
+        let longest = extent.x.max(extent.y).max(extent.z);
+        if longest > 1e-6 {
+            let scale = args.target_size / longest;
+            let center = (mesh.bounds_min + mesh.bounds_max) * 0.5;
+
+            // Scale and center all vertices: new_pos = (pos - center) * scale
+            for pos in &mut mesh.positions {
+                *pos = (*pos - center) * scale;
+            }
+            mesh.bounds_min = (mesh.bounds_min - center) * scale;
+            mesh.bounds_max = (mesh.bounds_max - center) * scale;
+
+            eprintln!(
+                "  normalized: longest axis {:.3} → {:.3} (scale {:.6})",
+                longest, args.target_size, scale
+            );
+        }
+    }
+    eprintln!();
 
     // --- Step 2: Determine voxel size ----------------------------------------
 
