@@ -739,8 +739,13 @@ impl AutomationApi for EditorAutomationApi {
             .map_err(|e| format!("lock poisoned: {e}"))?;
 
         let cameras = es.world.cameras();
+        let editor_cam = es.editor_camera_entity;
         let mut result = Vec::new();
         for entity in &cameras {
+            // Skip the editor's own camera entity.
+            if editor_cam == Some(*entity) {
+                continue;
+            }
             let pos = es
                 .world
                 .position(*entity)
