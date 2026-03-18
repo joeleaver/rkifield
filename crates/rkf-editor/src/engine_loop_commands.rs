@@ -319,10 +319,7 @@ pub(crate) fn apply_editor_command(es: &mut EditorState, cmd: crate::editor_comm
             es.pending_play_stop = true;
         }
 
-        // -- Camera linking -----------------------------------------------
-        LinkCamera { camera_id: _ } => {
-            // linked_camera removed — environment now per-camera.
-        }
+        // -- Camera viewport -----------------------------------------------
         SetViewportCamera { camera_id } => {
             es.viewport_camera = camera_id;
         }

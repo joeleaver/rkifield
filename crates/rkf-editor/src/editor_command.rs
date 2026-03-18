@@ -117,8 +117,6 @@ pub enum EditorCommand {
     },
 
     // ── Camera linking ─────────────────────────────────────────────────
-    /// Link the editor camera to a scene camera for environment resolution (or unlink with None).
-    LinkCamera { camera_id: Option<Uuid> },
     /// Set which scene camera drives the viewport (or None for editor camera).
     SetViewportCamera { camera_id: Option<Uuid> },
     /// Copy a scene camera's transform + FOV to the editor camera.

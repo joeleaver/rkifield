@@ -172,10 +172,7 @@ pub struct UiSignals {
     /// panel, play button) should check this before enabling interaction.
     pub dylib_ready: Signal<bool>,
 
-    // ── Camera linking ─────────────────────────────────────────────
-    /// UUID of the scene camera the editor is linked to, if any.
-    pub linked_camera: Signal<Option<Uuid>>,
-
+    // ── Camera viewport ────────────────────────────────────────────
     /// UUID of the scene camera currently driving the viewport, if any.
     pub viewport_camera: Signal<Option<Uuid>>,
 
@@ -290,7 +287,6 @@ impl UiSignals {
             project_loaded: Signal::new(false),
             recent_projects: Signal::new(Vec::new()),
             dylib_ready: Signal::new(false),
-            linked_camera: Signal::new(None),
             viewport_camera: Signal::new(None),
             scene_env_uuid: Signal::new(None),
         }

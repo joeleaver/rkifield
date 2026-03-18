@@ -72,8 +72,8 @@ fn save_scene_v3(
     if let Ok(s) = ron::to_string(&cam_snap) {
         scene_v3.properties.insert("camera".into(), s);
     }
-    // Environment settings are serialized as the EnvironmentSettings component
-    // on the SceneEnvironment entity — no separate properties bag entry needed.
+    // Environment is stored as the EnvironmentSettings component on the
+    // editor camera entity — no separate properties bag entry needed.
     if let Ok(s) = ron::to_string(es.light_editor.all_lights()) {
         scene_v3.properties.insert("lights".into(), s);
     }
@@ -290,8 +290,8 @@ fn restore_properties_v3(es: &mut EditorState, scene_v3: &SceneFileV3) {
                 + dir * es.editor_camera.orbit_distance;
         }
     }
-    // Environment is now restored from the EnvironmentSettings component
-    // on the SceneEnvironment entity (handled in load_scene_v3).
+    // Environment is restored from the EnvironmentSettings component
+    // on the editor camera entity (handled in load_scene_v3).
     if let Some(s) = scene_v3.properties.get("lights") {
         if let Ok(lights) = ron::from_str::<Vec<crate::light_editor::SceneLight>>(s) {
             es.light_editor.replace_lights(lights);

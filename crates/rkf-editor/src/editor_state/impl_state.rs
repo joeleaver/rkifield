@@ -473,7 +473,7 @@ impl EditorState {
         }
 
         // Environment is stored as the EnvironmentSettings component on the
-        // SceneEnvironment entity — no separate properties bag entry needed.
+        // editor camera entity — no separate properties bag entry needed.
         if let Ok(s) = ron::to_string(self.light_editor.all_lights()) {
             scene_v3.properties.insert("lights".into(), s);
         }
