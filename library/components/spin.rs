@@ -17,7 +17,7 @@ impl Default for Spin {
 }
 
 static FIELDS: [FieldMeta; 1] = [
-    FieldMeta { name: "speed", field_type: FieldType::Float, transient: false, range: Some((-10.0, 10.0)), default: None, persist: true },
+    FieldMeta { name: "speed", field_type: FieldType::Float, transient: false, range: Some((-10.0, 10.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
 ];
 
 pub fn entry() -> ComponentEntry {

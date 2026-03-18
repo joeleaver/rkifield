@@ -44,6 +44,9 @@ static FIELDS: [FieldMeta; 5] = [
         range: None,
         default: None,
         persist: false,
+        struct_meta: None,
+        asset_filter: None,
+        component_filter: None,
     },
     FieldMeta {
         name: "patrol_origin",
@@ -52,6 +55,9 @@ static FIELDS: [FieldMeta; 5] = [
         range: None,
         default: None,
         persist: false,
+        struct_meta: None,
+        asset_filter: None,
+        component_filter: None,
     },
     FieldMeta {
         name: "patrol_radius",
@@ -60,6 +66,9 @@ static FIELDS: [FieldMeta; 5] = [
         range: Some((0.0, 100.0)),
         default: None,
         persist: false,
+        struct_meta: None,
+        asset_filter: None,
+        component_filter: None,
     },
     FieldMeta {
         name: "chase_speed",
@@ -68,6 +77,9 @@ static FIELDS: [FieldMeta; 5] = [
         range: Some((0.0, 50.0)),
         default: None,
         persist: false,
+        struct_meta: None,
+        asset_filter: None,
+        component_filter: None,
     },
     FieldMeta {
         name: "detection_range",
@@ -76,6 +88,9 @@ static FIELDS: [FieldMeta; 5] = [
         range: Some((0.0, 200.0)),
         default: None,
         persist: false,
+        struct_meta: None,
+        asset_filter: None,
+        component_filter: None,
     },
 ];
 

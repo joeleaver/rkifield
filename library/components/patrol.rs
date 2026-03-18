@@ -25,6 +25,9 @@ static FIELDS: [FieldMeta; 3] = [
         range: None,
         default: None,
         persist: false,
+        struct_meta: None,
+        asset_filter: None,
+        component_filter: None,
     },
     FieldMeta {
         name: "speed",
@@ -33,6 +36,9 @@ static FIELDS: [FieldMeta; 3] = [
         range: Some((0.0, 100.0)),
         default: None,
         persist: false,
+        struct_meta: None,
+        asset_filter: None,
+        component_filter: None,
     },
     FieldMeta {
         name: "current_index",
@@ -41,6 +47,9 @@ static FIELDS: [FieldMeta; 3] = [
         range: None,
         default: None,
         persist: false,
+        struct_meta: None,
+        asset_filter: None,
+        component_filter: None,
     },
 ];
 

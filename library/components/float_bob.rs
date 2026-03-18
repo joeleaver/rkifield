@@ -12,7 +12,8 @@ pub struct FloatBob {
     pub frequency: f32,
     /// Phase offset in radians (allows staggering multiple bobbers).
     pub phase: f32,
-    /// Base Y position to oscillate around (initialized from entity position on first tick).
+    /// Base Y position — initialized from entity position on first tick.
+    /// Not shown in inspector (runtime state, not a user-facing parameter).
     pub base_y: Option<f32>,
 }
 
@@ -22,11 +23,11 @@ impl Default for FloatBob {
     }
 }
 
-static FIELDS: [FieldMeta; 4] = [
-    FieldMeta { name: "amplitude", field_type: FieldType::Float, transient: false, range: Some((0.0, 10.0)), default: None, persist: true },
-    FieldMeta { name: "frequency", field_type: FieldType::Float, transient: false, range: Some((0.0, 10.0)), default: None, persist: true },
-    FieldMeta { name: "phase", field_type: FieldType::Float, transient: false, range: Some((0.0, 6.283)), default: None, persist: true },
-    FieldMeta { name: "base_y", field_type: FieldType::Float, transient: false, range: None, default: None, persist: true },
+// Only expose the user-facing fields in the inspector.
+static FIELDS: [FieldMeta; 3] = [
+    FieldMeta { name: "amplitude", field_type: FieldType::Float, transient: false, range: Some((0.0, 10.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "frequency", field_type: FieldType::Float, transient: false, range: Some((0.0, 10.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "phase", field_type: FieldType::Float, transient: false, range: Some((0.0, 6.283)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
 ];
 
 pub fn entry() -> ComponentEntry {
@@ -50,7 +51,6 @@ pub fn entry() -> ComponentEntry {
                 "amplitude" => Ok(GameValue::Float(c.amplitude as f64)),
                 "frequency" => Ok(GameValue::Float(c.frequency as f64)),
                 "phase" => Ok(GameValue::Float(c.phase as f64)),
-                "base_y" => Ok(GameValue::Float(c.base_y.unwrap_or(0.0) as f64)),
                 _ => Err(format!("unknown field '{field}' on FloatBob")),
             }
         },
@@ -60,7 +60,6 @@ pub fn entry() -> ComponentEntry {
                 ("amplitude", GameValue::Float(f)) => c.amplitude = f as f32,
                 ("frequency", GameValue::Float(f)) => c.frequency = f as f32,
                 ("phase", GameValue::Float(f)) => c.phase = f as f32,
-                ("base_y", GameValue::Float(f)) => c.base_y = Some(f as f32),
                 _ => return Err(format!("unknown or mismatched field '{field}' on FloatBob")),
             }
             Ok(())

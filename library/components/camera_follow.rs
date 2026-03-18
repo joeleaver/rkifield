@@ -5,6 +5,8 @@ use rkf_runtime::behavior::{ComponentEntry, FieldMeta, FieldType, GameValue};
 /// Camera follow component: smoothly tracks a target entity's position.
 pub struct CameraFollow {
     pub target: hecs::Entity,
+    /// StableId UUID string of the target entity (for inspector/persistence).
+    pub target_id: String,
     pub offset: glam::Vec3,
     pub smoothing: f32,
 }
@@ -13,6 +15,7 @@ impl Default for CameraFollow {
     fn default() -> Self {
         Self {
             target: hecs::Entity::DANGLING,
+            target_id: String::new(),
             offset: glam::Vec3::new(0.0, 5.0, -10.0),
             smoothing: 0.1,
         }
@@ -24,6 +27,7 @@ impl Default for CameraFollow {
 #[serde(default)]
 struct CameraFollowProxy {
     target_bits: u64,
+    target_id: String,
     offset: glam::Vec3,
     smoothing: f32,
 }
@@ -33,13 +37,25 @@ impl Default for CameraFollowProxy {
         let def = CameraFollow::default();
         Self {
             target_bits: def.target.to_bits().get(),
+            target_id: String::new(),
             offset: def.offset,
             smoothing: def.smoothing,
         }
     }
 }
 
-static FIELDS: [FieldMeta; 2] = [
+static FIELDS: [FieldMeta; 3] = [
+    FieldMeta {
+        name: "target_id",
+        field_type: FieldType::ComponentRef,
+        transient: false,
+        range: None,
+        default: None,
+        persist: true,
+        struct_meta: None,
+        asset_filter: None,
+        component_filter: Some("Transform"),
+    },
     FieldMeta {
         name: "offset",
         field_type: FieldType::Vec3,
@@ -47,6 +63,9 @@ static FIELDS: [FieldMeta; 2] = [
         range: None,
         default: None,
         persist: false,
+        struct_meta: None,
+        asset_filter: None,
+        component_filter: None,
     },
     FieldMeta {
         name: "smoothing",
@@ -55,6 +74,9 @@ static FIELDS: [FieldMeta; 2] = [
         range: Some((0.0, 1.0)),
         default: None,
         persist: false,
+        struct_meta: None,
+        asset_filter: None,
+        component_filter: None,
     },
 ];
 
@@ -69,6 +91,7 @@ pub fn entry() -> ComponentEntry {
                 .map(|c| {
                     let proxy = CameraFollowProxy {
                         target_bits: c.target.to_bits().get(),
+                        target_id: c.target_id.clone(),
                         offset: c.offset,
                         smoothing: c.smoothing,
                     };
@@ -83,6 +106,7 @@ pub fn entry() -> ComponentEntry {
                     entity,
                     CameraFollow {
                         target,
+                        target_id: proxy.target_id,
                         offset: proxy.offset,
                         smoothing: proxy.smoothing,
                     },
@@ -98,6 +122,7 @@ pub fn entry() -> ComponentEntry {
                 .get::<&CameraFollow>(entity)
                 .map_err(|_| "entity does not have component 'CameraFollow'".to_string())?;
             match field_name {
+                "target_id" => Ok(GameValue::String(c.target_id.clone())),
                 "offset" => Ok(GameValue::Vec3(c.offset)),
                 "smoothing" => Ok(GameValue::Float(c.smoothing as f64)),
                 _ => Err(format!(
@@ -111,6 +136,10 @@ pub fn entry() -> ComponentEntry {
                 .get::<&mut CameraFollow>(entity)
                 .map_err(|_| "entity does not have component 'CameraFollow'".to_string())?;
             match field_name {
+                "target_id" => match value {
+                    GameValue::String(s) => c.target_id = s,
+                    _ => return Err("type mismatch for field 'target_id'".into()),
+                },
                 "offset" => match value {
                     GameValue::Vec3(v) => c.offset = v,
                     _ => return Err("type mismatch for field 'offset'".into()),

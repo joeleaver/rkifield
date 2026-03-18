@@ -24,6 +24,9 @@ static FIELDS: [FieldMeta; 2] = [
         range: None,
         default: None,
         persist: true,
+        struct_meta: None,
+        asset_filter: None,
+        component_filter: None,
     },
     FieldMeta {
         name: "key_required",
@@ -32,6 +35,9 @@ static FIELDS: [FieldMeta; 2] = [
         range: None,
         default: None,
         persist: false,
+        struct_meta: None,
+        asset_filter: None,
+        component_filter: None,
     },
 ];
 
