@@ -34,5 +34,8 @@ flamegraph.svg
 # OMC state (local agent orchestration)
 .omc/
 
+# Vendored dependencies (no longer tracked — fetched via git deps)
+/vendor/
+
 # Claude Code memory
 .claude/

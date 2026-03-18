@@ -15,32 +15,6 @@ members = [
     "crates/rkf-convert",
     "crates/rkf-game",
     "crates/rkf-testbed",
-    # Vendored rinch crates
-    "vendor/rinch/crates/rinch",
-    "vendor/rinch/crates/rinch-core",
-    "vendor/rinch/crates/rinch-macros",
-    "vendor/rinch/crates/rinch-platform",
-    "vendor/rinch/crates/rinch-renderer",
-    "vendor/rinch/crates/rinch-theme",
-    "vendor/rinch/crates/rinch-components",
-    "vendor/rinch/crates/rinch-tabler-icons",
-    "vendor/rinch/crates/rinch-dom",
-    "vendor/rinch/crates/rinch-editor",
-    "vendor/rinch/crates/rinch-editor-macros",
-    "vendor/rinch/crates/rinch-editor-components",
-    "vendor/rinch/crates/rinch-debug",
-    "vendor/rinch/crates/rinch-editable",
-    "vendor/rinch/crates/rinch-clipboard",
-    "vendor/rinch/crates/rinch-video",
-    "vendor/rinch/crates/rinch-web",
-    "vendor/rinch/crates/stylo-taffy",
-]
-exclude = [
-    "vendor/rinch/crates/rinch-mcp-server",
-    "vendor/rinch/crates/rinch-test",
-    "vendor/rinch/crates/rinch-test-cli",
-    "vendor/rinch/crates/rinch-visual-test",
-    "vendor/rinch/examples",
 ]
 
 [workspace.package]
@@ -48,7 +22,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/user/rinch"
+repository = "https://github.com/joeleaver/rkifield"
 
 [workspace.dependencies]
 # External dependencies
@@ -80,25 +54,25 @@ crossbeam = "0.8"
 arc-swap = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 
-# Rinch workspace dependencies (vendored)
-rinch = { path = "vendor/rinch/crates/rinch", default-features = false }
-rinch-core = { path = "vendor/rinch/crates/rinch-core" }
-rinch-macros = { path = "vendor/rinch/crates/rinch-macros" }
-rinch-renderer = { path = "vendor/rinch/crates/rinch-renderer" }
-rinch-theme = { path = "vendor/rinch/crates/rinch-theme" }
-rinch-components = { path = "vendor/rinch/crates/rinch-components" }
-rinch-tabler-icons = { path = "vendor/rinch/crates/rinch-tabler-icons" }
-rinch-dom = { path = "vendor/rinch/crates/rinch-dom" }
-rinch-editor = { path = "vendor/rinch/crates/rinch-editor" }
-rinch-editor-macros = { path = "vendor/rinch/crates/rinch-editor-macros" }
-rinch-editor-components = { path = "vendor/rinch/crates/rinch-editor-components" }
-rinch-debug = { path = "vendor/rinch/crates/rinch-debug" }
-rinch-editable = { path = "vendor/rinch/crates/rinch-editable" }
-rinch-platform = { path = "vendor/rinch/crates/rinch-platform" }
-rinch-web = { path = "vendor/rinch/crates/rinch-web" }
-rinch-video = { path = "vendor/rinch/crates/rinch-video" }
-rinch-clipboard = { path = "vendor/rinch/crates/rinch-clipboard" }
-stylo_taffy = { path = "vendor/rinch/crates/stylo-taffy" }
+# Rinch dependencies (from upstream git)
+rinch = { git = "ssh://git@github.com/joeleaver/rinch.git", default-features = false }
+rinch-core = { git = "ssh://git@github.com/joeleaver/rinch.git" }
+rinch-macros = { git = "ssh://git@github.com/joeleaver/rinch.git" }
+rinch-renderer = { git = "ssh://git@github.com/joeleaver/rinch.git" }
+rinch-theme = { git = "ssh://git@github.com/joeleaver/rinch.git" }
+rinch-components = { git = "ssh://git@github.com/joeleaver/rinch.git" }
+rinch-tabler-icons = { git = "ssh://git@github.com/joeleaver/rinch.git" }
+rinch-dom = { git = "ssh://git@github.com/joeleaver/rinch.git" }
+rinch-editor = { git = "ssh://git@github.com/joeleaver/rinch.git" }
+rinch-editor-macros = { git = "ssh://git@github.com/joeleaver/rinch.git" }
+rinch-editor-components = { git = "ssh://git@github.com/joeleaver/rinch.git" }
+rinch-debug = { git = "ssh://git@github.com/joeleaver/rinch.git" }
+rinch-editable = { git = "ssh://git@github.com/joeleaver/rinch.git" }
+rinch-platform = { git = "ssh://git@github.com/joeleaver/rinch.git" }
+rinch-web = { git = "ssh://git@github.com/joeleaver/rinch.git" }
+rinch-video = { git = "ssh://git@github.com/joeleaver/rinch.git" }
+rinch-clipboard = { git = "ssh://git@github.com/joeleaver/rinch.git" }
+stylo_taffy = { git = "ssh://git@github.com/joeleaver/rinch.git" }
 
 # Rinch external deps
 anyrender = "0.7"
