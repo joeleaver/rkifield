@@ -28,7 +28,7 @@ use glam::Vec3;
 
 use rkf_core::aabb::Aabb;
 use rkf_core::asset_file_v3::{SaveLodV3, save_object_v3};
-use rkf_core::brick_geometry::{BrickGeometry, SurfaceVoxel, voxel_index};
+use rkf_core::brick_geometry::{BrickGeometry, voxel_index};
 use rkf_core::brick_map::BrickMap;
 use rkf_core::companion::{ColorBrick, ColorVoxel};
 use rkf_core::constants::BRICK_DIM;
@@ -190,19 +190,27 @@ fn parse_args() -> Result<Args> {
 // Voxel size auto-detection
 // ---------------------------------------------------------------------------
 
-/// Estimate a sensible finest voxel size from the mesh bounding box.
+/// Standard voxel size tiers — must match the editor's VOXEL_TIERS.
+const VOXEL_TIERS: [f32; 4] = [0.005, 0.02, 0.08, 0.32];
+
+/// Pick the best voxel tier for a mesh based on its bounding box.
 ///
-/// Targets approximately 128 brick-widths (1024 voxels) along the longest
-/// axis of the mesh, clamped to [0.001, 0.1] metres.
+/// Uses the same heuristic as the editor: pick the coarsest tier that
+/// gives at least 8 bricks on the longest axis.
 fn auto_voxel_size(mesh: &MeshData) -> f32 {
     let extent = mesh.bounds_max - mesh.bounds_min;
     let longest = extent.max_element();
     if longest < 1e-6 {
-        return 0.02; // degenerate mesh fallback
+        return VOXEL_TIERS[0]; // degenerate mesh fallback
     }
-    // 1024 voxels along longest axis
-    let vs = longest / 1024.0;
-    vs.clamp(0.001, 0.1)
+    // Pick coarsest tier with >= 8 bricks on longest axis (same as editor)
+    for &vs in VOXEL_TIERS.iter().rev() {
+        let bricks = longest / (vs * BRICK_DIM as f32);
+        if bricks >= 8.0 {
+            return vs;
+        }
+    }
+    VOXEL_TIERS[0] // finest if the object is tiny
 }
 
 // ---------------------------------------------------------------------------
