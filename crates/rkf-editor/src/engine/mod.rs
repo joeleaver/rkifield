@@ -260,11 +260,13 @@ impl EditorEngine {
     }
 
     /// Sync the render camera from the editor camera state.
-    pub fn sync_camera(&mut self, editor_cam: &SceneCamera) {
+    ///
+    /// `fov_degrees` comes from the editor camera entity's CameraComponent.
+    pub fn sync_camera(&mut self, editor_cam: &SceneCamera, fov_degrees: f32) {
         self.camera.position = editor_cam.position;
         self.camera.yaw = editor_cam.fly_yaw;
         self.camera.pitch = editor_cam.fly_pitch;
-        self.camera.fov_degrees = editor_cam.fov_y.to_degrees();
+        self.camera.fov_degrees = fov_degrees;
     }
 
     /// Set the shading debug mode (0=normal, 1=normals, 2=positions, etc).

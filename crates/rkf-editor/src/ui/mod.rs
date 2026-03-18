@@ -174,6 +174,9 @@ pub fn editor_ui() -> NodeHandle {
                             if state.gizmo.dragging {
                                 let (ray_o, ray_d) = crate::camera::screen_to_ray(
                                     &state.editor_camera, x, y, vp_w, vp_h,
+                                    state.editor_camera_fov_y(),
+                                    state.editor_camera_near(),
+                                    state.editor_camera_far(),
                                 );
                                 if let Some(SelectedEntity::Object(eid)) = state.selected_entity {
                                     let gizmo_mode = state.gizmo.mode;
@@ -263,6 +266,9 @@ pub fn editor_ui() -> NodeHandle {
                                     let gizmo_size = cam_dist * 0.12;
                                     let (ray_o, ray_d) = crate::camera::screen_to_ray(
                                         &state.editor_camera, x, y, vp_w, vp_h,
+                                        state.editor_camera_fov_y(),
+                                        state.editor_camera_near(),
+                                        state.editor_camera_far(),
                                     );
                                     state.gizmo.hovered_axis = gizmo::pick_gizmo_axis_for_mode(
                                         ray_o, ray_d, gc, gizmo_size, state.gizmo.mode,
@@ -338,6 +344,9 @@ pub fn editor_ui() -> NodeHandle {
                                     let gizmo_size = cam_dist * 0.12;
                                     let (ray_o, ray_d) = crate::camera::screen_to_ray(
                                         &state.editor_camera, x, y, vp_w, vp_h,
+                                        state.editor_camera_fov_y(),
+                                        state.editor_camera_near(),
+                                        state.editor_camera_far(),
                                     );
                                     let axis = gizmo::pick_gizmo_axis_for_mode(
                                         ray_o, ray_d, gc, gizmo_size, state.gizmo.mode,

@@ -605,4 +605,12 @@ pub struct EditorState {
     /// UUID of the editor's own camera entity (has EditorCameraMarker).
     /// Excluded from scene save/load and scene tree UI.
     pub editor_camera_entity: Option<Uuid>,
+
+    /// Optional soft-link to a scene camera entity UUID for environment resolution.
+    pub linked_camera: Option<Uuid>,
+    /// Active viewport camera — scene camera entity that drives the viewport.
+    /// `None` = free editor camera.
+    pub viewport_camera: Option<Uuid>,
+    /// Optional piloting mode — editor viewport drives this scene camera entity.
+    pub piloting: Option<Uuid>,
 }

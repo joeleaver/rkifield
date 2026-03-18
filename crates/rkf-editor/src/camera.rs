@@ -9,7 +9,6 @@
 
 use crate::input::{InputState, KeyCode};
 use glam::{Mat4, Vec3};
-use uuid::Uuid;
 
 /// Camera interaction mode.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -36,12 +35,6 @@ pub struct SceneCamera {
     pub up: Vec3,
     /// Current interaction mode.
     pub mode: CameraMode,
-    /// Vertical field of view in radians.
-    pub fov_y: f32,
-    /// Near clip plane distance.
-    pub near: f32,
-    /// Far clip plane distance.
-    pub far: f32,
 
     // Orbit mode state
     /// Distance from target in orbit mode.
@@ -74,20 +67,6 @@ pub struct SceneCamera {
     pub min_pitch: f32,
     /// Maximum pitch angle (radians). Prevents looking straight up.
     pub max_pitch: f32,
-
-    // ── Camera linking ────────────────────────────────────────────
-    /// Optional soft-link to a scene camera entity UUID for environment resolution.
-    /// When set, the editor uses that camera's environment profile.
-    /// Invalid/deleted UUIDs are gracefully ignored (falls back to editor defaults).
-    pub linked_camera: Option<Uuid>,
-
-    /// Active viewport camera — scene camera entity that drives the viewport.
-    /// When set, the renderer uses this camera's position/rotation/fov instead
-    /// of the editor camera's. `None` = free editor camera.
-    pub viewport_camera: Option<Uuid>,
-
-    /// Optional piloting mode — editor viewport drives this scene camera entity.
-    pub piloting: Option<Uuid>,
 }
 
 impl Default for SceneCamera {
@@ -107,9 +86,6 @@ impl SceneCamera {
             target: Vec3::ZERO,
             up: Vec3::Y,
             mode: CameraMode::Orbit,
-            fov_y: 60.0_f32.to_radians(),
-            near: 0.1,
-            far: 1000.0,
             orbit_distance: 10.0,
             orbit_yaw: 0.0,
             orbit_pitch: 0.3,
@@ -122,9 +98,6 @@ impl SceneCamera {
             max_orbit_distance: 500.0,
             min_pitch: -1.4, // ~-80 degrees
             max_pitch: 1.4,  // ~+80 degrees
-            linked_camera: None,
-            viewport_camera: None,
-            piloting: None,
         };
         cam.update_from_orbit();
         cam
@@ -147,7 +120,6 @@ impl SceneCamera {
         if let Ok(cam) = ecs.get::<&rkf_runtime::components::CameraComponent>(entity) {
             self.fly_yaw = cam.yaw.to_radians();
             self.fly_pitch = cam.pitch.to_radians();
-            self.fov_y = cam.fov_degrees.to_radians();
         }
     }
 
@@ -247,8 +219,10 @@ impl SceneCamera {
     }
 
     /// Compute the right-handed perspective projection matrix.
-    pub fn projection_matrix(&self, aspect: f32) -> Mat4 {
-        Mat4::perspective_rh(self.fov_y, aspect, self.near, self.far)
+    ///
+    /// `fov_y`, `near`, `far` come from the editor camera entity's CameraComponent.
+    pub fn projection_matrix(&self, aspect: f32, fov_y: f32, near: f32, far: f32) -> Mat4 {
+        Mat4::perspective_rh(fov_y, aspect, near, far)
     }
 
     /// Set orbit yaw/pitch and recompute position (for camera presets).
@@ -354,10 +328,13 @@ pub fn screen_to_ray(
     pixel_y: f32,
     vp_width: f32,
     vp_height: f32,
+    fov_y: f32,
+    near: f32,
+    far: f32,
 ) -> (Vec3, Vec3) {
     let aspect = vp_width / vp_height;
     let view = cam.view_matrix();
-    let proj = cam.projection_matrix(aspect);
+    let proj = cam.projection_matrix(aspect, fov_y, near, far);
     let inv_vp = (proj * view).inverse();
 
     // Normalize pixel to NDC [-1, 1].
@@ -423,8 +400,8 @@ mod tests {
             cam.orbit_distance
         );
 
-        // FOV should be ~60 degrees
-        assert!(approx_eq(cam.fov_y, 60.0_f32.to_radians(), 0.001));
+        // Camera should have valid orbit state
+        assert!(cam.orbit_distance > 0.0);
     }
 
     #[test]
@@ -655,7 +632,10 @@ mod tests {
     #[test]
     fn test_projection_matrix() {
         let cam = SceneCamera::new();
-        let proj = cam.projection_matrix(16.0 / 9.0);
+        let fov_y = 60.0_f32.to_radians();
+        let near = 0.1_f32;
+        let _far = 1000.0_f32;
+        let proj = cam.projection_matrix(16.0 / 9.0, fov_y, near, _far);
 
         // Projection matrix should be invertible
         assert!(
@@ -665,7 +645,7 @@ mod tests {
 
         // Near plane points should map to z near 0 (wgpu/Vulkan RH convention, depth [0,1])
         // A point at (0, 0, -near) in view space should map to z = 0 in NDC
-        let near_point = proj.project_point3(Vec3::new(0.0, 0.0, -cam.near));
+        let near_point = proj.project_point3(Vec3::new(0.0, 0.0, -near));
         assert!(
             approx_eq(near_point.z, 0.0, 0.05),
             "near plane should map to z near 0: got {}",

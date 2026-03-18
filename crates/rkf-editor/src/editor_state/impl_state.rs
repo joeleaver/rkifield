@@ -13,7 +13,6 @@ impl EditorState {
         cam.position = Vec3::new(0.0, 2.5, 5.0);
         cam.fly_yaw = 0.0;
         cam.fly_pitch = -0.15;
-        cam.fov_y = 70.0_f32.to_radians();
         cam.fly_speed = 5.0;
 
         let mut world = World::new("editor");
@@ -101,6 +100,9 @@ impl EditorState {
             pending_paint_undo: None,
             world,
             editor_camera_entity: Some(editor_cam_uuid),
+            linked_camera: None,
+            viewport_camera: None,
+            piloting: None,
         }
     }
 
@@ -135,13 +137,84 @@ impl EditorState {
 
     /// Sync editor camera state to an engine `Camera`.
     ///
-    /// Copies position, orientation, and FOV from the `SceneCamera` to
-    /// the render engine's `Camera` struct.
+    /// Copies position, orientation, and FOV from the editor camera entity
+    /// to the render engine's `Camera` struct.
     pub fn sync_to_engine_camera(&self, engine_cam: &mut rkf_render::camera::Camera) {
         engine_cam.position = self.editor_camera.position;
         engine_cam.yaw = self.editor_camera.fly_yaw;
         engine_cam.pitch = self.editor_camera.fly_pitch;
-        engine_cam.fov_degrees = self.editor_camera.fov_y.to_degrees();
+        engine_cam.fov_degrees = self.editor_camera_fov_degrees();
+    }
+
+    /// Read fov_degrees from the editor camera entity's CameraComponent.
+    pub fn editor_camera_fov_degrees(&self) -> f32 {
+        self.editor_camera_component_field(|c| c.fov_degrees).unwrap_or(70.0)
+    }
+
+    /// Read near clip from the editor camera entity's CameraComponent.
+    pub fn editor_camera_near(&self) -> f32 {
+        self.editor_camera_component_field(|c| c.near).unwrap_or(0.1)
+    }
+
+    /// Read far clip from the editor camera entity's CameraComponent.
+    pub fn editor_camera_far(&self) -> f32 {
+        self.editor_camera_component_field(|c| c.far).unwrap_or(1000.0)
+    }
+
+    /// Read fov_y in radians from the editor camera entity.
+    pub fn editor_camera_fov_y(&self) -> f32 {
+        self.editor_camera_fov_degrees().to_radians()
+    }
+
+    /// Helper to read a field from the editor camera entity's CameraComponent.
+    fn editor_camera_component_field<T>(
+        &self,
+        f: impl FnOnce(&rkf_runtime::components::CameraComponent) -> T,
+    ) -> Option<T> {
+        let uuid = self.editor_camera_entity?;
+        let ecs_entity = self.world.ecs_entity_for(uuid)?;
+        let cam = self.world.ecs_ref()
+            .get::<&rkf_runtime::components::CameraComponent>(ecs_entity)
+            .ok()?;
+        Some(f(&cam))
+    }
+
+    /// Write a field on the editor camera entity's CameraComponent.
+    pub fn set_editor_camera_component_field(
+        &mut self,
+        f: impl FnOnce(&mut rkf_runtime::components::CameraComponent),
+    ) {
+        if let Some(uuid) = self.editor_camera_entity {
+            if let Some(ecs_entity) = self.world.ecs_entity_for(uuid) {
+                if let Ok(mut cam) = self.world.ecs_mut()
+                    .get::<&mut rkf_runtime::components::CameraComponent>(ecs_entity)
+                {
+                    f(&mut cam);
+                }
+            }
+        }
+    }
+
+    /// Write the editor camera's position/yaw/pitch back to its entity.
+    ///
+    /// Called each frame after update_camera() to keep the entity in sync
+    /// with the transient SceneCamera working state.
+    pub fn write_camera_to_entity(&mut self) {
+        if let Some(uuid) = self.editor_camera_entity {
+            let pos = rkf_core::WorldPosition::new(
+                glam::IVec3::ZERO,
+                self.editor_camera.position,
+            );
+            let _ = self.world.set_position(uuid, pos);
+            if let Some(ecs_entity) = self.world.ecs_entity_for(uuid) {
+                if let Ok(mut cam) = self.world.ecs_mut()
+                    .get::<&mut rkf_runtime::components::CameraComponent>(ecs_entity)
+                {
+                    cam.yaw = self.editor_camera.fly_yaw.to_degrees();
+                    cam.pitch = self.editor_camera.fly_pitch.to_degrees();
+                }
+            }
+        }
     }
 
     /// Name of the current debug visualization mode (empty for normal shading).
@@ -239,6 +312,9 @@ impl EditorState {
             pixel_y,
             vp_width,
             vp_height,
+            self.editor_camera_fov_y(),
+            self.editor_camera_near(),
+            self.editor_camera_far(),
         );
 
         let render_scene = self.world.build_render_scene();

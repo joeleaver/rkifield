@@ -62,7 +62,7 @@ fn save_scene_v3(
         position: es.editor_camera.position,
         yaw: es.editor_camera.fly_yaw,
         pitch: es.editor_camera.fly_pitch,
-        fov_y: es.editor_camera.fov_y,
+        fov_y: es.editor_camera_fov_y(),
     };
     if let Ok(s) = ron::to_string(&cam_snap) {
         scene_v3.properties.insert("camera".into(), s);
@@ -264,7 +264,7 @@ fn restore_properties_v3(es: &mut EditorState, scene_v3: &SceneFileV3) {
             es.editor_camera.position = cam.position;
             es.editor_camera.fly_yaw = cam.yaw;
             es.editor_camera.fly_pitch = cam.pitch;
-            es.editor_camera.fov_y = cam.fov_y;
+            es.set_editor_camera_component_field(|c| c.fov_degrees = cam.fov_y.to_degrees());
             let dir = glam::Vec3::new(
                 -cam.yaw.sin() * cam.pitch.cos(),
                 cam.pitch.sin(),

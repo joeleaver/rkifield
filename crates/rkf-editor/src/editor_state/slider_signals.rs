@@ -105,10 +105,10 @@ impl SliderSignals {
         let az = d[0].atan2(d[2]).to_degrees().rem_euclid(360.0);
         let el = d[1].asin().to_degrees();
         Self {
-            fov: Signal::new(es.editor_camera.fov_y.to_degrees() as f64),
+            fov: Signal::new(es.editor_camera_fov_degrees() as f64),
             fly_speed: Signal::new(es.editor_camera.fly_speed as f64),
-            near: Signal::new(es.editor_camera.near as f64),
-            far: Signal::new(es.editor_camera.far as f64),
+            near: Signal::new(es.editor_camera_near() as f64),
+            far: Signal::new(es.editor_camera_far() as f64),
             sun_azimuth: Signal::new(az as f64),
             sun_elevation: Signal::new(el as f64),
             sun_intensity: Signal::new(env.atmosphere.sun_intensity as f64),
@@ -248,10 +248,9 @@ impl SliderSignals {
     /// ECS `EnvironmentSettings` component via `SetComponentField` commands.
     pub fn sync_to_state(&self, es: &mut EditorState) {
         // Camera
-        es.editor_camera.fov_y = (self.fov.get() as f32).to_radians();
+        es.set_editor_camera_component_field(|c| c.fov_degrees = self.fov.get() as f32);
         es.editor_camera.fly_speed = self.fly_speed.get() as f32;
-        es.editor_camera.near = self.near.get() as f32;
-        es.editor_camera.far = self.far.get() as f32;
+        es.set_editor_camera_component_field(|c| { c.near = self.near.get() as f32; c.far = self.far.get() as f32; });
 
         // Brush — sync to both sculpt and paint settings
         let radius = self.brush_radius.get() as f32;

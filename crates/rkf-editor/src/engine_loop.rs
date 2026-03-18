@@ -294,7 +294,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
 
         // c. Single brief lock: read all data needed for this frame, then release.
         let (
-            camera, f_debug_mode, f_convert_to_voxel, f_remap_material,
+            camera, f_camera_fov_deg, f_debug_mode, f_convert_to_voxel, f_remap_material,
             f_set_prim_mat,
             f_environment, f_lights,
             mut scene_clone, f_selected, f_gizmo_mode, f_gizmo_axis,
@@ -328,13 +328,16 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             // Camera update (mutates EditorState input state).
             es.update_camera(dt);
 
+            // Write editor camera working state back to the editor camera entity.
+            es.write_camera_to_entity();
+
             // Pilot mode: write editor camera state back to the piloted entity.
-            if let Some(pilot_uuid) = es.editor_camera.piloting {
+            if let Some(pilot_uuid) = es.piloting {
                 if let Some(hecs_entity) = es.world.ecs_entity_for(pilot_uuid) {
                     let pos = es.editor_camera.position;
                     let yaw_deg = es.editor_camera.fly_yaw.to_degrees();
                     let pitch_deg = es.editor_camera.fly_pitch.to_degrees();
-                    let fov_deg = es.editor_camera.fov_y.to_degrees();
+                    let fov_deg = es.editor_camera_fov_degrees();
                     let wp = rkf_core::WorldPosition::new(glam::IVec3::ZERO, pos);
                     let _ = es.world.set_position(pilot_uuid, wp);
                     if let Ok(mut cam) = es.world.ecs_mut()
@@ -346,13 +349,13 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                     }
                 } else {
                     // Piloted camera was deleted — stop piloting.
-                    es.editor_camera.piloting = None;
+                    es.piloting = None;
                 }
             }
 
             // Viewport camera: render from a scene camera instead of the editor camera.
-            if es.editor_camera.piloting.is_none() {
-                if let Some(vp_uuid) = es.editor_camera.viewport_camera {
+            if es.piloting.is_none() {
+                if let Some(vp_uuid) = es.viewport_camera {
                     if let Some(hecs_entity) = es.world.ecs_entity_for(vp_uuid) {
                         let cam_data = {
                             let ecs = es.world.ecs_ref();
@@ -366,13 +369,13 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                             es.editor_camera.position = pos;
                             es.editor_camera.target = pos + glam::Vec3::new(0.0, 0.0, -1.0);
                         }
-                        if let Some((yaw, pitch, fov)) = cam_data.1 {
+                        if let Some((yaw, pitch, _fov)) = cam_data.1 {
                             es.editor_camera.fly_yaw = yaw.to_radians();
                             es.editor_camera.fly_pitch = pitch.to_radians();
-                            es.editor_camera.fov_y = fov.to_radians();
+                            // fov is read from the entity by sync_to_engine_camera
                         }
                     } else {
-                        es.editor_camera.viewport_camera = None;
+                        es.viewport_camera = None;
                     }
                 }
             }
@@ -730,7 +733,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             // write directly. We detect changes and push to the renderer.
 
             // Linked camera override: resolve profile → ECS entity.
-            if let Some(linked_uuid) = es.editor_camera.linked_camera {
+            if let Some(linked_uuid) = es.linked_camera {
                 if let Some(hecs_entity) = es.world.ecs_entity_for(linked_uuid) {
                     let profile_path = es.world.ecs_ref()
                         .get::<&rkf_runtime::components::CameraComponent>(hecs_entity)
@@ -747,7 +750,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                         }
                     }
                 } else {
-                    es.editor_camera.linked_camera = None;
+                    es.linked_camera = None;
                 }
             }
 
@@ -828,6 +831,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             };
 
             let cam = es.editor_camera;
+            let cam_fov_deg = es.editor_camera_fov_degrees();
             let sel = es.selected_entity;
             let gm = es.gizmo.mode;
             let grid = es.show_grid;
@@ -849,7 +853,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             // Reset per-frame deltas last.
             es.reset_frame_deltas();
 
-            (cam, debug_mode, convert_to_voxel, remap_material,
+            (cam, cam_fov_deg, debug_mode, convert_to_voxel, remap_material,
              set_prim_mat,
              environment, lights,
              scene, sel, gm, gizmo_axis, grid, emode, brush_radius, brush_falloff,
@@ -859,7 +863,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         };
 
         // d. Apply extracted data to engine (no lock held).
-        engine.sync_camera(&camera);
+        engine.sync_camera(&camera, f_camera_fov_deg);
         if let Some(mode) = f_debug_mode {
             engine.set_debug_mode(mode);
         }
@@ -1083,7 +1087,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             ss.camera_position = camera.position;
             ss.camera_yaw = camera.fly_yaw;
             ss.camera_pitch = camera.fly_pitch;
-            ss.camera_fov = camera.fov_y.to_degrees();
+            ss.camera_fov = f_camera_fov_deg;
             ss.frame_time_ms = dt as f64 * 1000.0;
             ss.frame_width = current_vp.0;
             ss.frame_height = current_vp.1;

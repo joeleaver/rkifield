@@ -171,14 +171,13 @@ pub(crate) fn apply_editor_command(es: &mut EditorState, cmd: crate::editor_comm
 
         // -- Camera settings ---------------------------------------------
         SetCameraFov { fov } => {
-            es.editor_camera.fov_y = fov.to_radians();
+            es.set_editor_camera_component_field(|c| c.fov_degrees = fov);
         }
         SetCameraSpeed { speed } => {
             es.editor_camera.fly_speed = speed;
         }
         SetCameraNearFar { near, far } => {
-            es.editor_camera.near = near;
-            es.editor_camera.far = far;
+            es.set_editor_camera_component_field(|c| { c.near = near; c.far = far; });
         }
 
         // -- Environment -------------------------------------------------
@@ -322,10 +321,10 @@ pub(crate) fn apply_editor_command(es: &mut EditorState, cmd: crate::editor_comm
 
         // -- Camera linking -----------------------------------------------
         LinkCamera { camera_id } => {
-            es.editor_camera.linked_camera = camera_id;
+            es.linked_camera = camera_id;
         }
         SetViewportCamera { camera_id } => {
-            es.editor_camera.viewport_camera = camera_id;
+            es.viewport_camera = camera_id;
         }
         SnapToCamera { camera_id } => {
             if let Some(hecs_entity) = es.world.ecs_entity_for(camera_id) {
@@ -339,11 +338,11 @@ pub(crate) fn apply_editor_command(es: &mut EditorState, cmd: crate::editor_comm
             );
             let yaw = es.editor_camera.fly_yaw.to_degrees();
             let pitch = es.editor_camera.fly_pitch.to_degrees();
-            let fov = es.editor_camera.fov_y.to_degrees();
+            let fov = es.editor_camera_fov_degrees();
             let _uuid = es.world.spawn_camera("Camera", pos, yaw, pitch, fov, None);
         }
         PilotCamera { camera_id } => {
-            es.editor_camera.piloting = camera_id;
+            es.piloting = camera_id;
         }
 
         // -- Window management -------------------------------------------
