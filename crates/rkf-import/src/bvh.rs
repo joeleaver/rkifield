@@ -28,15 +28,32 @@ struct BvhAabb {
     max: Vec3,
 }
 
+/// Per-node data for BVH-accelerated winding number (Barill et al. 2018).
+///
+/// Stores the dipole approximation: area-weighted normal sum, area-weighted
+/// centroid, and bounding radius. For far-away clusters, the solid angle
+/// contribution is approximated as `dot(dipole, r) / (4π |r|³)`.
+#[derive(Debug, Clone, Copy)]
+struct WindingData {
+    /// Sum of (face_normal × triangle_area) over all triangles in this subtree.
+    dipole: Vec3,
+    /// Area-weighted centroid of all triangles in this subtree.
+    centroid: Vec3,
+    /// Bounding radius from centroid (max distance from centroid to any vertex).
+    radius: f32,
+}
+
 /// BVH node -- either interior (two children) or leaf (triangle range).
 enum BvhNode {
     Interior {
         bounds: BvhAabb,
+        winding: WindingData,
         left: Box<BvhNode>,
         right: Box<BvhNode>,
     },
     Leaf {
         bounds: BvhAabb,
+        winding: WindingData,
         /// Range start of triangle indices in the reordered index array.
         start: usize,
         /// Number of triangles in this leaf.
@@ -51,6 +68,10 @@ pub struct TriangleBvh {
     tri_order: Vec<usize>,
     /// Cached triangle vertex positions for fast access.
     positions: Vec<[Vec3; 3]>,
+    /// Precomputed face normals (unnormalized, magnitude = 2× triangle area).
+    /// Used during BVH construction for winding data; retained for potential future use.
+    #[allow(dead_code)]
+    face_area_normals: Vec<Vec3>,
 }
 
 impl TriangleBvh {
@@ -61,31 +82,96 @@ impl TriangleBvh {
             .map(|i| mesh.triangle_positions(i))
             .collect();
 
+        // Precompute face area-normals: cross product (magnitude = 2× area).
+        let face_area_normals: Vec<Vec3> = positions
+            .iter()
+            .map(|[a, b, c]| (*b - *a).cross(*c - *a))
+            .collect();
+
         let mut tri_order: Vec<usize> = (0..tri_count).collect();
 
-        let root = Self::build_recursive(&positions, &mut tri_order, 0, tri_count, 0);
+        let root = Self::build_recursive(
+            &positions,
+            &face_area_normals,
+            &mut tri_order,
+            0,
+            tri_count,
+            0,
+        );
 
         Self {
             root,
             tri_order,
             positions,
+            face_area_normals,
+        }
+    }
+
+    /// Compute winding data for a set of triangles (dipole approximation).
+    fn compute_winding_data(
+        positions: &[[Vec3; 3]],
+        face_area_normals: &[Vec3],
+        tri_order: &[usize],
+        start: usize,
+        count: usize,
+    ) -> WindingData {
+        let mut dipole = Vec3::ZERO;
+        let mut centroid = Vec3::ZERO;
+        let mut total_area = 0.0f32;
+
+        for i in start..start + count {
+            let idx = tri_order[i];
+            let area_normal = face_area_normals[idx];
+            let area = area_normal.length() * 0.5;
+            let [a, b, c] = positions[idx];
+            let tri_centroid = (a + b + c) / 3.0;
+
+            dipole += area_normal * 0.5; // area_normal/2 = normal × area
+            centroid += tri_centroid * area;
+            total_area += area;
+        }
+
+        if total_area > 1e-10 {
+            centroid /= total_area;
+        }
+
+        // Bounding radius: max distance from centroid to any vertex
+        let mut radius = 0.0f32;
+        for i in start..start + count {
+            let idx = tri_order[i];
+            for v in &positions[idx] {
+                let d = (*v - centroid).length();
+                if d > radius {
+                    radius = d;
+                }
+            }
+        }
+
+        WindingData {
+            dipole,
+            centroid,
+            radius,
         }
     }
 
     /// Recursive BVH construction using midpoint split along the longest axis.
     fn build_recursive(
         positions: &[[Vec3; 3]],
+        face_area_normals: &[Vec3],
         tri_order: &mut [usize],
         start: usize,
         count: usize,
         depth: usize,
     ) -> BvhNode {
         let bounds = compute_bounds(positions, &tri_order[start..start + count]);
+        let winding =
+            Self::compute_winding_data(positions, face_area_normals, tri_order, start, count);
 
         // Leaf condition: few triangles or max depth
         if count <= 4 || depth >= 32 {
             return BvhNode::Leaf {
                 bounds,
+                winding,
                 start,
                 count,
             };
@@ -121,10 +207,17 @@ impl TriangleBvh {
             left_count = count / 2;
         }
 
-        let left =
-            Self::build_recursive(positions, tri_order, start, left_count, depth + 1);
+        let left = Self::build_recursive(
+            positions,
+            face_area_normals,
+            tri_order,
+            start,
+            left_count,
+            depth + 1,
+        );
         let right = Self::build_recursive(
             positions,
+            face_area_normals,
             tri_order,
             start + left_count,
             count - left_count,
@@ -133,6 +226,7 @@ impl TriangleBvh {
 
         BvhNode::Interior {
             bounds,
+            winding,
             left: Box::new(left),
             right: Box::new(right),
         }
@@ -193,6 +287,56 @@ impl TriangleBvh {
             }
         }
     }
+
+    /// BVH-accelerated winding number (Barill et al. 2018).
+    ///
+    /// Returns the generalized winding number at `point`. Values near ±1
+    /// indicate the point is inside a closed surface; near 0 means outside.
+    /// Works correctly for triangle soups (non-watertight meshes).
+    ///
+    /// Complexity: O(N) worst case but typically O(log N) due to the
+    /// far-field dipole approximation for distant triangle clusters.
+    pub fn winding_number(&self, point: Vec3) -> f32 {
+        self.winding_recursive(&self.root, point)
+            / (4.0 * std::f32::consts::PI)
+    }
+
+    /// Opening angle threshold for the Barnes-Hut criterion.
+    /// Lower values = more accurate but slower. 2.0 is the standard choice.
+    const BETA: f32 = 2.0;
+
+    fn winding_recursive(&self, node: &BvhNode, point: Vec3) -> f32 {
+        let winding_data = match node {
+            BvhNode::Interior { winding, .. } | BvhNode::Leaf { winding, .. } => winding,
+        };
+
+        let r = point - winding_data.centroid;
+        let r_len = r.length();
+
+        // Far-field: dipole approximation if cluster is small relative to distance
+        if r_len > 1e-10 && winding_data.radius / r_len < Self::BETA {
+            // Solid angle ≈ dot(dipole, r) / |r|³
+            let r3 = r_len * r_len * r_len;
+            return winding_data.dipole.dot(r) / r3;
+        }
+
+        match node {
+            BvhNode::Leaf { start, count, .. } => {
+                // Exact evaluation at leaf level
+                let mut sum = 0.0f32;
+                for i in *start..*start + *count {
+                    let idx = self.tri_order[i];
+                    let [a, b, c] = self.positions[idx];
+                    sum += triangle_solid_angle(point, a, b, c);
+                }
+                sum
+            }
+            BvhNode::Interior { left, right, .. } => {
+                self.winding_recursive(left, point)
+                    + self.winding_recursive(right, point)
+            }
+        }
+    }
 }
 
 /// Extract the bounds from a BVH node.
@@ -200,6 +344,30 @@ fn node_bounds(node: &BvhNode) -> BvhAabb {
     match node {
         BvhNode::Interior { bounds, .. } | BvhNode::Leaf { bounds, .. } => *bounds,
     }
+}
+
+/// Compute the signed solid angle subtended by triangle (a, b, c) at point p.
+///
+/// Uses the Van Oosterom & Strackee formula:
+/// `Ω = 2·atan2(a'·(b'×c'), |a'||b'||c'| + |a'|(b'·c') + |b'|(a'·c') + |c'|(a'·b'))`
+///
+/// where a' = a - p, etc.
+fn triangle_solid_angle(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> f32 {
+    let a = a - p;
+    let b = b - p;
+    let c = c - p;
+    let la = a.length();
+    let lb = b.length();
+    let lc = c.length();
+    if la < 1e-10 || lb < 1e-10 || lc < 1e-10 {
+        return 0.0;
+    }
+    let na = a / la;
+    let nb = b / lb;
+    let nc = c / lc;
+    let num = na.dot(nb.cross(nc));
+    let den = 1.0 + na.dot(nb) + nb.dot(nc) + na.dot(nc);
+    2.0 * num.atan2(den)
 }
 
 /// Closest point on a triangle to a query point.

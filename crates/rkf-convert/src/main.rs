@@ -217,61 +217,6 @@ fn auto_voxel_size(mesh: &MeshData) -> f32 {
 // Sign determination
 // ---------------------------------------------------------------------------
 
-/// Precompute per-triangle face normals for the normal-dot sign test.
-///
-/// Face normals are more robust than interpolated vertex normals for sign
-/// determination on degenerate meshes.
-fn precompute_triangle_normals(mesh: &MeshData) -> Vec<Vec3> {
-    (0..mesh.triangle_count())
-        .map(|i| {
-            let [a, b, c] = mesh.triangle_positions(i);
-            let n = (b - a).cross(c - a);
-            let len = n.length();
-            if len > 1e-10 {
-                n / len
-            } else {
-                // Degenerate triangle — fall back to averaged vertex normals.
-                let base = i * 3;
-                if !mesh.normals.is_empty() && base + 2 < mesh.indices.len() {
-                    let vi0 = mesh.indices[base] as usize;
-                    let vi1 = mesh.indices[base + 1] as usize;
-                    let vi2 = mesh.indices[base + 2] as usize;
-                    if vi0 < mesh.normals.len()
-                        && vi1 < mesh.normals.len()
-                        && vi2 < mesh.normals.len()
-                    {
-                        (mesh.normals[vi0] + mesh.normals[vi1] + mesh.normals[vi2])
-                            .normalize_or_zero()
-                    } else {
-                        Vec3::Y
-                    }
-                } else {
-                    Vec3::Y
-                }
-            }
-        })
-        .collect()
-}
-
-/// Determine inside/outside using BVH nearest-triangle + normal dot test.
-///
-/// O(log N) per query — uses the BVH to find the nearest triangle, then
-/// checks which side of the surface the point is on via the face normal.
-/// Works well for watertight meshes. For non-watertight meshes, use
-/// `winding_number` instead (O(N) but more robust).
-#[inline]
-#[allow(dead_code)]
-fn is_inside_bvh(bvh: &TriangleBvh, normals: &[Vec3], pos: Vec3) -> bool {
-    let nearest = bvh.nearest(pos);
-    let tri_normal = if nearest.triangle_index < normals.len() {
-        normals[nearest.triangle_index]
-    } else {
-        Vec3::Y
-    };
-    let to_surface = pos - nearest.closest_point;
-    to_surface.dot(tri_normal) <= 0.0
-}
-
 // ---------------------------------------------------------------------------
 // Per-LOD voxelization (geometry-first)
 // ---------------------------------------------------------------------------
@@ -283,7 +228,6 @@ fn is_inside_bvh(bvh: &TriangleBvh, normals: &[Vec3], pos: Vec3) -> bool {
 fn voxelize_to_lod(
     mesh: &MeshData,
     bvh: &TriangleBvh,
-    tri_normals: &[Vec3],
     aabb: &Aabb,
     voxel_size: f32,
     material_id_override: Option<u8>,
@@ -359,17 +303,12 @@ fn voxelize_to_lod(
                                     vz as f32 * voxel_size + half_voxel,
                                 );
 
-                            // Single BVH query — reused for sign, material, and color
-                            let nearest = bvh.nearest(pos);
+                            // BVH-accelerated winding number for robust sign test
+                            let winding = bvh.winding_number(pos);
+                            geo.set_solid(vx, vy, vz, winding > 0.5);
 
-                            // Sign test via normal dot product
-                            let tri_normal = if nearest.triangle_index < tri_normals.len() {
-                                tri_normals[nearest.triangle_index]
-                            } else {
-                                Vec3::Y
-                            };
-                            let inside = (pos - nearest.closest_point).dot(tri_normal) <= 0.0;
-                            geo.set_solid(vx, vy, vz, inside);
+                            // BVH nearest query for material and color transfer
+                            let nearest = bvh.nearest(pos);
 
                             let flat = voxel_index(vx, vy, vz) as usize;
 
@@ -464,7 +403,6 @@ fn voxelize_to_lod(
 fn generate_lods(
     mesh: &MeshData,
     bvh: &TriangleBvh,
-    tri_normals: &[Vec3],
     finest_voxel_size: f32,
     lod_levels: usize,
     material_id_override: Option<u8>,
@@ -492,7 +430,6 @@ fn generate_lods(
         let lod = voxelize_to_lod(
             mesh,
             bvh,
-            tri_normals,
             &aabb,
             voxel_size,
             material_id_override,
@@ -583,7 +520,6 @@ fn run() -> Result<()> {
 
     eprintln!("Building BVH over {} triangles...", mesh.triangle_count());
     let bvh = TriangleBvh::build(&mesh);
-    let tri_normals = precompute_triangle_normals(&mesh);
     eprintln!("  done");
     eprintln!();
 
@@ -593,7 +529,6 @@ fn run() -> Result<()> {
     let lods = generate_lods(
         &mesh,
         &bvh,
-        &tri_normals,
         finest_voxel_size,
         args.lod_levels,
         args.material_id_override,
