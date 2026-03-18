@@ -33,3 +33,6 @@ flamegraph.svg
 
 # OMC state (local agent orchestration)
 .omc/
+
+# Claude Code memory
+.claude/
