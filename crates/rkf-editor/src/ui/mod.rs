@@ -262,12 +262,10 @@ pub fn editor_ui() -> NodeHandle {
                                 if let Some(gc) = gc {
                                     let cam_dist = (gc - state.extract_camera_snapshot().position).length();
                                     let gizmo_size = cam_dist * 0.12;
-                                    let (ray_o, ray_d) = crate::camera::screen_to_ray(
-                                        &state.editor_camera, x, y, vp_w, vp_h,
-                                        state.editor_camera_fov_y(),
-                                        state.editor_camera_near(),
-                                        state.editor_camera_far(),
-                                    );
+                                    let (ray_o, ray_d) = {
+                                        let snap = state.extract_camera_snapshot();
+                                        crate::camera::screen_to_ray_snapshot(&snap, x, y, vp_w, vp_h)
+                                    };
                                     state.gizmo.hovered_axis = gizmo::pick_gizmo_axis_for_mode(
                                         ray_o, ray_d, gc, gizmo_size, state.gizmo.mode,
                                     );
@@ -340,12 +338,10 @@ pub fn editor_ui() -> NodeHandle {
                                 if let Some((gc, entity_pos, entity_rot, entity_scale)) = gizmo_info {
                                     let cam_dist = (gc - state.extract_camera_snapshot().position).length();
                                     let gizmo_size = cam_dist * 0.12;
-                                    let (ray_o, ray_d) = crate::camera::screen_to_ray(
-                                        &state.editor_camera, x, y, vp_w, vp_h,
-                                        state.editor_camera_fov_y(),
-                                        state.editor_camera_near(),
-                                        state.editor_camera_far(),
-                                    );
+                                    let (ray_o, ray_d) = {
+                                        let snap = state.extract_camera_snapshot();
+                                        crate::camera::screen_to_ray_snapshot(&snap, x, y, vp_w, vp_h)
+                                    };
                                     let axis = gizmo::pick_gizmo_axis_for_mode(
                                         ray_o, ray_d, gc, gizmo_size, state.gizmo.mode,
                                     );

@@ -191,18 +191,6 @@ impl EditorState {
         self.editor_camera.orbit_distance = self.camera_control.orbit_distance;
     }
 
-    /// Sync editor camera state to an engine `Camera`.
-    ///
-    /// Copies position, orientation, and FOV from the editor camera entity
-    /// to the render engine's `Camera` struct.
-    pub fn sync_to_engine_camera(&self, engine_cam: &mut rkf_render::camera::Camera) {
-        let snap = self.extract_camera_snapshot();
-        engine_cam.position = snap.position;
-        engine_cam.yaw = snap.yaw;
-        engine_cam.pitch = snap.pitch;
-        engine_cam.fov_degrees = snap.fov_degrees;
-    }
-
     /// Read fov_degrees from the editor camera entity's CameraComponent.
     pub fn editor_camera_fov_degrees(&self) -> f32 {
         self.editor_camera_component_field(|c| c.fov_degrees).unwrap_or(70.0)
@@ -318,28 +306,6 @@ impl EditorState {
             }
         }
         self.editor_camera_entity = Some(editor_cam_uuid);
-    }
-
-    /// Write the editor camera's position/yaw/pitch back to its entity.
-    ///
-    /// Called each frame after update_camera() to keep the entity in sync
-    /// with the transient SceneCamera working state.
-    pub fn write_camera_to_entity(&mut self) {
-        if let Some(uuid) = self.editor_camera_entity {
-            let pos = rkf_core::WorldPosition::new(
-                glam::IVec3::ZERO,
-                self.editor_camera.position,
-            );
-            let _ = self.world.set_position(uuid, pos);
-            if let Some(ecs_entity) = self.world.ecs_entity_for(uuid) {
-                if let Ok(mut cam) = self.world.ecs_mut()
-                    .get::<&mut rkf_runtime::components::CameraComponent>(ecs_entity)
-                {
-                    cam.yaw = self.editor_camera.fly_yaw.to_degrees();
-                    cam.pitch = self.editor_camera.fly_pitch.to_degrees();
-                }
-            }
-        }
     }
 
     /// Name of the current debug visualization mode (empty for normal shading).

@@ -367,26 +367,6 @@ impl SceneCamera {
         cam
     }
 
-    /// Sync this editor camera to match a scene camera entity's transform.
-    ///
-    /// Reads position from `Transform` and yaw/pitch/fov from `CameraComponent`
-    /// on the given hecs entity. Used by linked camera, play mode camera switching,
-    /// and snap-to-camera.
-    ///
-    /// Takes `&hecs::World` directly (not `&World`) to allow split borrows when
-    /// both `editor_camera` and `world` live on `EditorState`.
-    pub fn sync_from_entity(&mut self, ecs: &hecs::World, entity: hecs::Entity) {
-        if let Ok(t) = ecs.get::<&rkf_runtime::components::Transform>(entity) {
-            let pos = t.position.to_vec3();
-            self.position = pos;
-            self.target = pos + Vec3::new(0.0, 0.0, -1.0);
-        }
-        if let Ok(cam) = ecs.get::<&rkf_runtime::components::CameraComponent>(entity) {
-            self.fly_yaw = cam.yaw.to_radians();
-            self.fly_pitch = cam.pitch.to_radians();
-        }
-    }
-
     /// Rotate the orbit camera by a mouse delta (in pixels).
     ///
     /// `dx` rotates horizontally (yaw), `dy` rotates vertically (pitch).
@@ -470,8 +450,7 @@ impl SceneCamera {
 
         self.position = self.target + offset;
 
-        // Keep fly_yaw/fly_pitch in sync so sync_to_engine_camera
-        // gives the render camera the correct view direction.
+        // Keep fly_yaw/fly_pitch in sync with orbit angles.
         let dir = (self.target - self.position).normalize();
         self.fly_pitch = dir.y.asin();
         self.fly_yaw = (-dir.x).atan2(-dir.z);
@@ -578,38 +557,6 @@ impl SceneCamera {
             }
         }
     }
-}
-
-/// Generate a world-space ray from a screen pixel coordinate.
-///
-/// `pixel_x`, `pixel_y` are in physical (pixel) coordinates relative to the
-/// viewport origin. `vp_width`, `vp_height` are the viewport dimensions in pixels.
-///
-/// Returns `(ray_origin, ray_direction)` where `ray_direction` is normalized.
-pub fn screen_to_ray(
-    cam: &SceneCamera,
-    pixel_x: f32,
-    pixel_y: f32,
-    vp_width: f32,
-    vp_height: f32,
-    fov_y: f32,
-    near: f32,
-    far: f32,
-) -> (Vec3, Vec3) {
-    let aspect = vp_width / vp_height;
-    let view = cam.view_matrix();
-    let proj = cam.projection_matrix(aspect, fov_y, near, far);
-    let inv_vp = (proj * view).inverse();
-
-    // Normalize pixel to NDC [-1, 1].
-    let ndc_x = (pixel_x / vp_width) * 2.0 - 1.0;
-    let ndc_y = 1.0 - (pixel_y / vp_height) * 2.0; // Y flipped
-
-    let near_clip = inv_vp.project_point3(glam::Vec3::new(ndc_x, ndc_y, -1.0));
-    let far_clip = inv_vp.project_point3(glam::Vec3::new(ndc_x, ndc_y, 1.0));
-
-    let dir = (far_clip - near_clip).normalize();
-    (cam.position, dir)
 }
 
 /// Generate a world-space ray from a screen pixel using a `CameraSnapshot`.

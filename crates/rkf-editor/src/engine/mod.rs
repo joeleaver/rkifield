@@ -27,7 +27,7 @@ use rkf_render::radiance_inject::RadianceInjectPass;
 use rkf_render::radiance_mip::RadianceMipPass;
 
 use crate::automation::SharedState;
-use crate::camera::SceneCamera;
+// SceneCamera removed — engine uses CameraSnapshot via sync_camera_snapshot()
 
 mod init;
 mod environment;
@@ -265,16 +265,6 @@ impl EditorEngine {
         self.camera.yaw = snap.yaw;
         self.camera.pitch = snap.pitch;
         self.camera.fov_degrees = snap.fov_degrees;
-    }
-
-    /// Sync the render camera from the editor camera state (legacy).
-    ///
-    /// `fov_degrees` comes from the editor camera entity's CameraComponent.
-    pub fn sync_camera(&mut self, editor_cam: &SceneCamera, fov_degrees: f32) {
-        self.camera.position = editor_cam.position;
-        self.camera.yaw = editor_cam.fly_yaw;
-        self.camera.pitch = editor_cam.fly_pitch;
-        self.camera.fov_degrees = fov_degrees;
     }
 
     /// Set the shading debug mode (0=normal, 1=normals, 2=positions, etc).
