@@ -62,7 +62,7 @@ fn send_env_field(
     value: rkf_runtime::behavior::game_value::GameValue,
 ) {
     use crate::editor_command::EditorCommand;
-    if let Some(uuid) = ui.scene_env_uuid.get() {
+    if let Some(uuid) = ui.active_camera_uuid.get() {
         let _ = cmd.0.send(EditorCommand::SetComponentField {
             entity_id: uuid,
             component_name: "EnvironmentSettings".to_string(),
