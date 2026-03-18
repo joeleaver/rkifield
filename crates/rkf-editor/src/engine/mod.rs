@@ -259,7 +259,15 @@ impl EditorEngine {
         self.surface_format
     }
 
-    /// Sync the render camera from the editor camera state.
+    /// Sync the render camera from a `CameraSnapshot`.
+    pub fn sync_camera_snapshot(&mut self, snap: &crate::camera::CameraSnapshot) {
+        self.camera.position = snap.position;
+        self.camera.yaw = snap.yaw;
+        self.camera.pitch = snap.pitch;
+        self.camera.fov_degrees = snap.fov_degrees;
+    }
+
+    /// Sync the render camera from the editor camera state (legacy).
     ///
     /// `fov_degrees` comes from the editor camera entity's CameraComponent.
     pub fn sync_camera(&mut self, editor_cam: &SceneCamera, fov_degrees: f32) {

@@ -294,7 +294,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
 
         // c. Single brief lock: read all data needed for this frame, then release.
         let (
-            camera, f_camera_fov_deg, f_debug_mode, f_convert_to_voxel, f_remap_material,
+            camera_snap, f_debug_mode, f_convert_to_voxel, f_remap_material,
             f_set_prim_mat,
             f_environment, f_lights,
             mut scene_clone, f_selected, f_gizmo_mode, f_gizmo_axis,
@@ -345,18 +345,15 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             // Pilot mode: write editor camera state back to the piloted entity.
             if let Some(pilot_uuid) = es.piloting {
                 if let Some(hecs_entity) = es.world.ecs_entity_for(pilot_uuid) {
-                    let pos = es.editor_camera.position;
-                    let yaw_deg = es.editor_camera.fly_yaw.to_degrees();
-                    let pitch_deg = es.editor_camera.fly_pitch.to_degrees();
-                    let fov_deg = es.editor_camera_fov_degrees();
-                    let wp = rkf_core::WorldPosition::new(glam::IVec3::ZERO, pos);
+                    let snap = es.extract_camera_snapshot();
+                    let wp = rkf_core::WorldPosition::new(glam::IVec3::ZERO, snap.position);
                     let _ = es.world.set_position(pilot_uuid, wp);
                     if let Ok(mut cam) = es.world.ecs_mut()
                         .get::<&mut rkf_runtime::components::CameraComponent>(hecs_entity)
                     {
-                        cam.yaw = yaw_deg;
-                        cam.pitch = pitch_deg;
-                        cam.fov_degrees = fov_deg;
+                        cam.yaw = snap.yaw.to_degrees();
+                        cam.pitch = snap.pitch.to_degrees();
+                        cam.fov_degrees = snap.fov_degrees;
                     }
                 } else {
                     // Piloted camera was deleted — stop piloting.
@@ -364,32 +361,22 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                 }
             }
 
-            // Viewport camera: when a scene camera is active, read its transform
-            // into a separate override (don't touch es.editor_camera — it must
-            // preserve the editor camera's own position for when we switch back).
-            let viewport_cam_override: Option<(glam::Vec3, f32, f32, f32)> =
-                if es.piloting.is_none() {
-                    if let Some(vp_uuid) = es.viewport_camera {
-                        if let Some(hecs_entity) = es.world.ecs_entity_for(vp_uuid) {
-                            let ecs = es.world.ecs_ref();
-                            let pos = ecs.get::<&rkf_runtime::components::Transform>(hecs_entity)
-                                .ok().map(|t| t.position.to_vec3());
-                            let params = ecs.get::<&rkf_runtime::components::CameraComponent>(hecs_entity)
-                                .ok().map(|c| (c.yaw, c.pitch, c.fov_degrees));
-                            match (pos, params) {
-                                (Some(p), Some((yaw, pitch, fov))) => Some((p, yaw, pitch, fov)),
-                                _ => None,
-                            }
-                        } else {
-                            es.viewport_camera = None;
-                            None
-                        }
-                    } else {
-                        None
-                    }
+            // Determine the active camera for rendering: piloting > viewport > editor.
+            let active_camera_uuid = if es.piloting.is_some() {
+                // In piloting mode, editor camera drives the piloted entity,
+                // and we render from the editor camera's perspective.
+                es.editor_camera_entity.unwrap_or_default()
+            } else if let Some(vp_uuid) = es.viewport_camera {
+                if es.world.ecs_entity_for(vp_uuid).is_some() {
+                    vp_uuid
                 } else {
-                    None
-                };
+                    es.viewport_camera = None;
+                    es.editor_camera_entity.unwrap_or_default()
+                }
+            } else {
+                es.editor_camera_entity.unwrap_or_default()
+            };
+            let camera_snapshot = es.extract_camera_snapshot_for(active_camera_uuid);
 
             // Consume pending commands.
             let debug_mode = es.pending_debug_mode.take();
@@ -819,16 +806,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                 _ => 0.0,
             };
 
-            let mut cam = es.editor_camera;
-            let mut cam_fov_deg = es.editor_camera_fov_degrees();
-            // Apply viewport camera override (scene camera driving the viewport).
-            if let Some((pos, yaw, pitch, fov)) = viewport_cam_override {
-                cam.position = pos;
-                cam.target = pos + glam::Vec3::new(0.0, 0.0, -1.0);
-                cam.fly_yaw = yaw.to_radians();
-                cam.fly_pitch = pitch.to_radians();
-                cam_fov_deg = fov;
-            }
+            let cam_snap = camera_snapshot;
             let sel = es.selected_entity;
             let gm = es.gizmo.mode;
             let grid = es.show_grid;
@@ -850,7 +828,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             // Reset per-frame deltas last.
             es.reset_frame_deltas();
 
-            (cam, cam_fov_deg, debug_mode, convert_to_voxel, remap_material,
+            (cam_snap, debug_mode, convert_to_voxel, remap_material,
              set_prim_mat,
              environment, lights,
              scene, sel, gm, gizmo_axis, grid, emode, brush_radius, brush_falloff,
@@ -860,7 +838,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         };
 
         // d. Apply extracted data to engine (no lock held).
-        engine.sync_camera(&camera, f_camera_fov_deg);
+        engine.sync_camera_snapshot(&camera_snap);
         if let Some(mode) = f_debug_mode {
             engine.set_debug_mode(mode);
         }
@@ -969,7 +947,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         // g. Build wireframe overlays (delegated to engine_loop_ui).
         engine_loop_ui::build_wireframe_overlays(
             &mut engine, &editor_state, &shared_state, &scene_clone,
-            camera.position, f_selected, f_gizmo_mode, f_gizmo_axis,
+            camera_snap.position, f_selected, f_gizmo_mode, f_gizmo_axis,
             f_show_grid, f_editor_mode, f_brush_radius, f_brush_falloff,
             f_sculpting_active, play_state.is_playing(),
         );
@@ -1081,10 +1059,10 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
 
         // j. Update shared_state for MCP observation.
         if let Ok(mut ss) = shared_state.lock() {
-            ss.camera_position = camera.position;
-            ss.camera_yaw = camera.fly_yaw;
-            ss.camera_pitch = camera.fly_pitch;
-            ss.camera_fov = f_camera_fov_deg;
+            ss.camera_position = camera_snap.position;
+            ss.camera_yaw = camera_snap.yaw;
+            ss.camera_pitch = camera_snap.pitch;
+            ss.camera_fov = camera_snap.fov_degrees;
             ss.frame_time_ms = dt as f64 * 1000.0;
             ss.frame_width = current_vp.0;
             ss.frame_height = current_vp.1;
@@ -1120,10 +1098,10 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         if last_camera_push.elapsed() >= std::time::Duration::from_millis(250) {
             last_camera_push = std::time::Instant::now();
             if let Ok(es) = editor_state.lock() {
-                let cam_pos = es.editor_camera.position;
+                let snap = es.extract_camera_snapshot();
                 rinch::shell::rinch_runtime::run_on_main_thread(move || {
                     if let Some(ui) = rinch::core::context::try_use_context::<UiSignals>() {
-                        ui.camera_display_pos.set(cam_pos);
+                        ui.camera_display_pos.set(snap.position);
                     }
                 });
             }
