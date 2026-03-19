@@ -110,7 +110,14 @@ fn EditorModeButtons() -> NodeHandle {
                         let ui = ui;
                         move || {
                             let active = ui.editor_mode.get() == mode;
-                            toolbar_btn_style(active)
+                            let bg = if active { "var(--rinch-primary-color)" } else { "transparent" };
+                            let color = if active { "var(--rinch-color-dark-9)" } else { "var(--rinch-color-dimmed)" };
+                            format!(
+                                "display:flex;align-items:center;gap:4px;\
+                                 height:{BTN_SIZE};padding:0 6px;border-radius:3px;\
+                                 background:{bg};color:{color};cursor:pointer;\
+                                 border:1px solid transparent;"
+                            )
                         }
                     },
                     title: {tooltip},
@@ -129,6 +136,7 @@ fn EditorModeButtons() -> NodeHandle {
                         }
                     },
                     {render_tabler_icon(__scope, icon, TablerIconStyle::Outline)}
+                    span { style: "font-size:11px;", {tooltip} }
                 }
             }
         }
@@ -143,8 +151,9 @@ fn CameraSelector() -> NodeHandle {
     let ui = use_context::<UiSignals>();
 
     rsx! {
-        div { style: "display:flex;align-items:center;gap:4px;",
-            div { style: "font-size:10px;color:var(--rinch-color-dimmed);", "Camera:" }
+        div { style: "display:flex;align-items:center;gap:4px;color:var(--rinch-color-dimmed);",
+            {render_tabler_icon(__scope, TablerIcon::Video, TablerIconStyle::Outline)}
+            span { style: "font-size:11px;", "Camera" }
             // Key by camera fingerprint so the Select rebuilds when cameras change.
             for camera_key in vec![camera_list_key(&ui)] {
                 div {
