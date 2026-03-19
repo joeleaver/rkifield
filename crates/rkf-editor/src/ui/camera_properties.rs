@@ -16,13 +16,28 @@ use super::{DIVIDER_STYLE, VALUE_STYLE};
 /// Editor camera panel — shows camera settings, linked camera, and environment.
 #[component]
 pub fn EditorCameraPanel() -> NodeHandle {
+    rsx! {
+        div { style: "display:flex;flex-direction:column;overflow-y:auto;",
+            CameraSettingsSection {}
+            div { style: {DIVIDER_STYLE} }
+            LinkedCameraDropdown {}
+            CameraActionButtons {}
+            div { style: {DIVIDER_STYLE} }
+            EnvironmentProfileHeader {}
+            EnvironmentSectionsGroup {}
+        }
+    }
+}
+
+/// Camera FOV, fly speed, near/far, position readout.
+#[component]
+fn CameraSettingsSection() -> NodeHandle {
     let sliders = use_context::<SliderSignals>();
     let cmd = use_context::<CommandSender>();
     let ui = use_context::<UiSignals>();
 
     rsx! {
-        div { style: "display:flex;flex-direction:column;overflow-y:auto;",
-            // ── Camera settings ──────────────────────────────────
+        div {
             SliderRow {
                 label: "FOV",
                 suffix: "\u{00b0}",
@@ -82,18 +97,15 @@ pub fn EditorCameraPanel() -> NodeHandle {
                     format!("Pos: ({:.1}, {:.1}, {:.1})", pos.x, pos.y, pos.z)
                 }}
             }
-            div { style: {DIVIDER_STYLE} }
+        }
+    }
+}
 
-            // ── Environment source ─────────────────────────────
-            LinkedCameraDropdown {}
-
-            // ── Action buttons ───────────────────────────────────
-            CameraActionButtons {}
-
-            div { style: {DIVIDER_STYLE} }
-
-            // ── Environment settings ──────────────────────────────
-            EnvironmentProfileHeader {}
+/// Groups all environment sub-sections to reduce parent rsx! depth.
+#[component]
+fn EnvironmentSectionsGroup() -> NodeHandle {
+    rsx! {
+        div {
             AtmosphereSection {}
             FogSection {}
             CloudsSection {}

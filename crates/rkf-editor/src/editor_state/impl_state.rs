@@ -276,9 +276,12 @@ impl EditorState {
             None,
         );
         if let Some(ecs_entity) = self.world.ecs_entity_for(editor_cam_uuid) {
-            let _ = self.world.ecs_mut().insert_one(
+            let _ = self.world.ecs_mut().insert(
                 ecs_entity,
-                rkf_runtime::components::EditorCameraMarker,
+                (
+                    rkf_runtime::components::EditorCameraMarker,
+                    rkf_runtime::environment::EnvironmentSettings::default(),
+                ),
             );
             if let Ok(mut cam) = self.world.ecs_mut()
                 .get::<&mut rkf_runtime::components::CameraComponent>(ecs_entity)
