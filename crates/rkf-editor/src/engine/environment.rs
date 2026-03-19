@@ -64,5 +64,6 @@ impl EditorEngine {
         self.cosmetics.set_vignette(queue, pp.vignette_intensity);
         self.cosmetics.set_grain(queue, pp.grain_intensity);
         self.cosmetics.set_chromatic_aberration(queue, pp.chromatic_aberration);
+        self.env_gi_intensity = pp.gi_intensity;
     }
 }

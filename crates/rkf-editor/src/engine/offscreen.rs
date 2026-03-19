@@ -315,6 +315,7 @@ impl EditorEngine {
             env_dust_g: 0.3,
             env_vol_ambient_color: [0.24, 0.30, 0.42],
             env_vol_ambient_intensity: 1.0,
+            env_gi_intensity: 0.5,
             env_cloud_settings: rkf_render::CloudSettings::default(),
             accumulated_time: 0.0,
             render_width: internal_w,

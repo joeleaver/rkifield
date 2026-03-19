@@ -430,6 +430,7 @@ impl EnvironmentState {
                 god_rays_intensity: self.post_process.god_rays_intensity,
                 grain_intensity: self.post_process.grain_intensity,
                 chromatic_aberration: self.post_process.chromatic_aberration,
+                gi_intensity: 0.5,
             },
         }
     }

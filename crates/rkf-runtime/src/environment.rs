@@ -473,6 +473,14 @@ pub struct PostProcessSettings {
     pub god_rays_intensity: f32,
     pub grain_intensity: f32,
     pub chromatic_aberration: f32,
+    /// Global illumination intensity multiplier. Scales indirect diffuse and
+    /// specular from the radiance volume. Default 0.5.
+    #[serde(default = "default_gi_intensity")]
+    pub gi_intensity: f32,
+}
+
+fn default_gi_intensity() -> f32 {
+    0.5
 }
 
 impl Default for PostProcessSettings {
@@ -495,6 +503,7 @@ impl Default for PostProcessSettings {
             god_rays_intensity: 0.5,
             grain_intensity: 0.0,
             chromatic_aberration: 0.0,
+            gi_intensity: 0.5,
         }
     }
 }

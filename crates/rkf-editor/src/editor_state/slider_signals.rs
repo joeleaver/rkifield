@@ -49,6 +49,7 @@ pub struct SliderSignals {
     pub vignette: Signal<f64>,
     pub grain: Signal<f64>,
     pub chromatic_ab: Signal<f64>,
+    pub gi_intensity: Signal<f64>,
     // Brush
     pub brush_radius: Signal<f64>,
     pub brush_strength: Signal<f64>,
@@ -142,6 +143,7 @@ impl SliderSignals {
             vignette: Signal::new(pp.vignette_intensity as f64),
             grain: Signal::new(pp.grain_intensity as f64),
             chromatic_ab: Signal::new(pp.chromatic_aberration as f64),
+            gi_intensity: Signal::new(pp.gi_intensity as f64),
             brush_radius: Signal::new(es.sculpt.current_settings.radius as f64),
             brush_strength: Signal::new(es.sculpt.current_settings.strength as f64),
             brush_falloff: Signal::new(es.sculpt.current_settings.falloff as f64),
@@ -210,6 +212,7 @@ impl SliderSignals {
         send_env_float(cmd, ui, "post_process.vignette_intensity", self.vignette.get());
         send_env_float(cmd, ui, "post_process.grain_intensity", self.grain.get());
         send_env_float(cmd, ui, "post_process.chromatic_aberration", self.chromatic_ab.get());
+        send_env_float(cmd, ui, "post_process.gi_intensity", self.gi_intensity.get());
         send_env_bool(cmd, ui, "post_process.bloom_enabled", ui.bloom_enabled.get());
         send_env_bool(cmd, ui, "post_process.dof_enabled", ui.dof_enabled.get());
         send_env_int(cmd, ui, "post_process.tone_map_mode", ui.tone_map_mode.get() as i64);

@@ -187,7 +187,7 @@ struct ShadeUniforms {
     // Atmosphere
     sun_dir: vec4<f32>,        // xyz = direction toward sun, w = sun_intensity
     sun_color: vec4<f32>,      // xyz = sun color (linear RGB), w = unused
-    sky_params: vec4<f32>,     // x = rayleigh_scale, y = mie_scale, z = atmosphere_enabled, w = unused
+    sky_params: vec4<f32>,     // x = rayleigh_scale, y = mie_scale, z = atmosphere_enabled, w = gi_intensity
     // Camera basis for sky ray reconstruction
     cam_forward: vec4<f32>,    // xyz = camera forward (unit), w = unused
     cam_right: vec4<f32>,      // xyz = camera right * tan(fov/2) * aspect, w = unused
@@ -293,7 +293,7 @@ const COARSE_NEAR_THRESHOLD: f32 = 0.5;
 // GI cone tracing parameters
 const GI_CONE_STEPS: u32 = 24u;
 const GI_MAX_STEP: f32 = 0.16;
-const GI_STRENGTH: f32 = 0.5;
+// GI_STRENGTH is now shade_uniforms.sky_params.w (user-configurable).
 const GI_DIFFUSE_MAX_DIST: f32 = 5.0;
 const GI_SPECULAR_MAX_DIST: f32 = 8.0;
 

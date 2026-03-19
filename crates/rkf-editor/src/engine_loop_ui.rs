@@ -51,6 +51,7 @@ fn sync_env_sliders_from_settings(
     sliders.vignette.set(env.post_process.vignette_intensity as f64);
     sliders.grain.set(env.post_process.grain_intensity as f64);
     sliders.chromatic_ab.set(env.post_process.chromatic_aberration as f64);
+    sliders.gi_intensity.set(env.post_process.gi_intensity as f64);
     // Toggle signals.
     ui.atmo_enabled.set(env.atmosphere.enabled);
     ui.fog_enabled.set(env.fog.enabled);

@@ -155,6 +155,7 @@ pub struct EditorEngine {
     pub(super) env_dust_g: f32,
     pub(super) env_vol_ambient_color: [f32; 3],
     pub(super) env_vol_ambient_intensity: f32,
+    pub(super) env_gi_intensity: f32,
     // Cloud params from environment.
     pub(super) env_cloud_settings: rkf_render::CloudSettings,
     pub(super) accumulated_time: f32,

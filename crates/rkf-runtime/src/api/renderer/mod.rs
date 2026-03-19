@@ -150,6 +150,8 @@ pub struct RenderEnvironment {
     pub grain_intensity: f32,
     /// Chromatic aberration strength.
     pub chromatic_aberration: f32,
+    /// Global illumination intensity multiplier.
+    pub gi_intensity: f32,
 }
 
 impl Default for RenderEnvironment {
@@ -183,6 +185,7 @@ impl Default for RenderEnvironment {
             vignette_intensity: 0.15,
             grain_intensity: 0.02,
             chromatic_aberration: 0.0,
+            gi_intensity: 0.5,
         }
     }
 }

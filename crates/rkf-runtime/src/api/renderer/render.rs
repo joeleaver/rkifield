@@ -221,7 +221,7 @@ impl Renderer {
                     env.rayleigh_scale,
                     env.mie_scale,
                     if env.atmosphere_enabled { 1.0 } else { 0.0 },
-                    0.0,
+                    env.gi_intensity,
                 ],
                 cam_forward: [fwd.x, fwd.y, fwd.z, 0.0],
                 cam_right: [right.x, right.y, right.z, 0.0],

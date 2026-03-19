@@ -286,6 +286,13 @@ pub fn PostProcessSection() -> NodeHandle {
     rsx! {
         div {
             div { style: {LABEL_STYLE}, "Post-Processing" }
+            SliderRow {
+                label: "GI Intensity",
+                suffix: "",
+                signal: Some(sliders.gi_intensity),
+                min: 0.0, max: 3.0, step: 0.05, decimals: 2,
+                on_change: { let cmd = cmd.clone(); move |_v: f64| { sliders.send_post_process_commands(&cmd, &ui); } },
+            }
             ToggleRow {
                 label: "Bloom",
                 enabled: Some(ui.bloom_enabled),
