@@ -361,8 +361,6 @@ fn sample_voxel_at(obj_offset: u32, vc: vec3<i32>, dims: vec3<u32>,
     let flat_brick = brick.x + brick.y * dims.x + brick.z * dims.x * dims.y;
     let slot = brick_maps[obj_offset + flat_brick];
     if slot == EMPTY_SLOT {
-        // Empty brick: no geometry. Return brick_extent so shadow rays step
-        // completely over this brick — empty slots must never cast shadows.
         return vs * 8.0;
     }
     if slot == INTERIOR_SLOT {

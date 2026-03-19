@@ -71,18 +71,11 @@ fn sample_coarse_at_world(world_pos: vec3<f32>) -> f32 {
 /// Check if world position `pos` is near SDF geometry using the coarse field.
 /// Returns a density (1.0 = solid, 0.0 = empty) with soft edges.
 fn sample_sdf_density(pos: vec3<f32>) -> f32 {
-    let dist = sample_coarse_at_world(pos);
-
-    // Inside an object AABB (dist ≈ 0): high density.
-    // The coarse field stores unsigned distance to AABB surfaces,
-    // so dist ≈ 0 means we're on or inside an AABB boundary.
-    let band = coarse_info.voxel_size * 2.0;
-    if dist < 0.001 {
-        return 1.0;
-    }
-    if dist < band {
-        return 1.0 - dist / band;
-    }
+    // The coarse field stores unsigned distance to object AABBs, which is
+    // 0 everywhere inside an AABB regardless of actual object shape. Using
+    // this for density produces boxy shadows matching AABBs. Disabled until
+    // the vol_shadow pass has per-object SDF access for accurate queries.
+    // Direct soft shadows (shade pass) handle object shadow correctly.
     return 0.0;
 }
 

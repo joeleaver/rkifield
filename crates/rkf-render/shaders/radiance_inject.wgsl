@@ -435,15 +435,19 @@ fn sdf_normal(pos: vec3<f32>) -> vec3<f32> {
 
 fn simple_shadow(origin: vec3<f32>, dir: vec3<f32>, max_dist: f32) -> f32 {
     var t = 0.01;
-    for (var i = 0u; i < INJECT_SHADOW_STEPS; i++) {
+    var near_steps = 0u;
+    for (var i = 0u; i < 128u; i++) {
+        if near_steps >= INJECT_SHADOW_STEPS || t > max_dist {
+            break;
+        }
         let d = sample_sdf(origin + dir * t);
         if d < 0.002 {
             return 0.0;
         }
-        t += max(d, 0.01);
-        if t > max_dist {
-            break;
+        if d < 0.02 {
+            near_steps += 1u;
         }
+        t += max(d, 0.01);
     }
     return 1.0;
 }

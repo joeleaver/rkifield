@@ -9,16 +9,25 @@
 fn soft_shadow(origin: vec3<f32>, light_dir: vec3<f32>, max_dist: f32, k: f32) -> f32 {
     var shadow = 1.0;
     var t = SHADOW_EPSILON;
-    for (var i = 0u; i < MAX_SHADOW_STEPS; i++) {
+    // Near-surface budget: only count steps with small d toward the limit.
+    // Empty-space steps (EMPTY_SLOT bricks, d ≈ vs*8) are free — they must
+    // not exhaust the budget OR accumulate penumbra. The threshold 0.02
+    // separates "near a real surface" from "traversing empty bricks."
+    var near_steps = 0u;
+    for (var i = 0u; i < 256u; i++) {
+        if near_steps >= MAX_SHADOW_STEPS || t > max_dist {
+            break;
+        }
         let d = sample_sdf(origin + light_dir * t);
         if d < SHADOW_EPSILON {
             return 0.0;
         }
-        shadow = min(shadow, k * d / t);
-        t += max(d, SHADOW_EPSILON);
-        if t > max_dist {
-            break;
+        if d < 0.02 {
+            // Near a real surface — accumulate penumbra and count the step.
+            shadow = min(shadow, k * d / t);
+            near_steps += 1u;
         }
+        t += max(d, SHADOW_EPSILON);
     }
     return clamp(shadow, 0.0, 1.0);
 }
