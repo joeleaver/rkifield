@@ -281,14 +281,23 @@ fn process_brick(
                         vz as f32 * voxel_size + half_voxel,
                     );
 
-                // BVH-accelerated winding number for robust sign test.
-                // Use abs() — mesh winding order may produce ±1 for interior.
-                // Threshold 0.3 handles non-watertight meshes (winding < 1.0).
-                let winding = bvh.winding_number(pos);
-                geo.set_solid(vx, vy, vz, winding.abs() > 0.3);
-
-                // BVH nearest query for material and color transfer
+                // BVH nearest query — used for distance, sign test, material, and color.
                 let nearest = bvh.nearest(pos);
+
+                // Classify inside/outside using the nearest triangle's normal.
+                // The vector from the closest surface point to the voxel center,
+                // dotted with the triangle normal, gives a local sign test that
+                // doesn't depend on global mesh watertightness or winding order.
+                let tri = mesh.triangle_positions(nearest.triangle_index);
+                let nearest_point = tri[0] * nearest.barycentric[0]
+                    + tri[1] * nearest.barycentric[1]
+                    + tri[2] * nearest.barycentric[2];
+                let edge1 = tri[1] - tri[0];
+                let edge2 = tri[2] - tri[0];
+                let face_normal = edge1.cross(edge2);
+                let to_voxel = pos - nearest_point;
+                let is_inside = face_normal.dot(to_voxel) < 0.0;
+                geo.set_solid(vx, vy, vz, is_inside);
                 let flat = voxel_index(vx, vy, vz) as usize;
 
                 let mat_id = if let Some(override_id) = material_id_override {

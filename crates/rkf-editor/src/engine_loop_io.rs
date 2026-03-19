@@ -222,16 +222,19 @@ pub(crate) fn load_scene_v3(
     load_rkf_assets_from_hecs(engine, es, scene_dir);
     engine.reupload_brick_data();
 
-    // Upload color pool if any assets had per-voxel color.
-    // This must happen before full_rebuild (next frame), which creates a new
-    // ShadingPass referencing gpu_color_pool. By uploading here, full_rebuild
-    // picks up the populated pool automatically.
+    // Upload color pool if any assets had per-voxel color, and rebuild the
+    // shading pass bind group so it references the new GPU buffers.
     if !engine.cpu_color_bricks.is_empty() {
         let color_data: &[u8] = bytemuck::cast_slice(&engine.cpu_color_bricks);
         engine.gpu_color_pool = rkf_render::GpuColorPool::upload(
             &engine.ctx.device,
             color_data,
             &engine.color_companion_map,
+        );
+        engine.shading_pass.rebuild_group3(
+            &engine.ctx.device,
+            &engine.brush_overlay,
+            &engine.gpu_color_pool,
         );
     }
 
