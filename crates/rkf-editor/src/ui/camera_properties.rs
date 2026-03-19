@@ -9,7 +9,7 @@ use crate::editor_command::EditorCommand;
 use crate::editor_state::{SelectedEntity, SliderSignals, UiSignals};
 use crate::CommandSender;
 
-use super::environment_panel::{AtmosphereSection, CloudsSection, FogSection, PostProcessSection, AnimationSection};
+use super::environment_panel::{AtmosphereSection, CloudsSection, FogSection, PostProcessSection};
 use super::slider_helpers::SliderRow;
 use super::{DIVIDER_STYLE, VALUE_STYLE};
 
@@ -98,7 +98,6 @@ pub fn EditorCameraPanel() -> NodeHandle {
             FogSection {}
             CloudsSection {}
             PostProcessSection {}
-            AnimationSection {}
         }
     }
 }
