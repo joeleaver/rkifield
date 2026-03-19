@@ -36,7 +36,9 @@ struct VolMarchParams {
     fog_height:   vec4<f32>,
     fog_distance: vec4<f32>,
     frame_index:       u32,
-    vol_ambient_color: vec3<f32>,  // RGB ambient sky color for volumetric multi-scatter
+    vol_ambient_r:     f32,        // Volumetric ambient sky color R
+    vol_ambient_g:     f32,        // Volumetric ambient sky color G
+    vol_ambient_b:     f32,        // Volumetric ambient sky color B
     // Volumetric shadow map volume bounds (world space)
     vol_shadow_min: vec4<f32>,  // xyz = min corner, w = unused
     vol_shadow_max: vec4<f32>,  // xyz = max corner, w = unused
@@ -406,7 +408,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let cloud_g_back: f32 = -0.2;    // slight back-scatter lobe
     let cloud_forward_weight: f32 = 0.3; // 30% directional, 70% isotropic-ish
     // Ambient sky light illuminates clouds from all directions (multi-scatter approx).
-    let sky_ambient = params.vol_ambient_color;
+    let sky_ambient = vec3<f32>(params.vol_ambient_r, params.vol_ambient_g, params.vol_ambient_b);
 
     for (var i = 0u; i < params.max_steps; i++) {
         let t = params.near + (f32(i) + jitter) * params.step_size;
