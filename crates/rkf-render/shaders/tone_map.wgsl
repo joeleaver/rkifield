@@ -19,14 +19,32 @@ struct ToneMapParams {
 
 // ---------- ACES Tone Mapping ----------
 
-// ACES filmic tone mapping curve (Krzysztof Narkowicz approximation).
-fn aces_tonemap(x: vec3<f32>) -> vec3<f32> {
+// ACES filmic tone mapping curve (scalar, for luminance-based mapping).
+fn aces_curve(v: f32) -> f32 {
     let a = 2.51;
     let b = 0.03;
     let c = 2.43;
     let d = 0.59;
     let e = 0.14;
-    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), vec3<f32>(0.0), vec3<f32>(1.0));
+    return clamp((v * (a * v + b)) / (v * (c * v + d) + e), 0.0, 1.0);
+}
+
+// ACES filmic tone mapping — luminance-based to preserve color saturation.
+// Applying the curve per-channel (R,G,B independently) desaturates because
+// bright channels are compressed more, pulling all channels toward each other.
+// Instead: map luminance through ACES, then scale the color to match.
+fn aces_tonemap(x: vec3<f32>) -> vec3<f32> {
+    let luma = dot(x, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let mapped_luma = aces_curve(luma);
+    let scale = mapped_luma / max(luma, 1e-6);
+    let mapped = x * scale;
+    // Desaturate toward mapped luminance where channels would clip,
+    // preventing out-of-gamut artifacts from highly saturated HDR inputs.
+    let max_c = max(mapped.r, max(mapped.g, mapped.b));
+    if max_c > 1.0 {
+        return mix(vec3<f32>(mapped_luma), mapped, vec3<f32>(1.0 / max_c));
+    }
+    return mapped;
 }
 
 // ---------- AgX Tone Mapping ----------
@@ -110,8 +128,9 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
         mapped = aces_tonemap(hdr);
     }
 
-    // Apply sRGB gamma correction
-    let srgb = linear_to_srgb(mapped);
-
-    textureStore(ldr_output, coord, vec4<f32>(clamp(srgb, vec3(0.0), vec3(1.0)), 1.0));
+    // NOTE: No sRGB gamma here — the blit pass renders to an sRGB swapchain
+    // surface, which applies the linear→sRGB conversion in hardware.
+    // Applying linear_to_srgb() here would cause double gamma (washed out,
+    // flat, desaturated output).
+    textureStore(ldr_output, coord, vec4<f32>(clamp(mapped, vec3(0.0), vec3(1.0)), 1.0));
 }

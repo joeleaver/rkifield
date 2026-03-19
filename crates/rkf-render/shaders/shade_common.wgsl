@@ -293,7 +293,7 @@ const COARSE_NEAR_THRESHOLD: f32 = 0.5;
 // GI cone tracing parameters
 const GI_CONE_STEPS: u32 = 24u;
 const GI_MAX_STEP: f32 = 0.16;
-const GI_STRENGTH: f32 = 2.0;
+const GI_STRENGTH: f32 = 0.5;
 const GI_DIFFUSE_MAX_DIST: f32 = 5.0;
 const GI_SPECULAR_MAX_DIST: f32 = 8.0;
 
