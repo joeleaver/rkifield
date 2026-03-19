@@ -1,4 +1,4 @@
-//! Environment panel — atmosphere, fog, clouds, post-processing, animation.
+//! Environment panel — atmosphere, fog, clouds, post-processing.
 //!
 //! Each section is a separate `#[component]` for fine-grained reactivity:
 //! only the section whose toggle changes will rebuild.
@@ -389,82 +389,4 @@ pub fn PostProcessSection() -> NodeHandle {
     }
 }
 
-// ── Animation section ───────────────────────────────────────────────────────
-
-/// Play/pause/stop buttons + animation speed slider.
-#[component]
-pub fn AnimationSection() -> NodeHandle {
-    let cmd = use_context::<CommandSender>();
-    let ui = use_context::<UiSignals>();
-
-    let anim_state_signal = ui.animation_state;
-    let anim_speed_signal: Signal<f64> = Signal::new(1.0);
-
-    rsx! {
-        div {
-            div { style: {DIVIDER_STYLE} }
-            div { style: {SECTION_STYLE}, "Animation" }
-            div {
-                style: "display:flex;gap:6px;padding:2px 12px;",
-                div {
-                    style: {|| {
-                        let cur = anim_state_signal.get();
-                        let bg = if cur == 1 { "var(--rinch-primary-color)" } else { "var(--rinch-color-dark-7)" };
-                        format!("padding:2px 8px;border-radius:3px;cursor:pointer;background:{bg};font-size:11px;color:var(--rinch-color-text);")
-                    }},
-                    onclick: {
-                        let cmd = cmd.clone();
-                        move || {
-                            let _ = cmd.0.send(EditorCommand::SetAnimationState { state: 1 });
-                            anim_state_signal.set(1);
-                        }
-                    },
-                    "Play"
-                }
-                div {
-                    style: {|| {
-                        let cur = anim_state_signal.get();
-                        let bg = if cur == 2 { "var(--rinch-primary-color)" } else { "var(--rinch-color-dark-7)" };
-                        format!("padding:2px 8px;border-radius:3px;cursor:pointer;background:{bg};font-size:11px;color:var(--rinch-color-text);")
-                    }},
-                    onclick: {
-                        let cmd = cmd.clone();
-                        move || {
-                            let _ = cmd.0.send(EditorCommand::SetAnimationState { state: 2 });
-                            anim_state_signal.set(2);
-                        }
-                    },
-                    "Pause"
-                }
-                div {
-                    style: {|| {
-                        let cur = anim_state_signal.get();
-                        let bg = if cur == 0 { "var(--rinch-primary-color)" } else { "var(--rinch-color-dark-7)" };
-                        format!("padding:2px 8px;border-radius:3px;cursor:pointer;background:{bg};font-size:11px;color:var(--rinch-color-text);")
-                    }},
-                    onclick: {
-                        let cmd = cmd.clone();
-                        move || {
-                            let _ = cmd.0.send(EditorCommand::SetAnimationState { state: 0 });
-                            anim_state_signal.set(0);
-                        }
-                    },
-                    "Stop"
-                }
-            }
-            SliderRow {
-                label: "Speed",
-                suffix: "x",
-                signal: Some(anim_speed_signal),
-                min: 0.0, max: 4.0, step: 0.1, decimals: 1,
-                on_change: {
-                    let cmd = cmd.clone();
-                    move |v: f64| {
-                        let _ = cmd.0.send(EditorCommand::SetAnimationSpeed { speed: v as f32 });
-                    }
-                },
-            }
-        }
-    }
-}
 

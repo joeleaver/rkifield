@@ -9,7 +9,6 @@
 
 #![allow(dead_code)] // Editor modules are WIP — used incrementally
 
-mod animation_preview;
 mod automation;
 mod camera;
 mod debug_viz;

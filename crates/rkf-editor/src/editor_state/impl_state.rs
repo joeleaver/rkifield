@@ -47,7 +47,6 @@ impl EditorState {
             asset_browser: AssetBrowser::new(),
             grid_snap: GridSnap::default(),
             light_editor: LightManager::new(),
-            animation: AnimationPreview::new(),
             overlay_config: OverlayConfig::default(),
             debug_viz: DebugOverlay::new(),
             frame_time_history: FrameTimeHistory::new(),

@@ -10,7 +10,6 @@ mod tests;
 
 pub use slider_signals::{SliderSignals, send_env_color};
 
-use crate::animation_preview::AnimationPreview;
 use crate::camera::{CameraControlState, CameraMode, CameraSnapshot};
 use crate::debug_viz::{DebugOverlay, FrameTimeHistory};
 use crate::gizmo::{GizmoMode, GizmoState};
@@ -87,9 +86,6 @@ pub struct UiSignals {
     pub sun_color: Signal<Vec3>,
     pub fog_color: Signal<Vec3>,
     pub vol_ambient_color: Signal<Vec3>,
-
-    // ── Animation ────────────────────────────────────────────────
-    pub animation_state: Signal<u32>,
 
     // ── Material browser ─────────────────────────────────────────
     pub selected_material: Signal<Option<u16>>,
@@ -266,7 +262,6 @@ impl UiSignals {
             sun_color: Signal::new(Vec3::new(1.0, 0.95, 0.85)),
             fog_color: Signal::new(Vec3::new(0.7, 0.75, 0.8)),
             vol_ambient_color: Signal::new(Vec3::new(0.24, 0.30, 0.42)),
-            animation_state: Signal::new(0),
             selected_material: Signal::new(None),
             properties_tab: Signal::new(0),
             asset_browser_tab: Signal::new(0),
@@ -484,9 +479,6 @@ pub struct EditorState {
 
     // ── Lights ────────────────────────────────────────────────
     pub light_editor: LightManager,
-
-    // ── Animation ────────────────────────────────────────────
-    pub animation: AnimationPreview,
 
     // ── Overlays & Debug ─────────────────────────────────────
     pub overlay_config: OverlayConfig,

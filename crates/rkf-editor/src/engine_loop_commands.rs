@@ -304,18 +304,6 @@ pub(crate) fn apply_editor_command(es: &mut EditorState, cmd: crate::editor_comm
         ConvertToVoxel { object_id, voxel_size } => {
             es.pending_convert_to_voxel = Some((object_id, voxel_size));
         }
-        // -- Animation ---------------------------------------------------
-        SetAnimationState { state } => {
-            es.animation.playback_state = match state {
-                1 => crate::animation_preview::PlaybackState::Playing,
-                2 => crate::animation_preview::PlaybackState::Paused,
-                _ => crate::animation_preview::PlaybackState::Stopped,
-            };
-        }
-        SetAnimationSpeed { speed } => {
-            es.animation.speed = speed;
-        }
-
         // -- Materials ---------------------------------------------------
         SelectMaterial { slot } => {
             es.material_browser.selected_slot = Some(slot);

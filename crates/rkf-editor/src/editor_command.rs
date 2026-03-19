@@ -91,10 +91,6 @@ pub enum EditorCommand {
     /// Set the material_id on an analytical primitive.
     SetPrimitiveMaterial { object_id: Uuid, material_id: u16 },
 
-    // ── Animation ────────────────────────────────────────────────────────
-    SetAnimationState { state: u32 },
-    SetAnimationSpeed { speed: f32 },
-
     // ── Play mode ────────────────────────────────────────────────────────
     PlayStart,
     PlayStop,
