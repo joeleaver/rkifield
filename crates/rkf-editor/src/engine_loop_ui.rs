@@ -57,6 +57,13 @@ fn sync_env_sliders_from_settings(
     ui.bloom_enabled.set(env.post_process.bloom_enabled);
     ui.dof_enabled.set(env.post_process.dof_enabled);
     ui.tone_map_mode.set(env.post_process.tone_map_mode);
+    // Color signals.
+    let sc = &env.atmosphere.sun_color;
+    ui.sun_color.set(glam::Vec3::new(sc[0], sc[1], sc[2]));
+    let fc = &env.fog.color;
+    ui.fog_color.set(glam::Vec3::new(fc[0], fc[1], fc[2]));
+    let va = &env.fog.vol_ambient_color;
+    ui.vol_ambient_color.set(glam::Vec3::new(va[0], va[1], va[2]));
 }
 
 /// l: Process GPU pick result -- sets selected_entity, pushes to UI signals.

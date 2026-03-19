@@ -8,7 +8,7 @@ mod slider_signals;
 #[cfg(test)]
 mod tests;
 
-pub use slider_signals::SliderSignals;
+pub use slider_signals::{SliderSignals, send_env_color};
 
 use crate::animation_preview::AnimationPreview;
 use crate::camera::{CameraControlState, CameraMode, CameraSnapshot};
@@ -82,6 +82,11 @@ pub struct UiSignals {
     pub bloom_enabled: Signal<bool>,
     pub dof_enabled: Signal<bool>,
     pub tone_map_mode: Signal<u32>,
+
+    // ── Environment colors ────────────────────────────────────────
+    pub sun_color: Signal<Vec3>,
+    pub fog_color: Signal<Vec3>,
+    pub vol_ambient_color: Signal<Vec3>,
 
     // ── Animation ────────────────────────────────────────────────
     pub animation_state: Signal<u32>,
@@ -258,6 +263,9 @@ impl UiSignals {
             bloom_enabled: Signal::new(true),
             dof_enabled: Signal::new(false),
             tone_map_mode: Signal::new(0),
+            sun_color: Signal::new(Vec3::new(1.0, 0.95, 0.85)),
+            fog_color: Signal::new(Vec3::new(0.7, 0.75, 0.8)),
+            vol_ambient_color: Signal::new(Vec3::new(0.24, 0.30, 0.42)),
             animation_state: Signal::new(0),
             selected_material: Signal::new(None),
             properties_tab: Signal::new(0),

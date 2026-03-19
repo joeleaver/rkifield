@@ -13,6 +13,93 @@ use super::components::ToggleRow;
 use super::slider_helpers::SliderRow;
 use super::{DIVIDER_STYLE, LABEL_STYLE, SECTION_STYLE};
 
+fn vec3_to_hex(c: glam::Vec3) -> String {
+    format!(
+        "#{:02x}{:02x}{:02x}",
+        (c.x.clamp(0.0, 1.0) * 255.0) as u8,
+        (c.y.clamp(0.0, 1.0) * 255.0) as u8,
+        (c.z.clamp(0.0, 1.0) * 255.0) as u8,
+    )
+}
+
+fn parse_hex_color(hex: &str) -> Option<(u8, u8, u8)> {
+    let hex = hex.strip_prefix('#')?;
+    if hex.len() == 6 {
+        let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+        let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+        let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+        Some((r, g, b))
+    } else {
+        None
+    }
+}
+
+const COLOR_ROW_STYLE: &str = "display:flex;align-items:center;gap:6px;padding:1px 6px;font-size:10px;color:var(--rinch-color-text);";
+
+// ── Color picker sub-components ─────────────────────────────────────────────
+
+/// Build a color picker row using manual DOM construction (avoids rsx! type recursion).
+fn env_color_row(
+    scope: &mut RenderScope,
+    label_text: &str,
+    color_signal: Signal<glam::Vec3>,
+    field_path: &'static str,
+    cmd: &CommandSender,
+    ui: &UiSignals,
+) -> NodeHandle {
+    let row = scope.create_element("div");
+    row.set_attribute("style", COLOR_ROW_STYLE);
+
+    let label = scope.create_element("span");
+    label.set_text(label_text);
+    row.append_child(&label);
+
+    let picker = ColorPicker {
+        format: "hex".into(),
+        value: vec3_to_hex(color_signal.get()),
+        alpha: false,
+        with_input: false,
+        size: "xs".into(),
+        onchange: Some(InputCallback::new({
+            let cmd = cmd.clone();
+            let ui = *ui;
+            move |hex: String| {
+                if let Some((r, g, b)) = parse_hex_color(&hex) {
+                    let v = glam::Vec3::new(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
+                    color_signal.set(v);
+                    crate::editor_state::send_env_color(&cmd, &ui, field_path, v);
+                }
+            }
+        })),
+        ..Default::default()
+    };
+    let picker_node = rinch::core::untracked(|| picker.render(scope, &[]));
+    row.append_child(&picker_node);
+
+    row
+}
+
+#[component]
+pub fn SunColorPicker() -> NodeHandle {
+    let cmd = use_context::<CommandSender>();
+    let ui = use_context::<UiSignals>();
+    env_color_row(__scope, "Sun Color", ui.sun_color, "atmosphere.sun_color", &cmd, &ui)
+}
+
+#[component]
+pub fn FogColorPicker() -> NodeHandle {
+    let cmd = use_context::<CommandSender>();
+    let ui = use_context::<UiSignals>();
+    env_color_row(__scope, "Fog Color", ui.fog_color, "fog.color", &cmd, &ui)
+}
+
+#[component]
+pub fn VolAmbientColorPicker() -> NodeHandle {
+    let cmd = use_context::<CommandSender>();
+    let ui = use_context::<UiSignals>();
+    env_color_row(__scope, "Vol Ambient", ui.vol_ambient_color, "fog.vol_ambient_color", &cmd, &ui)
+}
+
 // ── Atmosphere section ──────────────────────────────────────────────────────
 
 /// Sun direction sliders + atmosphere toggle + Rayleigh/Mie scale.
@@ -46,6 +133,7 @@ pub fn AtmosphereSection() -> NodeHandle {
                 min: 0.0, max: 10.0, step: 0.1, decimals: 1,
                 on_change: { let cmd = cmd.clone(); move |_v: f64| { sliders.send_atmosphere_commands(&cmd, &ui); } },
             }
+            SunColorPicker {}
             ToggleRow {
                 label: "Atmosphere",
                 enabled: Some(ui.atmo_enabled),
@@ -114,6 +202,8 @@ pub fn FogSection() -> NodeHandle {
                 min: 0.0, max: 0.95, step: 0.05, decimals: 2,
                 on_change: { let cmd = cmd.clone(); move |_v: f64| { sliders.send_fog_commands(&cmd, &ui); } },
             }
+            FogColorPicker {}
+            VolAmbientColorPicker {}
         }
     }
 }

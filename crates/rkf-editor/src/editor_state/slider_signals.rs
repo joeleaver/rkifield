@@ -92,6 +92,11 @@ fn send_env_vec3(cmd: &crate::CommandSender, ui: &UiSignals, field: &str, v: Vec
     send_env_field(cmd, ui, field, rkf_runtime::behavior::game_value::GameValue::Vec3(v));
 }
 
+/// Send a color (Vec3) environment field. Public for use by color picker callbacks.
+pub fn send_env_color(cmd: &crate::CommandSender, ui: &UiSignals, field: &str, v: Vec3) {
+    send_env_vec3(cmd, ui, field, v);
+}
+
 impl SliderSignals {
     /// Create slider signals initialized from the current `EditorState`.
     /// Must be called on the main thread (signals use thread-local reactive state).
