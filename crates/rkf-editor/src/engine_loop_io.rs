@@ -154,6 +154,19 @@ fn sanitize_filename(name: &str) -> String {
         .collect()
 }
 
+/// Resolve an environment profile path relative to a scene directory.
+///
+/// If the path is already absolute, returns it as-is. Otherwise, joins it
+/// with `scene_dir` and returns the result.
+fn resolve_profile_path(profile: &str, scene_dir: &std::path::Path) -> String {
+    let p = std::path::Path::new(profile);
+    if p.is_absolute() {
+        profile.to_string()
+    } else {
+        scene_dir.join(profile).to_string_lossy().into_owned()
+    }
+}
+
 // ─── Load helpers ────────────────────────────────────────────────────────
 
 /// Load a v3 `.rkscene` file into the engine and editor state.
@@ -190,36 +203,30 @@ pub(crate) fn load_scene_v3(
     // Rebuild World entity tracking from hecs components.
     es.world.rebuild_entity_tracking_from_ecs();
 
-    // Migrate old scenes: restore environment to editor camera entity.
-    if let Some(env_str) = scene_v3.properties.get("environment") {
-        if let Ok(old_env) = ron::from_str::<crate::environment::EnvironmentState>(env_str) {
-            if let Some(editor_cam) = es.editor_camera_entity {
-                if let Some(ee) = es.world.ecs_entity_for(editor_cam) {
-                    let settings = old_env.to_settings();
-                    let _ = es.world.ecs_mut().insert_one(ee, settings);
-                }
+    let scene_dir = std::path::Path::new(path)
+        .parent()
+        .unwrap_or(std::path::Path::new("."));
+
+    // Load environment profiles for scene cameras.
+    {
+        let ecs = es.world.ecs_ref();
+        let mut profile_loads: Vec<(hecs::Entity, String)> = Vec::new();
+        for (e, cam) in ecs.query::<&rkf_runtime::components::CameraComponent>().iter() {
+            if !cam.environment_profile.is_empty() {
+                let resolved = resolve_profile_path(&cam.environment_profile, scene_dir);
+                profile_loads.push((e, resolved));
             }
         }
-    }
-    // Migrate SceneEnvironment entities: copy EnvironmentSettings to editor camera.
-    if let Some(scene_env_e) = es.world.scene_environment_entity() {
-        let settings = es.world.ecs_ref()
-            .get::<&rkf_runtime::environment::EnvironmentSettings>(scene_env_e)
-            .ok()
-            .map(|s| (*s).clone());
-        if let Some(settings) = settings {
-            if let Some(editor_cam) = es.editor_camera_entity {
-                if let Some(ee) = es.world.ecs_entity_for(editor_cam) {
-                    let _ = es.world.ecs_mut().insert_one(ee, settings);
-                }
+        drop(ecs);
+        for (e, path) in profile_loads {
+            if let Ok(profile) = rkf_runtime::load_environment(&path) {
+                let settings = rkf_runtime::environment::EnvironmentSettings::from_profile(&profile);
+                let _ = es.world.ecs_mut().insert_one(e, settings);
             }
         }
     }
 
     // Load .rkf assets for voxelized objects.
-    let scene_dir = std::path::Path::new(path)
-        .parent()
-        .unwrap_or(std::path::Path::new("."));
     load_rkf_assets_from_hecs(engine, es, scene_dir);
     engine.reupload_brick_data();
 

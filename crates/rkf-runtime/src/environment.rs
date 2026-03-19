@@ -4,9 +4,8 @@
 //! volumetric hints, and post-processing hints. Profiles can be blended with
 //! [`lerp_profiles`]. Serialisation uses RON (`.rkenv` files).
 //!
-//! [`EnvironmentSettings`] is the full ECS component that lives on the scene
-//! environment singleton entity — the single source of truth for all environment
-//! parameters. [`SceneEnvironment`] is the marker component that tags that entity.
+//! [`EnvironmentSettings`] is the full ECS component that lives on each camera
+//! entity — the single source of truth for environment parameters per camera.
 
 use serde::{Deserialize, Serialize};
 
@@ -483,9 +482,9 @@ impl Default for PostProcessSettings {
 
 /// Full environment settings — the ECS single source of truth.
 ///
-/// Lives on a singleton entity tagged with [`SceneEnvironment`]. Matches the
-/// renderer's full parameter set. The editor environment panel and linked camera
-/// resolution both read and write this component.
+/// Lives on each camera entity. Matches the renderer's full parameter set.
+/// The editor environment panel and linked camera resolution both read and
+/// write this component on the active camera.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct EnvironmentSettings {
     pub fog: FogSettings,
@@ -568,12 +567,6 @@ impl EnvironmentSettings {
     }
 }
 
-/// Marker component for the singleton scene environment entity.
-///
-/// Exactly one entity in the scene should have this. The environment panel
-/// reads/writes the `EnvironmentSettings` component on this entity.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct SceneEnvironment;
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
@@ -782,10 +775,4 @@ mod tests {
         assert_eq!(s, restored);
     }
 
-    #[test]
-    fn scene_environment_marker() {
-        let marker = SceneEnvironment;
-        let ron_str = ron::to_string(&marker).unwrap();
-        let _restored: SceneEnvironment = ron::from_str(&ron_str).unwrap();
-    }
 }

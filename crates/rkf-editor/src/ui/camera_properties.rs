@@ -97,17 +97,29 @@ const BTN_STYLE: &str = "padding:3px 8px;font-size:10px;cursor:pointer;\
     background:var(--rinch-color-dark-7);color:var(--rinch-color-text);\
     border:1px solid var(--rinch-color-border);border-radius:3px;";
 
-/// Linked camera selector — click to cycle through available cameras.
-///
-/// Shows "None" or the linked camera's name. Click cycles through:
-/// None → Camera1 → Camera2 → ... → None.
+/// Shows the active viewport camera name, or "Editor Camera" if none.
 #[component]
 fn LinkedCameraDropdown() -> NodeHandle {
     let ui = use_context::<UiSignals>();
-    let cmd = use_context::<CommandSender>();
+
+    let label = {
+        let vc = ui.viewport_camera.get();
+        if let Some(cam_uuid) = vc {
+            let objects = ui.objects.get();
+            objects.iter()
+                .find(|o| o.id == cam_uuid)
+                .map(|o| o.name.clone())
+                .unwrap_or_else(|| format!("Camera {}", &cam_uuid.to_string()[..8]))
+        } else {
+            "Editor Camera".to_string()
+        }
+    };
 
     rsx! {
-        div {}
+        div { style: "padding:2px 6px;font-size:10px;color:var(--rinch-color-text-dim);",
+            span { style: "opacity:0.7;", "Viewport: " }
+            span { "{label}" }
+        }
     }
 }
 

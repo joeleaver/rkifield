@@ -100,6 +100,7 @@ impl EditorState {
             editor_camera_entity: Some(editor_cam_uuid),
             viewport_camera: None,
             piloting: None,
+            last_env_profile_key: None,
         }
     }
 
@@ -449,32 +450,6 @@ impl EditorState {
         scene_file_v3::load_scene(&scene_v3, self.world.ecs_mut(), &mut stable_index, &registry);
         self.world.rebuild_entity_tracking_from_ecs();
 
-        // Migrate old scenes: restore environment from properties bag to editor camera.
-        if let Some(env_str) = scene_v3.properties.get("environment") {
-            if let Ok(old_env) = ron::from_str::<crate::environment::EnvironmentState>(env_str) {
-                if let Some(editor_cam) = self.editor_camera_entity {
-                    if let Some(ee) = self.world.ecs_entity_for(editor_cam) {
-                        let settings = old_env.to_settings();
-                        let _ = self.world.ecs_mut().insert_one(ee, settings);
-                    }
-                }
-            }
-        }
-        // Migrate SceneEnvironment entities: copy their EnvironmentSettings
-        // to the editor camera, then remove them.
-        if let Some(scene_env_e) = self.world.scene_environment_entity() {
-            let settings = self.world.ecs_ref()
-                .get::<&rkf_runtime::environment::EnvironmentSettings>(scene_env_e)
-                .ok()
-                .map(|s| (*s).clone());
-            if let Some(settings) = settings {
-                if let Some(editor_cam) = self.editor_camera_entity {
-                    if let Some(ee) = self.world.ecs_entity_for(editor_cam) {
-                        let _ = self.world.ecs_mut().insert_one(ee, settings);
-                    }
-                }
-            }
-        }
         if let Some(s) = scene_v3.properties.get("lights") {
             if let Ok(lights) = ron::from_str::<Vec<crate::light_editor::SceneLight>>(s) {
                 self.light_editor.replace_lights(lights);
@@ -507,16 +482,9 @@ impl EditorState {
         let registry = GameplayRegistry::new();
         let mut scene_v3 = scene_file_v3::save_scene(self.world.ecs_ref(), &stable_index, &registry);
 
-        // Filter out internal entities — editor camera and SceneEnvironment singleton.
+        // Filter out internal entities — editor camera.
         if let Some(editor_cam_id) = self.editor_camera_entity {
             scene_v3.entities.retain(|e| e.stable_id != editor_cam_id);
-        }
-        // Filter out SceneEnvironment entity (internal singleton, not user content).
-        if let Some(scene_env_hecs) = self.world.scene_environment_entity() {
-            if let Ok(sid) = self.world.ecs_ref().get::<&rkf_runtime::behavior::StableId>(scene_env_hecs) {
-                let env_uuid = sid.0;
-                scene_v3.entities.retain(|e| e.stable_id != env_uuid);
-            }
         }
 
         // Environment is stored as the EnvironmentSettings component on the
@@ -576,10 +544,7 @@ impl EditorState {
                 continue; // Already included above.
             }
             let ecs = self.world.ecs_ref();
-            // Skip internal entities (SceneEnvironment singleton, EditorCameraMarker).
-            if ecs.get::<&rkf_runtime::environment::SceneEnvironment>(record.ecs_entity).is_ok() {
-                continue;
-            }
+            // Skip internal entities (EditorCameraMarker).
             if ecs.get::<&rkf_runtime::components::EditorCameraMarker>(record.ecs_entity).is_ok() {
                 continue;
             }

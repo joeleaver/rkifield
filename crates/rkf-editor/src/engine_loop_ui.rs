@@ -263,6 +263,22 @@ pub(crate) fn push_dirty_ui_signals(
                 let scene_path = es.current_scene_path.clone();
                 // Active environment entity = viewport camera or editor camera.
                 let active_env_uuid = es.viewport_camera.or(es.editor_camera_entity);
+                // Read environment profile name for the UI header.
+                let profile_name = active_env_uuid
+                    .and_then(|uuid| es.world.ecs_entity_for(uuid))
+                    .and_then(|ee| es.world.ecs_ref()
+                        .get::<&rkf_runtime::components::CameraComponent>(ee)
+                        .ok()
+                        .map(|c| c.environment_profile.clone()))
+                    .unwrap_or_default();
+                let profile_display = if profile_name.is_empty() {
+                    String::new()
+                } else {
+                    std::path::Path::new(&profile_name)
+                        .file_name()
+                        .map(|f| f.to_string_lossy().into_owned())
+                        .unwrap_or(profile_name)
+                };
                 // Read environment settings for slider sync.
                 let env_for_sliders = active_env_uuid
                     .and_then(|uuid| es.world.ecs_entity_for(uuid))
@@ -302,6 +318,7 @@ pub(crate) fn push_dirty_ui_signals(
                         ui.inspector_data.set(inspector_snap);
                         ui.available_components.set(avail_comps);
                         ui.active_camera_uuid.set(active_env_uuid);
+                        ui.environment_profile_name.set(profile_display);
                         // Sync environment slider signals from ECS values.
                         if let Some(ref env) = env_for_sliders {
                             if let Some(sliders) = rinch::core::context::try_use_context::<crate::editor_state::SliderSignals>() {

@@ -731,6 +731,30 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             let active_env_entity = active_env_uuid
                 .and_then(|uuid| es.world.ecs_entity_for(uuid));
 
+            // Load environment profile when active camera changes or has a new profile.
+            if let (Some(cam_uuid), Some(cam_entity)) = (active_env_uuid, active_env_entity) {
+                let profile_path = es.world.ecs_ref()
+                    .get::<&rkf_runtime::components::CameraComponent>(cam_entity)
+                    .ok()
+                    .map(|c| c.environment_profile.clone())
+                    .unwrap_or_default();
+                let key = if profile_path.is_empty() {
+                    None
+                } else {
+                    Some((cam_uuid, profile_path.clone()))
+                };
+                if key != es.last_env_profile_key {
+                    es.last_env_profile_key = key.clone();
+                    if let Some((_, ref path)) = key {
+                        if let Ok(profile) = rkf_runtime::load_environment(path) {
+                            let settings = rkf_runtime::environment::EnvironmentSettings::from_profile(&profile);
+                            let _ = es.world.ecs_mut().insert_one(cam_entity, settings);
+                            dirty.scene = true;
+                        }
+                    }
+                }
+            }
+
             // Read from active camera entity → EnvironmentSettings for the renderer.
             let environment: Option<rkf_runtime::environment::EnvironmentSettings> = if dirty.scene {
                 if let Some(ee) = active_env_entity {

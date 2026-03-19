@@ -180,6 +180,9 @@ pub struct UiSignals {
     /// UUID of the camera entity whose EnvironmentSettings the panel edits.
     /// Resolved as `viewport_camera.or(editor_camera_entity)`.
     pub active_camera_uuid: Signal<Option<Uuid>>,
+    /// Filename of the active camera's environment profile (e.g. "default.rkenv"),
+    /// or empty string if no profile is set.
+    pub environment_profile_name: Signal<String>,
 }
 
 /// Snapshot of inspector data, safe to send to the UI thread.
@@ -289,6 +292,7 @@ impl UiSignals {
             dylib_ready: Signal::new(false),
             viewport_camera: Signal::new(None),
             active_camera_uuid: Signal::new(None),
+            environment_profile_name: Signal::new(String::new()),
         }
     }
 
@@ -607,4 +611,8 @@ pub struct EditorState {
     pub viewport_camera: Option<Uuid>,
     /// Optional piloting mode — editor viewport drives this scene camera entity.
     pub piloting: Option<Uuid>,
+
+    /// Tracks (camera_uuid, profile_path) of the last loaded environment profile,
+    /// so we only reload when the active camera or its profile actually changes.
+    pub last_env_profile_key: Option<(Uuid, String)>,
 }

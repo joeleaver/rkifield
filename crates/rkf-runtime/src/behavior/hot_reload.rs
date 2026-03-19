@@ -470,14 +470,16 @@ mod tests {
         let mut registry = GameplayRegistry::new();
         engine_register(&mut registry);
         registry.register_component(mock_health_entry()).unwrap();
-        assert_eq!(registry.component_count(), 5); // 4 engine + 1 gameplay
+        assert_eq!(registry.component_count(), 7); // 6 engine + 1 gameplay
 
         registry.clear_gameplay(ENGINE_COMPONENT_NAMES);
-        assert_eq!(registry.component_count(), 4); // Only engine components remain
+        assert_eq!(registry.component_count(), 6); // Only engine components remain
         assert!(registry.has_component("Transform"));
         assert!(registry.has_component("CameraComponent"));
         assert!(registry.has_component("FogVolumeComponent"));
         assert!(registry.has_component("EditorMetadata"));
+        assert!(registry.has_component("EnvironmentSettings"));
+        assert!(registry.has_component("EditorCameraMarker"));
         assert!(!registry.has_component("MockHealth"));
     }
 

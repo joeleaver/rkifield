@@ -207,8 +207,8 @@ pub(crate) fn apply_editor_command(es: &mut EditorState, cmd: crate::editor_comm
         }
 
         // -- Environment -------------------------------------------------
-        // Environment settings now flow through SetComponentField targeting
-        // the SceneEnvironment entity. No dedicated handlers needed.
+        // Environment settings flow through SetComponentField targeting the
+        // active camera entity's EnvironmentSettings component.
 
         // -- Lights ------------------------------------------------------
         SetLightPosition { light_id, position } => {
@@ -545,6 +545,27 @@ pub(crate) fn apply_component_command(
                                                 );
                                             }
                                         }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Auto-save environment profile: if we just edited EnvironmentSettings
+                    // on an entity that has a CameraComponent with a non-empty
+                    // environment_profile, write the updated settings back to the .rkenv file.
+                    if component_name == "EnvironmentSettings" {
+                        if let Ok(cam) = es.world.ecs_ref()
+                            .get::<&rkf_runtime::components::CameraComponent>(hecs_entity)
+                        {
+                            let profile_path = cam.environment_profile.clone();
+                            if !profile_path.is_empty() {
+                                if let Ok(env_settings) = es.world.ecs_ref()
+                                    .get::<&rkf_runtime::environment::EnvironmentSettings>(hecs_entity)
+                                {
+                                    let profile = env_settings.to_profile("auto");
+                                    if let Err(e) = rkf_runtime::save_environment(&profile_path, &profile) {
+                                        eprintln!("[warn] failed to auto-save environment profile '{}': {}", profile_path, e);
                                     }
                                 }
                             }

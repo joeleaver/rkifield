@@ -83,7 +83,7 @@ pub struct World {
 impl World {
     /// Create a new empty world with one default scene.
     pub fn new(name: impl Into<String>) -> Self {
-        let mut w = Self {
+        Self {
             scenes: vec![SceneMeta {
                 name: name.into(),
                 persistent: false,
@@ -96,39 +96,6 @@ impl World {
             entities: HashMap::new(),
             sdf_to_entity: HashMap::new(),
             entity_scene: HashMap::new(),
-        };
-        w.ensure_scene_environment();
-        w
-    }
-
-    /// Ensure the singleton scene environment entity exists.
-    ///
-    /// If no entity with `SceneEnvironment` + `EnvironmentSettings` exists,
-    /// spawns one as a proper World entity (with UUID) so it can be targeted
-    /// by `SetComponentField` commands.
-    pub fn ensure_scene_environment(&mut self) {
-        use crate::environment::{EnvironmentSettings, SceneEnvironment};
-        let has = self.ecs.query::<&SceneEnvironment>().iter().next().is_some();
-        if !has {
-            let uuid = self.finalize_ecs_spawn("SceneEnvironment".to_string());
-            if let Some(record) = self.entities.get(&uuid) {
-                let _ = self.ecs.insert(record.ecs_entity, (SceneEnvironment, EnvironmentSettings::default()));
-            }
         }
-    }
-
-    /// Find the singleton scene environment hecs entity.
-    pub fn scene_environment_entity(&self) -> Option<hecs::Entity> {
-        use crate::environment::SceneEnvironment;
-        self.ecs.query::<&SceneEnvironment>().iter().next().map(|(e, _)| e)
-    }
-
-    /// Find the UUID of the singleton scene environment entity.
-    pub fn scene_environment_uuid(&self) -> Option<Uuid> {
-        use crate::environment::SceneEnvironment;
-        let hecs_entity = self.ecs.query::<&SceneEnvironment>().iter().next().map(|(e, _)| e)?;
-        self.entities.iter()
-            .find(|(_, r)| r.ecs_entity == hecs_entity)
-            .map(|(uuid, _)| *uuid)
     }
 }

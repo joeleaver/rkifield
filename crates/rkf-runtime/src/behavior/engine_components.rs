@@ -9,7 +9,7 @@
 use super::game_value::GameValue;
 use super::registry::{ComponentEntry, FieldMeta, FieldType, GameplayRegistry};
 use crate::components::{CameraComponent, EditorCameraMarker, EditorMetadata, FogVolumeComponent, Transform};
-use crate::environment::{EnvironmentSettings, SceneEnvironment};
+use crate::environment::EnvironmentSettings;
 
 // ─── Field metadata (static) ─────────────────────────────────────────────
 
@@ -679,34 +679,6 @@ fn env_settings_entry() -> ComponentEntry {
     }
 }
 
-// ─── SceneEnvironment (marker) ───────────────────────────────────────────
-
-static SCENE_ENV_FIELDS: [FieldMeta; 0] = [];
-
-/// Create the `ComponentEntry` for the `SceneEnvironment` marker.
-fn scene_env_entry() -> ComponentEntry {
-    ComponentEntry {
-        name: "SceneEnvironment",
-        meta: &SCENE_ENV_FIELDS,
-        serialize: |world, entity| {
-            world.get::<&SceneEnvironment>(entity).ok()
-                .map(|_| "()".to_string())
-        },
-        deserialize_insert: |world, entity, _ron_str| {
-            world.insert_one(entity, SceneEnvironment).map_err(|e| e.to_string())?;
-            Ok(())
-        },
-        has: |world, entity| world.get::<&SceneEnvironment>(entity).is_ok(),
-        remove: |world, entity| { let _ = world.remove_one::<SceneEnvironment>(entity); },
-        get_field: |_world, _entity, field_name| {
-            Err(format!("SceneEnvironment has no field '{}'", field_name))
-        },
-        set_field: |_world, _entity, field_name, _value| {
-            Err(format!("SceneEnvironment has no field '{}'", field_name))
-        },
-    }
-}
-
 static EDITOR_CAMERA_MARKER_FIELDS: [FieldMeta; 0] = [];
 
 fn editor_camera_marker_entry() -> ComponentEntry {
@@ -741,7 +713,6 @@ pub const ENGINE_COMPONENT_NAMES: &[&str] = &[
     "FogVolumeComponent",
     "EditorMetadata",
     "EnvironmentSettings",
-    "SceneEnvironment",
     "EditorCameraMarker",
 ];
 
@@ -756,7 +727,6 @@ pub fn engine_register(registry: &mut GameplayRegistry) {
         fog_volume_entry(),
         editor_metadata_entry(),
         env_settings_entry(),
-        scene_env_entry(),
         editor_camera_marker_entry(),
     ];
     for entry in entries {
@@ -784,14 +754,13 @@ mod tests {
     fn engine_register_populates_registry() {
         let mut reg = GameplayRegistry::new();
         engine_register(&mut reg);
-        assert_eq!(reg.component_count(), 7);
+        assert_eq!(reg.component_count(), 6);
         assert!(reg.has_component("Transform"));
         assert!(reg.has_component("CameraComponent"));
         assert!(reg.has_component("EditorCameraMarker"));
         assert!(reg.has_component("FogVolumeComponent"));
         assert!(reg.has_component("EditorMetadata"));
         assert!(reg.has_component("EnvironmentSettings"));
-        assert!(reg.has_component("SceneEnvironment"));
     }
 
     // ── 2. Transform get_field ──────────────────────────────────────────

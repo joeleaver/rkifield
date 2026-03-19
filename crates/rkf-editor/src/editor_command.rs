@@ -52,7 +52,7 @@ pub enum EditorCommand {
 
     // ── Environment ──────────────────────────────────────────────────────
     // Environment settings flow through SetComponentField targeting the
-    // SceneEnvironment entity's EnvironmentSettings component.
+    // active camera entity's EnvironmentSettings component.
 
     // ── Lights ────────────────────────────────────────────────────────────
     SetLightPosition { light_id: u64, position: Vec3 },

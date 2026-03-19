@@ -133,7 +133,7 @@ pub use project::{
 };
 pub use environment::{
     AmbientConfig, EnvironmentProfile, EnvironmentSettings, FogConfig, PostProcessHints,
-    SceneEnvironment, SkyMode, VolumetricHints, lerp_profiles, load_environment,
+    SkyMode, VolumetricHints, lerp_profiles, load_environment,
     save_environment,
 };
 pub use behavior::{

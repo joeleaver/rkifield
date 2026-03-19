@@ -383,8 +383,20 @@ pub fn AnimationSection() -> NodeHandle {
 /// Combines all environment + post-process sections into a single panel.
 #[component]
 pub fn EnvironmentPanel() -> NodeHandle {
+    let ui = use_context::<UiSignals>();
+    let profile_name = ui.environment_profile_name.get();
+    let label = if profile_name.is_empty() {
+        "Default".to_string()
+    } else {
+        profile_name
+    };
+
     rsx! {
         div {
+            div { style: "padding:2px 6px;font-size:10px;color:var(--rinch-color-text-dim);border-bottom:1px solid var(--rinch-color-border);",
+                span { style: "opacity:0.7;", "Profile: " }
+                span { "{label}" }
+            }
             AtmosphereSection {}
             FogSection {}
             CloudsSection {}
