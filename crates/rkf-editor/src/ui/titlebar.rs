@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use rinch::prelude::*;
 
 use crate::editor_command::EditorCommand;
-use crate::editor_state::{EditorMode, EditorState, SliderSignals, UiSignals};
+use crate::editor_state::{EditorState, SliderSignals, UiSignals};
 use crate::layout::state::{LayoutBacking, LayoutState};
 use crate::layout::ContainerKind;
 use crate::CommandSender;
@@ -210,10 +210,12 @@ pub fn TitleBar() -> NodeHandle {
         ("Diffuse", 4),
         ("Specular", 5),
         ("GI Only", 6),
+        ("SDF Distance", 7),
+        ("Brick Grid", 8),
     ];
-    let mut view_menu = Menu::new();
+    let mut debug_menu = Menu::new();
     for &(label, mode) in debug_modes {
-        view_menu = view_menu.item(MenuItem::new(label).on_click({
+        debug_menu = debug_menu.item(MenuItem::new(label).on_click({
             let cmd = cmd.clone();
             move || {
                 let _ = cmd.0.send(EditorCommand::SetDebugMode { mode });
@@ -221,6 +223,8 @@ pub fn TitleBar() -> NodeHandle {
             }
         }));
     }
+    let mut view_menu = Menu::new();
+    view_menu = view_menu.submenu("Debug Shading", debug_menu);
 
     // Camera presets (yaw, pitch in radians).
     view_menu = view_menu.separator();
@@ -484,59 +488,6 @@ pub fn TitleBar() -> NodeHandle {
 
         item.append_child(&dropdown);
         bar.append_child(&item);
-    }
-
-    // ── Separator between menus and tool buttons ───────────────────────
-    let separator = rsx! {
-        div {
-            style: "width:1px;height:14px;background:var(--rinch-color-border);margin:0 8px;",
-        }
-    };
-    bar.append_child(&separator);
-
-    // ── Tool buttons (Sculpt/Paint) ────────────────────────────────────
-    {
-        let tool_container = rsx! {
-            div {
-                style: "display:flex;align-items:center;gap:2px;",
-            }
-        };
-
-        for &mode in EditorMode::TOOLS.iter() {
-            let cmd = cmd.clone();
-            let btn = rsx! {
-                div {
-                    style: {move || {
-                        let is_active = ui.editor_mode.get() == mode;
-                        if is_active {
-                            "padding:2px 8px;cursor:pointer;border-radius:3px;\
-                             background:var(--rinch-titlebar-active);\
-                             font-size:11px;color:var(--rinch-color-text);user-select:none;\
-                             border:1px solid var(--rinch-color-border);font-weight:600;"
-                        } else {
-                            "padding:2px 8px;cursor:pointer;border-radius:3px;\
-                             background:transparent;\
-                             font-size:11px;color:var(--rinch-color-dimmed);user-select:none;\
-                             border:1px solid transparent;font-weight:400;"
-                        }
-                    }},
-                    onclick: move || {
-                        let current = ui.editor_mode.get();
-                        let new_mode = if current == mode {
-                            EditorMode::Default
-                        } else {
-                            mode
-                        };
-                        let _ = cmd.0.send(EditorCommand::SetEditorMode { mode: new_mode });
-                        ui.editor_mode.set(new_mode);
-                    },
-                    {mode.name()}
-                }
-            };
-            tool_container.append_child(&btn);
-        }
-
-        bar.append_child(&tool_container);
     }
 
     // ── Separator before play button ─────────────────────────────────────
