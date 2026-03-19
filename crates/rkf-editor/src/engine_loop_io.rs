@@ -338,8 +338,26 @@ fn restore_properties_v3(es: &mut EditorState, scene_v3: &SceneFileV3) {
             }
         }
     }
-    // Environment is restored from the EnvironmentSettings component
-    // on the editor camera entity (handled in load_scene_v3).
+    // Restore editor camera environment settings from scene properties.
+    if let Some(env_str) = scene_v3.properties.get("editor_environment") {
+        if let Ok(settings) = ron::from_str::<rkf_runtime::environment::EnvironmentSettings>(env_str) {
+            if let Some(editor_cam) = es.editor_camera_entity {
+                if let Some(ee) = es.world.ecs_entity_for(editor_cam) {
+                    let _ = es.world.ecs_mut().insert_one(ee, settings);
+                }
+            }
+        }
+    }
+    // Restore linked environment camera.
+    if let Some(linked_str) = scene_v3.properties.get("linked_env_camera") {
+        if let Ok(uuid) = uuid::Uuid::parse_str(linked_str) {
+            es.linked_env_camera = Some(uuid);
+        }
+    } else {
+        es.linked_env_camera = None;
+    }
+    es.last_env_profile_key = None;
+
     if let Some(s) = scene_v3.properties.get("lights") {
         if let Ok(lights) = ron::from_str::<Vec<crate::light_editor::SceneLight>>(s) {
             es.light_editor.replace_lights(lights);

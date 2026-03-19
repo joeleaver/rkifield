@@ -451,6 +451,26 @@ impl EditorState {
         scene_file_v3::load_scene(&scene_v3, self.world.ecs_mut(), &mut stable_index, &registry);
         self.world.rebuild_entity_tracking_from_ecs();
 
+        // Restore editor camera environment settings.
+        if let Some(env_str) = scene_v3.properties.get("editor_environment") {
+            if let Ok(settings) = ron::from_str::<rkf_runtime::environment::EnvironmentSettings>(env_str) {
+                if let Some(editor_cam) = self.editor_camera_entity {
+                    if let Some(ee) = self.world.ecs_entity_for(editor_cam) {
+                        let _ = self.world.ecs_mut().insert_one(ee, settings);
+                    }
+                }
+            }
+        }
+        // Restore linked environment camera.
+        if let Some(linked_str) = scene_v3.properties.get("linked_env_camera") {
+            if let Ok(uuid) = uuid::Uuid::parse_str(linked_str) {
+                self.linked_env_camera = Some(uuid);
+            }
+        } else {
+            self.linked_env_camera = None;
+        }
+        self.last_env_profile_key = None;
+
         if let Some(s) = scene_v3.properties.get("lights") {
             if let Ok(lights) = ron::from_str::<Vec<crate::light_editor::SceneLight>>(s) {
                 self.light_editor.replace_lights(lights);
@@ -488,8 +508,23 @@ impl EditorState {
             scene_v3.entities.retain(|e| e.stable_id != editor_cam_id);
         }
 
-        // Environment is stored as the EnvironmentSettings component on the
-        // editor camera entity — no separate properties bag entry needed.
+        // Persist editor camera's environment settings.
+        if let Some(editor_cam) = self.editor_camera_entity {
+            if let Some(ee) = self.world.ecs_entity_for(editor_cam) {
+                if let Ok(env) = self.world.ecs_ref()
+                    .get::<&rkf_runtime::environment::EnvironmentSettings>(ee)
+                {
+                    if let Ok(s) = ron::to_string(&*env) {
+                        scene_v3.properties.insert("editor_environment".into(), s);
+                    }
+                }
+            }
+        }
+        // Persist linked environment camera UUID.
+        if let Some(linked) = self.linked_env_camera {
+            scene_v3.properties.insert("linked_env_camera".into(), linked.to_string());
+        }
+
         if let Ok(s) = ron::to_string(self.light_editor.all_lights()) {
             scene_v3.properties.insert("lights".into(), s);
         }
