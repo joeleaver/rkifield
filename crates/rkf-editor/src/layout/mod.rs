@@ -21,7 +21,6 @@ pub enum PanelId {
     #[default]
     SceneTree,
     EditorCamera,
-    Environment,
     ObjectProperties,
     AssetProperties,
     Materials,
@@ -49,7 +48,6 @@ impl PanelId {
     pub const ALL: &[PanelId] = &[
         Self::SceneTree,
         Self::EditorCamera,
-        Self::Environment,
         Self::ObjectProperties,
         Self::AssetProperties,
         Self::Materials,
@@ -75,7 +73,6 @@ impl PanelId {
         match self {
             Self::SceneTree => "Scene Tree",
             Self::EditorCamera => "Editor Camera",
-            Self::Environment => "Environment",
             Self::ObjectProperties => "Object Properties",
             Self::AssetProperties => "Asset Properties",
             Self::Materials => "Materials",
@@ -93,7 +90,7 @@ impl PanelId {
     pub fn default_container(self) -> ContainerKind {
         match self {
             Self::SceneTree => ContainerKind::Left,
-            Self::EditorCamera | Self::Environment | Self::ObjectProperties | Self::AssetProperties => ContainerKind::Right,
+            Self::EditorCamera | Self::ObjectProperties | Self::AssetProperties => ContainerKind::Right,
             Self::Materials | Self::Shaders | Self::Console | Self::Systems | Self::Library => ContainerKind::Bottom,
             Self::SceneView | Self::GameView | Self::AnimationEditor => ContainerKind::Center,
         }
@@ -294,7 +291,7 @@ impl Default for LayoutConfig {
 pub fn default_layout() -> LayoutConfig {
     LayoutConfig {
         left: ContainerConfig::single_zone(vec![PanelId::SceneTree]),
-        right: ContainerConfig::single_zone(vec![PanelId::EditorCamera, PanelId::Environment, PanelId::ObjectProperties, PanelId::AssetProperties]),
+        right: ContainerConfig::single_zone(vec![PanelId::EditorCamera, PanelId::ObjectProperties, PanelId::AssetProperties]),
         bottom: ContainerConfig::single_zone(vec![PanelId::Materials, PanelId::Shaders, PanelId::Systems, PanelId::Library, PanelId::Console]),
         center: ContainerConfig::single_zone(vec![PanelId::SceneView]),
         floating: Vec::new(),
@@ -334,7 +331,7 @@ mod tests {
         assert_eq!(layout.left.zones.len(), 1);
         assert_eq!(layout.left.zones[0].tabs, vec![PanelId::SceneTree]);
         assert_eq!(layout.right.zones.len(), 1);
-        assert_eq!(layout.right.zones[0].tabs, vec![PanelId::EditorCamera, PanelId::Environment, PanelId::ObjectProperties, PanelId::AssetProperties]);
+        assert_eq!(layout.right.zones[0].tabs, vec![PanelId::EditorCamera, PanelId::ObjectProperties, PanelId::AssetProperties]);
         assert_eq!(layout.center.zones.len(), 1);
         assert_eq!(layout.center.zones[0].tabs, vec![PanelId::SceneView]);
         assert_eq!(layout.bottom.zones.len(), 1);
@@ -355,11 +352,11 @@ mod tests {
         );
         assert_eq!(
             layout.find_panel(PanelId::ObjectProperties),
-            Some((ContainerKind::Right, 0, 2))
+            Some((ContainerKind::Right, 0, 1))
         );
         assert_eq!(
             layout.find_panel(PanelId::AssetProperties),
-            Some((ContainerKind::Right, 0, 3))
+            Some((ContainerKind::Right, 0, 2))
         );
         assert_eq!(
             layout.find_panel(PanelId::Console),

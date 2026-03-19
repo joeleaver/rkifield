@@ -9,6 +9,7 @@ use crate::editor_command::EditorCommand;
 use crate::editor_state::{SelectedEntity, SliderSignals, UiSignals};
 use crate::CommandSender;
 
+use super::environment_panel::{AtmosphereSection, CloudsSection, FogSection, PostProcessSection, AnimationSection};
 use super::slider_helpers::SliderRow;
 use super::{DIVIDER_STYLE, VALUE_STYLE};
 
@@ -83,12 +84,21 @@ pub fn EditorCameraPanel() -> NodeHandle {
             }
             div { style: {DIVIDER_STYLE} }
 
-            // ── Linked Camera ────────────────────────────────────
+            // ── Environment source ─────────────────────────────
             LinkedCameraDropdown {}
 
             // ── Action buttons ───────────────────────────────────
             CameraActionButtons {}
 
+            div { style: {DIVIDER_STYLE} }
+
+            // ── Environment settings ──────────────────────────────
+            EnvironmentProfileHeader {}
+            AtmosphereSection {}
+            FogSection {}
+            CloudsSection {}
+            PostProcessSection {}
+            AnimationSection {}
         }
     }
 }
@@ -96,6 +106,25 @@ pub fn EditorCameraPanel() -> NodeHandle {
 const BTN_STYLE: &str = "padding:3px 8px;font-size:10px;cursor:pointer;\
     background:var(--rinch-color-dark-7);color:var(--rinch-color-text);\
     border:1px solid var(--rinch-color-border);border-radius:3px;";
+
+/// Shows the active environment profile name or "Default".
+#[component]
+fn EnvironmentProfileHeader() -> NodeHandle {
+    let ui = use_context::<UiSignals>();
+    let profile_name = ui.environment_profile_name.get();
+    let label = if profile_name.is_empty() {
+        "Default".to_string()
+    } else {
+        profile_name
+    };
+
+    rsx! {
+        div { style: "padding:2px 6px;font-size:10px;color:var(--rinch-color-text-dim);",
+            span { style: "opacity:0.7;", "Profile: " }
+            span { "{label}" }
+        }
+    }
+}
 
 /// Compute a fingerprint of the camera list for keyed rebuild.
 fn camera_panel_list_key(ui: &UiSignals) -> String {

@@ -20,10 +20,6 @@ pub fn render_panel(scope: &mut RenderScope, panel: PanelId) -> NodeHandle {
             let c = crate::ui::camera_properties::EditorCameraPanel::default();
             c.render(scope, &[])
         }
-        PanelId::Environment => {
-            let c = crate::ui::environment_panel::EnvironmentPanel::default();
-            c.render(scope, &[])
-        }
         PanelId::ObjectProperties => {
             let c = crate::ui::right_panel::PropertiesPanel::default();
             c.render(scope, &[])

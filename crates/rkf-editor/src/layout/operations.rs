@@ -336,7 +336,7 @@ mod tests {
     fn remove_tab_found() {
         let mut layout = default_layout();
         let result = remove_tab(&mut layout, PanelId::ObjectProperties);
-        assert_eq!(result, Ok((ContainerKind::Right, 0, 2)));
+        assert_eq!(result, Ok((ContainerKind::Right, 0, 1)));
         assert!(!layout.right.zones[0]
             .tabs
             .contains(&PanelId::ObjectProperties));
