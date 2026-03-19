@@ -112,13 +112,16 @@ pub(crate) fn load_rkf_into_pool(
 /// Load a .rkf v3 (geometry-first) file into all three pool tiers.
 ///
 /// Returns `(BrickMapHandle, voxel_size, grid_aabb, brick_count, GeometryFirstData)`.
+/// Color data loaded from a v3 file: (brick_pool_slot, ColorBrick) pairs.
+pub(crate) type LoadedColorBricks = Vec<(u32, rkf_core::companion::ColorBrick)>;
+
 pub(crate) fn load_rkf_v3_into_pools(
     path: &str,
     pool: &mut rkf_core::brick_pool::Pool<rkf_core::brick::Brick>,
     alloc: &mut BrickMapAllocator,
     geo_pool: &mut GeometryPool,
     sdf_pool: &mut SdfCachePool,
-) -> Result<(rkf_core::scene_node::BrickMapHandle, f32, Aabb, u32, GeometryFirstData), String> {
+) -> Result<(rkf_core::scene_node::BrickMapHandle, f32, Aabb, u32, GeometryFirstData, LoadedColorBricks), String> {
     use rkf_core::asset_file_v3::{load_object_header_v3, load_object_lod_v3};
     use rkf_core::brick::Brick;
     use rkf_core::brick_map::{BrickMap, EMPTY_SLOT, INTERIOR_SLOT};
@@ -256,8 +259,34 @@ pub(crate) fn load_rkf_v3_into_pools(
 
     let gf_data = GeometryFirstData {
         geo_brick_map,
-        slot_map,
+        slot_map: slot_map.clone(),
         voxel_size,
+    };
+
+    // Collect color bricks mapped to brick pool slots.
+    let loaded_colors: LoadedColorBricks = if let Some(ref colors) = lod.color_bricks {
+        let mut out = Vec::new();
+        for bz in 0..dims.z {
+            for by in 0..dims.y {
+                for bx in 0..dims.x {
+                    let local_idx = lod.brick_map.get(bx, by, bz).unwrap_or(EMPTY_SLOT);
+                    if local_idx == EMPTY_SLOT || local_idx == INTERIOR_SLOT {
+                        continue;
+                    }
+                    if let Some(color_brick) = colors.get(local_idx as usize) {
+                        let brick_slot = brick_slots[local_idx as usize];
+                        // Only include if any voxel has non-zero intensity.
+                        let has_color = color_brick.data.iter().any(|cv| cv.intensity() > 0);
+                        if has_color {
+                            out.push((brick_slot, color_brick.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        out
+    } else {
+        Vec::new()
     };
 
     log::info!(
@@ -265,30 +294,30 @@ pub(crate) fn load_rkf_v3_into_pools(
         has_sdf_cache
     );
 
-    Ok((handle, voxel_size, grid_aabb, brick_count, gf_data))
+    Ok((handle, voxel_size, grid_aabb, brick_count, gf_data, loaded_colors))
 }
 
 /// Load a .rkf file, auto-detecting v2 or v3 format.
 ///
-/// Returns `(BrickMapHandle, voxel_size, grid_aabb, brick_count, Option<GeometryFirstData>)`.
-/// For v3 files, geometry-first data is populated; for v2 files it is None.
+/// Returns `(BrickMapHandle, voxel_size, grid_aabb, brick_count, Option<GeometryFirstData>, LoadedColorBricks)`.
+/// For v3 files, geometry-first data and color bricks are populated; for v2 files they are empty/None.
 pub(crate) fn load_rkf_auto(
     path: &str,
     pool: &mut rkf_core::brick_pool::Pool<rkf_core::brick::Brick>,
     alloc: &mut BrickMapAllocator,
     geo_pool: &mut GeometryPool,
     sdf_pool: &mut SdfCachePool,
-) -> Result<(rkf_core::scene_node::BrickMapHandle, f32, Aabb, u32, Option<GeometryFirstData>), String> {
+) -> Result<(rkf_core::scene_node::BrickMapHandle, f32, Aabb, u32, Option<GeometryFirstData>, LoadedColorBricks), String> {
     let version = detect_rkf_version(path)?;
     match version {
         3 => {
-            let (handle, vs, aabb, count, gfd) =
+            let (handle, vs, aabb, count, gfd, colors) =
                 load_rkf_v3_into_pools(path, pool, alloc, geo_pool, sdf_pool)?;
-            Ok((handle, vs, aabb, count, Some(gfd)))
+            Ok((handle, vs, aabb, count, Some(gfd), colors))
         }
         _ => {
             let (handle, vs, aabb, count) = load_rkf_into_pool(path, pool, alloc)?;
-            Ok((handle, vs, aabb, count, None))
+            Ok((handle, vs, aabb, count, None, Vec::new()))
         }
     }
 }

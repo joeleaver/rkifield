@@ -1104,7 +1104,13 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             }
         }
 
-        // o. Yield to let OS schedule other threads between frames.
-        std::thread::yield_now();
+        // o. Frame pacing — ensure minimum 2ms per frame (~500fps cap).
+        //    When a project is loaded, GPU readback provides natural pacing.
+        //    Without it the loop spins at 100K+ fps, pegging a CPU core.
+        const MIN_FRAME_DURATION: std::time::Duration = std::time::Duration::from_millis(2);
+        let elapsed = frame_start.elapsed();
+        if elapsed < MIN_FRAME_DURATION {
+            std::thread::sleep(MIN_FRAME_DURATION - elapsed);
+        }
     }
 }

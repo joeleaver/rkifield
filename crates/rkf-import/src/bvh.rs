@@ -302,8 +302,9 @@ impl TriangleBvh {
     }
 
     /// Opening angle threshold for the Barnes-Hut criterion.
-    /// Lower values = more accurate but slower. 2.0 is the standard choice.
-    const BETA: f32 = 2.0;
+    /// Lower values = more accurate but slower. 0.3 gives high accuracy
+    /// for inside/outside classification at moderate cost.
+    const BETA: f32 = 0.3;
 
     fn winding_recursive(&self, node: &BvhNode, point: Vec3) -> f32 {
         let winding_data = match node {

@@ -281,9 +281,11 @@ fn process_brick(
                         vz as f32 * voxel_size + half_voxel,
                     );
 
-                // BVH-accelerated winding number for robust sign test
+                // BVH-accelerated winding number for robust sign test.
+                // Use abs() — mesh winding order may produce ±1 for interior.
+                // Threshold 0.3 handles non-watertight meshes (winding < 1.0).
                 let winding = bvh.winding_number(pos);
-                geo.set_solid(vx, vy, vz, winding > 0.5);
+                geo.set_solid(vx, vy, vz, winding.abs() > 0.3);
 
                 // BVH nearest query for material and color transfer
                 let nearest = bvh.nearest(pos);
@@ -392,6 +394,13 @@ fn voxelize_to_lod(
     let brick_count = results.len();
     let mut geometry_vec = Vec::with_capacity(brick_count);
     let mut color_vec = Vec::with_capacity(brick_count);
+    let mut total_solid = 0usize;
+    let mut total_surface = 0usize;
+    for r in &results {
+        total_solid += r.geo.occupancy.iter().map(|w| w.count_ones() as usize).sum::<usize>();
+        total_surface += r.geo.surface_voxels.len();
+    }
+    eprintln!("  voxelization stats: {total_solid} solid voxels, {total_surface} surface voxels across {brick_count} bricks");
     for r in results {
         geometry_vec.push(r.geo);
         color_vec.push(r.color);

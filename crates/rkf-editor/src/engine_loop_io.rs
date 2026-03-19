@@ -222,6 +222,10 @@ pub(crate) fn load_scene_v3(
     load_rkf_assets_from_hecs(engine, es, scene_dir);
     engine.reupload_brick_data();
 
+    // TODO: Upload color pool when color data wiring is complete.
+    // Color bricks are staged in engine.cpu_color_bricks / color_companion_map
+    // but not yet uploaded to GPU.
+
     // Restore editor state from properties (camera, lights — NOT environment).
     restore_properties_v3(es, &scene_v3);
 
@@ -259,7 +263,7 @@ fn load_rkf_assets_from_hecs(
             &mut engine.cpu_geometry_pool,
             &mut engine.cpu_sdf_cache_pool,
         ) {
-            Ok((handle, voxel_size, grid_aabb, _count, gf_data)) => {
+            Ok((handle, voxel_size, grid_aabb, _count, gf_data, color_bricks)) => {
                 // Update the SdfTree component in hecs.
                 if let Ok(mut sdf) = es.world.ecs_mut().get::<&mut SdfTree>(ecs_entity) {
                     sdf.root.sdf_source = rkf_core::SdfSource::Voxelized {
@@ -268,10 +272,25 @@ fn load_rkf_assets_from_hecs(
                         aabb: grid_aabb,
                     };
                     sdf.aabb = grid_aabb;
+                } else {
+                    log::error!("  FAILED to update SdfTree component!");
                 }
                 // Store geometry-first data keyed by object ID.
                 if let (Some(gfd), Some(oid)) = (gf_data, obj_id) {
                     engine.geometry_first_data.insert(oid, gfd);
+                }
+                // Wire color bricks into the companion pool.
+                if !color_bricks.is_empty() {
+                    // Grow companion map to cover all brick pool slots.
+                    let pool_cap = engine.cpu_brick_pool.capacity() as usize;
+                    if engine.color_companion_map.len() < pool_cap {
+                        engine.color_companion_map.resize(pool_cap, rkf_core::brick_map::EMPTY_SLOT);
+                    }
+                    for (brick_slot, color_brick) in color_bricks {
+                        let color_idx = engine.cpu_color_bricks.len() as u32;
+                        engine.cpu_color_bricks.push(color_brick);
+                        engine.color_companion_map[brick_slot as usize] = color_idx;
+                    }
                 }
             }
             Err(e) => log::error!("Failed to load .rkf '{}': {e}", asset_path),
