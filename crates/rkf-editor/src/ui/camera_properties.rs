@@ -97,28 +97,79 @@ const BTN_STYLE: &str = "padding:3px 8px;font-size:10px;cursor:pointer;\
     background:var(--rinch-color-dark-7);color:var(--rinch-color-text);\
     border:1px solid var(--rinch-color-border);border-radius:3px;";
 
-/// Shows the active viewport camera name, or "Editor Camera" if none.
+/// Compute a fingerprint of the camera list for keyed rebuild.
+fn camera_panel_list_key(ui: &UiSignals) -> String {
+    let objects = ui.objects.get();
+    let cameras: Vec<_> = objects.iter().filter(|o| o.is_camera).collect();
+    let mut key = format!("cam:{}", cameras.len());
+    for c in &cameras {
+        key.push(':');
+        key.push_str(&c.id.to_string()[..8]);
+    }
+    key
+}
+
+/// Linked camera selector — dropdown to switch viewport between scene cameras.
+///
+/// Shows "Editor Camera" or a scene camera name. Changing the selection sends
+/// `SetViewportCamera` and updates the `viewport_camera` signal, which in turn
+/// causes the engine loop to load the selected camera's environment profile.
 #[component]
 fn LinkedCameraDropdown() -> NodeHandle {
     let ui = use_context::<UiSignals>();
 
-    let label = {
-        let vc = ui.viewport_camera.get();
-        if let Some(cam_uuid) = vc {
-            let objects = ui.objects.get();
-            objects.iter()
-                .find(|o| o.id == cam_uuid)
-                .map(|o| o.name.clone())
-                .unwrap_or_else(|| format!("Camera {}", &cam_uuid.to_string()[..8]))
-        } else {
-            "Editor Camera".to_string()
+    rsx! {
+        div { style: "padding:2px 6px;",
+            div { style: "font-size:10px;color:var(--rinch-color-text-dim);margin-bottom:2px;", "Viewport Camera" }
+            for _key in vec![camera_panel_list_key(&ui)] {
+                div {
+                    key: _key,
+                    style: "display:contents;",
+                    LinkedCameraSelect {}
+                }
+            }
         }
-    };
+    }
+}
+
+/// Inner Select for the linked camera dropdown — rebuilt when the camera list changes.
+#[component]
+fn LinkedCameraSelect() -> NodeHandle {
+    let ui = use_context::<UiSignals>();
+    let cmd = use_context::<CommandSender>();
+
+    let objects = ui.objects.get();
+    let mut options = vec![SelectOption::new("", "Editor Camera")];
+    for obj in objects.iter().filter(|o| o.is_camera) {
+        options.push(SelectOption::new(obj.id.to_string(), obj.name.clone()));
+    }
 
     rsx! {
-        div { style: "padding:2px 6px;font-size:10px;color:var(--rinch-color-text-dim);",
-            span { style: "opacity:0.7;", "Viewport: " }
-            span { "{label}" }
+        Select {
+            size: "xs",
+            placeholder: "Editor Camera",
+            value_fn: {
+                let ui = ui;
+                move || {
+                    ui.viewport_camera.get()
+                        .map(|id| id.to_string())
+                        .unwrap_or_default()
+                }
+            },
+            onchange: {
+                let cmd = cmd.clone();
+                let ui = ui;
+                move |value: String| {
+                    if value.is_empty() {
+                        let _ = cmd.0.send(EditorCommand::SetViewportCamera { camera_id: None });
+                        ui.viewport_camera.set(None);
+                    } else if let Ok(uuid) = uuid::Uuid::parse_str(&value) {
+                        let _ = cmd.0.send(EditorCommand::SetViewportCamera { camera_id: Some(uuid) });
+                        ui.viewport_camera.set(Some(uuid));
+                    }
+                }
+            },
+            data: options,
         }
     }
 }
