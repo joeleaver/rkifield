@@ -121,6 +121,10 @@ pub enum EditorCommand {
     // ── Camera linking ─────────────────────────────────────────────────
     /// Set which scene camera drives the viewport (or None for editor camera).
     SetViewportCamera { camera_id: Option<Uuid> },
+    /// Link the editor camera's environment to a scene camera's `.rkenv` profile.
+    /// None = use editor defaults (no file backing). Slider edits auto-save to
+    /// the linked camera's profile when set.
+    SetLinkedEnvCamera { camera_id: Option<Uuid> },
     /// Copy a scene camera's transform + FOV to the editor camera.
     SnapToCamera { camera_id: Uuid },
     /// Spawn a new camera entity at the editor camera's current position/rotation/FOV.

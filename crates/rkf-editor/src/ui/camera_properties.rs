@@ -109,18 +109,19 @@ fn camera_panel_list_key(ui: &UiSignals) -> String {
     key
 }
 
-/// Linked camera selector — dropdown to switch viewport between scene cameras.
+/// Linked environment camera selector — dropdown to link the editor camera's
+/// environment to a scene camera's `.rkenv` profile.
 ///
-/// Shows "Editor Camera" or a scene camera name. Changing the selection sends
-/// `SetViewportCamera` and updates the `viewport_camera` signal, which in turn
-/// causes the engine loop to load the selected camera's environment profile.
+/// This does NOT change the viewport — it only controls which environment
+/// profile the editor camera inherits. Slider edits auto-save to the linked
+/// camera's `.rkenv` file when set. "None" means use editor defaults.
 #[component]
 fn LinkedCameraDropdown() -> NodeHandle {
     let ui = use_context::<UiSignals>();
 
     rsx! {
         div { style: "padding:2px 6px;",
-            div { style: "font-size:10px;color:var(--rinch-color-text-dim);margin-bottom:2px;", "Viewport Camera" }
+            div { style: "font-size:10px;color:var(--rinch-color-text-dim);margin-bottom:2px;", "Environment Source" }
             for _key in vec![camera_panel_list_key(&ui)] {
                 div {
                     key: _key,
@@ -139,7 +140,7 @@ fn LinkedCameraSelect() -> NodeHandle {
     let cmd = use_context::<CommandSender>();
 
     let objects = ui.objects.get();
-    let mut options = vec![SelectOption::new("", "Editor Camera")];
+    let mut options = vec![SelectOption::new("", "None (editor defaults)")];
     for obj in objects.iter().filter(|o| o.is_camera) {
         options.push(SelectOption::new(obj.id.to_string(), obj.name.clone()));
     }
@@ -147,11 +148,11 @@ fn LinkedCameraSelect() -> NodeHandle {
     rsx! {
         Select {
             size: "xs",
-            placeholder: "Editor Camera",
+            placeholder: "None",
             value_fn: {
                 let ui = ui;
                 move || {
-                    ui.viewport_camera.get()
+                    ui.linked_env_camera.get()
                         .map(|id| id.to_string())
                         .unwrap_or_default()
                 }
@@ -161,11 +162,11 @@ fn LinkedCameraSelect() -> NodeHandle {
                 let ui = ui;
                 move |value: String| {
                     if value.is_empty() {
-                        let _ = cmd.0.send(EditorCommand::SetViewportCamera { camera_id: None });
-                        ui.viewport_camera.set(None);
+                        let _ = cmd.0.send(EditorCommand::SetLinkedEnvCamera { camera_id: None });
+                        ui.linked_env_camera.set(None);
                     } else if let Ok(uuid) = uuid::Uuid::parse_str(&value) {
-                        let _ = cmd.0.send(EditorCommand::SetViewportCamera { camera_id: Some(uuid) });
-                        ui.viewport_camera.set(Some(uuid));
+                        let _ = cmd.0.send(EditorCommand::SetLinkedEnvCamera { camera_id: Some(uuid) });
+                        ui.linked_env_camera.set(Some(uuid));
                     }
                 }
             },

@@ -100,6 +100,7 @@ impl EditorState {
             editor_camera_entity: Some(editor_cam_uuid),
             viewport_camera: None,
             piloting: None,
+            linked_env_camera: None,
             last_env_profile_key: None,
         }
     }

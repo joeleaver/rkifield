@@ -727,35 +727,48 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             // camera is the viewport camera (if set) or the editor camera.
 
             // Determine active environment entity.
-            let active_env_uuid = es.viewport_camera.or(es.editor_camera_entity);
+            // Environment source priority:
+            //   1. linked_env_camera (explicit profile link from camera panel)
+            //   2. editor_camera_entity (always the fallback)
+            // The environment always lives on the editor camera entity; linking
+            // copies the profile's settings onto it.
+            let active_env_uuid = es.editor_camera_entity;
             let active_env_entity = active_env_uuid
                 .and_then(|uuid| es.world.ecs_entity_for(uuid));
 
-            // Load environment profile when active camera changes or has a new profile.
-            if let (Some(cam_uuid), Some(cam_entity)) = (active_env_uuid, active_env_entity) {
-                let profile_path = es.world.ecs_ref()
-                    .get::<&rkf_runtime::components::CameraComponent>(cam_entity)
-                    .ok()
-                    .map(|c| c.environment_profile.clone())
-                    .unwrap_or_default();
-                let key = if profile_path.is_empty() {
-                    None
-                } else {
-                    Some((cam_uuid, profile_path.clone()))
-                };
-                if key != es.last_env_profile_key {
-                    es.last_env_profile_key = key.clone();
-                    if let Some((_, ref path)) = key {
-                        if let Ok(profile) = rkf_runtime::load_environment(path) {
-                            let settings = rkf_runtime::environment::EnvironmentSettings::from_profile(&profile);
-                            let _ = es.world.ecs_mut().insert_one(cam_entity, settings);
-                            dirty.scene = true;
+            // Load environment profile from linked scene camera when it changes.
+            if let Some(linked_uuid) = es.linked_env_camera {
+                if let Some(linked_entity) = es.world.ecs_entity_for(linked_uuid) {
+                    let profile_path = es.world.ecs_ref()
+                        .get::<&rkf_runtime::components::CameraComponent>(linked_entity)
+                        .ok()
+                        .map(|c| c.environment_profile.clone())
+                        .unwrap_or_default();
+                    let key = if profile_path.is_empty() {
+                        None
+                    } else {
+                        Some((linked_uuid, profile_path.clone()))
+                    };
+                    if key != es.last_env_profile_key {
+                        es.last_env_profile_key = key.clone();
+                        if let Some((_, ref path)) = key {
+                            if let Ok(profile) = rkf_runtime::load_environment(path) {
+                                let settings = rkf_runtime::environment::EnvironmentSettings::from_profile(&profile);
+                                // Apply loaded settings to the editor camera entity.
+                                if let Some(ee) = active_env_entity {
+                                    let _ = es.world.ecs_mut().insert_one(ee, settings);
+                                    dirty.scene = true;
+                                }
+                            }
                         }
                     }
                 }
+            } else if es.last_env_profile_key.is_some() {
+                // Unlinked — clear the tracking key (editor goes back to its own settings).
+                es.last_env_profile_key = None;
             }
 
-            // Read from active camera entity → EnvironmentSettings for the renderer.
+            // Read from editor camera entity → EnvironmentSettings for the renderer.
             let environment: Option<rkf_runtime::environment::EnvironmentSettings> = if dirty.scene {
                 if let Some(ee) = active_env_entity {
                     es.world.ecs_ref()

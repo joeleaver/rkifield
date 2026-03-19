@@ -183,6 +183,8 @@ pub struct UiSignals {
     /// Filename of the active camera's environment profile (e.g. "default.rkenv"),
     /// or empty string if no profile is set.
     pub environment_profile_name: Signal<String>,
+    /// UUID of the scene camera whose environment profile is linked to the editor.
+    pub linked_env_camera: Signal<Option<Uuid>>,
 }
 
 /// Snapshot of inspector data, safe to send to the UI thread.
@@ -293,6 +295,7 @@ impl UiSignals {
             viewport_camera: Signal::new(None),
             active_camera_uuid: Signal::new(None),
             environment_profile_name: Signal::new(String::new()),
+            linked_env_camera: Signal::new(None),
         }
     }
 
@@ -612,7 +615,13 @@ pub struct EditorState {
     /// Optional piloting mode — editor viewport drives this scene camera entity.
     pub piloting: Option<Uuid>,
 
+    /// Scene camera whose environment profile the editor camera inherits.
+    /// When set, the editor camera's EnvironmentSettings are loaded from this
+    /// camera's `.rkenv` file, and slider edits auto-save back to it.
+    /// Independent of `viewport_camera` (which only controls the viewport transform).
+    pub linked_env_camera: Option<Uuid>,
+
     /// Tracks (camera_uuid, profile_path) of the last loaded environment profile,
-    /// so we only reload when the active camera or its profile actually changes.
+    /// so we only reload when the linked camera or its profile actually changes.
     pub last_env_profile_key: Option<(Uuid, String)>,
 }

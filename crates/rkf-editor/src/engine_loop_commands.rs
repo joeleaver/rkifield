@@ -349,6 +349,11 @@ pub(crate) fn apply_editor_command(es: &mut EditorState, cmd: crate::editor_comm
         SetViewportCamera { camera_id } => {
             es.viewport_camera = camera_id;
         }
+        SetLinkedEnvCamera { camera_id } => {
+            es.linked_env_camera = camera_id;
+            // Reset profile key so the engine loop re-evaluates the linked profile.
+            es.last_env_profile_key = None;
+        }
         SnapToCamera { camera_id } => {
             // Read target camera's transform and apply to editor camera entity.
             let snap = es.extract_camera_snapshot_for(camera_id);
@@ -552,9 +557,11 @@ pub(crate) fn apply_component_command(
                     }
 
                     // Auto-save environment profile: if we just edited EnvironmentSettings
-                    // on an entity that has a CameraComponent with a non-empty
-                    // environment_profile, write the updated settings back to the .rkenv file.
+                    // on the editor camera and a linked_env_camera is set, write the
+                    // updated settings back to the linked camera's .rkenv file.
                     if component_name == "EnvironmentSettings" {
+                        // First check: direct profile on this entity's CameraComponent.
+                        let mut saved = false;
                         if let Ok(cam) = es.world.ecs_ref()
                             .get::<&rkf_runtime::components::CameraComponent>(hecs_entity)
                         {
@@ -566,6 +573,34 @@ pub(crate) fn apply_component_command(
                                     let profile = env_settings.to_profile("auto");
                                     if let Err(e) = rkf_runtime::save_environment(&profile_path, &profile) {
                                         eprintln!("[warn] failed to auto-save environment profile '{}': {}", profile_path, e);
+                                    }
+                                    saved = true;
+                                }
+                            }
+                        }
+                        // Second check: if this is the editor camera and we have a linked
+                        // env camera, save to the linked camera's profile instead.
+                        if !saved {
+                            if let Some(editor_cam) = es.editor_camera_entity {
+                                if es.world.ecs_entity_for(editor_cam) == Some(hecs_entity) {
+                                    if let Some(linked_uuid) = es.linked_env_camera {
+                                        if let Some(linked_e) = es.world.ecs_entity_for(linked_uuid) {
+                                            if let Ok(linked_cam) = es.world.ecs_ref()
+                                                .get::<&rkf_runtime::components::CameraComponent>(linked_e)
+                                            {
+                                                let profile_path = linked_cam.environment_profile.clone();
+                                                if !profile_path.is_empty() {
+                                                    if let Ok(env_settings) = es.world.ecs_ref()
+                                                        .get::<&rkf_runtime::environment::EnvironmentSettings>(hecs_entity)
+                                                    {
+                                                        let profile = env_settings.to_profile("auto");
+                                                        if let Err(e) = rkf_runtime::save_environment(&profile_path, &profile) {
+                                                            eprintln!("[warn] failed to auto-save environment profile '{}': {}", profile_path, e);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
