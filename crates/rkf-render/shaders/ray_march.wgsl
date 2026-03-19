@@ -30,6 +30,16 @@ const HIT_EPSILON: f32 = 0.001;
 const MIN_STEP: f32 = 0.0005;
 const BISECT_STEPS: u32 = 8u;
 
+// Hard iteration limit for the march loop. The convergence budget
+// (max_steps) only counts near-surface steps; empty-space traversal is
+// free. This hard limit prevents infinite loops.
+const HARD_MAX_STEPS: u32 = 1024u;
+
+// Steps with SDF distance above this threshold are "empty-space traversal"
+// and don't consume the convergence budget. Only near-surface steps
+// (where the ray is actually converging on a surface) count.
+const NEAR_SURFACE_THRESHOLD: f32 = 0.02;
+
 // BVH traversal stack depth.
 const BVH_STACK_SIZE: u32 = 32u;
 
@@ -648,9 +658,10 @@ fn ray_march_bvh(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
     var prev_t = 0.0;
     var prev_dist = MAX_FLOAT;
     var prev_obj_idx = 0u;
+    var near_steps = 0u;
 
-    for (var step = 0u; step < scene.max_steps; step++) {
-        if t > scene.max_distance {
+    for (var step = 0u; step < HARD_MAX_STEPS; step++) {
+        if t > scene.max_distance || near_steps >= scene.max_steps {
             break;
         }
 
@@ -746,6 +757,12 @@ fn ray_march_bvh(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
         }
 
         // Step forward by the minimum distance (sphere tracing).
+        // Only near-surface steps count toward the convergence budget.
+        // Empty-space traversal is free — prevents step exhaustion when
+        // rays pass through edge bricks of fine-voxel objects.
+        if min_dist < NEAR_SURFACE_THRESHOLD {
+            near_steps += 1u;
+        }
         prev_t = t;
         prev_dist = min_dist;
         prev_obj_idx = best_obj_idx;
@@ -770,9 +787,10 @@ fn ray_march_brute(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
     var t = 0.0;
     var prev_t = 0.0;
     var prev_dist = MAX_FLOAT;
+    var near_steps = 0u;
 
-    for (var step = 0u; step < scene.max_steps; step++) {
-        if t > scene.max_distance {
+    for (var step = 0u; step < HARD_MAX_STEPS; step++) {
+        if t > scene.max_distance || near_steps >= scene.max_steps {
             break;
         }
 
@@ -828,6 +846,9 @@ fn ray_march_brute(origin: vec3<f32>, dir: vec3<f32>) -> MarchResult {
             return result;
         }
 
+        if min_dist < NEAR_SURFACE_THRESHOLD {
+            near_steps += 1u;
+        }
         prev_t = t;
         prev_dist = min_dist;
         t += max(min_dist, MIN_STEP);
@@ -879,9 +900,10 @@ fn ray_march_tiled(origin: vec3<f32>, dir: vec3<f32>, pixel: vec2<u32>) -> March
     var prev_t = 0.0;
     var prev_dist = MAX_FLOAT;
     var prev_obj_idx = 0u;
+    var near_steps = 0u;
 
-    for (var step = 0u; step < scene.max_steps; step++) {
-        if t > scene.max_distance {
+    for (var step = 0u; step < HARD_MAX_STEPS; step++) {
+        if t > scene.max_distance || near_steps >= scene.max_steps {
             break;
         }
 
@@ -950,6 +972,9 @@ fn ray_march_tiled(origin: vec3<f32>, dir: vec3<f32>, pixel: vec2<u32>) -> March
             return result;
         }
 
+        if min_dist < NEAR_SURFACE_THRESHOLD {
+            near_steps += 1u;
+        }
         prev_t = t;
         prev_dist = min_dist;
         prev_obj_idx = best_obj_idx;
