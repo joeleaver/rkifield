@@ -254,6 +254,7 @@ fn auto_voxel_size(mesh: &MeshData) -> f32 {
 /// Result of processing a single brick (produced in parallel).
 struct BrickResult {
     geo: BrickGeometry,
+    sdf: SdfCache,
     color: ColorBrick,
 }
 
@@ -268,6 +269,7 @@ fn process_brick(
 ) -> BrickResult {
     let half_voxel = voxel_size * 0.5;
     let mut geo = BrickGeometry::new();
+    let mut sdf = SdfCache::empty();
     let mut color_brick = ColorBrick { data: [ColorVoxel::new(0, 0, 0, 0); 512] };
     let mut voxel_material_ids = [0u8; 512];
 
@@ -281,13 +283,10 @@ fn process_brick(
                         vz as f32 * voxel_size + half_voxel,
                     );
 
-                // BVH nearest query — used for distance, sign test, material, and color.
+                // BVH nearest query — smooth unsigned distance to mesh surface.
                 let nearest = bvh.nearest(pos);
 
                 // Classify inside/outside using the nearest triangle's normal.
-                // The vector from the closest surface point to the voxel center,
-                // dotted with the triangle normal, gives a local sign test that
-                // doesn't depend on global mesh watertightness or winding order.
                 let tri = mesh.triangle_positions(nearest.triangle_index);
                 let nearest_point = tri[0] * nearest.barycentric[0]
                     + tri[1] * nearest.barycentric[1]
@@ -298,6 +297,11 @@ fn process_brick(
                 let to_voxel = pos - nearest_point;
                 let is_inside = face_normal.dot(to_voxel) < 0.0;
                 geo.set_solid(vx, vy, vz, is_inside);
+
+                // Analytical signed distance: smooth, sub-voxel accurate.
+                let sign = if is_inside { -1.0 } else { 1.0 };
+                sdf.set_distance(vx, vy, vz, sign * nearest.distance);
+
                 let flat = voxel_index(vx, vy, vz) as usize;
 
                 let mat_id = if let Some(override_id) = material_id_override {
@@ -313,13 +317,7 @@ fn process_brick(
                 };
                 voxel_material_ids[flat] = mat_id;
 
-                if sample_color {
-                    if let Some(c) = sample_texture_at_triangle(
-                        mesh, nearest.triangle_index, &nearest.barycentric,
-                    ) {
-                        color_brick.data[flat] = ColorVoxel::new(c.r, c.g, c.b, 255);
-                    }
-                }
+                // Color sampling is deferred to after surface list is built (below).
             }
         }
     }
@@ -329,7 +327,28 @@ fn process_brick(
         sv.material_id = voxel_material_ids[sv.index() as usize];
     }
 
-    BrickResult { geo, color: color_brick }
+    // Sample color only at surface voxels — these are at the actual mesh boundary
+    // where bvh.nearest() reliably returns the correct triangle. Interior voxels
+    // can pick up colors from the wrong body part on thin geometry (arms near torso).
+    if sample_color {
+        for sv in &geo.surface_voxels {
+            let (vx, vy, vz) = rkf_core::brick_geometry::index_to_xyz(sv.index());
+            let pos = brick_min
+                + Vec3::new(
+                    vx as f32 * voxel_size + half_voxel,
+                    vy as f32 * voxel_size + half_voxel,
+                    vz as f32 * voxel_size + half_voxel,
+                );
+            let nearest = bvh.nearest(pos);
+            if let Some(c) = sample_texture_at_triangle(
+                mesh, nearest.triangle_index, &nearest.barycentric,
+            ) {
+                color_brick.data[sv.index() as usize] = ColorVoxel::new(c.r, c.g, c.b, 255);
+            }
+        }
+    }
+
+    BrickResult { geo, sdf, color: color_brick }
 }
 
 fn voxelize_to_lod(
@@ -410,28 +429,12 @@ fn voxelize_to_lod(
         total_surface += r.geo.surface_voxels.len();
     }
     eprintln!("  voxelization stats: {total_solid} solid voxels, {total_surface} surface voxels across {brick_count} bricks");
+    let mut sdf_caches = Vec::with_capacity(brick_count);
     for r in results {
         geometry_vec.push(r.geo);
+        sdf_caches.push(r.sdf);
         color_vec.push(r.color);
     }
-
-    // Compute SDF from geometry using Fast Sweeping Method (serial — needs global context)
-    let mut sdf_caches: Vec<SdfCache> = vec![SdfCache::empty(); brick_count];
-    let slot_mappings: Vec<SlotMapping> = (0..brick_count as u32)
-        .map(|i| SlotMapping {
-            brick_slot: i,
-            geometry_slot: i,
-            sdf_slot: i,
-        })
-        .collect();
-
-    compute_sdf_from_geometry(
-        &brick_map,
-        &geometry_vec,
-        &mut sdf_caches,
-        &slot_mappings,
-        voxel_size,
-    );
 
     if verbose {
         eprintln!(

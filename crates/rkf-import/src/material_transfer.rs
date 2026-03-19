@@ -73,9 +73,9 @@ pub fn sample_texture_at_triangle(
     let uvs = mesh.triangle_uvs(tri_idx);
 
     // Interpolate UV using barycentric coordinates
-    let u =
+    let mut u =
         uvs[0][0] * barycentric[0] + uvs[1][0] * barycentric[1] + uvs[2][0] * barycentric[2];
-    let v =
+    let mut v =
         uvs[0][1] * barycentric[0] + uvs[1][1] * barycentric[1] + uvs[2][1] * barycentric[2];
 
     // Get material for this triangle
@@ -89,6 +89,11 @@ pub fn sample_texture_at_triangle(
         return None;
     }
     let material = &mesh.materials[mat_idx];
+
+    // Apply KHR_texture_transform: final_uv = uv * scale + offset
+    let xf = material.uv_transform;
+    u = u * xf[2] + xf[0];
+    v = v * xf[3] + xf[1];
 
     // If material has albedo texture and mesh has UVs, sample it
     if let Some(ref tex) = material.albedo_texture {

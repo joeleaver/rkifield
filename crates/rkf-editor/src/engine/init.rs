@@ -115,7 +115,14 @@ impl EditorEngine {
         self.debug_view = DebugViewPass::new(device, &self.gbuffer);
         self.brush_overlay = BrushOverlay::empty(device);
         let composed = self.shader_composer.compose().to_string();
-        self.gpu_color_pool = rkf_render::GpuColorPool::empty(device);
+        // Preserve existing gpu_color_pool — it may contain imported color data.
+        // Re-upload from CPU if we have color bricks, since brush_overlay was recreated.
+        if !self.cpu_color_bricks.is_empty() {
+            let color_data: &[u8] = bytemuck::cast_slice(&self.cpu_color_bricks);
+            self.gpu_color_pool = rkf_render::GpuColorPool::upload(
+                device, color_data, &self.color_companion_map,
+            );
+        }
         self.shading_pass = ShadingPass::new(
             device, &self.gbuffer, &self.gpu_scene, &self.light_buffer,
             &self.coarse_field, &self.radiance_volume, &self.material_buffer,

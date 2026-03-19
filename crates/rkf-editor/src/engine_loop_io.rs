@@ -115,6 +115,7 @@ fn export_rkf_assets(
                 crate::scene_io::export_voxelized_to_rkf_v3(
                     &rkf_path, gfd, *voxel_size, aabb,
                     &engine.cpu_geometry_pool, &engine.cpu_sdf_cache_pool,
+                    &engine.cpu_color_bricks, &engine.color_companion_map,
                 )
             } else {
                 // No geometry-first data — skip (analytical objects don't need .rkf).

@@ -32,6 +32,9 @@ pub struct ImportMaterial {
     pub roughness: f32,
     /// Albedo texture data (RGBA8, if present).
     pub albedo_texture: Option<TextureData>,
+    /// UV transform: [offset_u, offset_v, scale_u, scale_v].
+    /// Applied as `final_uv = uv * scale + offset` (from KHR_texture_transform).
+    pub uv_transform: [f32; 4],
 }
 
 /// Texture data loaded from a mesh file.
@@ -148,6 +151,16 @@ fn load_gltf(path: &str) -> Result<MeshData> {
             let pbr = mat.pbr_metallic_roughness();
             let bc = pbr.base_color_factor();
 
+            // Extract UV transform from KHR_texture_transform (if present).
+            let uv_transform = pbr.base_color_texture()
+                .and_then(|info| {
+                    let t = info.texture_transform()?;
+                    let offset = t.offset();
+                    let scale = t.scale();
+                    Some([offset[0], offset[1], scale[0], scale[1]])
+                })
+                .unwrap_or([0.0, 0.0, 1.0, 1.0]);
+
             // Try to load albedo texture
             let albedo_texture = pbr.base_color_texture().and_then(|info| {
                 let tex = info.texture();
@@ -184,6 +197,7 @@ fn load_gltf(path: &str) -> Result<MeshData> {
                 metallic: pbr.metallic_factor(),
                 roughness: pbr.roughness_factor(),
                 albedo_texture,
+                uv_transform,
             }
         })
         .collect();
@@ -244,6 +258,7 @@ fn load_gltf(path: &str) -> Result<MeshData> {
             metallic: 0.0,
             roughness: 0.5,
             albedo_texture: None,
+            uv_transform: [0.0, 0.0, 1.0, 1.0],
         }]
     } else {
         materials
@@ -320,6 +335,7 @@ fn load_obj(path: &str) -> Result<MeshData> {
                 metallic: m.shininess.unwrap_or(0.0) / 1000.0, // rough approximation
                 roughness: 1.0 - (m.shininess.unwrap_or(0.0) / 1000.0).min(1.0),
                 albedo_texture,
+                uv_transform: [0.0, 0.0, 1.0, 1.0],
             }
         })
         .collect();
@@ -370,6 +386,7 @@ fn load_obj(path: &str) -> Result<MeshData> {
             metallic: 0.0,
             roughness: 0.5,
             albedo_texture: None,
+            uv_transform: [0.0, 0.0, 1.0, 1.0],
         }]
     } else {
         materials
@@ -421,6 +438,7 @@ mod tests {
                 metallic: 0.0,
                 roughness: 0.5,
                 albedo_texture: None,
+            uv_transform: [0.0, 0.0, 1.0, 1.0],
             }],
             bounds_min: Vec3::ZERO,
             bounds_max: Vec3::new(1.0, 1.0, 0.0),
@@ -502,6 +520,7 @@ mod tests {
             metallic: 0.0,
             roughness: 0.5,
             albedo_texture: None,
+            uv_transform: [0.0, 0.0, 1.0, 1.0],
         };
         assert_eq!(mat.name, "default");
         assert_eq!(mat.base_color, [0.8, 0.8, 0.8]);
