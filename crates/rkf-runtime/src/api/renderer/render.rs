@@ -157,19 +157,7 @@ impl Renderer {
         let env = &self.render_env;
         let sun_dir = env.sun_direction.normalize();
 
-        // Tint sun color based on elevation (Rayleigh extinction approximation).
-        let sun_elevation = sun_dir.y.asin();
-        let tinted_color = {
-            let path = (1.0 / sun_elevation.max(0.02).sin()).min(12.0);
-            let tau = Vec3::new(0.02, 0.06, 0.15);
-            let extinction = Vec3::new(
-                (-tau.x * path).exp(),
-                (-tau.y * path).exp(),
-                (-tau.z * path).exp(),
-            );
-            env.sun_color * extinction
-        };
-        let sun_color_tinted = tinted_color * env.sun_intensity;
+        let sun_color_tinted = env.sun_color * env.sun_intensity;
         let sun_dir_arr = [sun_dir.x, sun_dir.y, sun_dir.z];
 
         let fog_density = if env.fog_density > 0.0 { env.fog_density } else { 0.0 };
@@ -228,7 +216,7 @@ impl Renderer {
                 shadow_budget_k: 0,
                 camera_pos: [cam.x, cam.y, cam.z, 0.0],
                 sun_dir: [sun_dir_arr[0], sun_dir_arr[1], sun_dir_arr[2], env.sun_intensity],
-                sun_color: [tinted_color.x, tinted_color.y, tinted_color.z, 0.0],
+                sun_color: [env.sun_color.x, env.sun_color.y, env.sun_color.z, 0.0],
                 sky_params: [
                     env.rayleigh_scale,
                     env.mie_scale,
@@ -360,9 +348,7 @@ impl Renderer {
             fog_height: [fog_density, -0.5, env.fog_height_falloff, 0.0],
             fog_distance: [0.0, 0.01, env.ambient_dust, env.dust_asymmetry],
             frame_index: self.frame_index,
-            _pad0: 0,
-            _pad1: 0,
-            _pad2: 0,
+            vol_ambient_color: [env.vol_ambient_color.x, env.vol_ambient_color.y, env.vol_ambient_color.z],
             vol_shadow_min: [cam.x - 40.0, cam.y - 10.0, cam.z - 40.0, 0.0],
             vol_shadow_max: [cam.x + 40.0, cam.y + 10.0, cam.z + 40.0, 0.0],
         };

@@ -362,6 +362,15 @@ pub struct FogSettings {
     pub height_falloff: f32,
     pub ambient_dust_density: f32,
     pub dust_asymmetry: f32,
+    /// Volumetric ambient sky color (RGB, linear). Controls the multi-scatter
+    /// approximation color for clouds and fog. User-editable — not derived
+    /// from sun elevation.
+    #[serde(default = "default_vol_ambient_color")]
+    pub vol_ambient_color: [f32; 3],
+}
+
+fn default_vol_ambient_color() -> [f32; 3] {
+    [0.24, 0.30, 0.42]
 }
 
 impl Default for FogSettings {
@@ -375,6 +384,7 @@ impl Default for FogSettings {
             height_falloff: 0.1,
             ambient_dust_density: 0.005,
             dust_asymmetry: 0.3,
+            vol_ambient_color: default_vol_ambient_color(),
         }
     }
 }

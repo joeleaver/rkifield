@@ -8,22 +8,11 @@ impl EditorEngine {
         let atmo = &env.atmosphere;
         self.env_sun_dir = atmo.sun_direction;
 
-        let sun_elevation = atmo.sun_direction[1].asin();
         let base_color = glam::Vec3::new(atmo.sun_color[0], atmo.sun_color[1], atmo.sun_color[2]);
-        let tinted_color = {
-            let path = (1.0 / sun_elevation.max(0.02).sin()).min(12.0);
-            let tau = glam::Vec3::new(0.02, 0.06, 0.15);
-            let extinction = glam::Vec3::new(
-                (-tau.x * path).exp(),
-                (-tau.y * path).exp(),
-                (-tau.z * path).exp(),
-            );
-            base_color * extinction
-        };
-        let sc = tinted_color * atmo.sun_intensity;
+        let sc = base_color * atmo.sun_intensity;
         self.env_sun_color = [sc.x, sc.y, sc.z];
         self.env_sun_intensity = atmo.sun_intensity;
-        self.env_sun_color_raw = [tinted_color.x, tinted_color.y, tinted_color.z];
+        self.env_sun_color_raw = atmo.sun_color;
         self.env_rayleigh_scale = atmo.rayleigh_scale;
         self.env_mie_scale = atmo.mie_scale;
         self.env_atmosphere_enabled = atmo.enabled;
@@ -34,6 +23,7 @@ impl EditorEngine {
         self.env_fog_height_falloff = fog.height_falloff;
         self.env_ambient_dust = fog.ambient_dust_density;
         self.env_dust_g = fog.dust_asymmetry;
+        self.env_vol_ambient_color = fog.vol_ambient_color;
 
         let clouds = &env.clouds;
         self.env_cloud_settings.procedural_enabled = clouds.enabled;

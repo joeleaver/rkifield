@@ -89,7 +89,7 @@ pub struct RenderEnvironment {
     // Atmosphere
     /// Sun direction (normalized).
     pub sun_direction: Vec3,
-    /// Sun base color (before tinting by elevation).
+    /// Sun base color (linear RGB).
     pub sun_color: Vec3,
     /// Sun intensity multiplier.
     pub sun_intensity: f32,
@@ -111,6 +111,9 @@ pub struct RenderEnvironment {
     pub ambient_dust: f32,
     /// Henyey-Greenstein asymmetry parameter for dust scattering.
     pub dust_asymmetry: f32,
+    /// Volumetric ambient sky color (RGB, linear). Controls the multi-scatter
+    /// approximation color for clouds and fog.
+    pub vol_ambient_color: Vec3,
 
     // Clouds
     /// Cloud simulation settings.
@@ -161,6 +164,7 @@ impl Default for RenderEnvironment {
             fog_height_falloff: 0.5,
             ambient_dust: 0.005,
             dust_asymmetry: 0.6,
+            vol_ambient_color: Vec3::new(0.24, 0.30, 0.42),
             cloud_settings: rkf_render::CloudSettings::default(),
             bloom_threshold: 1.0,
             bloom_intensity: 0.3,

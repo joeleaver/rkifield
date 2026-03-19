@@ -135,12 +135,9 @@ pub struct VolMarchParams {
     pub fog_distance: [f32; 4],
     /// Current frame index for jitter temporal variation.
     pub frame_index: u32,
-    #[doc(hidden)]
-    pub _pad0: u32,
-    #[doc(hidden)]
-    pub _pad1: u32,
-    #[doc(hidden)]
-    pub _pad2: u32,
+    /// Volumetric ambient sky color (RGB). Used for multi-scatter approximation
+    /// on clouds and fog. User-controlled — no longer derived from sun elevation.
+    pub vol_ambient_color: [f32; 3],
     /// World-space minimum corner of the volumetric shadow volume (w unused).
     pub vol_shadow_min: [f32; 4],
     /// World-space maximum corner of the volumetric shadow volume (w unused).
@@ -250,9 +247,7 @@ impl VolMarchPass {
             fog_height: [0.0, 0.0, 0.1, 0.0],     // distance fog off (w=0)
             fog_distance: [0.0, 0.01, 0.0, 0.3],  // no dust; g=0.3
             frame_index: 0,
-            _pad0: 0,
-            _pad1: 0,
-            _pad2: 0,
+            vol_ambient_color: [0.24, 0.30, 0.42],
             // Match VolShadowPass default bounds: 128×64×128 m volume centred at origin.
             vol_shadow_min: [-64.0, -32.0, -64.0, 0.0],
             vol_shadow_max: [64.0, 32.0, 64.0, 0.0],
@@ -532,9 +527,7 @@ mod tests {
             fog_height: [0.05, 5.0, 0.1, 0.0],
             fog_distance: [0.01, 0.005, 0.003, 0.3],
             frame_index: 0,
-            _pad0: 0,
-            _pad1: 0,
-            _pad2: 0,
+            vol_ambient_color: [0.24, 0.30, 0.42],
             vol_shadow_min: [-64.0, -32.0, -64.0, 0.0],
             vol_shadow_max: [64.0, 32.0, 64.0, 0.0],
         };
@@ -571,9 +564,7 @@ mod tests {
         assert_eq!(std::mem::offset_of!(VolMarchParams, fog_height), 144);
         assert_eq!(std::mem::offset_of!(VolMarchParams, fog_distance), 160);
         assert_eq!(std::mem::offset_of!(VolMarchParams, frame_index), 176);
-        assert_eq!(std::mem::offset_of!(VolMarchParams, _pad0), 180);
-        assert_eq!(std::mem::offset_of!(VolMarchParams, _pad1), 184);
-        assert_eq!(std::mem::offset_of!(VolMarchParams, _pad2), 188);
+        assert_eq!(std::mem::offset_of!(VolMarchParams, vol_ambient_color), 180);
         assert_eq!(std::mem::offset_of!(VolMarchParams, vol_shadow_min), 192);
         assert_eq!(std::mem::offset_of!(VolMarchParams, vol_shadow_max), 208);
     }
@@ -604,9 +595,7 @@ mod tests {
             fog_height: [0.0, 0.0, 0.1, 0.0],
             fog_distance: [0.0, 0.01, DEFAULT_AMBIENT_DUST, DEFAULT_AMBIENT_DUST_G],
             frame_index: 0,
-            _pad0: 0,
-            _pad1: 0,
-            _pad2: 0,
+            vol_ambient_color: [0.24, 0.30, 0.42],
             vol_shadow_min: expected_min,
             vol_shadow_max: expected_max,
         };
@@ -644,9 +633,7 @@ mod tests {
             fog_height: [0.0, 0.0, 0.1, 0.0],   // w=0 → distance fog off
             fog_distance: [0.0, 0.01, 0.0, 0.3],
             frame_index: 0,
-            _pad0: 0,
-            _pad1: 0,
-            _pad2: 0,
+            vol_ambient_color: [0.24, 0.30, 0.42],
             vol_shadow_min: [-64.0, -32.0, -64.0, 0.0],
             vol_shadow_max: [64.0, 32.0, 64.0, 0.0],
         };

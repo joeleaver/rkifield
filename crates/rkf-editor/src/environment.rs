@@ -380,6 +380,7 @@ impl EnvironmentState {
                 height_falloff: self.fog.height_falloff,
                 ambient_dust_density: self.fog.ambient_dust_density,
                 dust_asymmetry: self.fog.dust_asymmetry,
+                vol_ambient_color: [0.24, 0.30, 0.42],
             },
             atmosphere: rkf_runtime::environment::AtmosphereSettings {
                 enabled: self.atmosphere.enabled,

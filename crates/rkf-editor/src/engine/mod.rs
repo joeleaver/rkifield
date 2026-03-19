@@ -153,6 +153,7 @@ pub struct EditorEngine {
     // Dust params for god rays.
     pub(super) env_ambient_dust: f32,
     pub(super) env_dust_g: f32,
+    pub(super) env_vol_ambient_color: [f32; 3],
     // Cloud params from environment.
     pub(super) env_cloud_settings: rkf_render::CloudSettings,
     pub(super) accumulated_time: f32,

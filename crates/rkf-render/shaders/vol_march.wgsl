@@ -35,10 +35,8 @@ struct VolMarchParams {
     fog_color:    vec4<f32>,
     fog_height:   vec4<f32>,
     fog_distance: vec4<f32>,
-    frame_index:  u32,
-    _pad0:        u32,
-    _pad1:        u32,
-    _pad2:        u32,
+    frame_index:       u32,
+    vol_ambient_color: vec3<f32>,  // RGB ambient sky color for volumetric multi-scatter
     // Volumetric shadow map volume bounds (world space)
     vol_shadow_min: vec4<f32>,  // xyz = min corner, w = unused
     vol_shadow_max: vec4<f32>,  // xyz = max corner, w = unused
@@ -408,12 +406,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let cloud_g_back: f32 = -0.2;    // slight back-scatter lobe
     let cloud_forward_weight: f32 = 0.3; // 30% directional, 70% isotropic-ish
     // Ambient sky light illuminates clouds from all directions (multi-scatter approx).
-    // Blend between blue sky at noon and warm tint at sunset based on sun elevation.
-    let noon_ambient = vec3<f32>(0.4, 0.5, 0.7) * 0.6;
-    let sun_elev = params.sun_dir.y; // ~1 at noon, ~0 at horizon
-    let warm_factor = 1.0 - smoothstep(0.0, 0.3, sun_elev);
-    let warm_ambient = normalize(params.sun_color.xyz + vec3<f32>(0.01)) * 0.35;
-    let sky_ambient = mix(noon_ambient, warm_ambient, warm_factor);
+    let sky_ambient = params.vol_ambient_color;
 
     for (var i = 0u; i < params.max_steps; i++) {
         let t = params.near + (f32(i) + jitter) * params.step_size;
