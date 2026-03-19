@@ -109,7 +109,10 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
     let view_dir = normalize(shade_uniforms.camera_pos.xyz - world_pos);
     let n_dot_v = max(dot(normal, view_dir), 0.001);
 
-    let sss_color = resolved.subsurface_color;
+    // Use the per-voxel albedo (which includes voxel color) for SSS,
+    // not the material's subsurface_color. Otherwise changing materials
+    // overwrites the visual color via SSS contribution.
+    let sss_color = albedo;
 
     // Atmospheric shadow softening at distance
     let cam_dist = length(world_pos - shade_uniforms.camera_pos.xyz);

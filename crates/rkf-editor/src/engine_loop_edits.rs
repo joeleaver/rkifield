@@ -155,6 +155,7 @@ pub(crate) fn process_remap_material(
         if let SdfSource::Voxelized { brick_map_handle, .. } = &obj.root_node.sdf_source {
             let handle = *brick_map_handle;
             let dims = handle.dims;
+            // Update GPU-format brick pool (VoxelSample).
             for bz in 0..dims.z {
                 for by in 0..dims.y {
                     for bx in 0..dims.x {
@@ -172,6 +173,34 @@ pub(crate) fn process_remap_material(
                                             brick.set(vx, vy, vz, sample);
                                         }
                                     }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Also update geometry-first source of truth (SurfaceVoxel.material_id).
+            // Without this, any later sync_geometry_to_bricks would rebuild
+            // VoxelSamples from BrickGeometry with the OLD material_id, reverting
+            // the change and losing per-voxel color associations.
+            if let Some(gf_data) = engine.geometry_first_data.get(&object_id) {
+                let geo_dims = gf_data.geo_brick_map.dims;
+                for bz in 0..geo_dims.z {
+                    for by in 0..geo_dims.y {
+                        for bx in 0..geo_dims.x {
+                            let Some(geo_slot) = gf_data.geo_brick_map.get(bx, by, bz) else {
+                                continue;
+                            };
+                            if geo_slot == rkf_core::brick_map::EMPTY_SLOT {
+                                continue;
+                            }
+                            let geo = engine.cpu_geometry_pool.get_mut(geo_slot);
+                            for sv in geo.surface_voxels.iter_mut() {
+                                if sv.material_id == from_material as u8 {
+                                    sv.material_id = to_material as u8;
+                                }
+                                if sv.secondary_material_id == from_material as u8 {
+                                    sv.secondary_material_id = to_material as u8;
                                 }
                             }
                         }
