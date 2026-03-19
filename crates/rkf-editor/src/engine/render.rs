@@ -580,7 +580,10 @@ impl EditorEngine {
             fog_height: [self.env_fog_density, -0.5, self.env_fog_height_falloff, 0.0],
             fog_distance: [0.0, 0.01, self.env_ambient_dust, self.env_dust_g],
             frame_index: self.frame_index,
-            vol_ambient_color: self.env_vol_ambient_color,
+            vol_ambient_color: {
+                let i = self.env_vol_ambient_intensity;
+                [self.env_vol_ambient_color[0] * i, self.env_vol_ambient_color[1] * i, self.env_vol_ambient_color[2] * i]
+            },
             vol_shadow_min: [cam.x - 40.0, cam.y - 10.0, cam.z - 40.0, 0.0],
             vol_shadow_max: [cam.x + 40.0, cam.y + 10.0, cam.z + 40.0, 0.0],
         };

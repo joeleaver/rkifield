@@ -114,6 +114,8 @@ pub struct RenderEnvironment {
     /// Volumetric ambient sky color (RGB, linear). Controls the multi-scatter
     /// approximation color for clouds and fog.
     pub vol_ambient_color: Vec3,
+    /// Volumetric ambient intensity multiplier.
+    pub vol_ambient_intensity: f32,
 
     // Clouds
     /// Cloud simulation settings.
@@ -165,6 +167,7 @@ impl Default for RenderEnvironment {
             ambient_dust: 0.005,
             dust_asymmetry: 0.6,
             vol_ambient_color: Vec3::new(0.24, 0.30, 0.42),
+            vol_ambient_intensity: 1.0,
             cloud_settings: rkf_render::CloudSettings::default(),
             bloom_threshold: 1.0,
             bloom_intensity: 0.3,

@@ -204,6 +204,13 @@ pub fn FogSection() -> NodeHandle {
             }
             FogColorPicker {}
             VolAmbientColorPicker {}
+            SliderRow {
+                label: "Ambient Intensity",
+                suffix: "",
+                signal: Some(sliders.vol_ambient_intensity),
+                min: 0.0, max: 5.0, step: 0.05, decimals: 2,
+                on_change: { let cmd = cmd.clone(); move |_v: f64| { sliders.send_fog_commands(&cmd, &ui); } },
+            }
         }
     }
 }

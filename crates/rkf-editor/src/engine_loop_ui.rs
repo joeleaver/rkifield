@@ -33,6 +33,7 @@ fn sync_env_sliders_from_settings(
     sliders.fog_height_falloff.set(env.fog.height_falloff as f64);
     sliders.dust_density.set(env.fog.ambient_dust_density as f64);
     sliders.dust_asymmetry.set(env.fog.dust_asymmetry as f64);
+    sliders.vol_ambient_intensity.set(env.fog.vol_ambient_intensity as f64);
     sliders.cloud_coverage.set(env.clouds.coverage as f64);
     sliders.cloud_density.set(env.clouds.density as f64);
     sliders.cloud_altitude.set(env.clouds.altitude as f64);

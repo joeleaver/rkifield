@@ -348,7 +348,10 @@ impl Renderer {
             fog_height: [fog_density, -0.5, env.fog_height_falloff, 0.0],
             fog_distance: [0.0, 0.01, env.ambient_dust, env.dust_asymmetry],
             frame_index: self.frame_index,
-            vol_ambient_color: [env.vol_ambient_color.x, env.vol_ambient_color.y, env.vol_ambient_color.z],
+            vol_ambient_color: {
+                let va = env.vol_ambient_color * env.vol_ambient_intensity;
+                [va.x, va.y, va.z]
+            },
             vol_shadow_min: [cam.x - 40.0, cam.y - 10.0, cam.z - 40.0, 0.0],
             vol_shadow_max: [cam.x + 40.0, cam.y + 10.0, cam.z + 40.0, 0.0],
         };

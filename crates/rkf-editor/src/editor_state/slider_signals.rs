@@ -29,6 +29,7 @@ pub struct SliderSignals {
     pub fog_height_falloff: Signal<f64>,
     pub dust_density: Signal<f64>,
     pub dust_asymmetry: Signal<f64>,
+    pub vol_ambient_intensity: Signal<f64>,
     // Clouds
     pub cloud_coverage: Signal<f64>,
     pub cloud_density: Signal<f64>,
@@ -123,6 +124,7 @@ impl SliderSignals {
             fog_height_falloff: Signal::new(env.fog.height_falloff as f64),
             dust_density: Signal::new(env.fog.ambient_dust_density as f64),
             dust_asymmetry: Signal::new(env.fog.dust_asymmetry as f64),
+            vol_ambient_intensity: Signal::new(env.fog.vol_ambient_intensity as f64),
             cloud_coverage: Signal::new(env.clouds.coverage as f64),
             cloud_density: Signal::new(env.clouds.density as f64),
             cloud_altitude: Signal::new(env.clouds.altitude as f64),
@@ -180,6 +182,7 @@ impl SliderSignals {
         send_env_float(cmd, ui, "fog.height_falloff", self.fog_height_falloff.get());
         send_env_float(cmd, ui, "fog.ambient_dust_density", self.dust_density.get());
         send_env_float(cmd, ui, "fog.dust_asymmetry", self.dust_asymmetry.get());
+        send_env_float(cmd, ui, "fog.vol_ambient_intensity", self.vol_ambient_intensity.get());
         send_env_bool(cmd, ui, "fog.enabled", ui.fog_enabled.get());
     }
 

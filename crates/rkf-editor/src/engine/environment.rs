@@ -24,6 +24,7 @@ impl EditorEngine {
         self.env_ambient_dust = fog.ambient_dust_density;
         self.env_dust_g = fog.dust_asymmetry;
         self.env_vol_ambient_color = fog.vol_ambient_color;
+        self.env_vol_ambient_intensity = fog.vol_ambient_intensity;
 
         let clouds = &env.clouds;
         self.env_cloud_settings.procedural_enabled = clouds.enabled;

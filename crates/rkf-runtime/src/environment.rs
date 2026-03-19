@@ -367,10 +367,18 @@ pub struct FogSettings {
     /// from sun elevation.
     #[serde(default = "default_vol_ambient_color")]
     pub vol_ambient_color: [f32; 3],
+    /// Volumetric ambient intensity multiplier. Scales `vol_ambient_color`
+    /// without changing the hue. Default 1.0.
+    #[serde(default = "default_vol_ambient_intensity")]
+    pub vol_ambient_intensity: f32,
 }
 
 fn default_vol_ambient_color() -> [f32; 3] {
     [0.24, 0.30, 0.42]
+}
+
+fn default_vol_ambient_intensity() -> f32 {
+    1.0
 }
 
 impl Default for FogSettings {
@@ -385,6 +393,7 @@ impl Default for FogSettings {
             ambient_dust_density: 0.005,
             dust_asymmetry: 0.3,
             vol_ambient_color: default_vol_ambient_color(),
+            vol_ambient_intensity: 1.0,
         }
     }
 }
