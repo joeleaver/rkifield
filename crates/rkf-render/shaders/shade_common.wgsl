@@ -308,10 +308,6 @@ fn extract_distance(word0: u32) -> f32 {
     return unpack2x16float(word0).x;
 }
 
-/// Extract per-voxel RGBA color from word1 — DEPRECATED, color now in companion pool.
-fn extract_voxel_color(word1: u32) -> vec4<f32> {
-    return vec4<f32>(1.0);
-}
 
 // ---------- SDF Primitives ----------
 
@@ -459,7 +455,7 @@ fn sample_voxelized_color(local_pos: vec3<f32>, obj: GpuObject) -> vec4<f32> {
 
 /// Sample per-voxel blend data from a voxelized object at a local-space position.
 /// Returns vec4(secondary_material_id, blend_weight_0to1, 0, 0).
-/// secondary_material_id is from word0 bits 24-31, blend_weight from word1 byte3.
+/// secondary_material_id is from word0 bits 22-27, blend_weight from word1 byte3.
 fn sample_voxelized_blend(local_pos: vec3<f32>, obj: GpuObject) -> vec2<f32> {
     let vs = obj.voxel_size;
     let brick_extent = vs * 8.0;

@@ -208,7 +208,7 @@ mod tests {
     use rkf_core::voxel::VoxelSample;
 
     fn sample(dist: f32, mat: u16) -> VoxelSample {
-        VoxelSample::new(dist, mat, [255, 255, 255, 255])
+        VoxelSample::new(dist, mat, 0)
     }
 
     fn test_record(object_id: u32, desc: &str) -> EditRecord {

@@ -222,9 +222,18 @@ pub(crate) fn load_scene_v3(
     load_rkf_assets_from_hecs(engine, es, scene_dir);
     engine.reupload_brick_data();
 
-    // TODO: Upload color pool when color data wiring is complete.
-    // Color bricks are staged in engine.cpu_color_bricks / color_companion_map
-    // but not yet uploaded to GPU.
+    // Upload color pool if any assets had per-voxel color.
+    // This must happen before full_rebuild (next frame), which creates a new
+    // ShadingPass referencing gpu_color_pool. By uploading here, full_rebuild
+    // picks up the populated pool automatically.
+    if !engine.cpu_color_bricks.is_empty() {
+        let color_data: &[u8] = bytemuck::cast_slice(&engine.cpu_color_bricks);
+        engine.gpu_color_pool = rkf_render::GpuColorPool::upload(
+            &engine.ctx.device,
+            color_data,
+            &engine.color_companion_map,
+        );
+    }
 
     // Restore editor state from properties (camera, lights — NOT environment).
     restore_properties_v3(es, &scene_v3);

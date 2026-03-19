@@ -24,14 +24,32 @@ unsafe impl Zeroable for VoxelSample {}
 unsafe impl Pod for VoxelSample {}
 
 impl VoxelSample {
-    /// Construct a new voxel sample with distance, material, and color.
+    /// Construct a new voxel sample with distance and primary material.
     ///
     /// `material_id` is masked to 6 bits (0–63).
-    /// `color` is `[R, G, B, blend_weight]`.
-    pub fn new(distance: f32, material_id: u16, color: [u8; 4]) -> Self {
+    /// `blend_weight` is 0 (primary only) to 255 (fully secondary).
+    /// Secondary material defaults to 0; use [`new_blended`] for dual-material.
+    pub fn new(distance: f32, material_id: u16, blend_weight: u8) -> Self {
         let word0 = (f16::from_f32(distance).to_bits() as u32)
             | (((material_id as u32) & 0x3F) << 16);
-        let word1 = u32::from_le_bytes(color);
+        let word1 = (blend_weight as u32) << 24;
+        Self { word0, word1 }
+    }
+
+    /// Construct a new voxel sample with distance, primary + secondary material, and blend weight.
+    ///
+    /// `material_id` and `secondary_material_id` are masked to 6 bits (0–63).
+    /// `blend_weight` is 0 (primary only) to 255 (fully secondary).
+    pub fn new_blended(
+        distance: f32,
+        material_id: u16,
+        secondary_material_id: u8,
+        blend_weight: u8,
+    ) -> Self {
+        let word0 = (f16::from_f32(distance).to_bits() as u32)
+            | (((material_id as u32) & 0x3F) << 16)
+            | (((secondary_material_id as u32) & 0x3F) << 22);
+        let word1 = (blend_weight as u32) << 24;
         Self { word0, word1 }
     }
 
@@ -71,20 +89,9 @@ impl VoxelSample {
         (self.word1 >> 24) as u8
     }
 
-    /// Construct a voxel from geometry-first data (single material, no flags).
+    /// Construct from raw f16 distance bits with secondary material and blend weight.
     ///
     /// `distance_f16_bits` is the raw f16 bits from [`SdfCache`].
-    /// `material_id` is masked to 6 bits.
-    /// `color` is `[R, G, B, blend_weight]`.
-    pub fn from_geometry_data(distance_f16_bits: u16, material_id: u8, color: [u8; 4]) -> Self {
-        let word0 = (distance_f16_bits as u32)
-            | (((material_id as u32) & 0x3F) << 16);
-        let word1 = u32::from_le_bytes(color);
-        Self { word0, word1 }
-    }
-
-    /// Construct from geometry-first data with secondary material and blend weight.
-    ///
     /// `blend_weight` is 0–255 (0 = primary only, 255 = fully secondary).
     /// Bits 28–31 of word0 are reserved (zero).
     pub fn from_geometry_data_blended(
@@ -103,9 +110,9 @@ impl VoxelSample {
 }
 
 impl Default for VoxelSample {
-    /// Returns a voxel far from any surface: distance = f16::INFINITY, material_id = 0, white color.
+    /// Returns a voxel far from any surface: distance = f16::INFINITY, material_id = 0, blend_weight = 0.
     fn default() -> Self {
-        Self::new(f32::INFINITY, 0, [255, 255, 255, 255])
+        Self::new(f32::INFINITY, 0, 0)
     }
 }
 
@@ -113,8 +120,6 @@ impl Default for VoxelSample {
 mod tests {
     use super::*;
     use std::mem;
-
-    const WHITE: [u8; 4] = [255, 255, 255, 255];
 
     #[test]
     fn size_is_8_bytes() {
@@ -138,49 +143,61 @@ mod tests {
     }
 
     #[test]
-    fn default_has_infinity_distance() {
+    fn default_has_infinity_distance_and_zero_blend() {
         let sample = VoxelSample::default();
         assert!(sample.distance().is_infinite());
         assert!(sample.distance_f32().is_infinite());
         assert!(sample.distance_f32() > 0.0);
+        assert_eq!(sample.blend_weight(), 0);
+        assert_eq!(sample.word1, 0);
     }
 
     #[test]
     fn roundtrip_typical_values() {
-        let dist = 1.5_f32;
-        let mat = 42_u16;
-        let color = [128, 64, 32, 255];
-
-        let sample = VoxelSample::new(dist, mat, color);
-
+        let sample = VoxelSample::new(1.5, 42, 0);
         assert_eq!(sample.distance_f32(), 1.5_f32);
-        assert_eq!(sample.material_id(), mat);
+        assert_eq!(sample.material_id(), 42);
+        assert_eq!(sample.blend_weight(), 0);
     }
 
     #[test]
     fn roundtrip_negative_distance() {
-        let sample = VoxelSample::new(-0.5, 1, WHITE);
+        let sample = VoxelSample::new(-0.5, 1, 0);
         assert_eq!(sample.distance_f32(), -0.5_f32);
         assert_eq!(sample.material_id(), 1);
     }
 
     #[test]
+    fn new_with_blend_weight() {
+        let sample = VoxelSample::new(1.0, 5, 200);
+        assert_eq!(sample.material_id(), 5);
+        assert_eq!(sample.blend_weight(), 200);
+    }
+
+    #[test]
+    fn new_blended_roundtrip() {
+        let sample = VoxelSample::new_blended(-0.5, 3, 7, 128);
+        assert_eq!(sample.material_id(), 3);
+        assert_eq!(sample.secondary_material_id(), 7);
+        assert_eq!(sample.blend_weight(), 128);
+        assert!((sample.distance_f32() - (-0.5)).abs() < 0.01);
+    }
+
+    #[test]
     fn edge_case_max_material_id() {
-        // Material id is 6 bits, max 63.
-        let sample = VoxelSample::new(0.0, 63, WHITE);
+        let sample = VoxelSample::new(0.0, 63, 0);
         assert_eq!(sample.material_id(), 63);
     }
 
     #[test]
     fn material_id_masked_to_6_bits() {
-        // Values above 63 are masked.
-        let sample = VoxelSample::new(0.0, 0xFF, WHITE);
+        let sample = VoxelSample::new(0.0, 0xFF, 0);
         assert_eq!(sample.material_id(), 63); // 0xFF & 0x3F = 63
     }
 
     #[test]
     fn set_material_id_preserves_distance() {
-        let mut sample = VoxelSample::new(-0.25, 5, WHITE);
+        let mut sample = VoxelSample::new(-0.25, 5, 0);
         assert_eq!(sample.material_id(), 5);
         sample.set_material_id(42);
         assert_eq!(sample.material_id(), 42);
@@ -190,23 +207,21 @@ mod tests {
     #[test]
     fn edge_case_f16_max_distance() {
         let dist = f16::MAX.to_f32();
-        let sample = VoxelSample::new(dist, 0, WHITE);
+        let sample = VoxelSample::new(dist, 0, 0);
         assert_eq!(sample.distance(), f16::MAX);
     }
 
     #[test]
-    fn from_geometry_data_roundtrip() {
+    fn from_geometry_data_blended_roundtrip() {
         let dist_bits = f16::from_f32(1.5).to_bits();
-        let color = [100, 200, 50, 255];
-        let sample = VoxelSample::from_geometry_data(dist_bits, 42, color);
+        let sample = VoxelSample::from_geometry_data_blended(dist_bits, 42, 0, 0);
         assert_eq!(sample.distance_f32(), 1.5);
         assert_eq!(sample.material_id(), 42);
     }
 
     #[test]
     fn fields_do_not_bleed_into_each_other() {
-        // material_id is 6 bits (16-21), secondary is 6 bits (22-27), bits 28-31 reserved.
-        let sample = VoxelSample::new(0.0, 0x3F, [0, 0, 0, 0]);
+        let sample = VoxelSample::new(0.0, 0x3F, 0);
         assert_eq!(sample.distance(), f16::from_bits(0));
         assert_eq!(sample.material_id(), 0x3F);
         assert_eq!(sample.secondary_material_id(), 0); // must not bleed
@@ -214,9 +229,7 @@ mod tests {
 
     #[test]
     fn new_with_large_material_id_does_not_overflow_into_secondary() {
-        // material_id > 63 should be masked to 6-bit range, not bleed into
-        // secondary_material_id (bits 22-27).
-        let sample = VoxelSample::new(0.0, 0x7F, [0, 0, 0, 0]);
+        let sample = VoxelSample::new(0.0, 0x7F, 0);
         assert_eq!(sample.material_id(), 63); // masked to 6 bits
         assert_eq!(sample.secondary_material_id(), 0); // must NOT bleed
     }
@@ -243,10 +256,8 @@ mod tests {
 
     #[test]
     fn all_fields_pack_without_overlap() {
-        // Set all fields to their max values and verify no overlap.
-        let dist_bits = 0xFFFF_u16; // all distance bits set
+        let dist_bits = 0xFFFF_u16;
         let sample = VoxelSample::from_geometry_data_blended(dist_bits, 63, 63, 0xFF);
-        // word0: bits 0-15 = dist, 16-21 = mat(63), 22-27 = sec(63), 28-31 = 0
         assert_eq!(sample.word0 & 0x0FFF_FFFF, 0x0FFF_FFFF);
         assert_eq!(sample.word0 >> 28, 0); // reserved bits are zero
         assert_eq!(sample.material_id(), 63);
@@ -257,8 +268,8 @@ mod tests {
     #[test]
     fn bytemuck_cast_slice_works() {
         let samples = vec![
-            VoxelSample::new(1.0, 1, WHITE),
-            VoxelSample::new(2.0, 2, WHITE),
+            VoxelSample::new(1.0, 1, 0),
+            VoxelSample::new(2.0, 2, 0),
         ];
         let bytes: &[u8] = bytemuck::cast_slice(&samples);
         assert_eq!(bytes.len(), 16);

@@ -264,7 +264,7 @@ impl EditorEngine {
                 &self.light_buffer, &self.radiance_volume, &self.coarse_field,
             );
             let composed = self.shader_composer.compose().to_string();
-            self.gpu_color_pool = rkf_render::GpuColorPool::empty(&self.ctx.device);
+            // Preserve existing gpu_color_pool — it may contain imported color data.
             self.shading_pass = ShadingPass::new(
                 &self.ctx.device, &self.gbuffer, &self.gpu_scene, &self.light_buffer,
                 &self.coarse_field, &self.radiance_volume, &self.material_buffer,

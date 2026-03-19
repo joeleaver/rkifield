@@ -245,7 +245,7 @@ mod tests {
     #[test]
     fn sample_set_roundtrip() {
         let mut brick = Brick::default();
-        let v = VoxelSample::new(1.5, 42, [0, 0, 0, 128]);
+        let v = VoxelSample::new(1.5, 42, 128);
         brick.set(3, 5, 6, v);
         assert_eq!(brick.sample(3, 5, 6), v);
         // Other voxels remain at default (infinity distance)

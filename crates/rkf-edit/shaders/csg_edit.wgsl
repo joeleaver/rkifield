@@ -9,7 +9,7 @@
 
 struct VoxelSample {
     word0: u32, // lower 16 = f16 distance, upper 8 = u8 material_id
-    word1: u32, // RGBA8 per-voxel color
+    word1: u32, // reserved (bytes 0-2) | blend_weight (byte 3)
 }
 
 struct EditParams {
@@ -328,7 +328,7 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
     let voxel = brick_pool[global_idx];
     let existing_dist = extract_distance(voxel.word0);
     let existing_mat = extract_material_id(voxel.word0);
-    let existing_color = voxel.word1;
+    let existing_blend_data = voxel.word1;
 
     // Compute object-local position of this voxel
     let voxel_pos = edit.brick_local_min + (vec3<f32>(f32(ix), f32(iy), f32(iz)) + 0.5) * edit.voxel_size;
@@ -352,7 +352,7 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
     // Apply the edit operation
     var new_dist = existing_dist;
     var new_mat = existing_mat;
-    var new_color = existing_color;
+    var new_blend_data = existing_blend_data;
 
     switch edit.edit_type {
         // CSG operations: modify distance and potentially material
@@ -396,6 +396,6 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
     // Write back modified voxel
     var new_voxel: VoxelSample;
     new_voxel.word0 = pack_word0(new_dist, new_mat);
-    new_voxel.word1 = new_color;
+    new_voxel.word1 = new_blend_data;
     brick_pool[global_idx] = new_voxel;
 }

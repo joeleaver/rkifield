@@ -99,7 +99,7 @@ mod tests {
                     let dist = x as f32 + y as f32 * 0.1 + z as f32 * 0.01;
                     // Material id is 6-bit (0-63), VoxelSample::new masks to 0x3F.
                     let mat = ((x + y * 8 + z * 64) % 256) as u16;
-                    brick.set(x, y, z, VoxelSample::new(dist, mat, [255, 255, 255, 255]));
+                    brick.set(x, y, z, VoxelSample::new(dist, mat, 0));
                 }
             }
         }
@@ -112,7 +112,7 @@ mod tests {
         for z in 0..BRICK_DIM {
             for y in 0..BRICK_DIM {
                 for x in 0..BRICK_DIM {
-                    brick.set(x, y, z, VoxelSample::new(dist, mat, [255, 255, 255, 255]));
+                    brick.set(x, y, z, VoxelSample::new(dist, mat, 0));
                 }
             }
         }
@@ -179,7 +179,7 @@ mod tests {
             for y in 0..BRICK_DIM {
                 for x in 0..BRICK_DIM {
                     let dist = if x < 4 { 0.0 } else { 2.0 };
-                    brick.set(x, y, z, VoxelSample::new(dist, 1, [255, 255, 255, 255]));
+                    brick.set(x, y, z, VoxelSample::new(dist, 1, 0));
                 }
             }
         }
@@ -203,7 +203,7 @@ mod tests {
                 for x in 0..BRICK_DIM {
                     // Linearly increasing distance along x
                     let dist = x as f32;
-                    brick.set(x, y, z, VoxelSample::new(dist, 1, [255, 255, 255, 255]));
+                    brick.set(x, y, z, VoxelSample::new(dist, 1, 0));
                 }
             }
         }
@@ -261,7 +261,7 @@ mod tests {
             for y in 0..BRICK_DIM {
                 for x in 0..BRICK_DIM {
                     let mat = if x == 3 && y == 3 && z == 3 { 10 } else { 20 };
-                    brick.set(x, y, z, VoxelSample::new(0.0, mat, [255, 255, 255, 255]));
+                    brick.set(x, y, z, VoxelSample::new(0.0, mat, 0));
                 }
             }
         }

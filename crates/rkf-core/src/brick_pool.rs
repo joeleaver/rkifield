@@ -290,7 +290,7 @@ mod tests {
         let slot = pool.allocate().unwrap();
 
         // Modify the brick
-        let v = VoxelSample::new(1.0, 42, [255, 255, 255, 255]);
+        let v = VoxelSample::new(1.0, 42, 0);
         pool.get_mut(slot).set(0, 0, 0, v);
         assert_eq!(pool.get(slot).sample(0, 0, 0).material_id(), 42);
 
@@ -322,7 +322,7 @@ mod tests {
     fn get_mut_allows_modification() {
         let mut pool: BrickPool = Pool::new(4);
         let slot = pool.allocate().unwrap();
-        let v = VoxelSample::new(-0.5, 100, [255, 255, 255, 255]);
+        let v = VoxelSample::new(-0.5, 100, 0);
         pool.get_mut(slot).set(3, 4, 5, v);
         assert_eq!(pool.get(slot).sample(3, 4, 5), v);
     }
@@ -346,7 +346,7 @@ mod tests {
     fn as_slice_reflects_mutations() {
         let mut pool: BrickPool = Pool::new(4);
         let slot = pool.allocate().unwrap();
-        let v = VoxelSample::new(2.0, 7, [255, 255, 255, 255]);
+        let v = VoxelSample::new(2.0, 7, 0);
         pool.get_mut(slot).set(0, 0, 0, v);
         assert_eq!(pool.as_slice()[slot as usize].sample(0, 0, 0), v);
     }
@@ -469,7 +469,7 @@ mod tests {
         let slots = pool.allocate_range(3).unwrap();
 
         // Modify a brick.
-        let v = VoxelSample::new(1.0, 42, [255, 255, 255, 255]);
+        let v = VoxelSample::new(1.0, 42, 0);
         pool.get_mut(slots[0]).set(0, 0, 0, v);
         assert_eq!(pool.get(slots[0]).sample(0, 0, 0).material_id(), 42);
 

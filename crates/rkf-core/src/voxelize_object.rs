@@ -174,7 +174,7 @@ where
                     );
 
                 let (dist, material_id) = sdf_fn(pos);
-                let sample = VoxelSample::new(dist, material_id, [255, 255, 255, 255]);
+                let sample = VoxelSample::new(dist, material_id, 0);
                 brick.set(vx, vy, vz, sample);
             }
         }

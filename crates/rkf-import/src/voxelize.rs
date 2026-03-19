@@ -336,7 +336,7 @@ fn populate_brick_mesh<F>(
                     0
                 };
                 let material_id = material_fn(pos, mat_idx);
-                let sample = VoxelSample::new(dist, material_id, [255, 255, 255, 255]);
+                let sample = VoxelSample::new(dist, material_id, 0);
                 brick.set(vx, vy, vz, sample);
             }
         }

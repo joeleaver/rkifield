@@ -7,7 +7,7 @@ use std::io::Cursor;
 
 /// Create a VoxelSample with a given f32 distance and material id.
 fn vs(dist: f32, mat: u16) -> VoxelSample {
-    VoxelSample::new(dist, mat, [255, 255, 255, 255])
+    VoxelSample::new(dist, mat, 0)
 }
 
 /// Build a 2x2x2 brick map with two allocated bricks (slots 10 and 20)

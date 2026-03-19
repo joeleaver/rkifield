@@ -11,7 +11,7 @@
 // ---------- Structs (must match Rust/shade.wgsl layouts exactly) ----------
 
 struct VoxelSample {
-    word0: u32, // lower 16 = f16 distance, upper 16 = u16 material_id
+    word0: u32, // lower 16 = f16 distance, bits 16-21 = material_id (6-bit) | bits 22-27 = secondary_material_id (6-bit) | bits 28-31 = reserved
     word1: u32,
 }
 
