@@ -26,6 +26,7 @@ mod placement;
 mod properties;
 mod scene_io;
 mod sculpt;
+mod store;
 mod editor_command;
 mod engine_loop;
 mod engine_loop_commands;

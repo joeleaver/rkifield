@@ -26,6 +26,7 @@ pub mod titlebar;
 pub mod right_panel;
 pub mod status_bar;
 pub mod viewport_toolbar;
+pub mod widgets;
 
 use std::sync::{Arc, Mutex};
 
