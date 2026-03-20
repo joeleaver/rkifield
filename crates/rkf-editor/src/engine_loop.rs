@@ -890,6 +890,9 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         if let Some(mode) = f_debug_mode {
             engine.set_debug_mode(mode);
         }
+        crate::engine_loop_store::push_debug_and_grid_to_store(
+            &store_push_buffer, engine.debug_mode(), f_show_grid,
+        );
         if let Some(ref env) = f_environment {
             engine.apply_environment_settings(env);
             engine.lights_dirty = true;

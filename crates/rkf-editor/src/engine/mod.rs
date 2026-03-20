@@ -275,6 +275,11 @@ impl EditorEngine {
         self.shade_debug_mode = mode;
     }
 
+    /// Current debug/visualization mode (0 = normal shading).
+    pub fn debug_mode(&self) -> u32 {
+        self.shade_debug_mode
+    }
+
     /// Camera-relative view-projection matrix for overlay rendering.
     pub fn view_projection(&self) -> glam::Mat4 {
         self.camera.view_projection(self.render_width, self.render_height)

@@ -127,6 +127,19 @@ pub(crate) fn push_modes_to_store(
     buf.push(("gizmo/mode".into(), UiValue::String(gizmo_str.into())));
 }
 
+/// Push debug mode and grid visibility to the store push buffer.
+///
+/// Called from the engine loop every frame alongside `push_modes_to_store`.
+pub(crate) fn push_debug_and_grid_to_store(
+    buffer: &PushBuffer,
+    debug_mode: u32,
+    show_grid: bool,
+) {
+    let mut buf = buffer.lock().expect("store push buffer poisoned");
+    buf.push(("editor/debug_mode".into(), UiValue::Int(debug_mode as i64)));
+    buf.push(("editor/show_grid".into(), UiValue::Bool(show_grid)));
+}
+
 /// Push scene collection counts and selection to the store push buffer.
 ///
 /// Called from the engine loop when `dirty.scene` or `dirty.lights` is true.
