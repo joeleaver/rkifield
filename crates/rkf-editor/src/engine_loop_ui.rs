@@ -273,7 +273,7 @@ pub(crate) fn push_dirty_ui_signals(
                         // Set material usage BEFORE objects -- objects.set() triggers
                         // ObjectProperties rebuild which reads selected_object_materials.
                         ui.selected_object_materials.set(mat_usage);
-                        ui.objects.set(objects);
+                        ui.objects.set(objects.clone());
                         ui.scene_name.set(scene_name);
                         ui.scene_path.set(scene_path);
                         ui.inspector_data.set(inspector_snap);
@@ -285,6 +285,10 @@ pub(crate) fn push_dirty_ui_signals(
                         // are now pushed via the UI Store.
                         let _ = env_for_sliders; // suppress unused warning
                     }
+                    // Mirror objects to store typed slot for collection views.
+                    if let Some(store) = rinch::core::context::try_use_context::<crate::store::UiStore>() {
+                        store.set_typed::<Vec<crate::ui_snapshot::ObjectSummary>>("scene/objects", objects);
+                    }
                 });
             }
             // Lights.
@@ -292,7 +296,10 @@ pub(crate) fn push_dirty_ui_signals(
                 let lights = es.build_light_summaries();
                 rinch::shell::rinch_runtime::run_on_main_thread(move || {
                     if let Some(ui) = rinch::core::context::try_use_context::<UiSignals>() {
-                        ui.lights.set(lights);
+                        ui.lights.set(lights.clone());
+                    }
+                    if let Some(store) = rinch::core::context::try_use_context::<crate::store::UiStore>() {
+                        store.set_typed::<Vec<crate::ui_snapshot::LightSummary>>("scene/lights", lights);
                     }
                 });
                 // Push light fields to UI Store for bound widgets.
@@ -375,7 +382,10 @@ pub(crate) fn push_dirty_ui_signals(
             let mat_count = materials.len();
             rinch::shell::rinch_runtime::run_on_main_thread(move || {
                 if let Some(ui) = rinch::core::context::try_use_context::<UiSignals>() {
-                    ui.materials.set(materials);
+                    ui.materials.set(materials.clone());
+                }
+                if let Some(store) = rinch::core::context::try_use_context::<crate::store::UiStore>() {
+                    store.set_typed::<Vec<crate::ui_snapshot::MaterialSummary>>("scene/materials", materials);
                 }
             });
             // Push material count to store.

@@ -4,10 +4,7 @@
 //! only the section whose toggle changes will rebuild.
 //!
 //! All environment fields use store-bound widgets (BoundSlider, BoundToggle,
-//! BoundColor) that read from and write to the UI Store. The only exception
-//! is Sun Azimuth/Elevation which are derived fields that compute a Vec3
-//! sun_direction — they use manual SliderRows until a DirectionInput widget
-//! is built.
+//! BoundColor, BoundDirection) that read from and write to the UI Store.
 
 use rinch::prelude::*;
 
@@ -16,17 +13,19 @@ use super::LABEL_STYLE;
 use crate::store::types::UiValue;
 use crate::store::UiStore;
 use crate::ui::bound::bound_color::BoundColor;
+use crate::ui::bound::bound_direction::BoundDirection;
 use crate::ui::bound::bound_slider::BoundSlider;
 use crate::ui::bound::bound_toggle::BoundToggle;
 
 // ── Atmosphere section ──────────────────────────────────────────────────────
 
-/// Atmosphere toggle, sun intensity/color, Rayleigh/Mie scale.
-///
-/// Sun azimuth/elevation sliders removed — will return as a DirectionInput
-/// widget that writes a Vec3 to `env/atmosphere.sun_direction`.
+/// Atmosphere toggle, sun direction/intensity/color, Rayleigh/Mie scale.
 #[component]
 pub fn AtmosphereSection() -> NodeHandle {
+    let sun_dir = BoundDirection {
+        path: "env/atmosphere.sun_direction".into(),
+        label: "Sun Direction".into(),
+    }.render(__scope, &[]);
     let sun_intensity = BoundSlider {
         path: "env/atmosphere.sun_intensity".into(), label: "Sun Intensity".into(),
         min: 0.0, max: 10.0, step: 0.1, decimals: 1, suffix: String::new(),
@@ -49,6 +48,7 @@ pub fn AtmosphereSection() -> NodeHandle {
     rsx! {
         div {
             div { style: {LABEL_STYLE}, "Atmosphere" }
+            {sun_dir}
             {sun_intensity}
             {sun_color}
             {atmo_toggle}
@@ -131,7 +131,8 @@ pub fn PostProcessSection() -> NodeHandle {
 fn PostProcessLightingGroup() -> NodeHandle {
     let store = use_context::<UiStore>();
 
-    // Tone map mode: read as Int from store, toggle on click, write back as Int.
+    // Tone map mode: manual Int read/write toggle. Intentionally not using BoundSelect
+    // (which handles strings, not ints). A two-value int cycle is simple enough inline.
     let tm_signal = store.read("env/post_process.tone_map_mode");
 
     let store_for_tm = store.clone();

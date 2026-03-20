@@ -12,6 +12,7 @@ use super::types::UiValue;
 use crate::editor_command::EditorCommand;
 use crate::editor_state::EditorMode;
 use crate::gizmo::GizmoMode;
+use uuid::Uuid;
 
 /// Convert a `UiValue` to the appropriate `EditorCommand` for the given path route.
 ///
@@ -56,7 +57,7 @@ pub fn route_write(route: &PathRoute, value: UiValue) -> Vec<EditorCommand> {
             vec![]
         }
 
-        PathRoute::SystemPath { .. } => vec![],
+        PathRoute::SystemPath { path } => route_system(path, value),
     }
 }
 
@@ -284,6 +285,23 @@ fn route_gizmo_tool(field: &str, value: UiValue) -> Option<EditorCommand> {
             Some(EditorCommand::SetGizmoMode { mode })
         }
         _ => None,
+    }
+}
+
+// ─── System path routing ─────────────────────────────────────────────────
+
+fn route_system(path: &str, value: UiValue) -> Vec<EditorCommand> {
+    match path {
+        "viewport/camera" => {
+            let s = value.as_string().unwrap_or_default();
+            let camera_id = if s.is_empty() {
+                None
+            } else {
+                Uuid::parse_str(&s).ok()
+            };
+            vec![EditorCommand::SetViewportCamera { camera_id }]
+        }
+        _ => vec![],
     }
 }
 
@@ -778,10 +796,39 @@ mod tests {
     // ── SystemPath ───────────────────────────────────────────────────────
 
     #[test]
-    fn system_path_returns_none() {
+    fn system_path_unknown_returns_none() {
         let route = PathRoute::SystemPath {
             path: "console/output".into(),
         };
         assert!(route_write(&route, UiValue::String("test".into())).is_empty());
+    }
+
+    #[test]
+    fn viewport_camera_routes_correctly() {
+        let uuid = Uuid::new_v4();
+        let route = PathRoute::SystemPath {
+            path: "viewport/camera".into(),
+        };
+        let cmd = route_write(&route, UiValue::String(uuid.to_string())).into_iter().next().unwrap();
+        match cmd {
+            EditorCommand::SetViewportCamera { camera_id } => {
+                assert_eq!(camera_id, Some(uuid));
+            }
+            _ => panic!("expected SetViewportCamera"),
+        }
+    }
+
+    #[test]
+    fn viewport_camera_empty_clears() {
+        let route = PathRoute::SystemPath {
+            path: "viewport/camera".into(),
+        };
+        let cmd = route_write(&route, UiValue::String(String::new())).into_iter().next().unwrap();
+        match cmd {
+            EditorCommand::SetViewportCamera { camera_id } => {
+                assert_eq!(camera_id, None);
+            }
+            _ => panic!("expected SetViewportCamera"),
+        }
     }
 }

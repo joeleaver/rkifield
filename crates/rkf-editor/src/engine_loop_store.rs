@@ -175,6 +175,18 @@ pub(crate) fn push_collection_counts_to_store(
     buf.push(("editor/selected".into(), UiValue::String(selected_str)));
 }
 
+/// Push viewport camera UUID to the store push buffer.
+///
+/// Called from the engine loop every frame so that the camera selector stays in sync.
+pub(crate) fn push_viewport_camera_to_store(buffer: &PushBuffer, camera: Option<uuid::Uuid>) {
+    let mut buf = buffer.lock().expect("store push buffer poisoned");
+    let value = match camera {
+        Some(id) => UiValue::String(id.to_string()),
+        None => UiValue::String(String::new()),
+    };
+    buf.push(("viewport/camera".into(), value));
+}
+
 /// Push FPS (frame time in ms) to the store push buffer.
 ///
 /// Called from the engine loop every ~500ms.

@@ -13,6 +13,8 @@ pub mod routing;
 pub mod signals;
 pub mod types;
 
+use std::any::{Any, TypeId};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crossbeam::channel::Sender;
@@ -47,6 +49,9 @@ pub struct UiStore {
 struct StoreInner {
     registry: PathRegistry,
     cache: SignalCache,
+    /// Typed data slots — stores `Signal<T>` for arbitrary `T: Clone + 'static`.
+    /// Keyed by `(key_string, TypeId)` to prevent type-mismatch panics.
+    typed_slots: HashMap<(String, TypeId), Box<dyn Any>>,
 }
 
 impl UiStore {
@@ -60,6 +65,7 @@ impl UiStore {
             inner: std::rc::Rc::new(std::cell::RefCell::new(StoreInner {
                 registry: PathRegistry::new(),
                 cache: SignalCache::new(),
+                typed_slots: HashMap::new(),
             })),
             push_buffer,
             cmd_tx,
@@ -77,7 +83,7 @@ impl UiStore {
     /// Must be called on the main thread (e.g. via `run_on_main_thread`).
     pub fn drain_pushes(&self) {
         let mut inner = self.inner.borrow_mut();
-        let StoreInner { ref mut registry, ref mut cache } = *inner;
+        let StoreInner { ref mut registry, ref mut cache, .. } = *inner;
         signals::drain_push_buffer(&self.push_buffer, registry, cache);
     }
 
@@ -157,6 +163,45 @@ impl UiStore {
     /// Dispatch an EditorCommand directly (for actions).
     pub fn dispatch(&self, cmd: EditorCommand) {
         let _ = self.cmd_tx.send(cmd);
+    }
+
+    // ── Typed data slots ─────────────────────────────────────────────
+
+    /// Set a typed value in the store.
+    ///
+    /// If a `Signal<T>` already exists for this key, updates it.
+    /// Otherwise, creates a new `Signal<T>` and stores it.
+    /// Must be called on the main thread (signals are thread-local).
+    pub fn set_typed<T: Clone + PartialEq + 'static>(&self, key: &str, value: T) {
+        let mut inner = self.inner.borrow_mut();
+        let slot_key = (key.to_string(), TypeId::of::<T>());
+        if let Some(boxed) = inner.typed_slots.get(&slot_key) {
+            // Slot exists — downcast and set.
+            let signal = boxed.downcast_ref::<Signal<T>>()
+                .expect("typed slot type mismatch (should be impossible)");
+            signal.set(value);
+        } else {
+            // Create new signal and store it.
+            let signal = Signal::new(value);
+            inner.typed_slots.insert(slot_key, Box::new(signal));
+        }
+    }
+
+    /// Read a typed signal from the store.
+    ///
+    /// Returns the `Signal<T>` for this key, creating it with `T::default()`
+    /// if it doesn't exist yet. Must be called on the main thread.
+    pub fn read_typed<T: Clone + Default + PartialEq + 'static>(&self, key: &str) -> Signal<T> {
+        let mut inner = self.inner.borrow_mut();
+        let slot_key = (key.to_string(), TypeId::of::<T>());
+        if let Some(boxed) = inner.typed_slots.get(&slot_key) {
+            *boxed.downcast_ref::<Signal<T>>()
+                .expect("typed slot type mismatch (should be impossible)")
+        } else {
+            let signal = Signal::new(T::default());
+            inner.typed_slots.insert(slot_key, Box::new(signal));
+            signal
+        }
     }
 
     // ── Action registry ──────────────────────────────────────────────

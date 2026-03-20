@@ -7,12 +7,8 @@
 //! materials list changes. Selection border updates are handled by reactive style
 //! closures on each card, avoiding a full grid rebuild on every selection change.
 //!
-//! ## Store migration status
-//!
-//! The materials panel reads `ui.materials` (Vec<MaterialSummary>) which is a
-//! complex typed collection. This remains on UiSignals because `UiValue` doesn't
-//! support typed lists. The material count is mirrored to `editor/material_count`
-//! in the store for read-only use by other widgets. Individual material property
+//! Collection data (materials) is read from the store's typed slots via
+//! `store.read_typed::<Vec<MaterialSummary>>()`. Individual material property
 //! editing uses `material:{slot}/{field}` store paths (see routing.rs).
 
 use std::sync::{Arc, Mutex};
@@ -22,6 +18,8 @@ use rinch::prelude::*;
 use crate::automation::SharedState;
 use crate::editor_command::EditorCommand;
 use crate::editor_state::UiSignals;
+use crate::store::UiStore;
+use crate::ui_snapshot::MaterialSummary;
 use crate::CommandSender;
 
 /// Materials panel component.

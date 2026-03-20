@@ -28,7 +28,7 @@ pub enum ObjectType {
 }
 
 /// Lightweight summary of a scene object for UI display.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ObjectSummary {
     pub id: Uuid,
     pub name: String,
@@ -65,7 +65,7 @@ pub struct MaterialSummary {
 }
 
 /// Lightweight summary of a light for UI display.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LightSummary {
     pub id: u64,
     pub light_type: SceneLightType,

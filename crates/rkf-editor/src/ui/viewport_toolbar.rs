@@ -6,10 +6,10 @@
 use rinch::prelude::*;
 use rinch_tabler_icons::{TablerIcon, TablerIconStyle, render_tabler_icon};
 
-use crate::editor_command::EditorCommand;
 use crate::editor_state::UiSignals;
+use crate::store::types::UiValue;
+use crate::store::UiStore;
 use crate::ui::widgets::action_button::ActionButton;
-use crate::CommandSender;
 
 const TOOLBAR_STYLE: &str = "\
     display:flex;align-items:center;gap:2px;padding:2px 8px;\
@@ -95,7 +95,7 @@ fn camera_list_key(ui: &UiSignals) -> String {
 #[component]
 fn CameraSelectorInner() -> NodeHandle {
     let ui = use_context::<UiSignals>();
-    let cmd = use_context::<CommandSender>();
+    let store = use_context::<UiStore>();
 
     let objects = ui.objects.get();
     let mut options = vec![SelectOption::new("", "Editor Camera")];
@@ -103,29 +103,21 @@ fn CameraSelectorInner() -> NodeHandle {
         options.push(SelectOption::new(obj.id.to_string(), obj.name.clone()));
     }
 
+    let cam_signal = store.read("viewport/camera");
+
     rsx! {
         Select {
             size: "xs",
             placeholder: "Editor",
             value_fn: {
-                let ui = ui;
                 move || {
-                    ui.viewport_camera.get()
-                        .map(|id| id.to_string())
-                        .unwrap_or_default()
+                    cam_signal.get().as_string().unwrap_or_default().to_string()
                 }
             },
             onchange: {
-                let cmd = cmd.clone();
-                let ui = ui;
+                let store = store.clone();
                 move |value: String| {
-                    if value.is_empty() {
-                        let _ = cmd.0.send(EditorCommand::SetViewportCamera { camera_id: None });
-                        ui.viewport_camera.set(None);
-                    } else if let Ok(uuid) = uuid::Uuid::parse_str(&value) {
-                        let _ = cmd.0.send(EditorCommand::SetViewportCamera { camera_id: Some(uuid) });
-                        ui.viewport_camera.set(Some(uuid));
-                    }
+                    store.set("viewport/camera", UiValue::String(value));
                 }
             },
             data: options,

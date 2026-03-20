@@ -2,17 +2,11 @@
 //!
 //! Uses rinch's `Tree` component with `TreeNodeData` to render the project
 //! hierarchy: Project → Camera + Scene → objects + lights.
-//! Reads from reactive UiSignals — no mutex locks needed.
 //!
-//! ## Store migration status
-//!
-//! The scene tree reads `ui.objects` (Vec<ObjectSummary>) and `ui.lights`
-//! (Vec<LightSummary>) which are complex typed collections. These remain on
-//! UiSignals because `UiValue` doesn't support typed lists. Full migration
-//! would require either a `UiValue::List` variant or a parallel typed-signal
-//! mechanism in the store. Selection is read from `ui.selection` (source of
-//! truth) and mirrored to `editor/selected` in the store for read-only use
-//! by other widgets. See `engine_loop_store::push_collection_counts_to_store`.
+//! Collection data (objects, lights) is read from the store's typed slots
+//! via `store.read_typed::<Vec<T>>()`. Selection is read from `ui.selection`
+//! (source of truth on UiSignals) because it's tightly coupled to tree sync,
+//! inspector data push, and material usage computation.
 
 use rinch::prelude::*;
 use rinch_tabler_icons::TablerIcon;
@@ -20,6 +14,7 @@ use rinch_tabler_icons::TablerIcon;
 use crate::editor_command::EditorCommand;
 use crate::editor_state::{SelectedEntity, UiSignals};
 use crate::light_editor::SceneLightType;
+use crate::store::UiStore;
 use crate::ui_snapshot::{LightSummary, ObjectSummary};
 use crate::CommandSender;
 
@@ -128,6 +123,11 @@ fn parse_value(value: &str) -> Option<SelectedEntity> {
 pub fn SceneTreePanel() -> NodeHandle {
     let cmd = use_context::<CommandSender>();
     let ui = use_context::<UiSignals>();
+    let store = use_context::<UiStore>();
+
+    // Read typed collection signals from the store.
+    let objects_signal = store.read_typed::<Vec<ObjectSummary>>("scene/objects");
+    let lights_signal = store.read_typed::<Vec<LightSummary>>("scene/lights");
 
     // Tree state lives as a context (created in editor_ui) so the
     // selection-sync Effect can live outside the render path.
@@ -135,7 +135,7 @@ pub fn SceneTreePanel() -> NodeHandle {
 
     // Header count — derived value, no .set() needed.
     let header_label = Memo::new(move || {
-        let count = ui.objects.get().len() + ui.lights.get().len();
+        let count = objects_signal.get().len() + lights_signal.get().len();
         format!("Scene ({count})")
     });
 
@@ -154,8 +154,8 @@ pub fn SceneTreePanel() -> NodeHandle {
     // Reactive data source for the Tree — rebuilds when objects/lights/scene change.
     let data_source: std::rc::Rc<dyn Fn() -> Vec<TreeNodeData>> =
         std::rc::Rc::new(move || {
-            let objects = ui.objects.get();
-            let lights = ui.lights.get();
+            let objects = objects_signal.get();
+            let lights = lights_signal.get();
             let scene_name = ui.scene_name.get();
             let scene_path = ui.scene_path.get();
             build_tree_data(&objects, &lights, &scene_name, &scene_path)
@@ -163,8 +163,8 @@ pub fn SceneTreePanel() -> NodeHandle {
 
     // Initial data for the Tree (read once, data_source handles updates).
     let initial_data = {
-        let objects = ui.objects.get();
-        let lights = ui.lights.get();
+        let objects = objects_signal.get();
+        let lights = lights_signal.get();
         let scene_name = ui.scene_name.get();
         let scene_path = ui.scene_path.get();
         build_tree_data(&objects, &lights, &scene_name, &scene_path)

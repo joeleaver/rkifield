@@ -304,7 +304,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             f_sculpt_edits, f_sculpt_undo, f_sculpting_active,
             f_paint_edits, f_paint_undo,
             f_play_start, f_play_stop,
-            f_camera_store,
+            f_camera_store, f_viewport_camera,
         ) = {
             let mut es = match editor_state.lock() {
                 Ok(es) => es,
@@ -885,13 +885,14 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
              sculpt_edits, sculpt_undo, sculpting_active,
              paint_edits, paint_undo,
              f_play_start, f_play_stop,
-             camera_store)
+             camera_store, es.viewport_camera)
         };
 
         // d. Apply extracted data to engine (no lock held).
         engine.sync_camera_snapshot(&camera_snap);
         crate::engine_loop_store::push_camera_to_store(&store_push_buffer, &f_camera_store);
         crate::engine_loop_store::push_modes_to_store(&store_push_buffer, f_editor_mode, f_gizmo_mode);
+        crate::engine_loop_store::push_viewport_camera_to_store(&store_push_buffer, f_viewport_camera);
         if let Some(mode) = f_debug_mode {
             engine.set_debug_mode(mode);
         }
