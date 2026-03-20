@@ -1,11 +1,31 @@
 //! Engine loop → UI Store push helpers.
 //!
-//! Pushes environment settings and editor state to the UI Store's push buffer
-//! so that bound widgets can read them reactively.
+//! Pushes environment settings, lights, and editor state to the UI Store's
+//! push buffer so that bound widgets can read them reactively.
 
+use crate::light_editor::SceneLight;
 use crate::store::signals::PushBuffer;
 use crate::store::types::UiValue;
 use rkf_runtime::environment::EnvironmentSettings;
+
+/// Camera values extracted from EditorState for store push.
+pub(crate) struct CameraStoreValues {
+    pub fov_degrees: f32,
+    pub fly_speed: f32,
+    pub near: f32,
+    pub far: f32,
+}
+
+/// Push camera settings to the store push buffer.
+///
+/// Called from the engine loop every frame so that bound widgets stay in sync.
+pub(crate) fn push_camera_to_store(buffer: &PushBuffer, cam: &CameraStoreValues) {
+    let mut buf = buffer.lock().expect("store push buffer poisoned");
+    buf.push(("camera/fov".into(), UiValue::Float(cam.fov_degrees as f64)));
+    buf.push(("camera/fly_speed".into(), UiValue::Float(cam.fly_speed as f64)));
+    buf.push(("camera/near".into(), UiValue::Float(cam.near as f64)));
+    buf.push(("camera/far".into(), UiValue::Float(cam.far as f64)));
+}
 
 /// Push all EnvironmentSettings fields to the store push buffer.
 ///
@@ -81,4 +101,43 @@ pub(crate) fn push_environment_to_store(
     buf.push(("env/post_process.vignette_intensity".into(), UiValue::Float(p.vignette_intensity as f64)));
     buf.push(("env/post_process.grain_intensity".into(), UiValue::Float(p.grain_intensity as f64)));
     buf.push(("env/post_process.chromatic_aberration".into(), UiValue::Float(p.chromatic_aberration as f64)));
+}
+
+/// Push editor mode and gizmo mode to the store push buffer.
+///
+/// Called from the engine loop every frame so that action `checked` callbacks
+/// can read the current mode.
+pub(crate) fn push_modes_to_store(
+    buffer: &PushBuffer,
+    editor_mode: crate::editor_state::EditorMode,
+    gizmo_mode: crate::gizmo::GizmoMode,
+) {
+    let mode_str = match editor_mode {
+        crate::editor_state::EditorMode::Default => "default",
+        crate::editor_state::EditorMode::Sculpt => "sculpt",
+        crate::editor_state::EditorMode::Paint => "paint",
+    };
+    let gizmo_str = match gizmo_mode {
+        crate::gizmo::GizmoMode::Translate => "translate",
+        crate::gizmo::GizmoMode::Rotate => "rotate",
+        crate::gizmo::GizmoMode::Scale => "scale",
+    };
+    let mut buf = buffer.lock().expect("store push buffer poisoned");
+    buf.push(("editor/mode".into(), UiValue::String(mode_str.into())));
+    buf.push(("gizmo/mode".into(), UiValue::String(gizmo_str.into())));
+}
+
+/// Push all light fields to the store push buffer.
+///
+/// Called from the engine loop when `dirty.lights` is true.
+pub(crate) fn push_lights_to_store(buffer: &PushBuffer, lights: &[SceneLight]) {
+    let mut buf = buffer.lock().expect("store push buffer poisoned");
+    for light in lights {
+        let id = light.id;
+        buf.push((format!("light:{id}/position.x"), UiValue::Float(light.position.x as f64)));
+        buf.push((format!("light:{id}/position.y"), UiValue::Float(light.position.y as f64)));
+        buf.push((format!("light:{id}/position.z"), UiValue::Float(light.position.z as f64)));
+        buf.push((format!("light:{id}/intensity"), UiValue::Float(light.intensity as f64)));
+        buf.push((format!("light:{id}/range"), UiValue::Float(light.range as f64)));
+    }
 }

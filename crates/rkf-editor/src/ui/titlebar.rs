@@ -8,7 +8,7 @@ use crate::editor_command::EditorCommand;
 use crate::editor_state::{EditorState, SliderSignals, UiSignals};
 use crate::layout::state::{LayoutBacking, LayoutState};
 use crate::layout::ContainerKind;
-use crate::CommandSender;
+use crate::store::UiStore;
 
 // ── Window control button ───────────────────────────────────────────────────
 
@@ -50,7 +50,7 @@ pub fn TitleBar() -> NodeHandle {
     let editor_state = use_context::<Arc<Mutex<EditorState>>>();
     let ui = use_context::<UiSignals>();
     let _sliders = use_context::<SliderSignals>();
-    let cmd = use_context::<CommandSender>();
+    let store = use_context::<UiStore>();
     let tree_state = use_context::<UseTreeReturn>();
     let layout = use_context::<LayoutState>();
     let layout_backing = use_context::<LayoutBacking>();
@@ -117,31 +117,27 @@ pub fn TitleBar() -> NodeHandle {
     let es = editor_state.clone();
     let file_menu = Menu::new()
         .item(MenuItem::new("New Project").on_click({
-            let cmd = cmd.clone();
-            move || {
-                let _ = cmd.0.send(EditorCommand::NewProject);
-            }
+            let store = store.clone();
+            move || { store.execute_action("file.new_project"); }
         }))
         .item(MenuItem::new("Open Project").on_click({
-            let cmd = cmd.clone();
+            let store = store.clone();
             move || {
-                let _ = cmd.0.send(EditorCommand::OpenProject { path: String::new() });
+                store.execute_action("file.open_project");
                 ui.set_selection(None, &tree_state);
             }
         }))
         .separator()
         .item(MenuItem::new("Open Scene").shortcut("Ctrl+O").on_click({
-            let cmd = cmd.clone();
+            let store = store.clone();
             move || {
-                let _ = cmd.0.send(EditorCommand::OpenScene { path: String::new() });
+                store.execute_action("file.open_scene");
                 ui.set_selection(None, &tree_state);
             }
         }))
         .item(MenuItem::new("Save").shortcut("Ctrl+S").on_click({
-            let cmd = cmd.clone();
-            move || {
-                let _ = cmd.0.send(EditorCommand::SaveProject);
-            }
+            let store = store.clone();
+            move || { store.execute_action("file.save"); }
         }))
         .item(MenuItem::new("Save Scene As").shortcut("Ctrl+Shift+S").on_click({
             let es = es.clone();
@@ -150,8 +146,9 @@ pub fn TitleBar() -> NodeHandle {
             }
         }))
         .separator()
-        .item(MenuItem::new("Quit").shortcut("Esc").on_click(move || {
-            close_current_window();
+        .item(MenuItem::new("Quit").shortcut("Esc").on_click({
+            let store = store.clone();
+            move || { store.execute_action("file.quit"); }
         }));
 
     let spawn_primitives: &[(&str, &str)] = &[
@@ -165,39 +162,31 @@ pub fn TitleBar() -> NodeHandle {
     let mut spawn_menu = Menu::new();
     for &(label, prim_name) in spawn_primitives {
         spawn_menu = spawn_menu.item(MenuItem::new(label).on_click({
-            let cmd = cmd.clone();
+            let store = store.clone();
             let name = prim_name.to_string();
             move || {
-                let _ = cmd.0.send(EditorCommand::SpawnPrimitive { name: name.clone() });
+                store.dispatch(EditorCommand::SpawnPrimitive { name: name.clone() });
             }
         }));
     }
 
     let edit_menu = Menu::new()
         .item(MenuItem::new("Undo").shortcut("Ctrl+Z").on_click({
-            let cmd = cmd.clone();
-            move || {
-                let _ = cmd.0.send(EditorCommand::Undo);
-            }
+            let store = store.clone();
+            move || { store.execute_action("edit.undo"); }
         }))
         .item(MenuItem::new("Redo").shortcut("Ctrl+Y").on_click({
-            let cmd = cmd.clone();
-            move || {
-                let _ = cmd.0.send(EditorCommand::Redo);
-            }
+            let store = store.clone();
+            move || { store.execute_action("edit.redo"); }
         }))
         .separator()
         .item(MenuItem::new("Delete").shortcut("Del").on_click({
-            let cmd = cmd.clone();
-            move || {
-                let _ = cmd.0.send(EditorCommand::DeleteSelected);
-            }
+            let store = store.clone();
+            move || { store.execute_action("edit.delete"); }
         }))
         .item(MenuItem::new("Duplicate").shortcut("Ctrl+D").on_click({
-            let cmd = cmd.clone();
-            move || {
-                let _ = cmd.0.send(EditorCommand::DuplicateSelected);
-            }
+            let store = store.clone();
+            move || { store.execute_action("edit.duplicate"); }
         }))
         .separator()
         .submenu("Spawn", spawn_menu);
@@ -216,9 +205,9 @@ pub fn TitleBar() -> NodeHandle {
     let mut debug_menu = Menu::new();
     for &(label, mode) in debug_modes {
         debug_menu = debug_menu.item(MenuItem::new(label).on_click({
-            let cmd = cmd.clone();
+            let store = store.clone();
             move || {
-                let _ = cmd.0.send(EditorCommand::SetDebugMode { mode });
+                store.dispatch(EditorCommand::SetDebugMode { mode });
                 ui.debug_mode.set(mode);
             }
         }));
@@ -238,9 +227,9 @@ pub fn TitleBar() -> NodeHandle {
     ];
     for &(label, yaw, pitch) in cam_presets {
         view_menu = view_menu.item(MenuItem::new(label).on_click({
-            let cmd = cmd.clone();
+            let store = store.clone();
             move || {
-                let _ = cmd.0.send(EditorCommand::SetCameraOrbitAngles { yaw, pitch });
+                store.dispatch(EditorCommand::SetCameraOrbitAngles { yaw, pitch });
             }
         }));
     }
@@ -248,9 +237,9 @@ pub fn TitleBar() -> NodeHandle {
     // Grid overlay toggle.
     view_menu = view_menu.separator();
     view_menu = view_menu.item(MenuItem::new("Toggle Grid").shortcut("G").on_click({
-        let cmd = cmd.clone();
+        let store = store.clone();
         move || {
-            let _ = cmd.0.send(EditorCommand::ToggleGrid);
+            store.execute_action("view.toggle_grid");
             ui.show_grid.update(|v| *v = !*v);
         }
     }));
@@ -498,7 +487,7 @@ pub fn TitleBar() -> NodeHandle {
 
     // ── Play / Stop button ───────────────────────────────────────────────
     {
-        let cmd = cmd.clone();
+        let store2 = store.clone();
         let play_btn = rsx! {
             div {
                 style: {move || {
@@ -525,9 +514,9 @@ pub fn TitleBar() -> NodeHandle {
                     }
                     let playing = ui.play_state.get();
                     if playing {
-                        let _ = cmd.0.send(EditorCommand::PlayStop);
+                        store2.execute_action("play.stop");
                     } else {
-                        let _ = cmd.0.send(EditorCommand::PlayStart);
+                        store2.execute_action("play.start");
                     }
                 },
                 {move || if ui.play_state.get() { "Stop" } else { "Play" }}

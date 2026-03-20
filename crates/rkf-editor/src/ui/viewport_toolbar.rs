@@ -1,13 +1,14 @@
 //! Viewport toolbar — sits above the render surface in the center viewport.
 //!
 //! Contains: camera selector, gizmo mode buttons, editor mode buttons.
+//! Mode and gizmo buttons are driven by the action registry via `ActionButton`.
 
 use rinch::prelude::*;
 use rinch_tabler_icons::{TablerIcon, TablerIconStyle, render_tabler_icon};
 
 use crate::editor_command::EditorCommand;
-use crate::editor_state::{EditorMode, SelectedEntity, UiSignals};
-use crate::gizmo::GizmoMode;
+use crate::editor_state::UiSignals;
+use crate::ui::widgets::action_button::ActionButton;
 use crate::CommandSender;
 
 const TOOLBAR_STYLE: &str = "\
@@ -16,20 +17,25 @@ const TOOLBAR_STYLE: &str = "\
     background:var(--rinch-color-dark-8);border-bottom:1px solid var(--rinch-color-border);\
     pointer-events:auto;z-index:2;";
 
-const BTN_SIZE: &str = "22px";
-
 /// Viewport toolbar component.
 #[component]
 pub fn ViewportToolbar() -> NodeHandle {
     rsx! {
         div { style: {TOOLBAR_STYLE},
             // ── Gizmo mode buttons ───────────────────────────
-            GizmoModeButtons {}
+            div { style: "display:flex;gap:1px;",
+                ActionButton { action_id: "gizmo.translate".to_string() }
+                ActionButton { action_id: "gizmo.rotate".to_string() }
+                ActionButton { action_id: "gizmo.scale".to_string() }
+            }
 
             Separator {}
 
             // ── Editor mode buttons (Sculpt, Paint) ──────────
-            EditorModeButtons {}
+            div { style: "display:flex;gap:1px;",
+                ActionButton { action_id: "mode.sculpt".to_string() }
+                ActionButton { action_id: "mode.paint".to_string() }
+            }
 
             Separator {}
 
@@ -47,99 +53,6 @@ pub fn ViewportToolbar() -> NodeHandle {
 fn Separator() -> NodeHandle {
     rsx! {
         div { style: "width:1px;height:16px;background:var(--rinch-color-border);margin:0 4px;" }
-    }
-}
-
-/// Translate / Rotate / Scale toggle buttons.
-#[component]
-fn GizmoModeButtons() -> NodeHandle {
-    let ui = use_context::<UiSignals>();
-    let cmd = use_context::<CommandSender>();
-
-    let modes = [
-        (GizmoMode::Translate, TablerIcon::ArrowsMove, "Move (G)"),
-        (GizmoMode::Rotate, TablerIcon::Rotate, "Rotate (R)"),
-        (GizmoMode::Scale, TablerIcon::Resize, "Scale (L)"),
-    ];
-
-    rsx! {
-        div { style: "display:flex;gap:1px;",
-            for (mode, icon, tooltip) in modes {
-                div {
-                    key: format!("{mode:?}"),
-                    style: {
-                        let ui = ui;
-                        move || {
-                            let active = ui.gizmo_mode.get() == mode;
-                            toolbar_btn_style(active)
-                        }
-                    },
-                    title: {tooltip},
-                    onclick: {
-                        let cmd = cmd.clone();
-                        let ui = ui;
-                        move || {
-                            let _ = cmd.0.send(EditorCommand::SetGizmoMode { mode });
-                            ui.gizmo_mode.set(mode);
-                        }
-                    },
-                    {render_tabler_icon(__scope, icon, TablerIconStyle::Outline)}
-                }
-            }
-        }
-    }
-}
-
-/// Sculpt / Paint toggle buttons.
-#[component]
-fn EditorModeButtons() -> NodeHandle {
-    let ui = use_context::<UiSignals>();
-    let cmd = use_context::<CommandSender>();
-
-    let modes = [
-        (EditorMode::Sculpt, TablerIcon::Brush, "Sculpt"),
-        (EditorMode::Paint, TablerIcon::Paint, "Paint"),
-    ];
-
-    rsx! {
-        div { style: "display:flex;gap:1px;",
-            for (mode, icon, tooltip) in modes {
-                div {
-                    key: format!("{mode:?}"),
-                    style: {
-                        let ui = ui;
-                        move || {
-                            let active = ui.editor_mode.get() == mode;
-                            let bg = if active { "var(--rinch-primary-color)" } else { "transparent" };
-                            let color = if active { "var(--rinch-color-dark-9)" } else { "var(--rinch-color-dimmed)" };
-                            format!(
-                                "display:flex;align-items:center;gap:4px;\
-                                 height:{BTN_SIZE};padding:0 6px;border-radius:3px;\
-                                 background:{bg};color:{color};cursor:pointer;\
-                                 border:1px solid transparent;"
-                            )
-                        }
-                    },
-                    title: {tooltip},
-                    onclick: {
-                        let cmd = cmd.clone();
-                        let ui = ui;
-                        move || {
-                            let current = ui.editor_mode.get();
-                            let new_mode = if current == mode {
-                                EditorMode::Default
-                            } else {
-                                mode
-                            };
-                            let _ = cmd.0.send(EditorCommand::SetEditorMode { mode: new_mode });
-                            ui.editor_mode.set(new_mode);
-                        }
-                    },
-                    {render_tabler_icon(__scope, icon, TablerIconStyle::Outline)}
-                    span { style: "font-size:11px;", {tooltip} }
-                }
-            }
-        }
     }
 }
 
@@ -218,15 +131,4 @@ fn CameraSelectorInner() -> NodeHandle {
             data: options,
         }
     }
-}
-
-fn toolbar_btn_style(active: bool) -> String {
-    let bg = if active { "var(--rinch-primary-color)" } else { "transparent" };
-    let color = if active { "var(--rinch-color-dark-9)" } else { "var(--rinch-color-dimmed)" };
-    format!(
-        "display:flex;align-items:center;justify-content:center;\
-         width:{BTN_SIZE};height:{BTN_SIZE};border-radius:3px;\
-         background:{bg};color:{color};cursor:pointer;\
-         border:1px solid transparent;"
-    )
 }

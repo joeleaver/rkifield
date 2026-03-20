@@ -213,7 +213,10 @@ pub(crate) fn apply_editor_command(es: &mut EditorState, cmd: crate::editor_comm
         // -- Lights ------------------------------------------------------
         SetLightPosition { light_id, position } => {
             if let Some(light) = es.light_editor.get_light_mut(light_id) {
-                light.position = position;
+                // NaN sentinel = keep existing axis (for per-axis store edits).
+                if !position.x.is_nan() { light.position.x = position.x; }
+                if !position.y.is_nan() { light.position.y = position.y; }
+                if !position.z.is_nan() { light.position.z = position.z; }
             }
             es.light_editor.mark_dirty();
         }

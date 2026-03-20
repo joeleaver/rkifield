@@ -304,6 +304,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             f_sculpt_edits, f_sculpt_undo, f_sculpting_active,
             f_paint_edits, f_paint_undo,
             f_play_start, f_play_stop,
+            f_camera_store,
         ) = {
             let mut es = match editor_state.lock() {
                 Ok(es) => es,
@@ -861,6 +862,14 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             let f_play_start = std::mem::take(&mut es.pending_play_start);
             let f_play_stop = std::mem::take(&mut es.pending_play_stop);
 
+            // Camera store values (for bound widgets).
+            let camera_store = crate::engine_loop_store::CameraStoreValues {
+                fov_degrees: es.editor_camera_fov_degrees(),
+                fly_speed: es.camera_control.fly_speed,
+                near: es.editor_camera_near(),
+                far: es.editor_camera_far(),
+            };
+
             // Reset per-frame deltas last.
             es.reset_frame_deltas();
 
@@ -870,11 +879,14 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
              scene, sel, gm, gizmo_axis, grid, emode, brush_radius, brush_falloff,
              sculpt_edits, sculpt_undo, sculpting_active,
              paint_edits, paint_undo,
-             f_play_start, f_play_stop)
+             f_play_start, f_play_stop,
+             camera_store)
         };
 
         // d. Apply extracted data to engine (no lock held).
         engine.sync_camera_snapshot(&camera_snap);
+        crate::engine_loop_store::push_camera_to_store(&store_push_buffer, &f_camera_store);
+        crate::engine_loop_store::push_modes_to_store(&store_push_buffer, f_editor_mode, f_gizmo_mode);
         if let Some(mode) = f_debug_mode {
             engine.set_debug_mode(mode);
         }
@@ -1125,7 +1137,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         if first_frame {
             first_frame = false;
         }
-        engine_loop_ui::push_dirty_ui_signals(&dirty, &editor_state, &engine, &gameplay_registry);
+        engine_loop_ui::push_dirty_ui_signals(&dirty, &editor_state, &engine, &gameplay_registry, &store_push_buffer);
 
         // n-store. Drain UI Store push buffer on main thread.
         rinch::shell::rinch_runtime::run_on_main_thread(|| {

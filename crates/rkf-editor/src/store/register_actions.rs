@@ -50,7 +50,7 @@ pub fn register_core_actions(store: &UiStore) {
         shortcut: Some("Ctrl+S"),
         enabled: None,
         checked: None,
-        execute: |s| s.dispatch(EditorCommand::SaveScene { path: None }),
+        execute: |s| s.dispatch(EditorCommand::SaveProject),
     });
 
     store.register_action(Action {
@@ -60,6 +60,33 @@ pub fn register_core_actions(store: &UiStore) {
         enabled: None,
         checked: None,
         execute: |s| s.dispatch(EditorCommand::NewProject),
+    });
+
+    store.register_action(Action {
+        id: "file.open_project",
+        label: "Open Project",
+        shortcut: None,
+        enabled: None,
+        checked: None,
+        execute: |s| s.dispatch(EditorCommand::OpenProject { path: String::new() }),
+    });
+
+    store.register_action(Action {
+        id: "file.open_scene",
+        label: "Open Scene",
+        shortcut: Some("Ctrl+O"),
+        enabled: None,
+        checked: None,
+        execute: |s| s.dispatch(EditorCommand::OpenScene { path: String::new() }),
+    });
+
+    store.register_action(Action {
+        id: "file.quit",
+        label: "Quit",
+        shortcut: Some("Esc"),
+        enabled: None,
+        checked: None,
+        execute: |_| rinch::prelude::close_current_window(),
     });
 
     // ── View ──────────────────────────────────────────────────────────
@@ -79,6 +106,78 @@ pub fn register_core_actions(store: &UiStore) {
         enabled: None,
         checked: None,
         execute: |s| s.dispatch(EditorCommand::ToggleShortcuts),
+    });
+
+    // ── Editor mode ──────────────────────────────────────────────────
+    store.register_action(Action {
+        id: "mode.select",
+        label: "Select",
+        shortcut: Some("Escape"),
+        enabled: None,
+        checked: Some(|s| s.read_string("editor/mode") == "default"),
+        execute: |s| s.dispatch(EditorCommand::SetEditorMode { mode: crate::editor_state::EditorMode::Default }),
+    });
+
+    store.register_action(Action {
+        id: "mode.sculpt",
+        label: "Sculpt",
+        shortcut: None,
+        enabled: None,
+        checked: Some(|s| s.read_string("editor/mode") == "sculpt"),
+        execute: |s| {
+            let current = s.read_string("editor/mode");
+            let mode = if current == "sculpt" {
+                crate::editor_state::EditorMode::Default
+            } else {
+                crate::editor_state::EditorMode::Sculpt
+            };
+            s.dispatch(EditorCommand::SetEditorMode { mode });
+        },
+    });
+
+    store.register_action(Action {
+        id: "mode.paint",
+        label: "Paint",
+        shortcut: None,
+        enabled: None,
+        checked: Some(|s| s.read_string("editor/mode") == "paint"),
+        execute: |s| {
+            let current = s.read_string("editor/mode");
+            let mode = if current == "paint" {
+                crate::editor_state::EditorMode::Default
+            } else {
+                crate::editor_state::EditorMode::Paint
+            };
+            s.dispatch(EditorCommand::SetEditorMode { mode });
+        },
+    });
+
+    // ── Gizmo mode ──────────────────────────────────────────────────
+    store.register_action(Action {
+        id: "gizmo.translate",
+        label: "Move",
+        shortcut: Some("G"),
+        enabled: None,
+        checked: Some(|s| s.read_string("gizmo/mode") == "translate"),
+        execute: |s| s.dispatch(EditorCommand::SetGizmoMode { mode: crate::gizmo::GizmoMode::Translate }),
+    });
+
+    store.register_action(Action {
+        id: "gizmo.rotate",
+        label: "Rotate",
+        shortcut: Some("R"),
+        enabled: None,
+        checked: Some(|s| s.read_string("gizmo/mode") == "rotate"),
+        execute: |s| s.dispatch(EditorCommand::SetGizmoMode { mode: crate::gizmo::GizmoMode::Rotate }),
+    });
+
+    store.register_action(Action {
+        id: "gizmo.scale",
+        label: "Scale",
+        shortcut: Some("L"),
+        enabled: None,
+        checked: Some(|s| s.read_string("gizmo/mode") == "scale"),
+        execute: |s| s.dispatch(EditorCommand::SetGizmoMode { mode: crate::gizmo::GizmoMode::Scale }),
     });
 
     // ── Play mode ─────────────────────────────────────────────────────

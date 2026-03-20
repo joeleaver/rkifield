@@ -71,6 +71,28 @@ fn route_light(light_id: u64, field: &str, value: UiValue) -> Option<EditorComma
                 position: Vec3::new(v[0] as f32, v[1] as f32, v[2] as f32),
             })
         }
+        // Per-axis position: uses NaN sentinel for unchanged axes.
+        "position.x" => {
+            let f = value.as_float()? as f32;
+            Some(EditorCommand::SetLightPosition {
+                light_id,
+                position: Vec3::new(f, f32::NAN, f32::NAN),
+            })
+        }
+        "position.y" => {
+            let f = value.as_float()? as f32;
+            Some(EditorCommand::SetLightPosition {
+                light_id,
+                position: Vec3::new(f32::NAN, f, f32::NAN),
+            })
+        }
+        "position.z" => {
+            let f = value.as_float()? as f32;
+            Some(EditorCommand::SetLightPosition {
+                light_id,
+                position: Vec3::new(f32::NAN, f32::NAN, f),
+            })
+        }
         "intensity" => {
             let f = value.as_float()?;
             Some(EditorCommand::SetLightIntensity {
@@ -347,6 +369,69 @@ mod tests {
                 assert!((position.x - 10.0).abs() < 1e-5);
                 assert!((position.y - 20.0).abs() < 1e-5);
                 assert!((position.z - 30.0).abs() < 1e-5);
+            }
+            _ => panic!("expected SetLightPosition"),
+        }
+    }
+
+    #[test]
+    fn light_position_x_routes_with_nan_sentinel() {
+        let route = PathRoute::LightField {
+            light_id: 2,
+            field: "position.x".into(),
+        };
+        let cmd = route_write(&route, UiValue::Float(5.0)).unwrap();
+        match cmd {
+            EditorCommand::SetLightPosition {
+                light_id,
+                position,
+            } => {
+                assert_eq!(light_id, 2);
+                assert!((position.x - 5.0).abs() < 1e-5);
+                assert!(position.y.is_nan());
+                assert!(position.z.is_nan());
+            }
+            _ => panic!("expected SetLightPosition"),
+        }
+    }
+
+    #[test]
+    fn light_position_y_routes_with_nan_sentinel() {
+        let route = PathRoute::LightField {
+            light_id: 2,
+            field: "position.y".into(),
+        };
+        let cmd = route_write(&route, UiValue::Float(7.0)).unwrap();
+        match cmd {
+            EditorCommand::SetLightPosition {
+                light_id,
+                position,
+            } => {
+                assert_eq!(light_id, 2);
+                assert!(position.x.is_nan());
+                assert!((position.y - 7.0).abs() < 1e-5);
+                assert!(position.z.is_nan());
+            }
+            _ => panic!("expected SetLightPosition"),
+        }
+    }
+
+    #[test]
+    fn light_position_z_routes_with_nan_sentinel() {
+        let route = PathRoute::LightField {
+            light_id: 2,
+            field: "position.z".into(),
+        };
+        let cmd = route_write(&route, UiValue::Float(-3.0)).unwrap();
+        match cmd {
+            EditorCommand::SetLightPosition {
+                light_id,
+                position,
+            } => {
+                assert_eq!(light_id, 2);
+                assert!(position.x.is_nan());
+                assert!(position.y.is_nan());
+                assert!((position.z - -3.0).abs() < 1e-5);
             }
             _ => panic!("expected SetLightPosition"),
         }

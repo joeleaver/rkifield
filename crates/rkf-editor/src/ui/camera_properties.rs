@@ -6,11 +6,11 @@
 use rinch::prelude::*;
 
 use crate::editor_command::EditorCommand;
-use crate::editor_state::{SelectedEntity, SliderSignals, UiSignals};
+use crate::editor_state::{SelectedEntity, UiSignals};
 use crate::CommandSender;
 
+use super::bound::bound_slider::BoundSlider;
 use super::environment_panel::{AtmosphereSection, CloudsSection, FogSection, PostProcessSection};
-use super::slider_helpers::SliderRow;
 use super::{DIVIDER_STYLE, VALUE_STYLE};
 
 /// Editor camera panel — shows camera settings, linked camera, and environment.
@@ -32,64 +32,31 @@ pub fn EditorCameraPanel() -> NodeHandle {
 /// Camera FOV, fly speed, near/far, position readout.
 #[component]
 fn CameraSettingsSection() -> NodeHandle {
-    let sliders = use_context::<SliderSignals>();
-    let cmd = use_context::<CommandSender>();
     let ui = use_context::<UiSignals>();
+
+    let fov = BoundSlider {
+        path: "camera/fov".into(), label: "FOV".into(),
+        min: 30.0, max: 120.0, step: 1.0, decimals: 0, suffix: "\u{00b0}".into(),
+    }.render(__scope, &[]);
+    let fly_speed = BoundSlider {
+        path: "camera/fly_speed".into(), label: "Fly Speed".into(),
+        min: 0.5, max: 500.0, step: 0.5, decimals: 1, suffix: String::new(),
+    }.render(__scope, &[]);
+    let near = BoundSlider {
+        path: "camera/near".into(), label: "Near Plane".into(),
+        min: 0.01, max: 10.0, step: 0.01, decimals: 2, suffix: String::new(),
+    }.render(__scope, &[]);
+    let far = BoundSlider {
+        path: "camera/far".into(), label: "Far Plane".into(),
+        min: 100.0, max: 10000.0, step: 100.0, decimals: 0, suffix: String::new(),
+    }.render(__scope, &[]);
 
     rsx! {
         div {
-            SliderRow {
-                label: "FOV",
-                suffix: "\u{00b0}",
-                signal: Some(sliders.fov),
-                min: 30.0,
-                max: 120.0,
-                step: 1.0,
-                decimals: 0,
-                on_change: {
-                    let cmd = cmd.clone();
-                    move |_v: f64| { sliders.send_camera_commands(&cmd); }
-                },
-            }
-            SliderRow {
-                label: "Fly Speed",
-                suffix: "",
-                signal: Some(sliders.fly_speed),
-                min: 0.5,
-                max: 500.0,
-                step: 0.5,
-                decimals: 1,
-                on_change: {
-                    let cmd = cmd.clone();
-                    move |_v: f64| { sliders.send_camera_commands(&cmd); }
-                },
-            }
-            SliderRow {
-                label: "Near Plane",
-                suffix: "",
-                signal: Some(sliders.near),
-                min: 0.01,
-                max: 10.0,
-                step: 0.01,
-                decimals: 2,
-                on_change: {
-                    let cmd = cmd.clone();
-                    move |_v: f64| { sliders.send_camera_commands(&cmd); }
-                },
-            }
-            SliderRow {
-                label: "Far Plane",
-                suffix: "",
-                signal: Some(sliders.far),
-                min: 100.0,
-                max: 10000.0,
-                step: 100.0,
-                decimals: 0,
-                on_change: {
-                    let cmd = cmd.clone();
-                    move |_v: f64| { sliders.send_camera_commands(&cmd); }
-                },
-            }
+            {fov}
+            {fly_speed}
+            {near}
+            {far}
             div { style: {DIVIDER_STYLE} }
             div { style: {VALUE_STYLE},
                 {|| {

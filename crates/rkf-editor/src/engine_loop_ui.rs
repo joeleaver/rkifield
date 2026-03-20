@@ -212,6 +212,7 @@ pub(crate) fn push_dirty_ui_signals(
     editor_state: &Arc<Mutex<EditorState>>,
     engine: &EditorEngine,
     gameplay_registry: &Arc<Mutex<rkf_runtime::behavior::GameplayRegistry>>,
+    store_push_buffer: &crate::store::signals::PushBuffer,
 ) {
     if dirty.scene || dirty.lights || dirty.materials || dirty.shaders {
         if let Ok(es) = editor_state.lock() {
@@ -295,6 +296,10 @@ pub(crate) fn push_dirty_ui_signals(
                         ui.lights.set(lights);
                     }
                 });
+                // Push light fields to UI Store for bound widgets.
+                crate::engine_loop_store::push_lights_to_store(
+                    &store_push_buffer, es.light_editor.all_lights(),
+                );
             }
         }
     }
