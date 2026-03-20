@@ -235,6 +235,116 @@ This replaces the current text-only component inspector AND the dedicated
 environment panel. EnvironmentSettings would render as a nice typed inspector
 automatically because its FieldMeta entries specify types and ranges.
 
+### Actions (Menus, Context Menus, Shortcuts)
+
+Not everything is a data binding. Menu items ("Save Scene", "Undo", "Delete
+Selected"), context menu actions ("Duplicate", "Focus Camera"), and keyboard
+shortcuts are stateless commands. The store handles these too:
+
+```rust
+// Register an action with metadata
+store.register_action(Action {
+    id: "scene.save",
+    label: "Save Scene",
+    shortcut: Some("Ctrl+S"),
+    enabled: |store| store.read_bool("editor/has_unsaved_changes"),
+    execute: |store| store.dispatch(EditorCommand::SaveScene),
+});
+
+store.register_action(Action {
+    id: "edit.undo",
+    label: "Undo",
+    shortcut: Some("Ctrl+Z"),
+    enabled: |store| store.read_bool("editor/can_undo"),
+    execute: |store| store.dispatch(EditorCommand::Undo),
+});
+
+store.register_action(Action {
+    id: "object.delete",
+    label: "Delete",
+    shortcut: Some("Delete"),
+    enabled: |store| store.read("editor/selected").is_some(),
+    execute: |store| store.dispatch(EditorCommand::DeleteSelected),
+});
+```
+
+#### Menu construction
+
+Menus are built from action IDs. The store provides the label, enabled state,
+and shortcut text. The menu component doesn't know what the actions do:
+
+```rust
+Menu {
+    items: &[
+        MenuItem::Action("scene.save"),
+        MenuItem::Action("scene.save_as"),
+        MenuItem::Separator,
+        MenuItem::Action("scene.open"),
+        MenuItem::Action("scene.new"),
+        MenuItem::Separator,
+        MenuItem::SubMenu("Recent", &recent_items),
+    ]
+}
+```
+
+#### Context menus
+
+Same mechanism. Right-click on a scene tree node:
+
+```rust
+ContextMenu {
+    items: &[
+        MenuItem::Action("object.duplicate"),
+        MenuItem::Action("object.delete"),
+        MenuItem::Separator,
+        MenuItem::Action("object.focus_camera"),
+        MenuItem::Action("object.rename"),
+    ]
+}
+```
+
+The `enabled` callback on each action determines whether the menu item is
+grayed out. The store provides the reactive state needed to evaluate it.
+
+#### Keyboard shortcuts
+
+The store owns the shortcut→action mapping. Input handling queries the store:
+
+```rust
+// In input handling:
+if let Some(action_id) = store.match_shortcut(key, modifiers) {
+    if store.is_action_enabled(action_id) {
+        store.execute_action(action_id);
+    }
+}
+```
+
+This replaces the current scattered `pending_*` flags on EditorState
+(pending_save, pending_undo, pending_delete, etc.) and the manual shortcut
+matching in the input handler. Adding a new action = register it once with
+its shortcut, enabled condition, and command.
+
+#### Stateful menu items
+
+Some menu items reflect state (checkmarks, radio buttons):
+
+```rust
+store.register_action(Action {
+    id: "view.show_grid",
+    label: "Show Grid",
+    shortcut: Some("G"),
+    checked: Some(|store| store.read_bool("editor/show_grid")),
+    execute: |store| store.set("editor/show_grid", UiValue::Bool(!store.read_bool_val("editor/show_grid"))),
+});
+
+store.register_action(Action {
+    id: "debug.mode.normals",
+    label: "Normals",
+    checked: Some(|store| store.read_int_val("editor/debug_mode") == 1),
+    execute: |store| store.set("editor/debug_mode", UiValue::Int(1)),
+});
+```
+
 ### What This Replaces
 
 | Current                          | New                              |
@@ -248,6 +358,10 @@ automatically because its FieldMeta entries specify types and ranges.
 | Manual `ColorPicker` wiring     | `BoundColor` with path           |
 | Dedicated EnvironmentPanel      | `ComponentInspector` auto-layout |
 | `apply_component_command` routing| Store routing (parse path)       |
+| `pending_*` flags on EditorState | `store.dispatch()` actions      |
+| Manual shortcut matching         | `store.match_shortcut()`        |
+| Hardcoded menu item lists        | `store.register_action()` + IDs |
+| Menu enabled/disabled logic      | Action `enabled` callbacks      |
 
 ### What Stays
 
@@ -271,14 +385,18 @@ Step 4 could be automatic if using `ComponentInspector` with good FieldMeta.
 
 ### Migration Path
 
-1. Build `UiStore` with path-based get/set and type conversion
-2. Build Layer 1 widgets (FloatSlider, ColorSwatch, BoolToggle)
-3. Build Layer 2 bound widgets (BoundSlider, BoundColor, BoundToggle)
-4. Migrate environment panel to use bound widgets (proof of concept)
-5. Migrate light editor, material editor, camera settings
-6. Build Layer 3 ComponentInspector (auto-layout from FieldMeta)
-7. Remove old SliderSignals, sync functions, send functions
-8. Extend FieldMeta with range hints for auto-generated sliders
+1. Build `UiStore` core: path registry, type conversion, get/set, dispatch
+2. Build action system: register_action, match_shortcut, execute
+3. Build Layer 1 widgets (FloatSlider, ColorSwatch, BoolToggle)
+4. Build Layer 2 bound widgets (BoundSlider, BoundColor, BoundToggle)
+5. Migrate environment panel to bound widgets (proof of concept)
+6. Migrate system menu to action-based (File, Edit, View menus)
+7. Migrate keyboard shortcuts to store.match_shortcut
+8. Migrate light editor, material editor, camera settings
+9. Build Layer 3 ComponentInspector (auto-layout from FieldMeta)
+10. Remove old SliderSignals, sync functions, send functions, pending_* flags
+11. Extend FieldMeta with range hints for auto-generated sliders
+12. Context menus via action IDs
 
 ### Thread Safety
 
