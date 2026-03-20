@@ -408,6 +408,155 @@ thread communicates via:
 - **Write**: `store.set()` sends an `EditorCommand` through the existing
   `crossbeam::channel`. No new threading mechanism needed.
 
+### Editor Modes and Tools
+
+The editor has interaction modes (Select, Sculpt, Paint) with mode-specific
+tools and settings. These all map naturally to store paths and actions.
+
+#### Mode switching
+
+The current mode is store state. Switching is an action:
+
+```
+editor/mode                     → "select" | "sculpt" | "paint"
+```
+
+```rust
+store.register_action(Action {
+    id: "mode.select",
+    label: "Select",
+    shortcut: Some("1"),
+    checked: Some(|s| s.read_string_val("editor/mode") == "select"),
+    execute: |s| s.set("editor/mode", UiValue::String("select".into())),
+});
+```
+
+The viewport toolbar renders mode buttons from action IDs. Each button
+reads `editor/mode` for its active state. No special mode-switching logic
+in the toolbar component.
+
+#### Gizmo
+
+Gizmo mode and interaction are store state + actions:
+
+```
+gizmo/mode                      → "translate" | "rotate" | "scale"
+gizmo/space                     → "local" | "world"
+gizmo/snap_enabled              → bool
+gizmo/snap_value                → f64
+```
+
+Shortcuts: G → `gizmo.translate`, R → `gizmo.rotate`, L → `gizmo.scale`.
+These are actions that set `gizmo/mode`. The gizmo renderer reads the mode
+from the store.
+
+Transform writes from gizmo drag go through:
+```
+store.set("entity:{id}/Transform/position", UiValue::Vec3(...))
+```
+
+#### Sculpt mode
+
+Sculpt has tool settings that map to store paths:
+
+```
+sculpt/brush_type               → "add" | "subtract" | "smooth" | "flatten"
+sculpt/radius                   → f64
+sculpt/strength                 → f64
+sculpt/falloff                  → f64
+```
+
+The brush palette becomes bound widgets:
+```rust
+BoundSlider  { path: "sculpt/radius",   label: "Radius",   min: 0.1, max: 50.0, ... }
+BoundSlider  { path: "sculpt/strength", label: "Strength", min: 0.0, max: 1.0,  ... }
+BoundSlider  { path: "sculpt/falloff",  label: "Falloff",  min: 0.0, max: 1.0,  ... }
+```
+
+Brush type switching:
+```rust
+store.register_action(Action {
+    id: "sculpt.brush.add",
+    label: "Add",
+    checked: Some(|s| s.read_string_val("sculpt/brush_type") == "add"),
+    execute: |s| s.set("sculpt/brush_type", UiValue::String("add".into())),
+});
+```
+
+The actual sculpt operation (mouse drag → geometry edit) stays in the engine
+loop. The store manages only the tool settings UI, not the stroke lifecycle.
+
+#### Paint mode
+
+Same pattern as sculpt:
+
+```
+paint/mode                      → "material" | "color" | "erase"
+paint/radius                    → f64
+paint/falloff                   → f64
+paint/material_slot             → i64
+paint/color                     → String (hex)
+```
+
+The paint color picker becomes:
+```rust
+BoundColor { path: "paint/color", label: "Paint Color" }
+```
+
+#### Viewport toolbar layout
+
+The viewport toolbar is built entirely from action IDs and store paths:
+
+```rust
+#[component]
+fn ViewportToolbar() -> NodeHandle {
+    // Mode buttons — each is an action with a checked state
+    ActionButton { action: "mode.select" }
+    ActionButton { action: "mode.sculpt" }
+    ActionButton { action: "mode.paint" }
+    Separator {}
+    // Gizmo buttons — shown when mode is "select"
+    ActionButton { action: "gizmo.translate" }
+    ActionButton { action: "gizmo.rotate" }
+    ActionButton { action: "gizmo.scale" }
+    Separator {}
+    // Camera selector — a bound widget
+    BoundSelect { path: "viewport/camera", ... }
+}
+```
+
+No mode-specific logic in the toolbar. It just renders actions. The `checked`
+callbacks handle active-state highlighting. Conditional visibility (e.g. hide
+gizmo buttons in sculpt mode) can use the store:
+
+```rust
+ActionButton { action: "gizmo.translate", visible: store.read_string("editor/mode") == "select" }
+```
+
+#### Conditional panels
+
+Mode-specific panels (brush palette, paint settings) show/hide based on
+`editor/mode`. The layout system queries the store:
+
+```rust
+if store.read_string_val("editor/mode") == "sculpt" {
+    BrushPalette {}
+}
+```
+
+Or the panel itself handles it:
+```rust
+#[component]
+fn BrushPalette() -> NodeHandle {
+    let store = use_context::<UiStore>();
+    let mode = store.read_string("editor/mode");
+    if mode.get() != "sculpt" && mode.get() != "paint" {
+        return empty_node();
+    }
+    // ... render brush settings
+}
+```
+
 ### Open Questions
 
 1. **Path format**: Should paths be strings or typed keys? Strings are flexible
