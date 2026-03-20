@@ -541,6 +541,8 @@ fn env_settings_get_field(
         "fog.height_falloff" => Ok(GameValue::Float(c.fog.height_falloff as f64)),
         "fog.ambient_dust_density" => Ok(GameValue::Float(c.fog.ambient_dust_density as f64)),
         "fog.dust_asymmetry" => Ok(GameValue::Float(c.fog.dust_asymmetry as f64)),
+        "fog.vol_ambient_color" => Ok(GameValue::Vec3(glam::Vec3::new(c.fog.vol_ambient_color[0], c.fog.vol_ambient_color[1], c.fog.vol_ambient_color[2]))),
+        "fog.vol_ambient_intensity" => Ok(GameValue::Float(c.fog.vol_ambient_intensity as f64)),
         // Atmosphere
         "atmosphere.enabled" => Ok(GameValue::Bool(c.atmosphere.enabled)),
         "atmosphere.rayleigh_scale" => Ok(GameValue::Float(c.atmosphere.rayleigh_scale as f64)),
@@ -580,6 +582,7 @@ fn env_settings_get_field(
         "post_process.god_rays_intensity" => Ok(GameValue::Float(c.post_process.god_rays_intensity as f64)),
         "post_process.grain_intensity" => Ok(GameValue::Float(c.post_process.grain_intensity as f64)),
         "post_process.chromatic_aberration" => Ok(GameValue::Float(c.post_process.chromatic_aberration as f64)),
+        "post_process.gi_intensity" => Ok(GameValue::Float(c.post_process.gi_intensity as f64)),
         _ => Err(format!("unknown field '{}' on component 'EnvironmentSettings'", field_name)),
     }
 }
@@ -603,6 +606,11 @@ fn env_settings_set_field(
         "fog.height_falloff" => { c.fog.height_falloff = value.as_float().ok_or("type mismatch")? as f32; }
         "fog.ambient_dust_density" => { c.fog.ambient_dust_density = value.as_float().ok_or("type mismatch")? as f32; }
         "fog.dust_asymmetry" => { c.fog.dust_asymmetry = value.as_float().ok_or("type mismatch")? as f32; }
+        "fog.vol_ambient_color" => {
+            let v = value.as_vec3().ok_or("type mismatch")?;
+            c.fog.vol_ambient_color = [v.x, v.y, v.z];
+        }
+        "fog.vol_ambient_intensity" => { c.fog.vol_ambient_intensity = value.as_float().ok_or("type mismatch")? as f32; }
         // Atmosphere
         "atmosphere.enabled" => { c.atmosphere.enabled = value.as_bool().ok_or("type mismatch")?; }
         "atmosphere.rayleigh_scale" => { c.atmosphere.rayleigh_scale = value.as_float().ok_or("type mismatch")? as f32; }
@@ -645,6 +653,7 @@ fn env_settings_set_field(
         "post_process.god_rays_intensity" => { c.post_process.god_rays_intensity = value.as_float().ok_or("type mismatch")? as f32; }
         "post_process.grain_intensity" => { c.post_process.grain_intensity = value.as_float().ok_or("type mismatch")? as f32; }
         "post_process.chromatic_aberration" => { c.post_process.chromatic_aberration = value.as_float().ok_or("type mismatch")? as f32; }
+        "post_process.gi_intensity" => { c.post_process.gi_intensity = value.as_float().ok_or("type mismatch")? as f32; }
         _ => return Err(format!("unknown field '{}' on component 'EnvironmentSettings'", field_name)),
     }
     Ok(())

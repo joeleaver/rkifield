@@ -39,19 +39,19 @@ const COLOR_ROW_STYLE: &str = "display:flex;align-items:center;gap:6px;padding:1
 // ── Color picker sub-components ─────────────────────────────────────────────
 
 /// Build a color picker row using manual DOM construction (avoids rsx! type recursion).
-fn env_color_row(
-    scope: &mut RenderScope,
-    label_text: &str,
-    color_signal: Signal<glam::Vec3>,
-    field_path: &'static str,
-    cmd: &CommandSender,
-    ui: &UiSignals,
-) -> NodeHandle {
-    let row = scope.create_element("div");
-    row.set_attribute("style", COLOR_ROW_STYLE);
+/// Build an environment color picker using the same pattern as brush_palette's
+/// working ColorPicker. Each component builds the picker directly in its own
+/// scope (not via a helper function), matching the pattern that works.
+#[component]
+pub fn SunColorPicker() -> NodeHandle {
+    let cmd = use_context::<CommandSender>();
+    let ui = use_context::<UiSignals>();
+    let color_signal = ui.sun_color;
 
-    let label = scope.create_element("span");
-    label.set_text(label_text);
+    let row = __scope.create_element("div");
+    row.set_attribute("style", COLOR_ROW_STYLE);
+    let label = __scope.create_element("span");
+    label.set_text("Sun Color");
     row.append_child(&label);
 
     let picker = ColorPicker {
@@ -62,42 +62,116 @@ fn env_color_row(
         size: "xs".into(),
         onchange: Some(InputCallback::new({
             let cmd = cmd.clone();
-            let ui = *ui;
+            let initial = vec3_to_hex(color_signal.get());
             move |hex: String| {
+                if hex == initial { return; } // skip initial-value echo
                 if let Some((r, g, b)) = parse_hex_color(&hex) {
                     let v = glam::Vec3::new(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
                     color_signal.set(v);
-                    crate::editor_state::send_env_color(&cmd, &ui, field_path, v);
+                    if let Some(uuid) = ui.active_camera_uuid.get() {
+                        let _ = cmd.0.send(crate::editor_command::EditorCommand::SetComponentField {
+                            entity_id: uuid,
+                            component_name: "EnvironmentSettings".to_string(),
+                            field_name: "atmosphere.sun_color".to_string(),
+                            value: rkf_runtime::behavior::game_value::GameValue::Vec3(v),
+                        });
+                    }
                 }
             }
         })),
         ..Default::default()
     };
-    let picker_node = rinch::core::untracked(|| picker.render(scope, &[]));
+    let picker_node = rinch::core::untracked(|| picker.render(__scope, &[]));
     row.append_child(&picker_node);
-
     row
-}
-
-#[component]
-pub fn SunColorPicker() -> NodeHandle {
-    let cmd = use_context::<CommandSender>();
-    let ui = use_context::<UiSignals>();
-    env_color_row(__scope, "Sun Color", ui.sun_color, "atmosphere.sun_color", &cmd, &ui)
 }
 
 #[component]
 pub fn FogColorPicker() -> NodeHandle {
     let cmd = use_context::<CommandSender>();
     let ui = use_context::<UiSignals>();
-    env_color_row(__scope, "Fog Color", ui.fog_color, "fog.color", &cmd, &ui)
+    let color_signal = ui.fog_color;
+
+    let row = __scope.create_element("div");
+    row.set_attribute("style", COLOR_ROW_STYLE);
+    let label = __scope.create_element("span");
+    label.set_text("Fog Color");
+    row.append_child(&label);
+
+    let picker = ColorPicker {
+        format: "hex".into(),
+        value: vec3_to_hex(color_signal.get()),
+        alpha: false,
+        with_input: false,
+        size: "xs".into(),
+        onchange: Some(InputCallback::new({
+            let cmd = cmd.clone();
+            let initial = vec3_to_hex(color_signal.get());
+            move |hex: String| {
+                if hex == initial { return; }
+                if let Some((r, g, b)) = parse_hex_color(&hex) {
+                    let v = glam::Vec3::new(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
+                    color_signal.set(v);
+                    if let Some(uuid) = ui.active_camera_uuid.get() {
+                        let _ = cmd.0.send(crate::editor_command::EditorCommand::SetComponentField {
+                            entity_id: uuid,
+                            component_name: "EnvironmentSettings".to_string(),
+                            field_name: "fog.color".to_string(),
+                            value: rkf_runtime::behavior::game_value::GameValue::Vec3(v),
+                        });
+                    }
+                }
+            }
+        })),
+        ..Default::default()
+    };
+    let picker_node = rinch::core::untracked(|| picker.render(__scope, &[]));
+    row.append_child(&picker_node);
+    row
 }
 
 #[component]
 pub fn VolAmbientColorPicker() -> NodeHandle {
     let cmd = use_context::<CommandSender>();
     let ui = use_context::<UiSignals>();
-    env_color_row(__scope, "Vol Ambient", ui.vol_ambient_color, "fog.vol_ambient_color", &cmd, &ui)
+    let color_signal = ui.vol_ambient_color;
+
+    let row = __scope.create_element("div");
+    row.set_attribute("style", COLOR_ROW_STYLE);
+    let label = __scope.create_element("span");
+    label.set_text("Vol Ambient");
+    row.append_child(&label);
+
+    let picker = ColorPicker {
+        format: "hex".into(),
+        value: vec3_to_hex(color_signal.get()),
+        alpha: false,
+        with_input: false,
+        size: "xs".into(),
+        onchange: Some(InputCallback::new({
+            let cmd = cmd.clone();
+            let initial = vec3_to_hex(color_signal.get());
+            move |hex: String| {
+                if hex == initial { return; }
+                if let Some((r, g, b)) = parse_hex_color(&hex) {
+                    let v = glam::Vec3::new(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
+                    color_signal.set(v);
+                    if let Some(uuid) = ui.active_camera_uuid.get() {
+                        let _ = cmd.0.send(crate::editor_command::EditorCommand::SetComponentField {
+                            entity_id: uuid,
+                            component_name: "EnvironmentSettings".to_string(),
+                            field_name: "fog.vol_ambient_color".to_string(),
+                            value: rkf_runtime::behavior::game_value::GameValue::Vec3(v),
+                        });
+                    }
+                }
+            }
+        })),
+        ..Default::default()
+    };
+    let picker_node = rinch::core::untracked(|| picker.render(__scope, &[]));
+    row.append_child(&picker_node);
+    row
 }
 
 // ── Atmosphere section ──────────────────────────────────────────────────────
