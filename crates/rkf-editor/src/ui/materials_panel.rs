@@ -30,6 +30,8 @@ pub fn MaterialsPanel() -> NodeHandle {
     let ui = use_context::<UiSignals>();
     let cmd = use_context::<CommandSender>();
     let shared_state = use_context::<Arc<Mutex<SharedState>>>();
+    let store = use_context::<UiStore>();
+    let materials_signal = store.read_typed::<Vec<MaterialSummary>>("scene/materials");
 
     rsx! {
         div { style: "flex:1;min-height:0;display:flex;flex-direction:column;",
@@ -40,7 +42,7 @@ pub fn MaterialsPanel() -> NodeHandle {
                     style: "font-size:10px;color:var(--rinch-color-placeholder);\
                             font-family:var(--rinch-font-family-monospace);padding:4px 12px;\
                             border-bottom:1px solid var(--rinch-color-border);flex-shrink:0;",
-                    {move || format!("{} slots", ui.materials.get().len())}
+                    {move || format!("{} slots", materials_signal.get().len())}
                 }
 
                 // Grid — keyed for loop rebuilds only when materials list changes.
@@ -48,7 +50,7 @@ pub fn MaterialsPanel() -> NodeHandle {
                     style: "display:flex;flex-wrap:wrap;gap:6px;padding:4px 12px;\
                             overflow-y:auto;flex:1;min-height:0;align-content:flex-start;",
 
-                    for mat in ui.materials.get() {
+                    for mat in materials_signal.get() {
                         div {
                             key: format!("{}", mat.slot),
                             style: {
