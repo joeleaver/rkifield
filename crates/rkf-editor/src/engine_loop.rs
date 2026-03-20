@@ -1150,6 +1150,8 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         if last_fps_push.elapsed() >= std::time::Duration::from_millis(500) {
             last_fps_push = std::time::Instant::now();
             let fps_ms = dt as f64 * 1000.0;
+            // Push to store for status bar.
+            crate::engine_loop_store::push_fps_to_store(&store_push_buffer, fps_ms);
             rinch::shell::rinch_runtime::run_on_main_thread(move || {
                 if let Some(ui) = rinch::core::context::try_use_context::<UiSignals>() {
                     ui.fps.set(fps_ms);
@@ -1160,6 +1162,10 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             last_camera_push = std::time::Instant::now();
             if let Ok(es) = editor_state.lock() {
                 let snap = es.extract_camera_snapshot();
+                // Push to store for status bar.
+                crate::engine_loop_store::push_camera_position_to_store(
+                    &store_push_buffer, snap.position,
+                );
                 rinch::shell::rinch_runtime::run_on_main_thread(move || {
                     if let Some(ui) = rinch::core::context::try_use_context::<UiSignals>() {
                         ui.camera_display_pos.set(snap.position);

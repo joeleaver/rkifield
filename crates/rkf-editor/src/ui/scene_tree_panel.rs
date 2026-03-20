@@ -3,6 +3,16 @@
 //! Uses rinch's `Tree` component with `TreeNodeData` to render the project
 //! hierarchy: Project → Camera + Scene → objects + lights.
 //! Reads from reactive UiSignals — no mutex locks needed.
+//!
+//! ## Store migration status
+//!
+//! The scene tree reads `ui.objects` (Vec<ObjectSummary>) and `ui.lights`
+//! (Vec<LightSummary>) which are complex typed collections. These remain on
+//! UiSignals because `UiValue` doesn't support typed lists. Full migration
+//! would require either a `UiValue::List` variant or a parallel typed-signal
+//! mechanism in the store. Selection is read from `ui.selection` (source of
+//! truth) and mirrored to `editor/selected` in the store for read-only use
+//! by other widgets. See `engine_loop_store::push_collection_counts_to_store`.
 
 use rinch::prelude::*;
 use rinch_tabler_icons::TablerIcon;

@@ -301,6 +301,22 @@ pub(crate) fn push_dirty_ui_signals(
                     &store_push_buffer, es.light_editor.all_lights(),
                 );
             }
+
+            // Push collection counts + selection to store (read-only mirror for
+            // store-bound widgets; UiSignals remains the primary source of truth).
+            {
+                // Count entities minus the editor camera (internal-only entity).
+                let obj_count = es.world.entity_count()
+                    .saturating_sub(if es.editor_camera_entity.is_some() { 1 } else { 0 });
+                let light_count = es.light_editor.all_lights().len();
+                crate::engine_loop_store::push_collection_counts_to_store(
+                    store_push_buffer,
+                    obj_count,
+                    light_count,
+                    0, // material count pushed separately in the materials block
+                    es.selected_entity.as_ref(),
+                );
+            }
         }
     }
 
@@ -357,11 +373,17 @@ pub(crate) fn push_dirty_ui_signals(
                 }
             }
             materials.sort_by_key(|m| m.slot);
+            let mat_count = materials.len();
             rinch::shell::rinch_runtime::run_on_main_thread(move || {
                 if let Some(ui) = rinch::core::context::try_use_context::<UiSignals>() {
                     ui.materials.set(materials);
                 }
             });
+            // Push material count to store.
+            {
+                let mut buf = store_push_buffer.lock().expect("store push buffer poisoned");
+                buf.push(("editor/material_count".into(), crate::store::types::UiValue::Int(mat_count as i64)));
+            }
         }
     }
 

@@ -127,6 +127,72 @@ pub(crate) fn push_modes_to_store(
     buf.push(("gizmo/mode".into(), UiValue::String(gizmo_str.into())));
 }
 
+/// Push scene collection counts and selection to the store push buffer.
+///
+/// Called from the engine loop when `dirty.scene` or `dirty.lights` is true.
+/// Pushes scalar/string summaries that store-bound widgets can consume.
+///
+/// NOTE: The full collection data (Vec<ObjectSummary>, Vec<MaterialSummary>,
+/// Vec<LightSummary>) remains on UiSignals because UiValue doesn't support
+/// complex typed lists. A future `UiValue::List` or typed-signal extension
+/// would be needed to migrate them fully. Selection also stays on UiSignals
+/// as the primary source of truth because it's tightly coupled to tree sync,
+/// inspector data push, and material usage computation. The store path
+/// `editor/selected` is a read-only mirror for widgets that only need to
+/// know *what* is selected (e.g. status bar, action enabled-checks).
+pub(crate) fn push_collection_counts_to_store(
+    buffer: &PushBuffer,
+    object_count: usize,
+    light_count: usize,
+    material_count: usize,
+    selected: Option<&crate::editor_state::SelectedEntity>,
+) {
+    let mut buf = buffer.lock().expect("store push buffer poisoned");
+    buf.push(("editor/object_count".into(), UiValue::Int(object_count as i64)));
+    buf.push(("editor/light_count".into(), UiValue::Int(light_count as i64)));
+    buf.push(("editor/material_count".into(), UiValue::Int(material_count as i64)));
+
+    let selected_str = match selected {
+        Some(crate::editor_state::SelectedEntity::Object(id)) => format!("object:{id}"),
+        Some(crate::editor_state::SelectedEntity::Light(id)) => format!("light:{id}"),
+        Some(crate::editor_state::SelectedEntity::Scene) => "scene".to_string(),
+        Some(crate::editor_state::SelectedEntity::Project) => "project".to_string(),
+        None => String::new(),
+    };
+    buf.push(("editor/selected".into(), UiValue::String(selected_str)));
+}
+
+/// Push FPS (frame time in ms) to the store push buffer.
+///
+/// Called from the engine loop every ~500ms.
+pub(crate) fn push_fps_to_store(buffer: &PushBuffer, fps_ms: f64) {
+    let mut buf = buffer.lock().expect("store push buffer poisoned");
+    buf.push(("editor/fps".into(), UiValue::Float(fps_ms)));
+}
+
+/// Push camera display position to the store push buffer.
+///
+/// Called from the engine loop every ~250ms.
+pub(crate) fn push_camera_position_to_store(buffer: &PushBuffer, pos: glam::Vec3) {
+    let mut buf = buffer.lock().expect("store push buffer poisoned");
+    buf.push(("camera/position".into(), UiValue::Vec3([
+        pos.x as f64, pos.y as f64, pos.z as f64,
+    ])));
+}
+
+/// Push loading status to the store push buffer.
+///
+/// Called when loading status changes. `None` means idle, `Some(msg)` shows a
+/// loading indicator.
+pub(crate) fn push_loading_status_to_store(buffer: &PushBuffer, msg: Option<String>) {
+    let mut buf = buffer.lock().expect("store push buffer poisoned");
+    let value = match msg {
+        Some(s) => UiValue::String(s),
+        None => UiValue::None,
+    };
+    buf.push(("editor/loading_status".into(), value));
+}
+
 /// Push all light fields to the store push buffer.
 ///
 /// Called from the engine loop when `dirty.lights` is true.

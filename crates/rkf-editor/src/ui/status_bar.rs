@@ -9,6 +9,7 @@
 use rinch::prelude::*;
 
 use crate::editor_state::{SelectedEntity, UiSignals};
+use crate::store::UiStore;
 
 // ── Status bar ──────────────────────────────────────────────────────────────
 
@@ -19,6 +20,10 @@ use crate::editor_state::{SelectedEntity, UiSignals};
 #[component]
 pub fn StatusBar() -> NodeHandle {
     let ui = use_context::<UiSignals>();
+    let store = use_context::<UiStore>();
+
+    let object_count_signal = store.read("editor/object_count");
+    let fps_signal = store.read("editor/fps");
 
     rsx! {
         div {
@@ -30,15 +35,15 @@ pub fn StatusBar() -> NodeHandle {
             div {
                 style: "display:flex;align-items:center;width:100%;gap:16px;",
 
-                // Object count — reads only ui.objects.
+                // Object count — reads from store.
                 div { {move || {
-                    let objects = ui.objects.get();
-                    format!("{} objects", objects.len())
+                    let count = object_count_signal.get().as_int().unwrap_or(0);
+                    format!("{count} objects")
                 }} }
 
-                // FPS — reads only ui.fps.
+                // FPS — reads from store.
                 div { {move || {
-                    let ms = ui.fps.get();
+                    let ms = fps_signal.get().as_float().unwrap_or(0.0);
                     if ms > 0.1 {
                         format!("{:.0} fps", 1000.0 / ms)
                     } else {

@@ -198,4 +198,18 @@ pub fn register_core_actions(store: &UiStore) {
         checked: None,
         execute: |s| s.dispatch(EditorCommand::PlayStop),
     });
+
+    // ── Console ──────────────────────────────────────────────────────────
+    store.register_action(Action {
+        id: "console.clear",
+        label: "Clear Console",
+        shortcut: None,
+        enabled: None,
+        checked: None,
+        execute: |_| {
+            if let Some(ui) = rinch::core::context::try_use_context::<crate::editor_state::UiSignals>() {
+                ui.console_entries.set(Vec::new());
+            }
+        },
+    });
 }

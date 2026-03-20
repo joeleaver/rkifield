@@ -12,6 +12,7 @@
 use rinch::prelude::*;
 
 use crate::editor_state::UiSignals;
+use crate::store::UiStore;
 use rkf_runtime::behavior::{ConsoleEntry, ConsoleLevel};
 
 // ── Style constants ────────────────────────────────────────────────────────
@@ -179,6 +180,7 @@ pub fn DebugPanel() -> NodeHandle {
     };
     header.append_child(&count_text);
 
+    let store = use_context::<UiStore>();
     let clear_btn = rsx! {
         button {
             style: {
@@ -192,9 +194,9 @@ pub fn DebugPanel() -> NodeHandle {
                 }
             },
             onclick: {
-                let ui = ui;
+                let store = store;
                 move || {
-                    ui.console_entries.set(Vec::new());
+                    store.execute_action("console.clear");
                 }
             },
             "Clear"
