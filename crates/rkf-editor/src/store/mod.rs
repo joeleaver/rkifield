@@ -6,7 +6,9 @@
 //!
 //! See `docs/UI_STORE_ARCHITECTURE.md` for the full design.
 
+pub mod actions;
 pub mod path;
+pub mod register_actions;
 pub mod routing;
 pub mod signals;
 pub mod types;
@@ -17,6 +19,7 @@ use crossbeam::channel::Sender;
 use rinch::prelude::Signal;
 
 use crate::editor_command::EditorCommand;
+use actions::{Action, ActionRegistry};
 use path::{PathRegistry, PathRoute};
 use signals::{PushBuffer, SignalCache};
 use types::UiValue;
@@ -37,6 +40,8 @@ pub struct UiStore {
     /// UUID of the active camera entity (for resolving `env/` paths).
     /// Updated by the engine loop push.
     active_camera: Signal<Option<uuid::Uuid>>,
+    /// Registered editor actions (menu items, toolbar buttons, shortcuts).
+    actions: std::rc::Rc<std::cell::RefCell<ActionRegistry>>,
 }
 
 struct StoreInner {
@@ -55,6 +60,7 @@ impl UiStore {
             push_buffer: signals::new_push_buffer(),
             cmd_tx,
             active_camera: Signal::new(None),
+            actions: std::rc::Rc::new(std::cell::RefCell::new(ActionRegistry::new())),
         }
     }
 
@@ -148,4 +154,47 @@ impl UiStore {
     pub fn dispatch(&self, cmd: EditorCommand) {
         let _ = self.cmd_tx.send(cmd);
     }
+
+    // ── Action registry ──────────────────────────────────────────────
+
+    /// Register an action in the action registry.
+    pub fn register_action(&self, action: Action) {
+        self.actions.borrow_mut().register(action);
+    }
+
+    /// Execute a registered action by ID. Returns `false` if not found.
+    pub fn execute_action(&self, id: &str) -> bool {
+        // Clone the Rc so the borrow is released before execute calls back into store.
+        let registry = self.actions.clone();
+        let reg = registry.borrow();
+        if reg.get(id).is_some() {
+            reg.execute(id, self);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get action metadata by ID. Returns label, shortcut, checked fn, enabled fn.
+    ///
+    /// The returned struct borrows from the registry, so call within a
+    /// short-lived scope (e.g. a render closure).
+    pub fn get_action(&self, id: &str) -> Option<ActionMeta> {
+        let reg = self.actions.borrow();
+        reg.get(id).map(|a| ActionMeta {
+            label: a.label,
+            shortcut: a.shortcut,
+            enabled: a.enabled,
+            checked: a.checked,
+        })
+    }
+}
+
+/// Lightweight snapshot of action metadata, safe to hold after the registry
+/// borrow is released.
+pub struct ActionMeta {
+    pub label: &'static str,
+    pub shortcut: Option<&'static str>,
+    pub enabled: Option<fn() -> bool>,
+    pub checked: Option<fn() -> bool>,
 }
