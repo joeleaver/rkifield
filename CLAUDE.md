@@ -289,6 +289,73 @@ MCP server is configured in `.mcp.json` at the project root:
 - [MCP Integration](docs/architecture/12-mcp-integration.md) — agent-native engine, tool discovery, automation API
 - [v1 Implementation Plan](docs/IMPLEMENTATION_PLAN.md) — 24 phases, ~160 tasks
 
+## UI Store
+
+The editor UI uses a central **UI Store** (`crates/rkf-editor/src/store/`) for reactive state management. All editor-visible state flows through the store where possible.
+
+### Adding a New Editable Field
+
+To add a new editable field (e.g. `fog.scatter_scale: f32`):
+
+1. **Add the field** to the data struct (e.g. `FogSettings` in `rkf-runtime/src/environment.rs`)
+2. **Add reflection** — get_field + set_field in `rkf-runtime/src/behavior/engine_components.rs`
+3. **Push to store** — add to the appropriate push function in `engine_loop_store.rs`
+4. **Add a BoundSlider** (or BoundToggle/BoundColor) in the panel component
+
+That's it. No signal definitions, no sync functions, no send functions.
+
+### Adding a New Action
+
+Register once in `store/register_actions.rs`:
+
+```rust
+store.register_action(Action {
+    id: "view.my_action",
+    label: "My Action",
+    shortcut: Some("Ctrl+M"),
+    enabled: None,
+    checked: None,
+    execute: |s| s.dispatch(EditorCommand::MyAction),
+});
+```
+
+The action works in menus, ActionButtons, and keyboard shortcuts automatically.
+
+### Store Path Format
+
+```
+env/{field.path}                 → EnvironmentSettings on active camera
+camera/{field}                   → Camera properties (fov, fly_speed, near, far)
+light:{id}/{field}               → Light properties (intensity, range, position.x/y/z)
+sculpt/{field}                   → Brush settings (radius, strength, falloff)
+editor/{field}                   → Editor state (mode, debug_mode, show_grid, fps)
+gizmo/{field}                    → Gizmo state (mode)
+entity:{uuid}/{Component}/{field} → ECS component fields
+```
+
+### Bound Widgets
+
+| Widget | Props | Data Type |
+|--------|-------|-----------|
+| `BoundSlider` | path, label, min, max, step, decimals, suffix | Float |
+| `BoundLogSlider` | path, label, min, max, step, decimals | Float (log scale) |
+| `BoundToggle` | path, label | Bool |
+| `BoundColor` | path, label | String (hex) |
+| `BoundSelect` | path, label, options | String |
+| `BoundVec3` | path, label, min, max, step, decimals | Vec3 |
+| `ActionButton` | action_id | Action dispatch |
+
+### Migration Boundary
+
+**In store** (simple values): floats, bools, strings, colors, Vec3, actions.
+
+**On UiSignals** (complex typed data): `Vec<ObjectSummary>`, `Vec<MaterialSummary>`, `Vec<ConsoleEntry>`, selection state with typed enums, drag-drop contexts. These stay on UiSignals because `UiValue` doesn't support complex structs.
+
+### Architecture Docs
+
+- [UI Store Architecture](docs/UI_STORE_ARCHITECTURE.md) — full design
+- [UI Store Implementation Plan](docs/UI_STORE_IMPLEMENTATION_PLAN.md) — 43 tasks, 13 phases
+
 ## Coding Conventions
 
 - **Shader code is WGSL** — not GLSL, not HLSL. All GPU work is `@compute` dispatches.
