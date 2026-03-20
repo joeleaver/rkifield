@@ -557,6 +557,163 @@ fn BrushPalette() -> NodeHandle {
 }
 ```
 
+### Collection Views (Scene Tree, Materials, Shaders, Systems)
+
+These are dynamic lists of items with selection, and sometimes drag-drop,
+rename, or context menus. They don't map to single bound widgets — they need
+a list data source from the store.
+
+#### Store list paths
+
+```
+scene/objects                   → list of { id, name, parent, type, is_camera }
+scene/lights                    → list of { id, name, type, position }
+materials/slots                 → list of { slot, name, category, albedo, ... }
+shaders/list                    → list of { name, id }
+systems/list                    → list of { name, enabled }
+```
+
+The store provides `read_list(path) -> Signal<Vec<ListItem>>` where `ListItem`
+is a lightweight snapshot struct. The engine pushes updated lists when dirty.
+
+#### Selection
+
+Selection is a store path:
+```
+editor/selected                 → "object:{uuid}" | "light:{id}" | "material:{slot}" | null
+```
+
+A list component sets selection on click:
+```rust
+store.set("editor/selected", UiValue::String(format!("object:{uuid}")));
+```
+
+Other panels react to selection changes by reading `editor/selected`.
+
+#### Context menus on list items
+
+Right-click on a scene tree node:
+```rust
+store.show_context_menu(&[
+    "object.duplicate",
+    "object.delete",
+    "---",
+    "object.rename",
+    "object.focus_camera",
+]);
+```
+
+Each ID is a registered action. The store checks `enabled` for each and
+renders the menu.
+
+#### Drag-and-drop
+
+Drag-drop is cross-component interaction. The store mediates:
+
+```
+drag/active                     → bool
+drag/type                       → "material" | "shader" | "asset"
+drag/payload                    → String (slot id, shader name, asset path)
+drag/target                     → String (drop target entity/slot)
+```
+
+Start drag:
+```rust
+store.set("drag/active", UiValue::Bool(true));
+store.set("drag/type", UiValue::String("material".into()));
+store.set("drag/payload", UiValue::String("5".into()));
+```
+
+Drop target reads drag state and fires an action:
+```rust
+store.dispatch_with("material.apply", &[
+    ("target_entity", payload_entity),
+    ("material_slot", drag_payload),
+]);
+```
+
+This replaces the current `DragContext<T>` signals and `drag_drop_generation`
+counter on UiSignals.
+
+### Console (Log Stream)
+
+The console is a read-only append stream with filtering. It's not property
+editing — it's a fundamentally different pattern.
+
+#### Store integration
+
+```
+console/entries                 → Signal<Vec<ConsoleEntry>>  (ring buffer)
+console/filter/info             → bool
+console/filter/warn             → bool
+console/filter/error            → bool
+```
+
+The engine appends entries via:
+```rust
+store.append("console/entries", entry);
+```
+
+The console panel reads `console/entries`, filters by the toggle paths, and
+renders. "Clear" is an action:
+```rust
+store.register_action(Action {
+    id: "console.clear",
+    label: "Clear",
+    execute: |s| s.clear_list("console/entries"),
+});
+```
+
+Filter toggles are bound widgets:
+```rust
+BoundToggle { path: "console/filter/warn", label: "Warn" }
+```
+
+This is a **list path with append semantics** — different from property paths
+(set) and collection paths (replace). The store needs `append()` and
+`clear_list()` operations in addition to `set()`.
+
+### Status Display
+
+The status bar reads multiple store paths with no writes:
+
+```
+editor/fps                      → f64
+editor/object_count             → i64
+editor/selected                 → String (for display)
+editor/mode                     → String
+camera/position                 → Vec3 (for display)
+editor/loading_status           → String | null
+```
+
+No special abstraction needed — just `store.read()` calls in a component.
+The loading modal checks `editor/loading_status`:
+
+```rust
+#[component]
+fn LoadingModal() -> NodeHandle {
+    let store = use_context::<UiStore>();
+    let status = store.read_string("editor/loading_status");
+    if status.get().is_empty() { return empty_node(); }
+    // ... render overlay with status message
+}
+```
+
+### UI Pattern Summary
+
+| Pattern              | Store mechanism           | Examples                        |
+|----------------------|---------------------------|---------------------------------|
+| Property editing     | `set(path, value)`        | Sliders, color pickers, toggles |
+| Actions              | `dispatch(action_id)`     | Menus, shortcuts, toolbar       |
+| Collection views     | `read_list(path)`         | Scene tree, materials, shaders  |
+| Selection            | `set("editor/selected")`  | Click in tree/viewport/list     |
+| Log stream           | `append(path, entry)`     | Console, notifications          |
+| Status display       | `read(path)` (read-only)  | Status bar, loading modal       |
+| Drag-and-drop        | `set("drag/*")`           | Material→object, shader→mat     |
+| Conditional panels   | `read("editor/mode")`     | Brush palette, paint settings   |
+
+All seven patterns flow through the same store. No special-case wiring.
+
 ### Open Questions
 
 1. **Path format**: Should paths be strings or typed keys? Strings are flexible
