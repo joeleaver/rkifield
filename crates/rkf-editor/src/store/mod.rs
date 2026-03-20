@@ -199,6 +199,6 @@ impl UiStore {
 pub struct ActionMeta {
     pub label: &'static str,
     pub shortcut: Option<&'static str>,
-    pub enabled: Option<fn() -> bool>,
-    pub checked: Option<fn() -> bool>,
+    pub enabled: Option<fn(&UiStore) -> bool>,
+    pub checked: Option<fn(&UiStore) -> bool>,
 }

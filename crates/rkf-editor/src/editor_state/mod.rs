@@ -74,18 +74,7 @@ pub struct UiSignals {
     pub show_grid: Signal<bool>,
     pub fps: Signal<f64>,
 
-    // ── Environment toggles ──────────────────────────────────────
-    pub atmo_enabled: Signal<bool>,
-    pub fog_enabled: Signal<bool>,
-    pub clouds_enabled: Signal<bool>,
-    pub bloom_enabled: Signal<bool>,
-    pub dof_enabled: Signal<bool>,
-    pub tone_map_mode: Signal<u32>,
-
-    // ── Environment colors ────────────────────────────────────────
-    pub sun_color: Signal<Vec3>,
-    pub fog_color: Signal<Vec3>,
-    pub vol_ambient_color: Signal<Vec3>,
+    // Environment toggles and colors removed — migrated to UI Store.
 
     // ── Material browser ─────────────────────────────────────────
     pub selected_material: Signal<Option<u16>>,
@@ -253,15 +242,6 @@ impl UiSignals {
             debug_mode: Signal::new(0),
             show_grid: Signal::new(false),
             fps: Signal::new(0.0),
-            atmo_enabled: Signal::new(true),
-            fog_enabled: Signal::new(false),
-            clouds_enabled: Signal::new(false),
-            bloom_enabled: Signal::new(true),
-            dof_enabled: Signal::new(false),
-            tone_map_mode: Signal::new(0),
-            sun_color: Signal::new(Vec3::new(1.0, 0.95, 0.85)),
-            fog_color: Signal::new(Vec3::new(0.7, 0.75, 0.8)),
-            vol_ambient_color: Signal::new(Vec3::new(0.24, 0.30, 0.42)),
             selected_material: Signal::new(None),
             properties_tab: Signal::new(0),
             asset_browser_tab: Signal::new(0),

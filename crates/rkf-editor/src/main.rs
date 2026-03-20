@@ -280,6 +280,7 @@ fn main() -> anyhow::Result<()> {
             create_context(slider_signals);
             // UI Store — central reactive state for all editor UI.
             let ui_store = store::UiStore::new(store_cmd_tx, store_push_buffer);
+            store::register_actions::register_core_actions(&ui_store);
             create_context(ui_store);
             // Command channel for UI→engine communication.
             create_context(cmd_sender);

@@ -16,12 +16,15 @@ pub(crate) fn push_environment_to_store(
     env: &EnvironmentSettings,
     active_camera_uuid: Option<uuid::Uuid>,
 ) {
-    let mut buf = buffer.lock().expect("store push buffer poisoned");
+    // Set active camera on main thread for env/ path resolution.
+    let cam_uuid = active_camera_uuid;
+    rinch::shell::rinch_runtime::run_on_main_thread(move || {
+        if let Some(store) = rinch::core::context::try_use_context::<crate::store::UiStore>() {
+            store.set_active_camera(cam_uuid);
+        }
+    });
 
-    // Active camera UUID (for env/ path resolution).
-    if let Some(uuid) = active_camera_uuid {
-        buf.push(("editor/active_camera".into(), UiValue::String(uuid.to_string())));
-    }
+    let mut buf = buffer.lock().expect("store push buffer poisoned");
 
     // Atmosphere
     let a = &env.atmosphere;

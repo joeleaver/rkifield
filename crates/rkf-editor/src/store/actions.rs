@@ -12,8 +12,8 @@ pub struct Action {
     pub id: &'static str,
     pub label: &'static str,
     pub shortcut: Option<&'static str>,
-    pub enabled: Option<fn() -> bool>,
-    pub checked: Option<fn() -> bool>,
+    pub enabled: Option<fn(&crate::store::UiStore) -> bool>,
+    pub checked: Option<fn(&crate::store::UiStore) -> bool>,
     pub execute: fn(&crate::store::UiStore),
 }
 

@@ -887,12 +887,6 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             crate::engine_loop_store::push_environment_to_store(
                 &store_push_buffer, env, active_cam,
             );
-            // Drain on main thread so bound widget signals update.
-            rinch::shell::rinch_runtime::run_on_main_thread(move || {
-                if let Some(store) = rinch::core::context::try_use_context::<crate::store::UiStore>() {
-                    store.drain_pushes();
-                }
-            });
         }
         if let Some(lights) = f_lights {
             engine.world_lights = lights;
@@ -1132,6 +1126,13 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             first_frame = false;
         }
         engine_loop_ui::push_dirty_ui_signals(&dirty, &editor_state, &engine, &gameplay_registry);
+
+        // n-store. Drain UI Store push buffer on main thread.
+        rinch::shell::rinch_runtime::run_on_main_thread(|| {
+            if let Some(store) = rinch::core::context::try_use_context::<crate::store::UiStore>() {
+                store.drain_pushes();
+            }
+        });
 
         // n. Periodically push FPS + camera position to the main thread.
         if last_fps_push.elapsed() >= std::time::Duration::from_millis(500) {

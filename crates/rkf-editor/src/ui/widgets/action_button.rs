@@ -11,7 +11,7 @@ pub fn ActionButton(action_id: String) -> NodeHandle {
 
     let meta = store.get_action(&action_id);
     let (label, _shortcut, is_checked): (&str, Option<&str>, bool) = match meta {
-        Some(m) => (m.label, m.shortcut, m.checked.map_or(false, |f| f())),
+        Some(m) => (m.label, m.shortcut, m.checked.map_or(false, |f| f(&store))),
         None => ("???", None, false),
     };
 
