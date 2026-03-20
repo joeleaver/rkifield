@@ -1,0 +1,81 @@
+//! Engine loop → UI Store push helpers.
+//!
+//! Pushes environment settings and editor state to the UI Store's push buffer
+//! so that bound widgets can read them reactively.
+
+use crate::store::signals::PushBuffer;
+use crate::store::types::UiValue;
+use rkf_runtime::environment::EnvironmentSettings;
+
+/// Push all EnvironmentSettings fields to the store push buffer.
+///
+/// Called from the engine loop after `apply_environment_settings()` when
+/// dirty.scene is true.
+pub(crate) fn push_environment_to_store(
+    buffer: &PushBuffer,
+    env: &EnvironmentSettings,
+    active_camera_uuid: Option<uuid::Uuid>,
+) {
+    let mut buf = buffer.lock().expect("store push buffer poisoned");
+
+    // Active camera UUID (for env/ path resolution).
+    if let Some(uuid) = active_camera_uuid {
+        buf.push(("editor/active_camera".into(), UiValue::String(uuid.to_string())));
+    }
+
+    // Atmosphere
+    let a = &env.atmosphere;
+    buf.push(("env/atmosphere.enabled".into(), UiValue::Bool(a.enabled)));
+    buf.push(("env/atmosphere.sun_intensity".into(), UiValue::Float(a.sun_intensity as f64)));
+    buf.push(("env/atmosphere.rayleigh_scale".into(), UiValue::Float(a.rayleigh_scale as f64)));
+    buf.push(("env/atmosphere.mie_scale".into(), UiValue::Float(a.mie_scale as f64)));
+    buf.push(("env/atmosphere.sun_color".into(), UiValue::String(
+        crate::store::types::rgb_to_hex([a.sun_color[0] as f64, a.sun_color[1] as f64, a.sun_color[2] as f64])
+    )));
+    buf.push(("env/atmosphere.sun_direction".into(), UiValue::Vec3([
+        a.sun_direction[0] as f64, a.sun_direction[1] as f64, a.sun_direction[2] as f64,
+    ])));
+
+    // Fog
+    let f = &env.fog;
+    buf.push(("env/fog.enabled".into(), UiValue::Bool(f.enabled)));
+    buf.push(("env/fog.density".into(), UiValue::Float(f.density as f64)));
+    buf.push(("env/fog.height_falloff".into(), UiValue::Float(f.height_falloff as f64)));
+    buf.push(("env/fog.ambient_dust_density".into(), UiValue::Float(f.ambient_dust_density as f64)));
+    buf.push(("env/fog.dust_asymmetry".into(), UiValue::Float(f.dust_asymmetry as f64)));
+    buf.push(("env/fog.color".into(), UiValue::String(
+        crate::store::types::rgb_to_hex([f.color[0] as f64, f.color[1] as f64, f.color[2] as f64])
+    )));
+    buf.push(("env/fog.vol_ambient_color".into(), UiValue::String(
+        crate::store::types::rgb_to_hex([f.vol_ambient_color[0] as f64, f.vol_ambient_color[1] as f64, f.vol_ambient_color[2] as f64])
+    )));
+    buf.push(("env/fog.vol_ambient_intensity".into(), UiValue::Float(f.vol_ambient_intensity as f64)));
+
+    // Clouds
+    let c = &env.clouds;
+    buf.push(("env/clouds.enabled".into(), UiValue::Bool(c.enabled)));
+    buf.push(("env/clouds.coverage".into(), UiValue::Float(c.coverage as f64)));
+    buf.push(("env/clouds.density".into(), UiValue::Float(c.density as f64)));
+    buf.push(("env/clouds.altitude".into(), UiValue::Float(c.altitude as f64)));
+    buf.push(("env/clouds.thickness".into(), UiValue::Float(c.thickness as f64)));
+    buf.push(("env/clouds.wind_speed".into(), UiValue::Float(c.wind_speed as f64)));
+
+    // Post-process
+    let p = &env.post_process;
+    buf.push(("env/post_process.gi_intensity".into(), UiValue::Float(p.gi_intensity as f64)));
+    buf.push(("env/post_process.bloom_enabled".into(), UiValue::Bool(p.bloom_enabled)));
+    buf.push(("env/post_process.bloom_intensity".into(), UiValue::Float(p.bloom_intensity as f64)));
+    buf.push(("env/post_process.bloom_threshold".into(), UiValue::Float(p.bloom_threshold as f64)));
+    buf.push(("env/post_process.exposure".into(), UiValue::Float(p.exposure as f64)));
+    buf.push(("env/post_process.tone_map_mode".into(), UiValue::Int(p.tone_map_mode as i64)));
+    buf.push(("env/post_process.sharpen_strength".into(), UiValue::Float(p.sharpen_strength as f64)));
+    buf.push(("env/post_process.dof_enabled".into(), UiValue::Bool(p.dof_enabled)));
+    buf.push(("env/post_process.dof_focus_distance".into(), UiValue::Float(p.dof_focus_distance as f64)));
+    buf.push(("env/post_process.dof_focus_range".into(), UiValue::Float(p.dof_focus_range as f64)));
+    buf.push(("env/post_process.dof_max_coc".into(), UiValue::Float(p.dof_max_coc as f64)));
+    buf.push(("env/post_process.motion_blur_intensity".into(), UiValue::Float(p.motion_blur_intensity as f64)));
+    buf.push(("env/post_process.god_rays_intensity".into(), UiValue::Float(p.god_rays_intensity as f64)));
+    buf.push(("env/post_process.vignette_intensity".into(), UiValue::Float(p.vignette_intensity as f64)));
+    buf.push(("env/post_process.grain_intensity".into(), UiValue::Float(p.grain_intensity as f64)));
+    buf.push(("env/post_process.chromatic_aberration".into(), UiValue::Float(p.chromatic_aberration as f64)));
+}

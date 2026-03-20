@@ -33,6 +33,7 @@ mod engine_loop_commands;
 mod engine_loop_edits;
 mod engine_loop_io;
 mod engine_loop_play;
+mod engine_loop_store;
 mod engine_loop_ui;
 pub(crate) mod layout;
 mod ui;
@@ -125,6 +126,8 @@ fn main() -> anyhow::Result<()> {
     // 1b. Create UI→engine command channel.
     let (cmd_tx, cmd_rx) = crossbeam::channel::unbounded::<EditorCommand>();
     let store_cmd_tx = cmd_tx.clone(); // Clone for UiStore (created on main thread later)
+    let store_push_buffer = store::signals::new_push_buffer();
+    let store_push_for_thread = store_push_buffer.clone();
     let layout_backing = layout::state::LayoutBacking::new(layout::default_layout());
 
     // 1c. Create shared material library (loaded from engine library palette).
@@ -206,6 +209,7 @@ fn main() -> anyhow::Result<()> {
             gameplay_registry: gameplay_registry_for_thread,
             game_store: game_store_for_thread,
             console: console_for_thread,
+            store_push_buffer: store_push_for_thread,
         });
     });
 
@@ -275,7 +279,7 @@ fn main() -> anyhow::Result<()> {
             }
             create_context(slider_signals);
             // UI Store — central reactive state for all editor UI.
-            let ui_store = store::UiStore::new(store_cmd_tx);
+            let ui_store = store::UiStore::new(store_cmd_tx, store_push_buffer);
             create_context(ui_store);
             // Command channel for UI→engine communication.
             create_context(cmd_sender);

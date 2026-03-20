@@ -26,6 +26,7 @@ pub(crate) struct EngineThreadData {
     pub(crate) gameplay_registry: Arc<Mutex<rkf_runtime::behavior::GameplayRegistry>>,
     pub(crate) game_store: Arc<Mutex<rkf_runtime::behavior::GameStore>>,
     pub(crate) console: rkf_runtime::behavior::ConsoleBuffer,
+    pub(crate) store_push_buffer: crate::store::signals::PushBuffer,
 }
 
 /// Tracks which categories of data changed this frame, so we only
@@ -78,6 +79,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         gameplay_registry,
         game_store,
         console,
+        store_push_buffer,
     } = data;
 
     log::info!("Engine thread: creating dedicated GPU device");
@@ -879,6 +881,18 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         if let Some(ref env) = f_environment {
             engine.apply_environment_settings(env);
             engine.lights_dirty = true;
+            // Push environment fields to UI Store for bound widgets.
+            let active_cam = editor_state.lock().ok()
+                .and_then(|es| es.editor_camera_entity);
+            crate::engine_loop_store::push_environment_to_store(
+                &store_push_buffer, env, active_cam,
+            );
+            // Drain on main thread so bound widget signals update.
+            rinch::shell::rinch_runtime::run_on_main_thread(move || {
+                if let Some(store) = rinch::core::context::try_use_context::<crate::store::UiStore>() {
+                    store.drain_pushes();
+                }
+            });
         }
         if let Some(lights) = f_lights {
             engine.world_lights = lights;

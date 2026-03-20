@@ -50,14 +50,18 @@ struct StoreInner {
 }
 
 impl UiStore {
-    /// Create a new store. Must be called on the main thread.
-    pub fn new(cmd_tx: Sender<EditorCommand>) -> Self {
+    /// Create a new store with a shared push buffer.
+    ///
+    /// The `push_buffer` is shared with the engine thread — the engine writes
+    /// to it, the store drains it on the main thread via `drain_pushes()`.
+    /// Must be called on the main thread.
+    pub fn new(cmd_tx: Sender<EditorCommand>, push_buffer: PushBuffer) -> Self {
         Self {
             inner: std::rc::Rc::new(std::cell::RefCell::new(StoreInner {
                 registry: PathRegistry::new(),
                 cache: SignalCache::new(),
             })),
-            push_buffer: signals::new_push_buffer(),
+            push_buffer,
             cmd_tx,
             active_camera: Signal::new(None),
             actions: std::rc::Rc::new(std::cell::RefCell::new(ActionRegistry::new())),

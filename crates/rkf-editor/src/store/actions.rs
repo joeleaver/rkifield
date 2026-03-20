@@ -68,7 +68,7 @@ mod tests {
 
     fn dummy_store() -> crate::store::UiStore {
         let (tx, _rx) = crossbeam::channel::unbounded();
-        crate::store::UiStore::new(tx)
+        crate::store::UiStore::new(tx, crate::store::signals::new_push_buffer())
     }
 
     #[test]
