@@ -11,10 +11,6 @@
 
 use rinch::prelude::*;
 
-use crate::editor_state::SliderSignals;
-use crate::CommandSender;
-
-use super::slider_helpers::SliderRow;
 use super::LABEL_STYLE;
 
 use crate::store::types::UiValue;
@@ -25,68 +21,34 @@ use crate::ui::bound::bound_toggle::BoundToggle;
 
 // ── Atmosphere section ──────────────────────────────────────────────────────
 
-/// Sun direction sliders + atmosphere toggle + Rayleigh/Mie scale.
+/// Atmosphere toggle, sun intensity/color, Rayleigh/Mie scale.
+///
+/// Sun azimuth/elevation sliders removed — will return as a DirectionInput
+/// widget that writes a Vec3 to `env/atmosphere.sun_direction`.
 #[component]
 pub fn AtmosphereSection() -> NodeHandle {
-    let sliders = use_context::<SliderSignals>();
-    let cmd = use_context::<CommandSender>();
-
-    // Bound widgets rendered outside rsx! to avoid type-inference conflicts
-    // between SliderRow (Option<f64> min) and BoundSlider (f64 min).
     let sun_intensity = BoundSlider {
-        path: String::from("env/atmosphere.sun_intensity"),
-        label: String::from("Sun Intensity"),
-        min: 0.0, max: 10.0, step: 0.1, decimals: 1,
-        suffix: String::new(),
+        path: "env/atmosphere.sun_intensity".into(), label: "Sun Intensity".into(),
+        min: 0.0, max: 10.0, step: 0.1, decimals: 1, suffix: String::new(),
     }.render(__scope, &[]);
-
     let sun_color = BoundColor {
-        path: String::from("env/atmosphere.sun_color"),
-        label: String::from("Sun Color"),
+        path: "env/atmosphere.sun_color".into(), label: "Sun Color".into(),
     }.render(__scope, &[]);
-
     let atmo_toggle = BoundToggle {
-        path: String::from("env/atmosphere.enabled"),
-        label: String::from("Atmosphere"),
+        path: "env/atmosphere.enabled".into(), label: "Atmosphere".into(),
     }.render(__scope, &[]);
-
     let rayleigh = BoundSlider {
-        path: String::from("env/atmosphere.rayleigh_scale"),
-        label: String::from("Rayleigh Scale"),
-        min: 0.0, max: 5.0, step: 0.1, decimals: 1,
-        suffix: String::new(),
+        path: "env/atmosphere.rayleigh_scale".into(), label: "Rayleigh Scale".into(),
+        min: 0.0, max: 5.0, step: 0.1, decimals: 1, suffix: String::new(),
     }.render(__scope, &[]);
-
     let mie = BoundSlider {
-        path: String::from("env/atmosphere.mie_scale"),
-        label: String::from("Mie Scale"),
-        min: 0.0, max: 5.0, step: 0.1, decimals: 1,
-        suffix: String::new(),
+        path: "env/atmosphere.mie_scale".into(), label: "Mie Scale".into(),
+        min: 0.0, max: 5.0, step: 0.1, decimals: 1, suffix: String::new(),
     }.render(__scope, &[]);
-
-    // Sun Azimuth/Elevation are derived (compute Vec3 sun_direction).
-    // They use manual SliderRows until a DirectionInput widget is built.
-    // ui param required by send_atmosphere_commands signature but only
-    // sun_direction is actually sent.
-    let ui = use_context::<crate::editor_state::UiSignals>();
 
     rsx! {
         div {
             div { style: {LABEL_STYLE}, "Atmosphere" }
-            SliderRow {
-                label: "Sun Azimuth",
-                suffix: "\u{00b0}",
-                signal: Some(sliders.sun_azimuth),
-                min: 0.0, max: 360.0, step: 1.0, decimals: 0,
-                on_change: { let cmd = cmd.clone(); move |_v: f64| { sliders.send_atmosphere_commands(&cmd, &ui); } },
-            }
-            SliderRow {
-                label: "Sun Elevation",
-                suffix: "\u{00b0}",
-                signal: Some(sliders.sun_elevation),
-                min: Some(-90.0), max: 90.0, step: 1.0, decimals: 0,
-                on_change: { let cmd = cmd.clone(); move |_v: f64| { sliders.send_atmosphere_commands(&cmd, &ui); } },
-            }
             {sun_intensity}
             {sun_color}
             {atmo_toggle}

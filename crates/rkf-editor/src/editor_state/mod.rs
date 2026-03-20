@@ -8,7 +8,7 @@ mod slider_signals;
 #[cfg(test)]
 mod tests;
 
-pub use slider_signals::{SliderSignals, send_env_color};
+pub use slider_signals::SliderSignals;
 
 use crate::camera::{CameraControlState, CameraMode, CameraSnapshot};
 use crate::debug_viz::{DebugOverlay, FrameTimeHistory};

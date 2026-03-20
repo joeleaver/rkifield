@@ -16,20 +16,8 @@ use crate::engine_loop_commands::compute_material_usage;
 ///
 /// Called on the main thread after a scene load or environment change to ensure
 /// the UI sliders reflect the ECS singleton's actual values.
-/// Sync sun azimuth/elevation sliders from the environment's sun_direction.
-///
-/// Only the derived azimuth/elevation need manual sync — all other
-/// environment fields are now pushed via the UI Store.
-fn sync_sun_direction_sliders(
-    sliders: &crate::editor_state::SliderSignals,
-    env: &rkf_runtime::environment::EnvironmentSettings,
-) {
-    let d = &env.atmosphere.sun_direction;
-    let az = d[0].atan2(d[2]).to_degrees().rem_euclid(360.0);
-    let el = d[1].asin().to_degrees();
-    sliders.sun_azimuth.set(az as f64);
-    sliders.sun_elevation.set(el as f64);
-}
+// sync_sun_direction_sliders removed — sun azimuth/elevation sliders
+// temporarily removed. Will return as a DirectionInput widget.
 
 /// l: Process GPU pick result -- sets selected_entity, pushes to UI signals.
 ///    Suppressed while actively sculpting to prevent accidental selection changes.
@@ -293,13 +281,9 @@ pub(crate) fn push_dirty_ui_signals(
                         ui.active_camera_uuid.set(active_env_uuid);
                         ui.environment_profile_name.set(profile_display);
                         ui.linked_env_camera.set(linked_env);
-                        // Sync sun azimuth/elevation sliders from sun_direction.
-                        // All other env fields are pushed via the UI Store.
-                        if let Some(ref env) = env_for_sliders {
-                            if let Some(sliders) = rinch::core::context::try_use_context::<crate::editor_state::SliderSignals>() {
-                                sync_sun_direction_sliders(&sliders, env);
-                            }
-                        }
+                        // Environment slider sync removed — all env fields
+                        // are now pushed via the UI Store.
+                        let _ = env_for_sliders; // suppress unused warning
                     }
                 });
             }
