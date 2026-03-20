@@ -124,6 +124,7 @@ fn main() -> anyhow::Result<()> {
 
     // 1b. Create UI→engine command channel.
     let (cmd_tx, cmd_rx) = crossbeam::channel::unbounded::<EditorCommand>();
+    let store_cmd_tx = cmd_tx.clone(); // Clone for UiStore (created on main thread later)
     let layout_backing = layout::state::LayoutBacking::new(layout::default_layout());
 
     // 1c. Create shared material library (loaded from engine library palette).
@@ -273,6 +274,9 @@ fn main() -> anyhow::Result<()> {
                 ui_signals.console_entries.set(buf2.snapshot());
             }
             create_context(slider_signals);
+            // UI Store — central reactive state for all editor UI.
+            let ui_store = store::UiStore::new(store_cmd_tx);
+            create_context(ui_store);
             // Command channel for UI→engine communication.
             create_context(cmd_sender);
             // Layout state — zone-based configurable layout.
