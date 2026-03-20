@@ -187,10 +187,10 @@ fn main(@builtin(global_invocation_id) pixel: vec3<u32>) {
             let gi_origin = ctx.world_pos + ctx.normal * SHADOW_BIAS * 2.0;
             let gi_diffuse_raw = cone_trace_diffuse(gi_origin, ctx.normal, ctx.jitter);
             let kd_gi = (1.0 - ctx.metallic);
-            let gi_diffuse = gi_diffuse_raw * ctx.albedo * kd_gi * ao * shade_uniforms.sky_params.w;
+            let gi_diffuse = gi_diffuse_raw * ctx.albedo * kd_gi * ao * shade_uniforms.sun_color.w;
             let gi_specular_raw = cone_trace_specular(gi_origin, ctx.reflect_dir, ctx.roughness, ctx.jitter);
             let gi_fresnel = fresnel_schlick(ctx.n_dot_v, ctx.f0);
-            let gi_specular = gi_specular_raw * gi_fresnel * ao * shade_uniforms.sky_params.w;
+            let gi_specular = gi_specular_raw * gi_fresnel * ao * shade_uniforms.sun_color.w;
             color = (gi_diffuse + gi_specular) * ctx.contact;
         }
         case 7u: {

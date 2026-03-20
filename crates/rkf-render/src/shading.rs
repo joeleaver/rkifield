@@ -45,7 +45,7 @@ pub struct ShadeUniforms {
     pub camera_pos: [f32; 4],
     /// Sun direction toward the sun (xyz) + sun intensity (w).
     pub sun_dir: [f32; 4],
-    /// Sun color in linear RGB (xyz) + unused (w).
+    /// Sun color in linear RGB (xyz) + gi_intensity (w).
     pub sun_color: [f32; 4],
     /// Atmosphere params: x=rayleigh_scale, y=mie_scale, z=atmosphere_enabled (1.0/0.0), w=unused.
     pub sky_params: [f32; 4],
