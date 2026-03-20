@@ -202,20 +202,43 @@ fn SelectionPanel() -> NodeHandle {
 
 /// Asset-specific content (material or shader properties).
 #[component]
+/// Compute a fingerprint for the current asset selection (keyed rebuild).
+fn asset_selection_key(mat: Option<u16>, shader: Option<String>) -> String {
+    if let Some(slot) = mat {
+        format!("mat:{slot}")
+    } else if let Some(ref name) = shader {
+        format!("shader:{name}")
+    } else {
+        "none".to_string()
+    }
+}
+
+#[component]
 #[allow(unused_variables)]
 fn AssetContent() -> NodeHandle {
     let ui = use_context::<UiSignals>();
 
     rsx! {
         div { style: "display:flex;flex-direction:column;",
-            if let Some(slot) = ui.selected_material.get() {
-                MaterialProperties { slot: slot }
-            } else if let Some(shader_name) = ui.selected_shader.get() {
-                ShaderProperties { shader_name: shader_name }
-            } else {
+            for key in vec![{
+                let mat = ui.selected_material.get();
+                let shader = ui.selected_shader.get();
+                if let Some(slot) = mat { format!("mat:{slot}") }
+                else if let Some(ref name) = shader { format!("shader:{name}") }
+                else { "none".to_string() }
+            }] {
                 div {
-                    style: {format!("{SECTION_STYLE}color:var(--rinch-color-placeholder);")},
-                    "No asset selected"
+                    key: key,
+                    if let Some(slot) = ui.selected_material.get() {
+                        MaterialProperties { slot: slot }
+                    } else if let Some(shader_name) = ui.selected_shader.get() {
+                        ShaderProperties { shader_name: shader_name }
+                    } else {
+                        div {
+                            style: {format!("{SECTION_STYLE}color:var(--rinch-color-placeholder);")},
+                            "No asset selected"
+                        }
+                    }
                 }
             }
         }
