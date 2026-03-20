@@ -166,57 +166,21 @@ impl SliderSignals {
     }
 
     /// Send atmosphere fields to the scene environment ECS entity.
+    /// Send sun direction computed from azimuth/elevation sliders.
+    ///
+    /// Only sends the derived sun_direction Vec3 — all other atmosphere
+    /// fields are now handled by store-bound widgets.
     pub fn send_atmosphere_commands(&self, cmd: &crate::CommandSender, ui: &UiSignals) {
         let az = (self.sun_azimuth.get() as f32).to_radians();
         let el = (self.sun_elevation.get() as f32).to_radians();
         let cos_el = el.cos();
         let sun_dir = Vec3::new(az.sin() * cos_el, el.sin(), az.cos() * cos_el).normalize();
         send_env_vec3(cmd, ui, "atmosphere.sun_direction", sun_dir);
-        send_env_float(cmd, ui, "atmosphere.sun_intensity", self.sun_intensity.get());
-        send_env_float(cmd, ui, "atmosphere.rayleigh_scale", self.rayleigh_scale.get());
-        send_env_float(cmd, ui, "atmosphere.mie_scale", self.mie_scale.get());
-        send_env_bool(cmd, ui, "atmosphere.enabled", ui.atmo_enabled.get());
     }
 
-    /// Send fog fields to the scene environment ECS entity.
-    pub fn send_fog_commands(&self, cmd: &crate::CommandSender, ui: &UiSignals) {
-        send_env_float(cmd, ui, "fog.density", self.fog_density.get());
-        send_env_float(cmd, ui, "fog.height_falloff", self.fog_height_falloff.get());
-        send_env_float(cmd, ui, "fog.ambient_dust_density", self.dust_density.get());
-        send_env_float(cmd, ui, "fog.dust_asymmetry", self.dust_asymmetry.get());
-        send_env_float(cmd, ui, "fog.vol_ambient_intensity", self.vol_ambient_intensity.get());
-        send_env_bool(cmd, ui, "fog.enabled", ui.fog_enabled.get());
-    }
-
-    /// Send cloud fields to the scene environment ECS entity.
-    pub fn send_cloud_commands(&self, cmd: &crate::CommandSender, ui: &UiSignals) {
-        send_env_float(cmd, ui, "clouds.coverage", self.cloud_coverage.get());
-        send_env_float(cmd, ui, "clouds.density", self.cloud_density.get());
-        send_env_float(cmd, ui, "clouds.altitude", self.cloud_altitude.get());
-        send_env_float(cmd, ui, "clouds.thickness", self.cloud_thickness.get());
-        send_env_float(cmd, ui, "clouds.wind_speed", self.cloud_wind_speed.get());
-        send_env_bool(cmd, ui, "clouds.enabled", ui.clouds_enabled.get());
-    }
-
-    /// Send post-processing fields to the scene environment ECS entity.
-    pub fn send_post_process_commands(&self, cmd: &crate::CommandSender, ui: &UiSignals) {
-        send_env_float(cmd, ui, "post_process.bloom_intensity", self.bloom_intensity.get());
-        send_env_float(cmd, ui, "post_process.bloom_threshold", self.bloom_threshold.get());
-        send_env_float(cmd, ui, "post_process.exposure", self.exposure.get());
-        send_env_float(cmd, ui, "post_process.sharpen_strength", self.sharpen.get());
-        send_env_float(cmd, ui, "post_process.dof_focus_distance", self.dof_focus_dist.get());
-        send_env_float(cmd, ui, "post_process.dof_focus_range", self.dof_focus_range.get());
-        send_env_float(cmd, ui, "post_process.dof_max_coc", self.dof_max_coc.get());
-        send_env_float(cmd, ui, "post_process.motion_blur_intensity", self.motion_blur.get());
-        send_env_float(cmd, ui, "post_process.god_rays_intensity", self.god_rays.get());
-        send_env_float(cmd, ui, "post_process.vignette_intensity", self.vignette.get());
-        send_env_float(cmd, ui, "post_process.grain_intensity", self.grain.get());
-        send_env_float(cmd, ui, "post_process.chromatic_aberration", self.chromatic_ab.get());
-        send_env_float(cmd, ui, "post_process.gi_intensity", self.gi_intensity.get());
-        send_env_bool(cmd, ui, "post_process.bloom_enabled", ui.bloom_enabled.get());
-        send_env_bool(cmd, ui, "post_process.dof_enabled", ui.dof_enabled.get());
-        send_env_int(cmd, ui, "post_process.tone_map_mode", ui.tone_map_mode.get() as i64);
-    }
+    // send_fog_commands — removed (migrated to store-bound widgets)
+    // send_cloud_commands — removed (migrated to store-bound widgets)
+    // send_post_process_commands — removed (migrated to store-bound widgets)
 
     /// Send brush/sculpt/paint settings commands.
     pub fn send_brush_commands(&self, cmd: &crate::CommandSender) {
@@ -233,24 +197,14 @@ impl SliderSignals {
         });
     }
 
-    /// Send all slider and toggle values as EditorCommands.
+    /// Send all non-store slider values as EditorCommands.
+    ///
+    /// Environment fields (fog, clouds, post-process) are now handled by
+    /// store-bound widgets. This only sends camera, sun direction, and brush.
     pub fn send_all_commands(&self, cmd: &crate::CommandSender, ui: &UiSignals) {
         self.send_camera_commands(cmd);
         self.send_atmosphere_commands(cmd, ui);
-        self.send_fog_commands(cmd, ui);
-        self.send_cloud_commands(cmd, ui);
-        self.send_post_process_commands(cmd, ui);
         self.send_brush_commands(cmd);
-    }
-
-    /// Send toggle/state commands for environment sections.
-    pub fn send_toggle_commands(&self, cmd: &crate::CommandSender, ui: &UiSignals) {
-        send_env_bool(cmd, ui, "atmosphere.enabled", ui.atmo_enabled.get());
-        send_env_bool(cmd, ui, "fog.enabled", ui.fog_enabled.get());
-        send_env_bool(cmd, ui, "clouds.enabled", ui.clouds_enabled.get());
-        send_env_bool(cmd, ui, "post_process.bloom_enabled", ui.bloom_enabled.get());
-        send_env_bool(cmd, ui, "post_process.dof_enabled", ui.dof_enabled.get());
-        send_env_int(cmd, ui, "post_process.tone_map_mode", ui.tone_map_mode.get() as i64);
     }
 
     /// Write camera + brush slider values back to `EditorState`.

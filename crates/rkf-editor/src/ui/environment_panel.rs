@@ -2,10 +2,16 @@
 //!
 //! Each section is a separate `#[component]` for fine-grained reactivity:
 //! only the section whose toggle changes will rebuild.
+//!
+//! All environment fields use store-bound widgets (BoundSlider, BoundToggle,
+//! BoundColor) that read from and write to the UI Store. The only exception
+//! is Sun Azimuth/Elevation which are derived fields that compute a Vec3
+//! sun_direction — they use manual SliderRows until a DirectionInput widget
+//! is built.
 
 use rinch::prelude::*;
 
-use crate::editor_state::{SliderSignals, UiSignals};
+use crate::editor_state::SliderSignals;
 use crate::CommandSender;
 
 use super::slider_helpers::SliderRow;
@@ -17,167 +23,6 @@ use crate::ui::bound::bound_color::BoundColor;
 use crate::ui::bound::bound_slider::BoundSlider;
 use crate::ui::bound::bound_toggle::BoundToggle;
 
-fn vec3_to_hex(c: glam::Vec3) -> String {
-    format!(
-        "#{:02x}{:02x}{:02x}",
-        (c.x.clamp(0.0, 1.0) * 255.0) as u8,
-        (c.y.clamp(0.0, 1.0) * 255.0) as u8,
-        (c.z.clamp(0.0, 1.0) * 255.0) as u8,
-    )
-}
-
-fn parse_hex_color(hex: &str) -> Option<(u8, u8, u8)> {
-    let hex = hex.strip_prefix('#')?;
-    if hex.len() == 6 {
-        let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
-        let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
-        let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-        Some((r, g, b))
-    } else {
-        None
-    }
-}
-
-const COLOR_ROW_STYLE: &str = "display:flex;align-items:center;gap:6px;padding:1px 6px;font-size:10px;color:var(--rinch-color-text);";
-
-// ── Color picker sub-components ─────────────────────────────────────────────
-
-/// Build a color picker row using manual DOM construction (avoids rsx! type recursion).
-/// Build an environment color picker using the same pattern as brush_palette's
-/// working ColorPicker. Each component builds the picker directly in its own
-/// scope (not via a helper function), matching the pattern that works.
-#[component]
-pub fn SunColorPicker() -> NodeHandle {
-    let cmd = use_context::<CommandSender>();
-    let ui = use_context::<UiSignals>();
-    let color_signal = ui.sun_color;
-
-    let row = __scope.create_element("div");
-    row.set_attribute("style", COLOR_ROW_STYLE);
-    let label = __scope.create_element("span");
-    label.set_text("Sun Color");
-    row.append_child(&label);
-
-    let picker = ColorPicker {
-        format: "hex".into(),
-        value: vec3_to_hex(color_signal.get()),
-        alpha: false,
-        with_input: false,
-        size: "xs".into(),
-        onchange: Some(InputCallback::new({
-            let cmd = cmd.clone();
-            let initial = vec3_to_hex(color_signal.get());
-            move |hex: String| {
-                if hex == initial { return; } // skip initial-value echo
-                if let Some((r, g, b)) = parse_hex_color(&hex) {
-                    let v = glam::Vec3::new(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
-                    color_signal.set(v);
-                    if let Some(uuid) = ui.active_camera_uuid.get() {
-                        let _ = cmd.0.send(crate::editor_command::EditorCommand::SetComponentField {
-                            entity_id: uuid,
-                            component_name: "EnvironmentSettings".to_string(),
-                            field_name: "atmosphere.sun_color".to_string(),
-                            value: rkf_runtime::behavior::game_value::GameValue::Vec3(v),
-                        });
-                    }
-                }
-            }
-        })),
-        ..Default::default()
-    };
-    let picker_node = rinch::core::untracked(|| picker.render(__scope, &[]));
-    row.append_child(&picker_node);
-    row
-}
-
-#[component]
-pub fn FogColorPicker() -> NodeHandle {
-    let cmd = use_context::<CommandSender>();
-    let ui = use_context::<UiSignals>();
-    let color_signal = ui.fog_color;
-
-    let row = __scope.create_element("div");
-    row.set_attribute("style", COLOR_ROW_STYLE);
-    let label = __scope.create_element("span");
-    label.set_text("Fog Color");
-    row.append_child(&label);
-
-    let picker = ColorPicker {
-        format: "hex".into(),
-        value: vec3_to_hex(color_signal.get()),
-        alpha: false,
-        with_input: false,
-        size: "xs".into(),
-        onchange: Some(InputCallback::new({
-            let cmd = cmd.clone();
-            let initial = vec3_to_hex(color_signal.get());
-            move |hex: String| {
-                if hex == initial { return; }
-                if let Some((r, g, b)) = parse_hex_color(&hex) {
-                    let v = glam::Vec3::new(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
-                    color_signal.set(v);
-                    if let Some(uuid) = ui.active_camera_uuid.get() {
-                        let _ = cmd.0.send(crate::editor_command::EditorCommand::SetComponentField {
-                            entity_id: uuid,
-                            component_name: "EnvironmentSettings".to_string(),
-                            field_name: "fog.color".to_string(),
-                            value: rkf_runtime::behavior::game_value::GameValue::Vec3(v),
-                        });
-                    }
-                }
-            }
-        })),
-        ..Default::default()
-    };
-    let picker_node = rinch::core::untracked(|| picker.render(__scope, &[]));
-    row.append_child(&picker_node);
-    row
-}
-
-#[component]
-pub fn VolAmbientColorPicker() -> NodeHandle {
-    let cmd = use_context::<CommandSender>();
-    let ui = use_context::<UiSignals>();
-    let color_signal = ui.vol_ambient_color;
-
-    let row = __scope.create_element("div");
-    row.set_attribute("style", COLOR_ROW_STYLE);
-    let label = __scope.create_element("span");
-    label.set_text("Vol Ambient");
-    row.append_child(&label);
-
-    let picker = ColorPicker {
-        format: "hex".into(),
-        value: vec3_to_hex(color_signal.get()),
-        alpha: false,
-        with_input: false,
-        size: "xs".into(),
-        onchange: Some(InputCallback::new({
-            let cmd = cmd.clone();
-            let initial = vec3_to_hex(color_signal.get());
-            move |hex: String| {
-                if hex == initial { return; }
-                if let Some((r, g, b)) = parse_hex_color(&hex) {
-                    let v = glam::Vec3::new(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
-                    color_signal.set(v);
-                    if let Some(uuid) = ui.active_camera_uuid.get() {
-                        let _ = cmd.0.send(crate::editor_command::EditorCommand::SetComponentField {
-                            entity_id: uuid,
-                            component_name: "EnvironmentSettings".to_string(),
-                            field_name: "fog.vol_ambient_color".to_string(),
-                            value: rkf_runtime::behavior::game_value::GameValue::Vec3(v),
-                        });
-                    }
-                }
-            }
-        })),
-        ..Default::default()
-    };
-    let picker_node = rinch::core::untracked(|| picker.render(__scope, &[]));
-    row.append_child(&picker_node);
-    row
-}
-
 // ── Atmosphere section ──────────────────────────────────────────────────────
 
 /// Sun direction sliders + atmosphere toggle + Rayleigh/Mie scale.
@@ -185,7 +30,6 @@ pub fn VolAmbientColorPicker() -> NodeHandle {
 pub fn AtmosphereSection() -> NodeHandle {
     let sliders = use_context::<SliderSignals>();
     let cmd = use_context::<CommandSender>();
-    let ui = use_context::<UiSignals>();
 
     // Bound widgets rendered outside rsx! to avoid type-inference conflicts
     // between SliderRow (Option<f64> min) and BoundSlider (f64 min).
@@ -219,6 +63,12 @@ pub fn AtmosphereSection() -> NodeHandle {
         min: 0.0, max: 5.0, step: 0.1, decimals: 1,
         suffix: String::new(),
     }.render(__scope, &[]);
+
+    // Sun Azimuth/Elevation are derived (compute Vec3 sun_direction).
+    // They use manual SliderRows until a DirectionInput widget is built.
+    // ui param required by send_atmosphere_commands signature but only
+    // sun_direction is actually sent.
+    let ui = use_context::<crate::editor_state::UiSignals>();
 
     rsx! {
         div {
@@ -320,7 +170,6 @@ fn PostProcessLightingGroup() -> NodeHandle {
     let store = use_context::<UiStore>();
 
     // Tone map mode: read as Int from store, toggle on click, write back as Int.
-    // TODO: Replace with BoundSelect once it supports Int↔String conversion.
     let tm_signal = store.read("env/post_process.tone_map_mode");
 
     let store_for_tm = store.clone();
@@ -408,5 +257,3 @@ fn PostProcessEffectsGroup() -> NodeHandle {
         }
     }
 }
-
-

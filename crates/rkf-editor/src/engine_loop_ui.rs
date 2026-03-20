@@ -16,56 +16,19 @@ use crate::engine_loop_commands::compute_material_usage;
 ///
 /// Called on the main thread after a scene load or environment change to ensure
 /// the UI sliders reflect the ECS singleton's actual values.
-fn sync_env_sliders_from_settings(
+/// Sync sun azimuth/elevation sliders from the environment's sun_direction.
+///
+/// Only the derived azimuth/elevation need manual sync — all other
+/// environment fields are now pushed via the UI Store.
+fn sync_sun_direction_sliders(
     sliders: &crate::editor_state::SliderSignals,
     env: &rkf_runtime::environment::EnvironmentSettings,
-    ui: &UiSignals,
 ) {
     let d = &env.atmosphere.sun_direction;
     let az = d[0].atan2(d[2]).to_degrees().rem_euclid(360.0);
     let el = d[1].asin().to_degrees();
     sliders.sun_azimuth.set(az as f64);
     sliders.sun_elevation.set(el as f64);
-    sliders.sun_intensity.set(env.atmosphere.sun_intensity as f64);
-    sliders.rayleigh_scale.set(env.atmosphere.rayleigh_scale as f64);
-    sliders.mie_scale.set(env.atmosphere.mie_scale as f64);
-    sliders.fog_density.set(env.fog.density as f64);
-    sliders.fog_height_falloff.set(env.fog.height_falloff as f64);
-    sliders.dust_density.set(env.fog.ambient_dust_density as f64);
-    sliders.dust_asymmetry.set(env.fog.dust_asymmetry as f64);
-    sliders.vol_ambient_intensity.set(env.fog.vol_ambient_intensity as f64);
-    sliders.cloud_coverage.set(env.clouds.coverage as f64);
-    sliders.cloud_density.set(env.clouds.density as f64);
-    sliders.cloud_altitude.set(env.clouds.altitude as f64);
-    sliders.cloud_thickness.set(env.clouds.thickness as f64);
-    sliders.cloud_wind_speed.set(env.clouds.wind_speed as f64);
-    sliders.bloom_intensity.set(env.post_process.bloom_intensity as f64);
-    sliders.bloom_threshold.set(env.post_process.bloom_threshold as f64);
-    sliders.exposure.set(env.post_process.exposure as f64);
-    sliders.sharpen.set(env.post_process.sharpen_strength as f64);
-    sliders.dof_focus_dist.set(env.post_process.dof_focus_distance as f64);
-    sliders.dof_focus_range.set(env.post_process.dof_focus_range as f64);
-    sliders.dof_max_coc.set(env.post_process.dof_max_coc as f64);
-    sliders.motion_blur.set(env.post_process.motion_blur_intensity as f64);
-    sliders.god_rays.set(env.post_process.god_rays_intensity as f64);
-    sliders.vignette.set(env.post_process.vignette_intensity as f64);
-    sliders.grain.set(env.post_process.grain_intensity as f64);
-    sliders.chromatic_ab.set(env.post_process.chromatic_aberration as f64);
-    sliders.gi_intensity.set(env.post_process.gi_intensity as f64);
-    // Toggle signals.
-    ui.atmo_enabled.set(env.atmosphere.enabled);
-    ui.fog_enabled.set(env.fog.enabled);
-    ui.clouds_enabled.set(env.clouds.enabled);
-    ui.bloom_enabled.set(env.post_process.bloom_enabled);
-    ui.dof_enabled.set(env.post_process.dof_enabled);
-    ui.tone_map_mode.set(env.post_process.tone_map_mode);
-    // Color signals.
-    let sc = &env.atmosphere.sun_color;
-    ui.sun_color.set(glam::Vec3::new(sc[0], sc[1], sc[2]));
-    let fc = &env.fog.color;
-    ui.fog_color.set(glam::Vec3::new(fc[0], fc[1], fc[2]));
-    let va = &env.fog.vol_ambient_color;
-    ui.vol_ambient_color.set(glam::Vec3::new(va[0], va[1], va[2]));
 }
 
 /// l: Process GPU pick result -- sets selected_entity, pushes to UI signals.
@@ -330,10 +293,11 @@ pub(crate) fn push_dirty_ui_signals(
                         ui.active_camera_uuid.set(active_env_uuid);
                         ui.environment_profile_name.set(profile_display);
                         ui.linked_env_camera.set(linked_env);
-                        // Sync environment slider signals from ECS values.
+                        // Sync sun azimuth/elevation sliders from sun_direction.
+                        // All other env fields are pushed via the UI Store.
                         if let Some(ref env) = env_for_sliders {
                             if let Some(sliders) = rinch::core::context::try_use_context::<crate::editor_state::SliderSignals>() {
-                                sync_env_sliders_from_settings(&sliders, env, &ui);
+                                sync_sun_direction_sliders(&sliders, env);
                             }
                         }
                     }
