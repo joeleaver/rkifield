@@ -206,10 +206,8 @@ pub fn register_core_actions(store: &UiStore) {
         shortcut: None,
         enabled: None,
         checked: None,
-        execute: |_| {
-            if let Some(ui) = rinch::core::context::try_use_context::<crate::editor_state::UiSignals>() {
-                ui.console_entries.set(Vec::new());
-            }
+        execute: |store| {
+            store.set_typed::<Vec<rkf_runtime::behavior::ConsoleEntry>>("console/entries", Vec::new());
         },
     });
 }

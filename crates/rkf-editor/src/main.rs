@@ -257,27 +257,34 @@ fn main() -> anyhow::Result<()> {
             // Per-property UI signals for fine-grained reactivity.
             let ui_signals = UiSignals::new();
             create_context(ui_signals);
-            // Wire console buffer → UI signal. On any push (from any thread),
-            // schedule a main-thread update that snapshots into the signal.
+            // Wire console buffer → UI signal + store typed slot.
+            // On any push (from any thread), schedule a main-thread update.
             {
                 let buf = console_buffer.clone();
                 console_buffer.set_on_push(move || {
                     let buf = buf.clone();
                     rinch::shell::rinch_runtime::run_on_main_thread(move || {
+                        let snapshot = buf.snapshot();
                         if let Some(ui) = rinch::core::context::try_use_context::<UiSignals>() {
-                            ui.console_entries.set(buf.snapshot());
+                            ui.console_entries.set(snapshot.clone());
+                        }
+                        if let Some(store) = rinch::core::context::try_use_context::<store::UiStore>() {
+                            store.set_typed::<Vec<rkf_runtime::behavior::ConsoleEntry>>("console/entries", snapshot);
                         }
                     });
                 });
-                // Flush any entries that were pushed before the callback was set
-                // (e.g. during initial game crate build on the engine thread).
-                let buf2 = console_buffer.clone();
-                ui_signals.console_entries.set(buf2.snapshot());
             }
             // UI Store — central reactive state for all editor UI.
             let ui_store = store::UiStore::new(store_cmd_tx, store_push_buffer);
             store::register_actions::register_core_actions(&ui_store);
-            create_context(ui_store);
+            create_context(ui_store.clone());
+            // Flush any console entries that were pushed before the callback was set
+            // (e.g. during initial game crate build on the engine thread).
+            {
+                let snapshot = console_buffer.snapshot();
+                ui_signals.console_entries.set(snapshot.clone());
+                ui_store.set_typed::<Vec<rkf_runtime::behavior::ConsoleEntry>>("console/entries", snapshot);
+            }
             // Command channel for UI→engine communication.
             create_context(cmd_sender);
             // Layout state — zone-based configurable layout.

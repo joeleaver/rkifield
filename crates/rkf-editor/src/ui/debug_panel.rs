@@ -11,9 +11,8 @@
 
 use rinch::prelude::*;
 
-use crate::editor_state::UiSignals;
 use crate::store::UiStore;
-use rkf_runtime::behavior::{ConsoleEntry, ConsoleLevel};
+use rkf_runtime::behavior::{ConsoleEntry, ConsoleFilter, ConsoleLevel};
 
 // ── Style constants ────────────────────────────────────────────────────────
 
@@ -70,7 +69,10 @@ const TIMESTAMP_STYLE: &str = "\
 /// Console panel — lists info, warning, and error messages from scripts and builds.
 #[component]
 pub fn DebugPanel() -> NodeHandle {
-    let ui = use_context::<UiSignals>();
+    let store = use_context::<UiStore>();
+
+    let entries_sig = store.read_typed::<Vec<ConsoleEntry>>("console/entries");
+    let filter_sig = store.read_typed::<ConsoleFilter>("console/filter");
 
     let root = rsx! {
         div { style: "flex:1;min-height:0;display:flex;flex-direction:column;" }
@@ -85,9 +87,9 @@ pub fn DebugPanel() -> NodeHandle {
     let info_btn = rsx! {
         button {
             style: {
-                let ui = ui;
+                let filter_sig = filter_sig;
                 move || {
-                    let f = ui.console_filter.get();
+                    let f = filter_sig.get();
                     if f.show_info {
                         format!("{FILTER_BTN_BASE}color:var(--rinch-color-blue-5, #339af0);background:rgba(51,154,240,0.15);")
                     } else {
@@ -96,11 +98,12 @@ pub fn DebugPanel() -> NodeHandle {
                 }
             },
             onclick: {
-                let ui = ui;
+                let store = store.clone();
+                let filter_sig = filter_sig;
                 move || {
-                    let mut f = ui.console_filter.get();
+                    let mut f = filter_sig.get();
                     f.show_info = !f.show_info;
-                    ui.console_filter.set(f);
+                    store.set_typed::<ConsoleFilter>("console/filter", f);
                 }
             },
             "Info"
@@ -111,9 +114,9 @@ pub fn DebugPanel() -> NodeHandle {
     let warn_btn = rsx! {
         button {
             style: {
-                let ui = ui;
+                let filter_sig = filter_sig;
                 move || {
-                    let f = ui.console_filter.get();
+                    let f = filter_sig.get();
                     if f.show_warn {
                         format!("{FILTER_BTN_BASE}color:var(--rinch-color-yellow-5, #ffd43b);background:rgba(255,212,59,0.15);")
                     } else {
@@ -122,11 +125,12 @@ pub fn DebugPanel() -> NodeHandle {
                 }
             },
             onclick: {
-                let ui = ui;
+                let store = store.clone();
+                let filter_sig = filter_sig;
                 move || {
-                    let mut f = ui.console_filter.get();
+                    let mut f = filter_sig.get();
                     f.show_warn = !f.show_warn;
-                    ui.console_filter.set(f);
+                    store.set_typed::<ConsoleFilter>("console/filter", f);
                 }
             },
             "Warn"
@@ -137,9 +141,9 @@ pub fn DebugPanel() -> NodeHandle {
     let error_btn = rsx! {
         button {
             style: {
-                let ui = ui;
+                let filter_sig = filter_sig;
                 move || {
-                    let f = ui.console_filter.get();
+                    let f = filter_sig.get();
                     if f.show_error {
                         format!("{FILTER_BTN_BASE}color:var(--rinch-color-red-5, #ff6b6b);background:rgba(255,107,107,0.15);")
                     } else {
@@ -148,11 +152,12 @@ pub fn DebugPanel() -> NodeHandle {
                 }
             },
             onclick: {
-                let ui = ui;
+                let store = store.clone();
+                let filter_sig = filter_sig;
                 move || {
-                    let mut f = ui.console_filter.get();
+                    let mut f = filter_sig.get();
                     f.show_error = !f.show_error;
-                    ui.console_filter.set(f);
+                    store.set_typed::<ConsoleFilter>("console/filter", f);
                 }
             },
             "Error"
@@ -164,8 +169,8 @@ pub fn DebugPanel() -> NodeHandle {
         div {
             style: "flex:1;",
             {move || {
-                let entries = ui.console_entries.get();
-                let filter = ui.console_filter.get();
+                let entries = entries_sig.get();
+                let filter = filter_sig.get();
                 let visible = entries.iter().filter(|e| filter.accepts(e.level)).count();
                 let total = entries.len();
                 if total == 0 {
@@ -180,13 +185,12 @@ pub fn DebugPanel() -> NodeHandle {
     };
     header.append_child(&count_text);
 
-    let store = use_context::<UiStore>();
     let clear_btn = rsx! {
         button {
             style: {
-                let ui = ui;
+                let entries_sig = entries_sig;
                 move || {
-                    if ui.console_entries.get().is_empty() {
+                    if entries_sig.get().is_empty() {
                         format!("{CLEAR_BTN_STYLE}display:none;")
                     } else {
                         CLEAR_BTN_STYLE.to_string()
@@ -194,7 +198,7 @@ pub fn DebugPanel() -> NodeHandle {
                 }
             },
             onclick: {
-                let store = store;
+                let store = store.clone();
                 move || {
                     store.execute_action("console.clear");
                 }
@@ -209,9 +213,9 @@ pub fn DebugPanel() -> NodeHandle {
     let hint = rsx! {
         div {
             style: {
-                let ui = ui;
+                let entries_sig = entries_sig;
                 move || {
-                    if ui.console_entries.get().is_empty() {
+                    if entries_sig.get().is_empty() {
                         EMPTY_MSG_STYLE.to_string()
                     } else {
                         "display:none;".to_string()
@@ -232,8 +236,8 @@ pub fn DebugPanel() -> NodeHandle {
         __scope,
         &list,
         move || {
-            let entries = ui.console_entries.get();
-            let filter = ui.console_filter.get();
+            let entries = entries_sig.get();
+            let filter = filter_sig.get();
             entries.into_iter().filter(|e| filter.accepts(e.level)).collect::<Vec<_>>()
         },
         |entry| console_entry_key(entry),
