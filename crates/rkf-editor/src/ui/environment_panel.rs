@@ -273,19 +273,28 @@ pub fn CloudsSection() -> NodeHandle {
 
 // ── Post-processing section ─────────────────────────────────────────────────
 
-/// Bloom, exposure, tone mapping, sharpen, DoF, motion blur, god rays,
-/// vignette, grain, chromatic aberration.
+/// Post-processing: GI, bloom, exposure, tone mapping, sharpen.
 #[component]
 pub fn PostProcessSection() -> NodeHandle {
+    rsx! {
+        div {
+            div { style: {LABEL_STYLE}, "Post-Processing" }
+            PostProcessLightingGroup {}
+            PostProcessEffectsGroup {}
+        }
+    }
+}
+
+/// GI, bloom, exposure, tone mapping, sharpen, DoF.
+#[component]
+fn PostProcessLightingGroup() -> NodeHandle {
     let sliders = use_context::<SliderSignals>();
     let cmd = use_context::<CommandSender>();
     let ui = use_context::<UiSignals>();
-
     let tm_signal = ui.tone_map_mode;
 
     rsx! {
         div {
-            div { style: {LABEL_STYLE}, "Post-Processing" }
             SliderRow {
                 label: "GI Intensity",
                 suffix: "",
@@ -338,6 +347,19 @@ pub fn PostProcessSection() -> NodeHandle {
                 min: 0.0, max: 2.0, step: 0.05, decimals: 2,
                 on_change: { let cmd = cmd.clone(); move |_v: f64| { sliders.send_post_process_commands(&cmd, &ui); } },
             }
+        }
+    }
+}
+
+/// DoF, motion blur, god rays, vignette, grain, chromatic aberration.
+#[component]
+fn PostProcessEffectsGroup() -> NodeHandle {
+    let sliders = use_context::<SliderSignals>();
+    let cmd = use_context::<CommandSender>();
+    let ui = use_context::<UiSignals>();
+
+    rsx! {
+        div {
             ToggleRow {
                 label: "DoF",
                 enabled: Some(ui.dof_enabled),
