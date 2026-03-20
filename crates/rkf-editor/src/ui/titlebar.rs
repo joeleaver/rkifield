@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use rinch::prelude::*;
 
 use crate::editor_command::EditorCommand;
-use crate::editor_state::{EditorState, SliderSignals, UiSignals};
+use crate::editor_state::{EditorState, UiSignals};
 use crate::layout::state::{LayoutBacking, LayoutState};
 use crate::layout::ContainerKind;
 use crate::store::UiStore;
@@ -49,7 +49,6 @@ pub fn TitleBar() -> NodeHandle {
 
     let editor_state = use_context::<Arc<Mutex<EditorState>>>();
     let ui = use_context::<UiSignals>();
-    let _sliders = use_context::<SliderSignals>();
     let store = use_context::<UiStore>();
     let tree_state = use_context::<UseTreeReturn>();
     let layout = use_context::<LayoutState>();

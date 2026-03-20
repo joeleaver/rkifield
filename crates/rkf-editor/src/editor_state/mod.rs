@@ -4,11 +4,8 @@
 //! `Arc<Mutex<EditorState>>` between the winit event loop and the rinch component tree.
 
 mod impl_state;
-mod slider_signals;
 #[cfg(test)]
 mod tests;
-
-pub use slider_signals::SliderSignals;
 
 use crate::camera::{CameraControlState, CameraMode, CameraSnapshot};
 use crate::debug_viz::{DebugOverlay, FrameTimeHistory};

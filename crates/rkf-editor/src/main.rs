@@ -48,7 +48,7 @@ use rinch::prelude::*;
 
 use automation::SharedState;
 use editor_command::EditorCommand;
-use editor_state::{EditorState, SliderSignals, UiSignals};
+use editor_state::{EditorState, UiSignals};
 use engine_viewport::{DISPLAY_HEIGHT, DISPLAY_WIDTH};
 
 /// Sender half of the UI→engine command channel.
@@ -248,9 +248,6 @@ fn main() -> anyhow::Result<()> {
     rinch::shell::run_with_window_props_and_menu(
         move |_scope| {
             // Register contexts so components can call use_context().
-            // Centralized slider signals — one batch sync Effect replaces 33 lock closures.
-            // Must be created before editor_state_ctx is moved into create_context.
-            let slider_signals = SliderSignals::new(&editor_state_ctx.lock().expect("EditorState lock at init"));
             create_context(editor_state_ctx);
             create_context(shared_state_ctx);
             // Surface handle context — editor_ui uses it to wire SurfaceEvent → editor input.
@@ -277,7 +274,6 @@ fn main() -> anyhow::Result<()> {
                 let buf2 = console_buffer.clone();
                 ui_signals.console_entries.set(buf2.snapshot());
             }
-            create_context(slider_signals);
             // UI Store — central reactive state for all editor UI.
             let ui_store = store::UiStore::new(store_cmd_tx, store_push_buffer);
             store::register_actions::register_core_actions(&ui_store);

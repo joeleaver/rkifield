@@ -1,24 +1,27 @@
 //! Loading modal — blocks interaction while a long-running task is in progress.
 //!
-//! Driven by `ui.loading_status: Signal<Option<String>>`. When `Some(message)`,
-//! renders a centered semi-transparent overlay with the message.
-//! When `None`, hidden via `display:none`.
+//! Driven by `editor/loading_status` in the UI Store. When the value is a
+//! non-empty string, renders a centered semi-transparent overlay with the
+//! message. When `None`, hidden via `display:none`.
 
 use rinch::prelude::*;
 
-use crate::editor_state::UiSignals;
+use crate::store::UiStore;
+use crate::store::types::UiValue;
 
 /// Full-screen blocking modal shown during long tasks (e.g. game plugin build).
 #[component]
 pub fn LoadingModal() -> NodeHandle {
-    let ui = use_context::<UiSignals>();
+    let store = use_context::<UiStore>();
+    let loading_signal = store.read("editor/loading_status");
 
     rsx! {
         div {
             style: {
-                let ui = ui;
+                let sig = loading_signal;
                 move || {
-                    if ui.loading_status.get().is_some() {
+                    let has_msg = matches!(sig.get(), UiValue::String(_));
+                    if has_msg {
                         "position:absolute;z-index:200;top:0;left:0;right:0;bottom:0;\
                          background:rgba(0,0,0,0.5);\
                          display:flex;align-items:center;justify-content:center;"
@@ -47,7 +50,7 @@ pub fn LoadingModal() -> NodeHandle {
                     style: "display:flex;flex-direction:column;gap:4px;",
                     div {
                         style: "font-size:14px;color:var(--rinch-color-text);",
-                        {move || ui.loading_status.get().unwrap_or_default()}
+                        {move || loading_signal.get().as_string().unwrap_or_default().to_string()}
                     }
                     div {
                         style: "font-size:12px;color:var(--rinch-color-dimmed, #868e96);",

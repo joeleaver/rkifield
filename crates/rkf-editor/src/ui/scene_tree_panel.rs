@@ -18,7 +18,7 @@ use rinch::prelude::*;
 use rinch_tabler_icons::TablerIcon;
 
 use crate::editor_command::EditorCommand;
-use crate::editor_state::{SelectedEntity, SliderSignals, UiSignals};
+use crate::editor_state::{SelectedEntity, UiSignals};
 use crate::light_editor::SceneLightType;
 use crate::ui_snapshot::{LightSummary, ObjectSummary};
 use crate::CommandSender;
@@ -142,8 +142,7 @@ pub fn SceneTreePanel() -> NodeHandle {
     // NOTE: Selection sync Effect lives in editor_ui() (ui/mod.rs),
     // NOT here. Effects must not .set() signals during render.
 
-    // Selection callback → send command + sync slider values (no lock).
-    let _sliders = use_context::<SliderSignals>();
+    // Selection callback → send command (no lock).
     let onselect = ValueCallback::new(move |value: String| {
         if let Some(entity) = parse_value(&value) {
             let _ = cmd.0.send(EditorCommand::SelectEntity { entity: Some(entity) });

@@ -14,7 +14,7 @@ use super::Vec3Editor;
 /// Edits a full transform: Position, Rotation, Scale.
 ///
 /// Derives Memos from UiSignals.objects for the given entity.
-/// Sends EditorCommands on change — no SliderSignals dependency.
+/// Sends EditorCommands on change.
 #[derive(Debug, Default)]
 pub struct TransformEditor {
     pub entity_id: uuid::Uuid,

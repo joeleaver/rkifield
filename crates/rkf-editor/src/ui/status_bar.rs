@@ -1,10 +1,8 @@
 //! Status bar component — object count, FPS, selection info, mode display.
 //!
-//! All content is built in a single rsx! call. Each section uses its own
-//! reactive closure (`{move || ...}`) so only that section re-renders when
-//! its specific signals change. Conditional visibility uses reactive style
-//! closures (`display:none`) instead of rsx! `if` blocks, avoiding DOM
-//! teardown/rebuild.
+//! Most sections read from the UI Store for simple scalar/string values.
+//! Selection name lookup and diagnostics remain on UiSignals because they
+//! require complex typed data (Vec<ObjectSummary>, DiagnosticEntry enums).
 
 use rinch::prelude::*;
 
@@ -24,6 +22,10 @@ pub fn StatusBar() -> NodeHandle {
 
     let object_count_signal = store.read("editor/object_count");
     let fps_signal = store.read("editor/fps");
+    let debug_mode_signal = store.read("editor/debug_mode");
+    let gizmo_mode_signal = store.read("gizmo/mode");
+    let editor_mode_signal = store.read("editor/mode");
+    let show_grid_signal = store.read("editor/show_grid");
 
     rsx! {
         div {
@@ -51,7 +53,7 @@ pub fn StatusBar() -> NodeHandle {
                     }
                 }} }
 
-                // Diagnostics indicator — reads ui.diagnostics.
+                // Diagnostics indicator — reads ui.diagnostics (complex typed data).
                 // Shows error/warning count in red. Hidden when no diagnostics.
                 div {
                     style: {move || {
@@ -82,6 +84,7 @@ pub fn StatusBar() -> NodeHandle {
                 }
 
                 // Selected entity name — reads ui.selection, ui.objects, ui.lights.
+                // Stays on UiSignals: requires Vec<ObjectSummary>/Vec<LightSummary> lookup.
                 // Hidden via display:none when nothing is selected.
                 div {
                     style: {move || {
@@ -118,64 +121,68 @@ pub fn StatusBar() -> NodeHandle {
                     }}
                 }
 
-                // Debug mode indicator — reads only ui.debug_mode.
+                // Debug mode indicator — reads from store.
                 // Hidden via display:none when debug mode is off (mode 0 = normal).
                 div {
                     style: {move || {
-                        let debug_mode = ui.debug_mode.get();
-                        let debug_name = crate::ui_snapshot::debug_mode_name(debug_mode);
-                        if !debug_name.is_empty() {
+                        let mode = debug_mode_signal.get().as_int().unwrap_or(0) as u32;
+                        let name = crate::ui_snapshot::debug_mode_name(mode);
+                        if !name.is_empty() {
                             "color:var(--rinch-color-yellow-5, #fcc419);".to_string()
                         } else {
                             "display:none;".to_string()
                         }
                     }},
                     {move || {
-                        let debug_mode = ui.debug_mode.get();
-                        crate::ui_snapshot::debug_mode_name(debug_mode).to_string()
+                        let mode = debug_mode_signal.get().as_int().unwrap_or(0) as u32;
+                        crate::ui_snapshot::debug_mode_name(mode).to_string()
                     }}
                 }
 
                 // Spacer.
                 div { style: "flex:1;", }
 
-                // Gizmo mode indicator — reads only ui.gizmo_mode.
+                // Gizmo mode indicator — reads from store.
                 div {
                     style: "color:var(--rinch-color-dimmed);",
                     {move || {
-                        let gizmo_mode = ui.gizmo_mode.get();
-                        format!("{gizmo_mode:?}")
+                        let mode = gizmo_mode_signal.get();
+                        match mode.as_string().unwrap_or_default() {
+                            "translate" => "Translate",
+                            "rotate" => "Rotate",
+                            "scale" => "Scale",
+                            _ => "Translate",
+                        }.to_string()
                     }}
                 }
 
-                // Active tool mode — reads only ui.editor_mode.
-                // Hidden via display:none when no tool mode is active.
+                // Active tool mode — reads from store.
+                // Hidden via display:none when no tool mode is active (default mode).
                 div {
                     style: {move || {
-                        let editor_mode = ui.editor_mode.get();
-                        let mode_name = editor_mode.name();
-                        if !mode_name.is_empty() {
+                        let mode = editor_mode_signal.get();
+                        let name = mode.as_string().unwrap_or_default();
+                        if name == "sculpt" || name == "paint" {
                             "color:var(--rinch-primary-color);".to_string()
                         } else {
                             "display:none;".to_string()
                         }
                     }},
                     {move || {
-                        let editor_mode = ui.editor_mode.get();
-                        let mode_name = editor_mode.name();
-                        if !mode_name.is_empty() {
-                            format!("{mode_name} mode")
-                        } else {
-                            String::new()
+                        let mode = editor_mode_signal.get();
+                        match mode.as_string().unwrap_or_default() {
+                            "sculpt" => "Sculpt mode".to_string(),
+                            "paint" => "Paint mode".to_string(),
+                            _ => String::new(),
                         }
                     }}
                 }
 
-                // Grid indicator — reads only ui.show_grid.
+                // Grid indicator — reads from store.
                 // Hidden via display:none when grid is off.
                 div {
                     style: {move || {
-                        if ui.show_grid.get() {
+                        if show_grid_signal.get().as_bool().unwrap_or(false) {
                             "color:var(--rinch-color-dimmed);".to_string()
                         } else {
                             "display:none;".to_string()

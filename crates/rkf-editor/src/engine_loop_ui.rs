@@ -69,9 +69,8 @@ pub(crate) fn process_gpu_pick(
                     ui.selected_object_materials.set(mat_usage);
                     ui.inspector_data.set(inspector_snap);
                     ui.available_components.set(avail_comps);
-                    let sliders = rinch::core::context::try_use_context::<crate::editor_state::SliderSignals>();
                     let tree_state = rinch::core::context::try_use_context::<rinch::prelude::UseTreeReturn>();
-                    if let (Some(_sliders), Some(tree_state)) = (sliders, tree_state) {
+                    if let Some(tree_state) = tree_state {
                         ui.set_selection(picked_entity, &tree_state);
                         if picked_entity.is_some() {
                             ui.properties_tab.set(0);

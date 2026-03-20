@@ -300,7 +300,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             f_set_prim_mat,
             f_environment, f_lights,
             mut scene_clone, f_selected, f_gizmo_mode, f_gizmo_axis,
-            f_show_grid, f_editor_mode, f_brush_radius, f_brush_falloff,
+            f_show_grid, f_editor_mode, f_brush_radius, f_brush_strength, f_brush_falloff,
             f_sculpt_edits, f_sculpt_undo, f_sculpting_active,
             f_paint_edits, f_paint_undo,
             f_play_start, f_play_stop,
@@ -837,6 +837,11 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                 crate::editor_state::EditorMode::Paint => es.paint.current_settings.radius,
                 _ => 1.0,
             };
+            let brush_strength = match es.mode {
+                crate::editor_state::EditorMode::Sculpt => es.sculpt.current_settings.strength,
+                crate::editor_state::EditorMode::Paint => es.paint.current_settings.strength,
+                _ => 0.5,
+            };
             let brush_falloff = match es.mode {
                 crate::editor_state::EditorMode::Paint => es.paint.current_settings.falloff,
                 crate::editor_state::EditorMode::Sculpt => es.sculpt.current_settings.falloff,
@@ -876,7 +881,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             (cam_snap, debug_mode, convert_to_voxel, remap_material,
              set_prim_mat,
              environment, lights,
-             scene, sel, gm, gizmo_axis, grid, emode, brush_radius, brush_falloff,
+             scene, sel, gm, gizmo_axis, grid, emode, brush_radius, brush_strength, brush_falloff,
              sculpt_edits, sculpt_undo, sculpting_active,
              paint_edits, paint_undo,
              f_play_start, f_play_stop,
@@ -892,6 +897,9 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
         }
         crate::engine_loop_store::push_debug_and_grid_to_store(
             &store_push_buffer, engine.debug_mode(), f_show_grid,
+        );
+        crate::engine_loop_store::push_brush_to_store(
+            &store_push_buffer, f_brush_radius, f_brush_strength, f_brush_falloff,
         );
         if let Some(ref env) = f_environment {
             engine.apply_environment_settings(env);

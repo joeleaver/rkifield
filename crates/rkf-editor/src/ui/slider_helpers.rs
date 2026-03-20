@@ -145,39 +145,3 @@ pub fn LogSliderRow(
     }
 }
 
-// ── SyncedSliderRow component ──────────────────────────────────────────────
-
-/// A slider row that sends all commands on change via SliderSignals.
-#[component]
-#[allow(clippy::too_many_arguments)]
-pub fn SyncedSliderRow(
-    label: String,
-    suffix: String,
-    signal: Option<Signal<f64>>,
-    min: Option<f64>,
-    max: Option<f64>,
-    step: Option<f64>,
-    decimals: Option<u32>,
-    sliders: Option<crate::editor_state::SliderSignals>,
-    cmd: Option<crate::CommandSender>,
-    ui: Option<crate::editor_state::UiSignals>,
-) -> NodeHandle {
-    let sliders = sliders.expect("SyncedSliderRow requires sliders");
-    let cmd = cmd.expect("SyncedSliderRow requires cmd");
-    let ui = ui.expect("SyncedSliderRow requires ui");
-
-    rsx! {
-        SliderRow {
-            label: label,
-            suffix: suffix,
-            signal: signal,
-            min: min,
-            max: max,
-            step: step,
-            decimals: decimals,
-            on_change: move |_v: f64| {
-                sliders.send_all_commands(&cmd, &ui);
-            },
-        }
-    }
-}

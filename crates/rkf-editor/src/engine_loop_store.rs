@@ -206,6 +206,21 @@ pub(crate) fn push_loading_status_to_store(buffer: &PushBuffer, msg: Option<Stri
     buf.push(("editor/loading_status".into(), value));
 }
 
+/// Push brush (sculpt/paint shared) settings to the store push buffer.
+///
+/// Called from the engine loop every frame so that bound widgets stay in sync.
+pub(crate) fn push_brush_to_store(
+    buffer: &PushBuffer,
+    radius: f32,
+    strength: f32,
+    falloff: f32,
+) {
+    let mut buf = buffer.lock().expect("store push buffer poisoned");
+    buf.push(("sculpt/radius".into(), UiValue::Float(radius as f64)));
+    buf.push(("sculpt/strength".into(), UiValue::Float(strength as f64)));
+    buf.push(("sculpt/falloff".into(), UiValue::Float(falloff as f64)));
+}
+
 /// Push all light fields to the store push buffer.
 ///
 /// Called from the engine loop when `dirty.lights` is true.

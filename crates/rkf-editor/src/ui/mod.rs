@@ -35,7 +35,7 @@ use rinch::prelude::*;
 
 use crate::automation::SharedState;
 use crate::editor_command::EditorCommand;
-use crate::editor_state::{EditorMode, EditorState, SelectedEntity, SliderSignals, UiSignals};
+use crate::editor_state::{EditorMode, EditorState, SelectedEntity, UiSignals};
 use crate::CommandSender;
 use crate::gizmo;
 use crate::input::{InputState, KeyCode, Modifiers};
@@ -111,8 +111,8 @@ pub fn editor_ui() -> NodeHandle {
 
     // ── Store setup ─────────────────────────────────────────────────────────
     // Selection-change sync and batch command sync are now store methods
-    // (UiSignals::on_selection_changed, SliderSignals::send_all_commands)
-    // called from event handlers instead of reactive Effects.
+    // (UiSignals::on_selection_changed) called from event handlers
+    // instead of reactive Effects.
 
     // Create tree state as context so SceneTreePanel can use it.
     {
@@ -133,7 +133,6 @@ pub fn editor_ui() -> NodeHandle {
         let ss = shared_state.clone();
         let sh = surface_handle.clone();
         let ui = use_context::<UiSignals>();
-        let _sliders = use_context::<SliderSignals>();
         let cmd = use_context::<CommandSender>();
         let tree_state = use_context::<UseTreeReturn>();
         let cmd_tx = use_context::<crate::CommandSender>().0.clone();

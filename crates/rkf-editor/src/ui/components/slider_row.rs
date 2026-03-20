@@ -68,38 +68,3 @@ pub fn SliderRow(
     }
 }
 
-/// Build a SliderRow that sends all commands on change via the store method.
-///
-/// Each slider's onchange calls `SliderSignals::send_all_commands()` to push
-/// the current values to the engine (replacing the former batch sync Effect).
-#[allow(clippy::too_many_arguments)]
-pub fn build_synced_slider_row(
-    scope: &mut RenderScope,
-    container: &NodeHandle,
-    label: &str,
-    suffix: &str,
-    signal: Signal<f64>,
-    min: f64,
-    max: f64,
-    step: f64,
-    decimals: u32,
-    sliders: crate::editor_state::SliderSignals,
-    cmd: crate::CommandSender,
-    ui: crate::editor_state::UiSignals,
-) {
-    let row = SliderRow {
-        label: label.to_string(),
-        suffix: suffix.to_string(),
-        signal: Some(signal),
-        min,
-        max,
-        step,
-        decimals,
-        on_change: Some(ValueCallback::new(move |_v: f64| {
-            sliders.send_all_commands(&cmd, &ui);
-        })),
-        ..Default::default()
-    };
-    let node = rinch::core::untracked(|| row.render(scope, &[]));
-    container.append_child(&node);
-}

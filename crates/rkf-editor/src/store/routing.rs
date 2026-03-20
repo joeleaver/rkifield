@@ -18,7 +18,7 @@ use crate::gizmo::GizmoMode;
 /// Returns `None` if the route/value combination doesn't map to a command
 /// (e.g. unknown field names, type mismatches, or routes handled specially
 /// by the store layer).
-pub fn route_write(route: &PathRoute, value: UiValue) -> Option<EditorCommand> {
+pub fn route_write(route: &PathRoute, value: UiValue) -> Vec<EditorCommand> {
     match route {
         PathRoute::EcsField {
             entity_id,
@@ -26,25 +26,25 @@ pub fn route_write(route: &PathRoute, value: UiValue) -> Option<EditorCommand> {
             field,
         } => {
             let game_value: GameValue = value.into();
-            Some(EditorCommand::SetComponentField {
+            vec![EditorCommand::SetComponentField {
                 entity_id: *entity_id,
                 component_name: component.clone(),
                 field_name: field.clone(),
                 value: game_value,
-            })
+            }]
         }
 
         PathRoute::EnvField { .. } => {
             // EnvField needs the active camera UUID — the store resolves this
             // to an EcsField before calling route_write.
-            None
+            vec![]
         }
 
-        PathRoute::LightField { light_id, field } => route_light(*light_id, field, value),
+        PathRoute::LightField { light_id, field } => route_light(*light_id, field, value).into_iter().collect(),
 
-        PathRoute::CameraField { field } => route_camera(field, value),
+        PathRoute::CameraField { field } => route_camera(field, value).into_iter().collect(),
 
-        PathRoute::EditorState { field } => route_editor(field, value),
+        PathRoute::EditorState { field } => route_editor(field, value).into_iter().collect(),
 
         PathRoute::ToolState { tool, field } => route_tool(tool, field, value),
 
@@ -53,10 +53,10 @@ pub fn route_write(route: &PathRoute, value: UiValue) -> Option<EditorCommand> {
             // Not yet wired — individual field mutation needs a read-modify-write
             // pattern that the store will handle at a higher level.
             let _ = slot;
-            None
+            vec![]
         }
 
-        PathRoute::SystemPath { .. } => None,
+        PathRoute::SystemPath { .. } => vec![],
     }
 }
 
@@ -179,44 +179,66 @@ fn route_editor(field: &str, value: UiValue) -> Option<EditorCommand> {
 
 // ─── Tool state routing ─────────────────────────────────────────────────
 
-fn route_tool(tool: &str, field: &str, value: UiValue) -> Option<EditorCommand> {
+fn route_tool(tool: &str, field: &str, value: UiValue) -> Vec<EditorCommand> {
     match tool {
         "sculpt" => route_sculpt_tool(field, value),
-        "paint" => route_paint_tool(field, value),
-        "gizmo" => route_gizmo_tool(field, value),
-        _ => None,
+        "paint" => route_paint_tool(field, value).into_iter().collect(),
+        "gizmo" => route_gizmo_tool(field, value).into_iter().collect(),
+        _ => vec![],
     }
 }
 
-fn route_sculpt_tool(field: &str, value: UiValue) -> Option<EditorCommand> {
-    // SetSculptSettings takes all three at once. For individual field edits
-    // we set the changed field and use NaN for the others (keep existing).
+fn route_sculpt_tool(field: &str, value: UiValue) -> Vec<EditorCommand> {
+    // Brush settings (radius, strength, falloff) are shared between sculpt and
+    // paint modes. When changed, send both SetSculptSettings and SetPaintSettings
+    // so both stay in sync. Individual field edits use NaN for unchanged fields.
     match field {
         "radius" => {
-            let f = value.as_float()?;
-            Some(EditorCommand::SetSculptSettings {
-                radius: f as f32,
-                strength: f32::NAN,
-                falloff: f32::NAN,
-            })
+            let Some(f) = value.as_float() else { return vec![] };
+            vec![
+                EditorCommand::SetSculptSettings {
+                    radius: f as f32,
+                    strength: f32::NAN,
+                    falloff: f32::NAN,
+                },
+                EditorCommand::SetPaintSettings {
+                    radius: f as f32,
+                    strength: f32::NAN,
+                    falloff: f32::NAN,
+                },
+            ]
         }
         "strength" => {
-            let f = value.as_float()?;
-            Some(EditorCommand::SetSculptSettings {
-                radius: f32::NAN,
-                strength: f as f32,
-                falloff: f32::NAN,
-            })
+            let Some(f) = value.as_float() else { return vec![] };
+            vec![
+                EditorCommand::SetSculptSettings {
+                    radius: f32::NAN,
+                    strength: f as f32,
+                    falloff: f32::NAN,
+                },
+                EditorCommand::SetPaintSettings {
+                    radius: f32::NAN,
+                    strength: f as f32,
+                    falloff: f32::NAN,
+                },
+            ]
         }
         "falloff" => {
-            let f = value.as_float()?;
-            Some(EditorCommand::SetSculptSettings {
-                radius: f32::NAN,
-                strength: f32::NAN,
-                falloff: f as f32,
-            })
+            let Some(f) = value.as_float() else { return vec![] };
+            vec![
+                EditorCommand::SetSculptSettings {
+                    radius: f32::NAN,
+                    strength: f32::NAN,
+                    falloff: f as f32,
+                },
+                EditorCommand::SetPaintSettings {
+                    radius: f32::NAN,
+                    strength: f32::NAN,
+                    falloff: f as f32,
+                },
+            ]
         }
-        _ => None,
+        _ => vec![],
     }
 }
 
@@ -282,7 +304,7 @@ mod tests {
             component: "Transform".into(),
             field: "position".into(),
         };
-        let cmd = route_write(&route, UiValue::Vec3([1.0, 2.0, 3.0])).unwrap();
+        let cmd = route_write(&route, UiValue::Vec3([1.0, 2.0, 3.0])).into_iter().next().unwrap();
         match cmd {
             EditorCommand::SetComponentField {
                 entity_id,
@@ -293,7 +315,7 @@ mod tests {
                 assert_eq!(entity_id, uuid);
                 assert_eq!(component_name, "Transform");
                 assert_eq!(field_name, "position");
-                let v = value.as_vec3().unwrap();
+                let v = value.as_vec3().into_iter().next().unwrap();
                 assert!((v.x - 1.0).abs() < 1e-6);
                 assert!((v.y - 2.0).abs() < 1e-6);
                 assert!((v.z - 3.0).abs() < 1e-6);
@@ -310,7 +332,7 @@ mod tests {
             component: "EnvironmentSettings".into(),
             field: "fog.density".into(),
         };
-        let cmd = route_write(&route, UiValue::Float(0.5)).unwrap();
+        let cmd = route_write(&route, UiValue::Float(0.5)).into_iter().next().unwrap();
         match cmd {
             EditorCommand::SetComponentField {
                 field_name, value, ..
@@ -329,7 +351,7 @@ mod tests {
         let route = PathRoute::EnvField {
             field: "fog.density".into(),
         };
-        assert!(route_write(&route, UiValue::Float(0.5)).is_none());
+        assert!(route_write(&route, UiValue::Float(0.5)).is_empty());
     }
 
     // ── LightField ───────────────────────────────────────────────────────
@@ -340,7 +362,7 @@ mod tests {
             light_id: 3,
             field: "intensity".into(),
         };
-        let cmd = route_write(&route, UiValue::Float(2.5)).unwrap();
+        let cmd = route_write(&route, UiValue::Float(2.5)).into_iter().next().unwrap();
         match cmd {
             EditorCommand::SetLightIntensity {
                 light_id,
@@ -359,7 +381,7 @@ mod tests {
             light_id: 1,
             field: "position".into(),
         };
-        let cmd = route_write(&route, UiValue::Vec3([10.0, 20.0, 30.0])).unwrap();
+        let cmd = route_write(&route, UiValue::Vec3([10.0, 20.0, 30.0])).into_iter().next().unwrap();
         match cmd {
             EditorCommand::SetLightPosition {
                 light_id,
@@ -380,7 +402,7 @@ mod tests {
             light_id: 2,
             field: "position.x".into(),
         };
-        let cmd = route_write(&route, UiValue::Float(5.0)).unwrap();
+        let cmd = route_write(&route, UiValue::Float(5.0)).into_iter().next().unwrap();
         match cmd {
             EditorCommand::SetLightPosition {
                 light_id,
@@ -401,7 +423,7 @@ mod tests {
             light_id: 2,
             field: "position.y".into(),
         };
-        let cmd = route_write(&route, UiValue::Float(7.0)).unwrap();
+        let cmd = route_write(&route, UiValue::Float(7.0)).into_iter().next().unwrap();
         match cmd {
             EditorCommand::SetLightPosition {
                 light_id,
@@ -422,7 +444,7 @@ mod tests {
             light_id: 2,
             field: "position.z".into(),
         };
-        let cmd = route_write(&route, UiValue::Float(-3.0)).unwrap();
+        let cmd = route_write(&route, UiValue::Float(-3.0)).into_iter().next().unwrap();
         match cmd {
             EditorCommand::SetLightPosition {
                 light_id,
@@ -443,7 +465,7 @@ mod tests {
             light_id: 0,
             field: "range".into(),
         };
-        let cmd = route_write(&route, UiValue::Float(50.0)).unwrap();
+        let cmd = route_write(&route, UiValue::Float(50.0)).into_iter().next().unwrap();
         match cmd {
             EditorCommand::SetLightRange { light_id, range } => {
                 assert_eq!(light_id, 0);
@@ -459,7 +481,7 @@ mod tests {
             light_id: 0,
             field: "unknown_field".into(),
         };
-        assert!(route_write(&route, UiValue::Float(1.0)).is_none());
+        assert!(route_write(&route, UiValue::Float(1.0)).is_empty());
     }
 
     #[test]
@@ -469,7 +491,7 @@ mod tests {
             field: "intensity".into(),
         };
         // Bool instead of Float — as_float returns None → route returns None.
-        assert!(route_write(&route, UiValue::Bool(true)).is_none());
+        assert!(route_write(&route, UiValue::Bool(true)).is_empty());
     }
 
     // ── CameraField ──────────────────────────────────────────────────────
@@ -479,7 +501,7 @@ mod tests {
         let route = PathRoute::CameraField {
             field: "fov".into(),
         };
-        let cmd = route_write(&route, UiValue::Float(90.0)).unwrap();
+        let cmd = route_write(&route, UiValue::Float(90.0)).into_iter().next().unwrap();
         match cmd {
             EditorCommand::SetCameraFov { fov } => {
                 assert!((fov - 90.0).abs() < 1e-6);
@@ -493,7 +515,7 @@ mod tests {
         let route = PathRoute::CameraField {
             field: "fly_speed".into(),
         };
-        let cmd = route_write(&route, UiValue::Float(5.0)).unwrap();
+        let cmd = route_write(&route, UiValue::Float(5.0)).into_iter().next().unwrap();
         match cmd {
             EditorCommand::SetCameraSpeed { speed } => {
                 assert!((speed - 5.0).abs() < 1e-6);
@@ -507,7 +529,7 @@ mod tests {
         let route = PathRoute::CameraField {
             field: "orbit_angles".into(),
         };
-        let cmd = route_write(&route, UiValue::Vec3([1.57, -0.5, 0.0])).unwrap();
+        let cmd = route_write(&route, UiValue::Vec3([1.57, -0.5, 0.0])).into_iter().next().unwrap();
         match cmd {
             EditorCommand::SetCameraOrbitAngles { yaw, pitch } => {
                 assert!((yaw - 1.57).abs() < 1e-5);
@@ -522,7 +544,7 @@ mod tests {
         let route = PathRoute::CameraField {
             field: "near".into(),
         };
-        let cmd = route_write(&route, UiValue::Float(0.1)).unwrap();
+        let cmd = route_write(&route, UiValue::Float(0.1)).into_iter().next().unwrap();
         match cmd {
             EditorCommand::SetCameraNearFar { near, far } => {
                 assert!((near - 0.1).abs() < 1e-6);
@@ -537,7 +559,7 @@ mod tests {
         let route = PathRoute::CameraField {
             field: "nonexistent".into(),
         };
-        assert!(route_write(&route, UiValue::Float(1.0)).is_none());
+        assert!(route_write(&route, UiValue::Float(1.0)).is_empty());
     }
 
     // ── EditorState ──────────────────────────────────────────────────────
@@ -547,7 +569,7 @@ mod tests {
         let route = PathRoute::EditorState {
             field: "debug_mode".into(),
         };
-        let cmd = route_write(&route, UiValue::Int(3)).unwrap();
+        let cmd = route_write(&route, UiValue::Int(3)).into_iter().next().unwrap();
         match cmd {
             EditorCommand::SetDebugMode { mode } => {
                 assert_eq!(mode, 3);
@@ -561,7 +583,7 @@ mod tests {
         let route = PathRoute::EditorState {
             field: "show_grid".into(),
         };
-        let cmd = route_write(&route, UiValue::Bool(true)).unwrap();
+        let cmd = route_write(&route, UiValue::Bool(true)).into_iter().next().unwrap();
         match cmd {
             EditorCommand::ToggleGrid => {}
             _ => panic!("expected ToggleGrid"),
@@ -575,7 +597,7 @@ mod tests {
         };
 
         // Lowercase
-        let cmd = route_write(&route, UiValue::String("sculpt".into())).unwrap();
+        let cmd = route_write(&route, UiValue::String("sculpt".into())).into_iter().next().unwrap();
         match cmd {
             EditorCommand::SetEditorMode { mode } => {
                 assert_eq!(mode, EditorMode::Sculpt);
@@ -584,7 +606,7 @@ mod tests {
         }
 
         // Capitalized
-        let cmd = route_write(&route, UiValue::String("Paint".into())).unwrap();
+        let cmd = route_write(&route, UiValue::String("Paint".into())).into_iter().next().unwrap();
         match cmd {
             EditorCommand::SetEditorMode { mode } => {
                 assert_eq!(mode, EditorMode::Paint);
@@ -598,7 +620,7 @@ mod tests {
         let route = PathRoute::EditorState {
             field: "mode".into(),
         };
-        assert!(route_write(&route, UiValue::String("invalid".into())).is_none());
+        assert!(route_write(&route, UiValue::String("invalid".into())).is_empty());
     }
 
     #[test]
@@ -606,7 +628,7 @@ mod tests {
         let route = PathRoute::EditorState {
             field: "nonexistent".into(),
         };
-        assert!(route_write(&route, UiValue::Float(1.0)).is_none());
+        assert!(route_write(&route, UiValue::Float(1.0)).is_empty());
     }
 
     // ── ToolState ────────────────────────────────────────────────────────
@@ -617,8 +639,10 @@ mod tests {
             tool: "sculpt".into(),
             field: "radius".into(),
         };
-        let cmd = route_write(&route, UiValue::Float(2.0)).unwrap();
-        match cmd {
+        let cmds = route_write(&route, UiValue::Float(2.0));
+        // Brush fields send both sculpt and paint commands.
+        assert_eq!(cmds.len(), 2);
+        match &cmds[0] {
             EditorCommand::SetSculptSettings {
                 radius,
                 strength,
@@ -630,6 +654,18 @@ mod tests {
             }
             _ => panic!("expected SetSculptSettings"),
         }
+        match &cmds[1] {
+            EditorCommand::SetPaintSettings {
+                radius,
+                strength,
+                falloff,
+            } => {
+                assert!((radius - 2.0).abs() < 1e-6);
+                assert!(strength.is_nan());
+                assert!(falloff.is_nan());
+            }
+            _ => panic!("expected SetPaintSettings"),
+        }
     }
 
     #[test]
@@ -638,8 +674,9 @@ mod tests {
             tool: "sculpt".into(),
             field: "strength".into(),
         };
-        let cmd = route_write(&route, UiValue::Float(0.8)).unwrap();
-        match cmd {
+        let cmds = route_write(&route, UiValue::Float(0.8));
+        assert_eq!(cmds.len(), 2);
+        match &cmds[0] {
             EditorCommand::SetSculptSettings {
                 radius,
                 strength,
@@ -659,7 +696,7 @@ mod tests {
             tool: "paint".into(),
             field: "color".into(),
         };
-        let cmd = route_write(&route, UiValue::Vec3([1.0, 0.5, 0.0])).unwrap();
+        let cmd = route_write(&route, UiValue::Vec3([1.0, 0.5, 0.0])).into_iter().next().unwrap();
         match cmd {
             EditorCommand::SetPaintColor { r, g, b } => {
                 assert!((r - 1.0).abs() < 1e-6);
@@ -676,7 +713,7 @@ mod tests {
             tool: "paint".into(),
             field: "radius".into(),
         };
-        let cmd = route_write(&route, UiValue::Float(3.0)).unwrap();
+        let cmd = route_write(&route, UiValue::Float(3.0)).into_iter().next().unwrap();
         match cmd {
             EditorCommand::SetPaintSettings { radius, .. } => {
                 assert!((radius - 3.0).abs() < 1e-6);
@@ -691,7 +728,7 @@ mod tests {
             tool: "gizmo".into(),
             field: "mode".into(),
         };
-        let cmd = route_write(&route, UiValue::String("rotate".into())).unwrap();
+        let cmd = route_write(&route, UiValue::String("rotate".into())).into_iter().next().unwrap();
         match cmd {
             EditorCommand::SetGizmoMode { mode } => {
                 assert_eq!(mode, GizmoMode::Rotate);
@@ -706,7 +743,7 @@ mod tests {
             tool: "gizmo".into(),
             field: "mode".into(),
         };
-        assert!(route_write(&route, UiValue::String("stretch".into())).is_none());
+        assert!(route_write(&route, UiValue::String("stretch".into())).is_empty());
     }
 
     #[test]
@@ -715,7 +752,7 @@ mod tests {
             tool: "eraser".into(),
             field: "size".into(),
         };
-        assert!(route_write(&route, UiValue::Float(1.0)).is_none());
+        assert!(route_write(&route, UiValue::Float(1.0)).is_empty());
     }
 
     #[test]
@@ -724,7 +761,7 @@ mod tests {
             tool: "sculpt".into(),
             field: "opacity".into(),
         };
-        assert!(route_write(&route, UiValue::Float(1.0)).is_none());
+        assert!(route_write(&route, UiValue::Float(1.0)).is_empty());
     }
 
     // ── MaterialField ────────────────────────────────────────────────────
@@ -735,7 +772,7 @@ mod tests {
             slot: 5,
             field: "roughness".into(),
         };
-        assert!(route_write(&route, UiValue::Float(0.5)).is_none());
+        assert!(route_write(&route, UiValue::Float(0.5)).is_empty());
     }
 
     // ── SystemPath ───────────────────────────────────────────────────────
@@ -745,6 +782,6 @@ mod tests {
         let route = PathRoute::SystemPath {
             path: "console/output".into(),
         };
-        assert!(route_write(&route, UiValue::String("test".into())).is_none());
+        assert!(route_write(&route, UiValue::String("test".into())).is_empty());
     }
 }

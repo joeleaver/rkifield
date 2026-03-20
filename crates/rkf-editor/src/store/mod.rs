@@ -149,7 +149,7 @@ impl UiStore {
             other => other,
         };
 
-        if let Some(cmd) = routing::route_write(&resolved, value) {
+        for cmd in routing::route_write(&resolved, value) {
             let _ = self.cmd_tx.send(cmd);
         }
     }
