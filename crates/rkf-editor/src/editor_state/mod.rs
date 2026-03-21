@@ -14,7 +14,6 @@ use crate::input::InputState;
 use crate::light_editor::LightManager;
 use crate::overlay::OverlayConfig;
 use crate::paint::PaintState;
-use crate::placement::{AssetBrowser, GridSnap, PlacementQueue};
 use crate::properties::PropertySheet;
 use crate::scene_io::{RecentFiles, UnsavedChangesState};
 use crate::sculpt::SculptState;
@@ -80,7 +79,6 @@ pub struct UiSignals {
     pub properties_tab: Signal<u32>,
 
     // ── Asset browser tab (0 = Materials, 1 = Shaders) ───────────
-    pub asset_browser_tab: Signal<u32>,
 
     // ── Selected shader name (for properties display) ────────────
     pub selected_shader: Signal<Option<String>>,
@@ -245,7 +243,6 @@ impl UiSignals {
             fps: Signal::new(0.0),
             selected_material: Signal::new(None),
             properties_tab: Signal::new(0),
-            asset_browser_tab: Signal::new(0),
             selected_shader: Signal::new(None),
             preview_primitive_type: Signal::new(0),
             shader_drag: DragContext::new(),
@@ -455,10 +452,6 @@ pub struct EditorState {
     // ── Tool states ──────────────────────────────────────────
     pub sculpt: SculptState,
     pub paint: PaintState,
-    pub placement_queue: PlacementQueue,
-    pub asset_browser: AssetBrowser,
-    pub grid_snap: GridSnap,
-
     // ── Lights ────────────────────────────────────────────────
     pub light_editor: LightManager,
 

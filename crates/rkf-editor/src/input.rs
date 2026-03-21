@@ -13,7 +13,6 @@ pub enum FocusTarget {
     Viewport,
     SceneHierarchy,
     Properties,
-    AssetBrowser,
     MenuBar,
     None,
 }

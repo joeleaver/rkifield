@@ -3,7 +3,6 @@
 //! Layout: titlebar → (left panel | viewport | right panel) → status bar.
 //! EditorState is shared via rinch context (create_context in main.rs).
 
-pub mod asset_browser;
 pub mod camera_properties;
 pub mod component_inspector;
 pub mod components;
