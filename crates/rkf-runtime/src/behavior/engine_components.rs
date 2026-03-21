@@ -867,7 +867,12 @@ fn sdf_tree_entry() -> ComponentEntry {
                 .map(|c| ron::to_string(&*c).unwrap())
         },
         deserialize_insert: |world, entity, ron_str| {
-            let c: SdfTree = ron::from_str(ron_str).map_err(|e| e.to_string())?;
+            // Handle default construction (from Add Component).
+            let c = if ron_str.trim() == "SdfTree()" || ron_str.trim() == "()" {
+                SdfTree::default()
+            } else {
+                ron::from_str(ron_str).map_err(|e| e.to_string())?
+            };
             world.insert_one(entity, c).map_err(|e| e.to_string())?;
             Ok(())
         },
