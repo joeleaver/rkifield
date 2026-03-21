@@ -297,6 +297,7 @@ fn component_impl_struct(attrs: ComponentAttrs, mut input: ItemStruct) -> syn::R
         inventory::submit! {
             rkf_runtime::behavior::ComponentEntry {
                 name: #struct_name_str,
+                engine: false,
                 serialize: |world, entity| {
                     world.get::<&#struct_name>(entity)
                         .ok()
@@ -426,6 +427,7 @@ fn component_impl_enum(attrs: ComponentAttrs, input: ItemEnum) -> syn::Result<To
         inventory::submit! {
             rkf_runtime::behavior::ComponentEntry {
                 name: #enum_name_str,
+                engine: false,
                 serialize: |world, entity| {
                     world.get::<&#enum_name>(entity)
                         .ok()

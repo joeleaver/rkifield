@@ -207,6 +207,7 @@ static EDITOR_METADATA_FIELDS: [FieldMeta; 2] = [
 fn transform_entry() -> ComponentEntry {
     ComponentEntry {
         name: "Transform",
+        engine: true,
         meta: &TRANSFORM_FIELDS,
         serialize: |world, entity| {
             world
@@ -270,6 +271,7 @@ fn transform_entry() -> ComponentEntry {
 fn camera_entry() -> ComponentEntry {
     ComponentEntry {
         name: "CameraComponent",
+        engine: true,
         meta: &CAMERA_FIELDS,
         serialize: |world, entity| {
             world
@@ -358,6 +360,7 @@ fn camera_entry() -> ComponentEntry {
 fn fog_volume_entry() -> ComponentEntry {
     ComponentEntry {
         name: "FogVolumeComponent",
+        engine: true,
         meta: &FOG_VOLUME_FIELDS,
         serialize: |world, entity| {
             world
@@ -421,6 +424,7 @@ fn fog_volume_entry() -> ComponentEntry {
 fn editor_metadata_entry() -> ComponentEntry {
     ComponentEntry {
         name: "EditorMetadata",
+        engine: true,
         meta: &EDITOR_METADATA_FIELDS,
         serialize: |world, entity| {
             world
@@ -783,6 +787,7 @@ fn env_settings_set_field(
 fn env_settings_entry() -> ComponentEntry {
     ComponentEntry {
         name: "EnvironmentSettings",
+        engine: true,
         meta: &ENV_SETTINGS_FIELDS,
         serialize: |world, entity| {
             world.get::<&EnvironmentSettings>(entity).ok()
@@ -813,6 +818,7 @@ static EDITOR_CAMERA_MARKER_FIELDS: [FieldMeta; 0] = [];
 fn editor_camera_marker_entry() -> ComponentEntry {
     ComponentEntry {
         name: "EditorCameraMarker",
+        engine: true,
         meta: &EDITOR_CAMERA_MARKER_FIELDS,
         serialize: |world, entity| {
             world.get::<&EditorCameraMarker>(entity).ok()
@@ -833,22 +839,41 @@ fn editor_camera_marker_entry() -> ComponentEntry {
     }
 }
 
-// ─── Registration ────────────────────────────────────────────────────────
+// ─── SdfTree (serialize/deserialize only, no field-level editing) ──────────
 
-/// All engine component names, for distinguishing engine vs gameplay entries.
-pub const ENGINE_COMPONENT_NAMES: &[&str] = &[
-    "Transform",
-    "CameraComponent",
-    "FogVolumeComponent",
-    "EditorMetadata",
-    "EnvironmentSettings",
-    "EditorCameraMarker",
-];
+fn sdf_tree_entry() -> ComponentEntry {
+    use crate::components::SdfTree;
+    ComponentEntry {
+        name: "SdfTree",
+        engine: true,
+        meta: &[],
+        serialize: |world, entity| {
+            world.get::<&SdfTree>(entity)
+                .ok()
+                .map(|c| ron::to_string(&*c).unwrap())
+        },
+        deserialize_insert: |world, entity, ron_str| {
+            let c: SdfTree = ron::from_str(ron_str).map_err(|e| e.to_string())?;
+            world.insert_one(entity, c).map_err(|e| e.to_string())?;
+            Ok(())
+        },
+        has: |world, entity| world.get::<&SdfTree>(entity).is_ok(),
+        remove: |world, entity| { let _ = world.remove_one::<SdfTree>(entity); },
+        get_field: |_world, _entity, field_name| {
+            Err(format!("SdfTree has no inspector field '{}'", field_name))
+        },
+        set_field: |_world, _entity, field_name, _value| {
+            Err(format!("SdfTree has no inspector field '{}'", field_name))
+        },
+    }
+}
+
+// ─── Registration ────────────────────────────────────────────────────────
 
 /// Register all engine components into the given registry.
 ///
 /// Called once at startup, before any gameplay dylib loads. Engine entries
-/// survive `clear_gameplay()` because their names are in `ENGINE_COMPONENT_NAMES`.
+/// have `engine: true` and survive `clear_gameplay()` during hot-reload.
 pub fn engine_register(registry: &mut GameplayRegistry) {
     let entries = [
         transform_entry(),
@@ -857,6 +882,7 @@ pub fn engine_register(registry: &mut GameplayRegistry) {
         editor_metadata_entry(),
         env_settings_entry(),
         editor_camera_marker_entry(),
+        sdf_tree_entry(),
     ];
     for entry in entries {
         registry
@@ -883,13 +909,14 @@ mod tests {
     fn engine_register_populates_registry() {
         let mut reg = GameplayRegistry::new();
         engine_register(&mut reg);
-        assert_eq!(reg.component_count(), 6);
+        assert_eq!(reg.component_count(), 7);
         assert!(reg.has_component("Transform"));
         assert!(reg.has_component("CameraComponent"));
         assert!(reg.has_component("EditorCameraMarker"));
         assert!(reg.has_component("FogVolumeComponent"));
         assert!(reg.has_component("EditorMetadata"));
         assert!(reg.has_component("EnvironmentSettings"));
+        assert!(reg.has_component("SdfTree"));
     }
 
     // ── 2. Transform get_field ──────────────────────────────────────────

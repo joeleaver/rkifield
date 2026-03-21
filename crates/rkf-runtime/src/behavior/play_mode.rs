@@ -244,7 +244,7 @@ pub fn is_tool_allowed(state: &PlayState, tool: &str) -> bool {
 pub fn load_scene_into_play_world(
     world: &mut hecs::World,
     scene_data: &[u8],
-    _registry: &GameplayRegistry,
+    registry: &GameplayRegistry,
 ) -> Result<Vec<hecs::Entity>, String> {
     let ron_str = std::str::from_utf8(scene_data)
         .map_err(|e| format!("scene data is not valid UTF-8: {}", e))?;
@@ -266,31 +266,11 @@ pub fn load_scene_into_play_world(
         uuid_to_hecs.insert(record.stable_id, entity);
         spawned.push(entity);
 
-        // Engine components
-        if let Some(Ok(t)) = record.get_component::<Transform>(
-            crate::scene_file_v3::component_names::TRANSFORM,
-        ) {
-            let _ = world.insert_one(entity, t);
-        }
-        if let Some(Ok(m)) = record.get_component::<EditorMetadata>(
-            crate::scene_file_v3::component_names::EDITOR_METADATA,
-        ) {
-            let _ = world.insert_one(entity, m);
-        }
-        if let Some(Ok(s)) = record.get_component::<SdfTree>(
-            crate::scene_file_v3::component_names::SDF_TREE,
-        ) {
-            let _ = world.insert_one(entity, s);
-        }
-        if let Some(Ok(c)) = record.get_component::<CameraComponent>(
-            crate::scene_file_v3::component_names::CAMERA,
-        ) {
-            let _ = world.insert_one(entity, c);
-        }
-        if let Some(Ok(f)) = record.get_component::<FogVolumeComponent>(
-            crate::scene_file_v3::component_names::FOG_VOLUME,
-        ) {
-            let _ = world.insert_one(entity, f);
+        // All components via registry (engine + gameplay, uniform path).
+        for (comp_name, ron_str) in &record.components {
+            if let Some(entry) = registry.component_entry(comp_name) {
+                let _ = (entry.deserialize_insert)(world, entity, ron_str);
+            }
         }
     }
 

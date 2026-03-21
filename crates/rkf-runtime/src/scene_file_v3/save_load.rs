@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use uuid::Uuid;
 
-use super::types::{component_names, EntityRecord, SceneFileV3};
+use super::types::{EntityRecord, SceneFileV3};
 
 /// Preserve unknown components that don't match any registered type.
 ///
@@ -29,7 +29,7 @@ pub fn save_scene(
     registry: &crate::behavior::GameplayRegistry,
 ) -> SceneFileV3 {
     use crate::behavior::StableId;
-    use crate::components::*;
+    use crate::components::Parent;
 
     let mut scene = SceneFileV3::new();
 
@@ -52,23 +52,6 @@ pub fn save_scene(
             }
         }
 
-        // Engine components
-        if let Ok(t) = ecs.get::<&Transform>(hecs_entity) {
-            let _ = record.insert_component(component_names::TRANSFORM, &*t);
-        }
-        if let Ok(m) = ecs.get::<&EditorMetadata>(hecs_entity) {
-            let _ = record.insert_component(component_names::EDITOR_METADATA, &*m);
-        }
-        if let Ok(s) = ecs.get::<&SdfTree>(hecs_entity) {
-            let _ = record.insert_component(component_names::SDF_TREE, &*s);
-        }
-        if let Ok(c) = ecs.get::<&CameraComponent>(hecs_entity) {
-            let _ = record.insert_component(component_names::CAMERA, &*c);
-        }
-        if let Ok(f) = ecs.get::<&FogVolumeComponent>(hecs_entity) {
-            let _ = record.insert_component(component_names::FOG_VOLUME, &*f);
-        }
-
         // Re-emit unknown components
         if let Ok(unknown) = ecs.get::<&UnknownComponents>(hecs_entity) {
             for (name, ron_str) in &unknown.data {
@@ -76,9 +59,7 @@ pub fn save_scene(
             }
         }
 
-        // All registered components via registry ComponentEntry iteration.
-        // Engine components manually serialized above are already in the record
-        // and will be skipped by the contains_key check below.
+        // All components via registry ComponentEntry (engine + gameplay, uniform path).
         for entry in registry.component_entries() {
             if record.components.contains_key(entry.name) {
                 continue;
@@ -108,9 +89,9 @@ pub fn load_scene(
     registry: &crate::behavior::GameplayRegistry,
 ) {
     use crate::behavior::StableId;
-    use crate::components::*;
+    use crate::components::Parent;
 
-    // Phase 1: Create entities and deserialize components (except Parent).
+    // Phase 1: Create entities and deserialize all components (except Parent).
     let mut uuid_to_hecs: HashMap<Uuid, hecs::Entity> = HashMap::new();
 
     for record in &scene.entities {
@@ -118,50 +99,19 @@ pub fn load_scene(
         stable_index.insert(record.stable_id, hecs_entity);
         uuid_to_hecs.insert(record.stable_id, hecs_entity);
 
-        // Engine components
-        if let Some(Ok(t)) = record.get_component::<Transform>(component_names::TRANSFORM) {
-            let _ = ecs.insert_one(hecs_entity, t);
-        }
-        if let Some(Ok(m)) = record.get_component::<EditorMetadata>(component_names::EDITOR_METADATA) {
-            let _ = ecs.insert_one(hecs_entity, m);
-        }
-        if let Some(Ok(s)) = record.get_component::<SdfTree>(component_names::SDF_TREE) {
-            let _ = ecs.insert_one(hecs_entity, s);
-        }
-        if let Some(Ok(c)) = record.get_component::<CameraComponent>(component_names::CAMERA) {
-            let _ = ecs.insert_one(hecs_entity, c);
-        }
-        if let Some(Ok(f)) = record.get_component::<FogVolumeComponent>(component_names::FOG_VOLUME) {
-            let _ = ecs.insert_one(hecs_entity, f);
-        }
-
-        // Gameplay components via registry ComponentEntry deserialization,
-        // and collect truly unknown components.
-        let known_names: &[&str] = &[
-            component_names::TRANSFORM,
-            component_names::CAMERA,
-            component_names::EDITOR_METADATA,
-            component_names::SDF_TREE,
-            component_names::FOG_VOLUME,
-        ];
+        // All components via registry (engine + gameplay, uniform path).
         let mut unknown: HashMap<String, String> = HashMap::new();
         for (comp_name, ron_str) in &record.components {
-            // Skip engine components (already deserialized above)
-            if known_names.contains(&comp_name.as_str()) {
-                continue;
-            }
-            // Try gameplay registry
             if let Some(entry) = registry.component_entry(comp_name) {
                 if let Err(e) = (entry.deserialize_insert)(ecs, hecs_entity, ron_str) {
                     eprintln!(
-                        "warning: failed to deserialize gameplay component '{}' on entity {}: {}",
+                        "warning: failed to deserialize component '{}' on entity {}: {}",
                         comp_name, record.stable_id, e
                     );
-                    // Preserve as unknown so data isn't lost
                     unknown.insert(comp_name.clone(), ron_str.clone());
                 }
             } else {
-                // Not in registry -- preserve as unknown
+                // Not in registry — preserve as unknown so data isn't lost
                 unknown.insert(comp_name.clone(), ron_str.clone());
             }
         }

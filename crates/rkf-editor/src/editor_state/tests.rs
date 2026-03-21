@@ -3,7 +3,7 @@
 use super::*;
 use glam::{Quat, Vec3};
 use rkf_runtime::scene_file_v3::{
-    EntityRecord, SceneFileV3, component_names, serialize_scene_v3,
+    EntityRecord, SceneFileV3, serialize_scene_v3,
 };
 
 fn write_test_scene_v3(path: &str) {
@@ -13,7 +13,7 @@ fn write_test_scene_v3(path: &str) {
     let id1 = rkf_runtime::behavior::StableId::new();
     let mut e1 = EntityRecord::new(id1.uuid());
     e1.insert_component(
-        component_names::TRANSFORM,
+        "Transform",
         &rkf_runtime::components::Transform {
             position: rkf_core::WorldPosition::new(glam::IVec3::ZERO, Vec3::new(0.0, -0.5, 0.0)),
             rotation: Quat::IDENTITY,
@@ -21,7 +21,7 @@ fn write_test_scene_v3(path: &str) {
         },
     ).unwrap();
     e1.insert_component(
-        component_names::EDITOR_METADATA,
+        "EditorMetadata",
         &rkf_runtime::components::EditorMetadata {
             name: "Ground".to_string(),
             tags: vec![],
@@ -29,7 +29,7 @@ fn write_test_scene_v3(path: &str) {
         },
     ).unwrap();
     e1.insert_component(
-        component_names::SDF_TREE,
+        "SdfTree",
         &rkf_runtime::components::SdfTree {
             root: rkf_core::scene_node::SceneNode::new("procedural://ground"),
             asset_path: None,
@@ -43,7 +43,7 @@ fn write_test_scene_v3(path: &str) {
     let mut e2 = EntityRecord::new(id2.uuid());
     e2.parent = Some(id1.uuid());
     e2.insert_component(
-        component_names::TRANSFORM,
+        "Transform",
         &rkf_runtime::components::Transform {
             position: rkf_core::WorldPosition::new(glam::IVec3::ZERO, Vec3::new(1.0, 2.0, 3.0)),
             rotation: Quat::from_rotation_y(1.0),
@@ -51,7 +51,7 @@ fn write_test_scene_v3(path: &str) {
         },
     ).unwrap();
     e2.insert_component(
-        component_names::EDITOR_METADATA,
+        "EditorMetadata",
         &rkf_runtime::components::EditorMetadata {
             name: "Child".to_string(),
             tags: vec![],
@@ -59,7 +59,7 @@ fn write_test_scene_v3(path: &str) {
         },
     ).unwrap();
     e2.insert_component(
-        component_names::SDF_TREE,
+        "SdfTree",
         &rkf_runtime::components::SdfTree {
             root: rkf_core::scene_node::SceneNode::new("procedural://pillar"),
             asset_path: None,
@@ -158,7 +158,7 @@ fn test_save_roundtrip_preserves_entities() {
     // Check entity metadata
     let ground = saved.entities.iter().find(|e| {
         e.get_component::<rkf_runtime::components::EditorMetadata>(
-            component_names::EDITOR_METADATA,
+            "EditorMetadata",
         )
         .and_then(|r| r.ok())
         .map(|m| m.name == "Ground")

@@ -7,7 +7,6 @@
 use std::path::Path;
 
 use super::dylib_loader::{DylibError, DylibLoader};
-use super::engine_components::ENGINE_COMPONENT_NAMES;
 use super::registry::GameplayRegistry;
 
 // ─── Error type ──────────────────────────────────────────────────────────────
@@ -70,7 +69,7 @@ pub(crate) fn serialize_gameplay_components(
     let mut saved = Vec::new();
     for entry in registry.component_entries() {
         // Skip engine components — they survive the reload.
-        if ENGINE_COMPONENT_NAMES.contains(&entry.name) {
+        if entry.engine {
             continue;
         }
         // Iterate all entities and check if they have this component.
@@ -100,7 +99,7 @@ pub fn remove_gameplay_components(
     // Collect entities per component first to avoid borrow issues.
     let mut to_remove: Vec<(&'static str, Vec<hecs::Entity>)> = Vec::new();
     for entry in registry.component_entries() {
-        if ENGINE_COMPONENT_NAMES.contains(&entry.name) {
+        if entry.engine {
             continue;
         }
         let entities: Vec<hecs::Entity> = world
@@ -214,7 +213,7 @@ pub fn hot_reload(
         DylibLoader::load(new_path).map_err(HotReloadError::LoadFailed)?;
 
     // 5. Clear gameplay entries from registry (keep engine entries).
-    registry.clear_gameplay(ENGINE_COMPONENT_NAMES);
+    registry.clear_gameplay();
 
     // 6. Register new dylib's components and systems.
     new_loader
@@ -240,7 +239,7 @@ pub fn hot_reload(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::behavior::engine_components::{engine_register, ENGINE_COMPONENT_NAMES};
+    use crate::behavior::engine_components::engine_register;
     use crate::behavior::registry::{ComponentEntry, FieldMeta, FieldType, GameplayRegistry};
     use crate::components::Transform;
 
@@ -266,6 +265,7 @@ mod tests {
         }];
         ComponentEntry {
             name: "MockHealth",
+            engine: false,
             serialize: |world, entity| {
                 world
                     .get::<&MockHealth>(entity)
@@ -307,6 +307,7 @@ mod tests {
         }];
         ComponentEntry {
             name: "MockArmor",
+            engine: false,
             serialize: |world, entity| {
                 world
                     .get::<&MockArmor>(entity)
@@ -356,7 +357,7 @@ mod tests {
         assert!(world.get::<&Transform>(entity).is_ok());
 
         // Re-register (simulating new dylib load).
-        registry.clear_gameplay(ENGINE_COMPONENT_NAMES);
+        registry.clear_gameplay();
         registry.register_component(mock_health_entry()).unwrap();
 
         // Restore.
@@ -401,7 +402,7 @@ mod tests {
         assert_eq!(saved.len(), 1);
 
         // Now clear registry and DON'T re-register MockHealth.
-        registry.clear_gameplay(ENGINE_COMPONENT_NAMES);
+        registry.clear_gameplay();
 
         // Restore — MockHealth is unknown, should skip gracefully.
         let (restored, failed) = restore_gameplay_components(&mut world, &registry, &saved);
@@ -443,7 +444,7 @@ mod tests {
         assert!(!world.get::<&MockArmor>(e2).is_ok());
 
         // Re-register only MockHealth (not MockArmor) — simulates component removal.
-        registry.clear_gameplay(ENGINE_COMPONENT_NAMES);
+        registry.clear_gameplay();
         registry.register_component(mock_health_entry()).unwrap();
 
         // Restore.
@@ -470,16 +471,17 @@ mod tests {
         let mut registry = GameplayRegistry::new();
         engine_register(&mut registry);
         registry.register_component(mock_health_entry()).unwrap();
-        assert_eq!(registry.component_count(), 7); // 6 engine + 1 gameplay
+        assert_eq!(registry.component_count(), 8); // 7 engine + 1 gameplay
 
-        registry.clear_gameplay(ENGINE_COMPONENT_NAMES);
-        assert_eq!(registry.component_count(), 6); // Only engine components remain
+        registry.clear_gameplay();
+        assert_eq!(registry.component_count(), 7); // Only engine components remain
         assert!(registry.has_component("Transform"));
         assert!(registry.has_component("CameraComponent"));
         assert!(registry.has_component("FogVolumeComponent"));
         assert!(registry.has_component("EditorMetadata"));
         assert!(registry.has_component("EnvironmentSettings"));
         assert!(registry.has_component("EditorCameraMarker"));
+        assert!(registry.has_component("SdfTree"));
         assert!(!registry.has_component("MockHealth"));
     }
 
@@ -498,10 +500,11 @@ mod tests {
         remove_gameplay_components(&mut world, &registry);
 
         // Re-register with a mock entry that always fails to deserialize.
-        registry.clear_gameplay(ENGINE_COMPONENT_NAMES);
+        registry.clear_gameplay();
         registry
             .register_component(ComponentEntry {
                 name: "MockHealth",
+            engine: false,
                 serialize: |_, _| None,
                 deserialize_insert: |_, _, _| Err("intentional failure".to_string()),
                 has: |_, _| false,

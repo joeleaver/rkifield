@@ -36,11 +36,11 @@ fn scene_with_entities_roundtrip() {
 
     let mut e1 = EntityRecord::new(id1);
     e1.insert_component(
-        component_names::TRANSFORM,
+        "Transform",
         &crate::components::Transform::default(),
     ).unwrap();
     e1.insert_component(
-        component_names::EDITOR_METADATA,
+        "EditorMetadata",
         &crate::components::EditorMetadata {
             name: "Guard".to_string(),
             tags: vec!["npc".to_string()],
@@ -51,7 +51,7 @@ fn scene_with_entities_roundtrip() {
     let mut e2 = EntityRecord::new(id2);
     e2.parent = Some(id1);
     e2.insert_component(
-        component_names::CAMERA,
+        "CameraComponent",
         &crate::components::CameraComponent {
             label: "MainCam".to_string(),
             fov_degrees: 75.0,
@@ -73,14 +73,14 @@ fn scene_with_entities_roundtrip() {
 
     // Verify component data survived
     let meta: crate::components::EditorMetadata = scene2.entities[0]
-        .get_component(component_names::EDITOR_METADATA)
+        .get_component("EditorMetadata")
         .unwrap()
         .unwrap();
     assert_eq!(meta.name, "Guard");
     assert_eq!(meta.tags, vec!["npc"]);
 
     let cam: crate::components::CameraComponent = scene2.entities[1]
-        .get_component(component_names::CAMERA)
+        .get_component("CameraComponent")
         .unwrap()
         .unwrap();
     assert_eq!(cam.label, "MainCam");
@@ -99,9 +99,9 @@ fn sdf_tree_component_roundtrip() {
             glam::Vec3::new(2.0, 1.0, 3.0),
         ),
     };
-    record.insert_component(component_names::SDF_TREE, &tree).unwrap();
+    record.insert_component("SdfTree", &tree).unwrap();
 
-    let ron_str = &record.components[component_names::SDF_TREE];
+    let ron_str = &record.components["SdfTree"];
     let tree2: crate::components::SdfTree = ron::from_str(ron_str).unwrap();
     assert_eq!(tree2.asset_path, Some("models/hero.rkf".to_string()));
     assert_eq!(tree2.aabb.min, glam::Vec3::new(-2.0, -1.0, -3.0));
@@ -129,9 +129,9 @@ fn sdf_tree_analytical_primitive_roundtrip() {
     };
 
     let mut record = EntityRecord::new(Uuid::from_u128(999));
-    record.insert_component(component_names::SDF_TREE, &tree).unwrap();
+    record.insert_component("SdfTree", &tree).unwrap();
 
-    let ron_str = &record.components[component_names::SDF_TREE];
+    let ron_str = &record.components["SdfTree"];
     let tree2: crate::components::SdfTree = ron::from_str(ron_str).unwrap();
     assert_eq!(tree2.asset_path, None);
     assert_eq!(tree2.aabb.min, glam::Vec3::splat(-0.5));
@@ -167,10 +167,10 @@ fn fog_volume_component_roundtrip() {
         phase_g: 0.4,
         half_extents: glam::Vec3::new(10.0, 20.0, 30.0),
     };
-    record.insert_component(component_names::FOG_VOLUME, &fog).unwrap();
+    record.insert_component("FogVolumeComponent", &fog).unwrap();
 
     let fog2: crate::components::FogVolumeComponent = record
-        .get_component(component_names::FOG_VOLUME)
+        .get_component("FogVolumeComponent")
         .unwrap()
         .unwrap();
     assert!((fog2.density - 0.7).abs() < 1e-6);
@@ -222,7 +222,8 @@ fn save_load_roundtrip() {
 
     let mut ecs = hecs::World::new();
     let mut stable_index = StableIdIndex::new();
-    let registry = GameplayRegistry::new();
+    let mut registry = GameplayRegistry::new();
+    crate::engine_register(&mut registry);
 
     let id1 = Uuid::from_u128(100);
     let id2 = Uuid::from_u128(200);
@@ -308,7 +309,8 @@ fn save_skips_entities_without_stable_id() {
 
     let mut ecs = hecs::World::new();
     let _stable_index = StableIdIndex::new();
-    let registry = GameplayRegistry::new();
+    let mut registry = GameplayRegistry::new();
+    crate::engine_register(&mut registry);
 
     // Entity without StableId -- should be skipped
     ecs.spawn((Transform::default(),));
@@ -333,7 +335,8 @@ fn unknown_components_survive_save_load() {
 
     let mut ecs = hecs::World::new();
     let mut stable_index = StableIdIndex::new();
-    let registry = GameplayRegistry::new();
+    let mut registry = GameplayRegistry::new();
+    crate::engine_register(&mut registry);
 
     let id = Uuid::from_u128(77);
     let e = ecs.spawn((
@@ -368,7 +371,8 @@ fn sdf_tree_asset_path_roundtrip_through_save_load() {
 
     let mut ecs = hecs::World::new();
     let mut stable_index = StableIdIndex::new();
-    let registry = GameplayRegistry::new();
+    let mut registry = GameplayRegistry::new();
+    crate::engine_register(&mut registry);
 
     let id = Uuid::from_u128(55);
     let e = ecs.spawn((

@@ -111,6 +111,9 @@ pub trait ComponentMeta {
 pub struct ComponentEntry {
     /// Stable string name (from `ComponentMeta::type_name()`).
     pub name: &'static str,
+    /// True for engine components (survive `clear_gameplay()` during hot-reload).
+    /// False for gameplay components defined in the dylib.
+    pub engine: bool,
     /// Serialize the component on `entity` to RON. Returns `None` if entity lacks this component.
     /// Entity references are remapped to StableId UUIDs.
     pub serialize: fn(&hecs::World, hecs::Entity) -> Option<String>,
@@ -268,10 +271,10 @@ impl GameplayRegistry {
     /// Remove all gameplay entries (keeping engine entries).
     ///
     /// Called during hot-reload before loading the new dylib.
-    /// Engine components (registered via `engine_register()`) are not removed.
-    /// Engine component names are defined in [`ENGINE_COMPONENT_NAMES`].
-    pub fn clear_gameplay(&mut self, engine_names: &[&str]) {
-        self.components.retain(|name, _| engine_names.contains(&name.as_str()));
+    /// Retains engine components (those with `engine: true`) and removes all
+    /// gameplay components whose function pointers will become invalid.
+    pub fn clear_gameplay(&mut self) {
+        self.components.retain(|_, entry| entry.engine);
         self.systems.clear();
     }
 
@@ -327,6 +330,7 @@ mod tests {
     fn dummy_entry(name: &'static str) -> ComponentEntry {
         ComponentEntry {
             name,
+            engine: false,
             serialize: |_, _| None,
             deserialize_insert: |_, _, _| Ok(()),
             remove: |_, _| {},
@@ -401,7 +405,7 @@ mod tests {
             fn_ptr: std::ptr::null(),
         });
 
-        reg.clear_gameplay(&[]);
+        reg.clear_gameplay();
         assert_eq!(reg.component_count(), 0);
         assert!(reg.system_list().is_empty());
     }

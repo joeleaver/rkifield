@@ -76,20 +76,6 @@ impl EntityRecord {
     }
 }
 
-/// Well-known engine component names used in v3 scene files.
-pub mod component_names {
-    /// Transform component.
-    pub const TRANSFORM: &str = "Transform";
-    /// Camera component.
-    pub const CAMERA: &str = "CameraComponent";
-    /// Editor metadata.
-    pub const EDITOR_METADATA: &str = "EditorMetadata";
-    /// SDF tree (object shape).
-    pub const SDF_TREE: &str = "SdfTree";
-    /// Fog volume.
-    pub const FOG_VOLUME: &str = "FogVolumeComponent";
-}
-
 /// Serialize a [`SceneFileV3`] to a RON string.
 pub fn serialize_scene_v3(scene: &SceneFileV3) -> Result<String, ron::Error> {
     ron::ser::to_string_pretty(scene, ron::ser::PrettyConfig::default())

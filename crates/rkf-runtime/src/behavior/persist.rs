@@ -508,8 +508,8 @@ mod tests {
     ];
 
     fn auto_health_entry() -> ComponentEntry {
-        ComponentEntry {
-            name: "AutoHealth",
+        ComponentEntry {            name: "AutoHealth",
+            engine: false,
             meta: &AUTO_HEALTH_META,
             serialize: |_, _| None,
             deserialize_insert: |_, _, _| Ok(()),
@@ -646,8 +646,8 @@ mod tests {
             },
         ];
 
-        let score_entry = ComponentEntry {
-            name: "Score",
+        let score_entry = ComponentEntry {            name: "Score",
+            engine: false,
             meta: &SCORE_META,
             serialize: |_, _| None,
             deserialize_insert: |_, _, _| Ok(()),
@@ -715,8 +715,8 @@ mod tests {
 
         let health_entry = auto_health_entry();
         // Create a dummy entry for a component the entity doesn't have
-        let absent_entry = ComponentEntry {
-            name: "Absent",
+        let absent_entry = ComponentEntry {            name: "Absent",
+            engine: false,
             meta: &[FieldMeta {
                 name: "x",
                 field_type: FieldType::Float,

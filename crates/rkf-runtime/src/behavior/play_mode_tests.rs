@@ -549,14 +549,14 @@ fn load_scene_empty_data_returns_empty() {
 
 #[test]
 fn load_scene_into_play_world_v3_data() {
-    use crate::scene_file_v3::{EntityRecord, SceneFileV3, component_names, serialize_scene_v3};
+    use crate::scene_file_v3::{EntityRecord, SceneFileV3, serialize_scene_v3};
 
     let mut scene = SceneFileV3::new();
     let id = uuid::Uuid::from_u128(101);
     let mut record = EntityRecord::new(id);
     record
         .insert_component(
-            component_names::TRANSFORM,
+            "Transform",
             &Transform {
                 position: WorldPosition::new(IVec3::ZERO, Vec3::new(1.0, 2.0, 3.0)),
                 rotation: Quat::IDENTITY,
@@ -566,7 +566,7 @@ fn load_scene_into_play_world_v3_data() {
         .unwrap();
     record
         .insert_component(
-            component_names::EDITOR_METADATA,
+            "EditorMetadata",
             &EditorMetadata {
                 name: "TestObj".to_string(),
                 tags: vec![],
@@ -579,7 +579,8 @@ fn load_scene_into_play_world_v3_data() {
     let ron_str = serialize_scene_v3(&scene).unwrap();
 
     let mut world = hecs::World::new();
-    let registry = GameplayRegistry::new();
+    let mut registry = GameplayRegistry::new();
+    crate::behavior::engine_components::engine_register(&mut registry);
     let result = load_scene_into_play_world(&mut world, ron_str.as_bytes(), &registry);
     assert!(result.is_ok());
 
@@ -620,13 +621,13 @@ fn load_scene_into_play_world_invalid_utf8() {
 #[test]
 fn loaded_scene_entities_unloadable() {
     // Load a scene, then unload it by scene name
-    use crate::scene_file_v3::{EntityRecord, SceneFileV3, component_names, serialize_scene_v3};
+    use crate::scene_file_v3::{EntityRecord, SceneFileV3, serialize_scene_v3};
 
     let mut scene = SceneFileV3::new();
     let mut record = EntityRecord::new(uuid::Uuid::from_u128(200));
     record
         .insert_component(
-            component_names::TRANSFORM,
+            "Transform",
             &Transform::default(),
         )
         .unwrap();
@@ -635,7 +636,8 @@ fn loaded_scene_entities_unloadable() {
     let ron_str = serialize_scene_v3(&scene).unwrap();
 
     let mut world = hecs::World::new();
-    let registry = GameplayRegistry::new();
+    let mut registry = GameplayRegistry::new();
+    crate::behavior::engine_components::engine_register(&mut registry);
     let spawned = load_scene_into_play_world(&mut world, ron_str.as_bytes(), &registry).unwrap();
     assert_eq!(spawned.len(), 1);
     assert!(world.contains(spawned[0]));
@@ -716,6 +718,7 @@ struct Health {
 fn registry_with_health() -> GameplayRegistry {
     let entry = ComponentEntry {
         name: "Health",
+            engine: false,
         serialize: |_, _| None,
         deserialize_insert: |_, _, _| Ok(()),
         remove: |_, _| {},

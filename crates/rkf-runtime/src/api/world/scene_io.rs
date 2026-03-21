@@ -62,7 +62,8 @@ impl World {
         self.ensure_stable_ids();
 
         let stable_index = self.build_stable_id_index();
-        let registry = GameplayRegistry::new();
+        let mut registry = GameplayRegistry::new();
+        crate::engine_register(&mut registry);
 
         let scene_v3 = scene_file_v3::save_scene(self.ecs_ref(), &stable_index, &registry);
         let ron_str = scene_file_v3::serialize_scene_v3(&scene_v3)
@@ -85,7 +86,8 @@ impl World {
         let scene_v3 = scene_file_v3::deserialize_scene_v3(&ron_str)
             .map_err(|e| WorldError::Parse(e.to_string()))?;
 
-        let registry = GameplayRegistry::new();
+        let mut registry = GameplayRegistry::new();
+        crate::engine_register(&mut registry);
         let mut stable_index = StableIdIndex::new();
 
         scene_file_v3::load_scene(&scene_v3, &mut self.ecs, &mut stable_index, &registry);

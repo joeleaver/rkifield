@@ -101,8 +101,8 @@ mod tests {
     // ─── ComponentEntry constructors ─────────────────────────────────────
 
     fn test_health_entry() -> ComponentEntry {
-        ComponentEntry {
-            name: "TestHealth",
+        ComponentEntry {            name: "TestHealth",
+            engine: false,
             meta: &TEST_HEALTH_FIELDS,
             serialize: |world, entity| {
                 world
@@ -155,8 +155,8 @@ mod tests {
     }
 
     fn test_counter_entry() -> ComponentEntry {
-        ComponentEntry {
-            name: "TestCounter",
+        ComponentEntry {            name: "TestCounter",
+            engine: false,
             meta: &TEST_COUNTER_FIELDS,
             serialize: |world, entity| {
                 world
@@ -207,8 +207,8 @@ mod tests {
     }
 
     fn test_door_entry() -> ComponentEntry {
-        ComponentEntry {
-            name: "TestDoor",
+        ComponentEntry {            name: "TestDoor",
+            engine: false,
             meta: &TEST_DOOR_FIELDS,
             serialize: |world, entity| {
                 world

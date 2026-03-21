@@ -448,7 +448,8 @@ impl EditorState {
         self.world.clear();
         self.respawn_editor_camera(saved_snap);
 
-        let registry = GameplayRegistry::new();
+        let mut registry = GameplayRegistry::new();
+        rkf_runtime::engine_register(&mut registry);
         let mut stable_index = StableIdIndex::new();
         scene_file_v3::load_scene(&scene_v3, self.world.ecs_mut(), &mut stable_index, &registry);
         self.world.rebuild_entity_tracking_from_ecs();
@@ -502,7 +503,8 @@ impl EditorState {
             }
         }
 
-        let registry = GameplayRegistry::new();
+        let mut registry = GameplayRegistry::new();
+        rkf_runtime::engine_register(&mut registry);
         let mut scene_v3 = scene_file_v3::save_scene(self.world.ecs_ref(), &stable_index, &registry);
 
         // Filter out internal entities — editor camera.

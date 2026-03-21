@@ -147,7 +147,7 @@ pub use behavior::{
     deserialize_blueprint, deserialize_entity, find_path, find_tagged, parent_of, root_of,
     serialize_blueprint, serialize_entity,
 };
-pub use behavior::engine_components::{engine_register, ENGINE_COMPONENT_NAMES};
+pub use behavior::engine_components::engine_register;
 pub use behavior::game_value::GameValue as BehaviorGameValue;
 pub use behavior::game_value::GameValueTypeError;
 pub use game_manager::{GameEvent, GameManager, GameState, GameValue};

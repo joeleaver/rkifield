@@ -838,9 +838,8 @@ fn load_game_dylib(
 ) -> Option<rkf_runtime::behavior::DylibLoader> {
     let mut reg = registry.lock().expect("registry lock");
 
-    // Clear old gameplay components (keep engine ones).
-    let engine_names = rkf_runtime::behavior::engine_components::ENGINE_COMPONENT_NAMES;
-    reg.clear_gameplay(engine_names);
+    // Clear old gameplay components (keep engine ones via `engine: true` flag).
+    reg.clear_gameplay();
 
     // Drop old loader before loading new one.
     drop(old_loader);

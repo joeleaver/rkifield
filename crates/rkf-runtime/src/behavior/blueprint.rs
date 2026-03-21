@@ -451,6 +451,7 @@ mod tests {
         registry
             .register_component(ComponentEntry {
                 name: "Health",
+            engine: false,
                 serialize: |_, _| Some("(current: 50.0, max: 100.0)".to_owned()),
                 deserialize_insert: |_, _, _| Ok(()),
                 remove: |_, _| {},
@@ -465,6 +466,7 @@ mod tests {
         registry
             .register_component(ComponentEntry {
                 name: "Transform",
+            engine: false,
                 serialize: |_, _| Some("(position: ..., rotation: ..., scale: ...)".to_owned()),
                 deserialize_insert: |_, _, _| Ok(()),
                 remove: |_, _| {},
@@ -479,6 +481,7 @@ mod tests {
         registry
             .register_component(ComponentEntry {
                 name: "StableId",
+            engine: false,
                 serialize: |_, _| Some("(uuid: \"abc\")".to_owned()),
                 deserialize_insert: |_, _, _| Ok(()),
                 remove: |_, _| {},

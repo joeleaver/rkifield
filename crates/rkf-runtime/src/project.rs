@@ -144,7 +144,7 @@ pub fn create_project(parent_dir: &Path, name: &str) -> Result<PathBuf> {
 
     // Create default scene (v3 format).
     {
-        use crate::scene_file_v3::{SceneFileV3, EntityRecord, component_names, serialize_scene_v3};
+        use crate::scene_file_v3::{SceneFileV3, EntityRecord, serialize_scene_v3};
         use crate::components::CameraComponent;
 
         let mut scene = SceneFileV3::new();
@@ -157,13 +157,13 @@ pub fn create_project(parent_dir: &Path, name: &str) -> Result<PathBuf> {
             pitch: -0.15,
             ..Default::default()
         };
-        let _ = cam_record.insert_component(component_names::CAMERA, &cam);
+        let _ = cam_record.insert_component("CameraComponent", &cam);
         let meta = crate::components::EditorMetadata {
             name: "Main Camera".to_string(),
             tags: Vec::new(),
             locked: false,
         };
-        let _ = cam_record.insert_component(component_names::EDITOR_METADATA, &meta);
+        let _ = cam_record.insert_component("EditorMetadata", &meta);
         let transform = crate::components::Transform {
             position: rkf_core::WorldPosition::new(
                 glam::IVec3::ZERO,
@@ -172,7 +172,7 @@ pub fn create_project(parent_dir: &Path, name: &str) -> Result<PathBuf> {
             rotation: glam::Quat::IDENTITY,
             scale: glam::Vec3::ONE,
         };
-        let _ = cam_record.insert_component(component_names::TRANSFORM, &transform);
+        let _ = cam_record.insert_component("Transform", &transform);
         scene.entities.push(cam_record);
 
         let ron_str = serialize_scene_v3(&scene)?;

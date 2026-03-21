@@ -1,26 +1,12 @@
 //! Uniform treatment verification — ensures engine components flow through the
 //! same code paths as gameplay components.
 //!
-//! These utilities verify that engine components (Transform, CameraComponent,
-//! FogVolumeComponent, EditorMetadata) are properly registered in the
-//! [`GameplayRegistry`] and work correctly with the inspector, edit pipeline,
-//! and field-level get/set.
+//! These utilities verify that engine components (those with `engine: true`) are
+//! properly registered in the [`GameplayRegistry`] and work correctly with the
+//! inspector, edit pipeline, and field-level get/set.
 
-use super::engine_components::ENGINE_COMPONENT_NAMES;
 use super::inspector::build_inspector_data;
 use super::registry::GameplayRegistry;
-
-/// Checks that all `ENGINE_COMPONENT_NAMES` are registered in the registry.
-///
-/// Returns a list of any engine component names that are missing from the
-/// registry. An empty list means all engine components are properly registered.
-pub fn verify_engine_components_in_registry(registry: &GameplayRegistry) -> Vec<String> {
-    ENGINE_COMPONENT_NAMES
-        .iter()
-        .filter(|name| !registry.has_component(name))
-        .map(|name| name.to_string())
-        .collect()
-}
 
 /// Verifies that `get_field` and `set_field` work for each registered engine
 /// component's fields.
@@ -35,14 +21,10 @@ pub fn verify_engine_component_fields(
 ) -> Vec<(String, String)> {
     let mut failures = Vec::new();
 
-    for &name in ENGINE_COMPONENT_NAMES {
-        let entry = match registry.component_entry(name) {
-            Some(e) => e,
-            None => {
-                failures.push((name.to_string(), "not registered".to_string()));
-                continue;
-            }
-        };
+    for entry in registry.component_entries() {
+        if !entry.engine {
+            continue;
+        }
 
         if !(entry.has)(world, entity) {
             continue; // Component not on entity — skip, not a failure.
@@ -54,7 +36,7 @@ pub fn verify_engine_component_fields(
                 Ok(v) => v,
                 Err(e) => {
                     failures.push((
-                        name.to_string(),
+                        entry.name.to_string(),
                         format!("get_field('{}') failed: {}", field_meta.name, e),
                     ));
                     continue;
@@ -64,7 +46,7 @@ pub fn verify_engine_component_fields(
             // Write the same value back (roundtrip).
             if let Err(e) = (entry.set_field)(world, entity, field_meta.name, value) {
                 failures.push((
-                    name.to_string(),
+                    entry.name.to_string(),
                     format!("set_field('{}') failed: {}", field_meta.name, e),
                 ));
             }
@@ -86,18 +68,17 @@ pub fn verify_inspector_renders_engine_components(
 ) -> bool {
     let data = build_inspector_data(world, entity, registry);
 
-    for &name in ENGINE_COMPONENT_NAMES {
-        let entry = match registry.component_entry(name) {
-            Some(e) => e,
-            None => continue,
-        };
+    for entry in registry.component_entries() {
+        if !entry.engine {
+            continue;
+        }
 
         if !(entry.has)(world, entity) {
             continue; // Not on entity — skip.
         }
 
         // Verify this component appears in inspector data.
-        let found = data.components.iter().any(|c| c.name == name);
+        let found = data.components.iter().any(|c| c.name == entry.name);
         if !found {
             return false;
         }
@@ -120,17 +101,6 @@ mod tests {
         let mut reg = GameplayRegistry::new();
         engine_register(&mut reg);
         reg
-    }
-
-    #[test]
-    fn all_engine_components_registered() {
-        let registry = test_registry();
-        let missing = verify_engine_components_in_registry(&registry);
-        assert!(
-            missing.is_empty(),
-            "missing engine components: {:?}",
-            missing
-        );
     }
 
     #[test]
@@ -190,14 +160,6 @@ mod tests {
         assert!(verify_inspector_renders_engine_components(
             &world, entity, &registry
         ));
-    }
-
-    #[test]
-    fn missing_components_detected() {
-        // Empty registry should report all engine components as missing.
-        let registry = GameplayRegistry::new();
-        let missing = verify_engine_components_in_registry(&registry);
-        assert_eq!(missing.len(), ENGINE_COMPONENT_NAMES.len());
     }
 
     #[test]

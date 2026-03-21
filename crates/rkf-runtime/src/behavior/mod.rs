@@ -112,7 +112,7 @@ pub use engine_access::{EngineAccess, TransformUpdate, WorldEngineAccess};
 pub use system_context::SystemContext;
 pub use tool_routing::ToolEditMapping;
 pub use uniform_treatment::{
-    verify_engine_components_in_registry, verify_engine_component_fields,
+    verify_engine_component_fields,
     verify_inspector_renders_engine_components,
 };
 pub use blueprint::{save_entity_as_blueprint, spawn_from_blueprint};
