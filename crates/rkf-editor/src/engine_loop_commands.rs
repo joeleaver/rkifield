@@ -121,6 +121,15 @@ pub(crate) fn apply_editor_command(es: &mut EditorState, cmd: crate::editor_comm
         SpawnPrimitive { name } => {
             es.pending_spawn = Some(name);
         }
+        SpawnCamera => {
+            es.pending_spawn_camera = true;
+        }
+        SpawnPointLight => {
+            es.pending_spawn_point_light = true;
+        }
+        SpawnSpotLight => {
+            es.pending_spawn_spot_light = true;
+        }
         DeleteSelected => {
             es.pending_delete = true;
         }

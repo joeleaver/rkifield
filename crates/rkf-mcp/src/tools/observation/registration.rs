@@ -520,6 +520,25 @@ pub fn register_observation_tools(registry: &mut ToolRegistry) {
         Arc::new(CameraSnapToHandler),
     );
 
+    // --- Light entity tools ---
+
+    registry.register(
+        ToolDefinition {
+            name: "light_spawn".to_string(),
+            description: "Spawn a point or spot light at a position".to_string(),
+            category: ToolCategory::Mutation,
+            parameters: vec![
+                ParameterDef { name: "light_type".to_string(), description: "Light type: 'point' or 'spot'".to_string(), param_type: ParamType::String, required: true, default: None },
+                ParameterDef { name: "x".to_string(), description: "X position".to_string(), param_type: ParamType::Number, required: false, default: Some(serde_json::json!(0.0)) },
+                ParameterDef { name: "y".to_string(), description: "Y position".to_string(), param_type: ParamType::Number, required: false, default: Some(serde_json::json!(0.0)) },
+                ParameterDef { name: "z".to_string(), description: "Z position".to_string(), param_type: ParamType::Number, required: false, default: Some(serde_json::json!(0.0)) },
+            ],
+            return_type: ReturnTypeDef { description: "Light ID of the spawned light".to_string(), return_type: ParamType::Object },
+            mode: ToolMode::Editor,
+        },
+        Arc::new(LightSpawnHandler),
+    );
+
     // --- Diagnostic tools ---
 
     registry.register(

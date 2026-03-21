@@ -17,7 +17,6 @@ pub const MANDATORY_COMPONENTS: &[&str] = &["Transform", "EditorMetadata"];
 /// The generic component inspector should hide these to avoid duplication.
 pub const ENGINE_UI_COMPONENTS: &[&str] = &[
     "Transform", "EditorMetadata", "SdfTree",
-    "EnvironmentSettings",
     "EditorCameraMarker",
 ];
 

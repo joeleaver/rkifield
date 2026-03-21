@@ -168,6 +168,19 @@ pub fn TitleBar() -> NodeHandle {
             }
         }));
     }
+    spawn_menu = spawn_menu.separator()
+        .item(MenuItem::new("Camera").on_click({
+            let store = store.clone();
+            move || { store.dispatch(EditorCommand::SpawnCamera); }
+        }))
+        .item(MenuItem::new("Point Light").on_click({
+            let store = store.clone();
+            move || { store.dispatch(EditorCommand::SpawnPointLight); }
+        }))
+        .item(MenuItem::new("Spot Light").on_click({
+            let store = store.clone();
+            move || { store.dispatch(EditorCommand::SpawnSpotLight); }
+        }));
 
     let edit_menu = Menu::new()
         .item(MenuItem::new("Undo").shortcut("Ctrl+Z").on_click({

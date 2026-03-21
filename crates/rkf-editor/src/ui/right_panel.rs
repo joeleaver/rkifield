@@ -23,7 +23,7 @@ use super::{SECTION_STYLE, VALUE_STYLE};
 #[component]
 pub fn PropertiesPanel() -> NodeHandle {
     rsx! {
-        div { style: "display:flex;flex-direction:column;",
+        div { style: "display:flex;flex-direction:column;min-height:0;flex:1;overflow-y:auto;",
             EntityContent {}
         }
     }
@@ -37,7 +37,7 @@ pub fn AssetPropertiesPanel() -> NodeHandle {
     let preview_handle = use_context::<PreviewSurfaceHandle>();
 
     rsx! {
-        div { style: "display:flex;flex-direction:column;",
+        div { style: "display:flex;flex-direction:column;min-height:0;flex:1;overflow-y:auto;",
             // Material preview — visible when a material is selected.
             RenderSurface { surface: Some(preview_handle.0.clone()),
                 style: {

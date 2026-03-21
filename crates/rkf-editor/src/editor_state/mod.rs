@@ -518,6 +518,12 @@ pub struct EditorState {
     pub pending_save_path: Option<String>,
     /// Set by Edit > Spawn, consumed by the event loop. Value is the primitive name.
     pub pending_spawn: Option<String>,
+    /// Set by Spawn > Camera, consumed by the event loop.
+    pub pending_spawn_camera: bool,
+    /// Set by Spawn > Point Light, consumed by the event loop.
+    pub pending_spawn_point_light: bool,
+    /// Set by Spawn > Spot Light, consumed by the event loop.
+    pub pending_spawn_spot_light: bool,
     /// Set by Delete key, consumed by the event loop.
     pub pending_delete: bool,
     /// Set by Ctrl+D, consumed by the event loop.

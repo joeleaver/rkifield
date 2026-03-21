@@ -295,6 +295,21 @@ pub fn standard_tool_definitions() -> Value {
                 "required": ["entity_id"]
             }
         },
+        // --- Light entity tools ---
+        {
+            "name": "light_spawn",
+            "description": "Spawn a point or spot light at a position",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "light_type": { "type": "string", "description": "Light type: 'point' or 'spot'" },
+                    "x": { "type": "number", "description": "X position", "default": 0.0 },
+                    "y": { "type": "number", "description": "Y position", "default": 0.0 },
+                    "z": { "type": "number", "description": "Z position", "default": 0.0 }
+                },
+                "required": ["light_type"]
+            }
+        },
         // --- Diagnostic tools ---
         {
             "name": "voxel_slice",
@@ -658,6 +673,22 @@ pub fn dispatch_tool_call(
                 Err(e) => Ok(tool_err_json(&e)),
             }
         }
+        // --- Light entity tools ---
+        "light_spawn" => {
+            let light_type = match args.get("light_type").and_then(|v| v.as_str()) {
+                Some(t) => t,
+                None => return Ok(tool_err_json("light_type is required ('point' or 'spot')")),
+            };
+            let position = [
+                args.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+                args.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+                args.get("z").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+            ];
+            match api.light_spawn(light_type, position) {
+                Ok(id) => Ok(tool_ok_json(serde_json::json!({"status": "ok", "light_id": id}))),
+                Err(e) => Ok(tool_err_json(&e)),
+            }
+        }
         // --- Diagnostic tools ---
         "voxel_slice" => {
             let object_id = match args.get("object_id").and_then(|v| v.as_u64()) {
@@ -807,7 +838,7 @@ mod tests {
     fn register_all_observation_tools() {
         let mut registry = ToolRegistry::new();
         register_observation_tools(&mut registry);
-        assert_eq!(registry.len(), 34);
+        assert_eq!(registry.len(), 35);
     }
 
     #[test]
@@ -824,7 +855,7 @@ mod tests {
         let mut registry = ToolRegistry::new();
         register_observation_tools(&mut registry);
         let tools = registry.list_tools(ToolMode::Editor);
-        assert_eq!(tools.len(), 34);
+        assert_eq!(tools.len(), 35);
     }
 
     #[test]

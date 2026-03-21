@@ -76,13 +76,10 @@ pub fn save_scene(
             }
         }
 
-        // Gameplay components via registry ComponentEntry iteration
+        // All registered components via registry ComponentEntry iteration.
+        // Engine components manually serialized above are already in the record
+        // and will be skipped by the contains_key check below.
         for entry in registry.component_entries() {
-            // Skip engine components -- already serialized above
-            if crate::behavior::engine_components::ENGINE_COMPONENT_NAMES.contains(&entry.name) {
-                continue;
-            }
-            // Skip if already present (e.g. from UnknownComponents re-emit)
             if record.components.contains_key(entry.name) {
                 continue;
             }

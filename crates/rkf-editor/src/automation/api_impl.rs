@@ -812,6 +812,39 @@ impl AutomationApi for EditorAutomationApi {
         Ok(())
     }
 
+    fn light_spawn(
+        &self,
+        light_type: &str,
+        position: [f32; 3],
+    ) -> Result<u64, String> {
+        let lt = match light_type {
+            "point" => crate::light_editor::SceneLightType::Point,
+            "spot" => crate::light_editor::SceneLightType::Spot,
+            _ => return Err(format!("unknown light type '{}', expected 'point' or 'spot'", light_type)),
+        };
+        let mut es = self
+            .editor_state
+            .lock()
+            .map_err(|e| format!("lock poisoned: {e}"))?;
+
+        let pos = glam::Vec3::new(position[0], position[1], position[2]);
+        let light = crate::light_editor::SceneLight {
+            id: 0, // assigned by add_light_full
+            light_type: lt,
+            position: pos,
+            direction: glam::Vec3::NEG_Y,
+            color: glam::Vec3::ONE,
+            intensity: 1.0,
+            range: if lt == crate::light_editor::SceneLightType::Spot { 15.0 } else { 10.0 },
+            spot_inner_angle: if lt == crate::light_editor::SceneLightType::Spot { 0.3 } else { 0.0 },
+            spot_outer_angle: if lt == crate::light_editor::SceneLightType::Spot { 0.5 } else { 0.0 },
+            cast_shadows: true,
+            cookie_path: None,
+        };
+        let id = es.light_editor.add_light_full(light);
+        Ok(id)
+    }
+
     fn env_override(&self, property: &str, value: f32) -> Result<(), String> {
         self.env_override_impl(property, value)
     }

@@ -3,6 +3,8 @@
 //! Reads from `UiSignals::inspector_data` (pushed by the engine thread) and
 //! sends `EditorCommand` variants for field edits, component add/remove.
 
+use std::collections::HashMap;
+
 use rinch::prelude::*;
 
 use crate::editor_command::EditorCommand;
@@ -10,6 +12,28 @@ use crate::editor_state::{ComponentSnapshot, FieldSnapshot, UiSignals};
 use crate::CommandSender;
 
 use super::{DIVIDER_STYLE, LABEL_STYLE};
+
+// TODO: If more per-inspector UI state accumulates (scroll position, field focus,
+// edit-in-progress values, etc.), extract a `ComponentInspectorStore` struct with
+// a keyed map of per-component state. For now, collapse state is the only case.
+
+/// Persistent collapse signals keyed by path.
+/// Lives in the ComponentInspector scope (outside the reactive for-loop)
+/// so signals survive data rebuilds.
+type CollapseMap = Signal<HashMap<String, Signal<bool>>>;
+
+/// Get or create a collapse signal for the given path.
+/// Defaults to expanded (false = not collapsed).
+/// Uses untracked access to avoid reactive cycles during render.
+fn get_collapse_signal(map: CollapseMap, path: &str) -> Signal<bool> {
+    let current = rinch::core::untracked(|| map.get());
+    if let Some(sig) = current.get(path) {
+        return *sig;
+    }
+    let sig = Signal::new(false);
+    rinch::core::untracked(|| map.update(|m| { m.insert(path.to_string(), sig); }));
+    sig
+}
 
 // ── Style constants ──────────────────────────────────────────────────────
 
@@ -63,6 +87,8 @@ pub fn ComponentInspector() -> NodeHandle {
 
     // Signal to control add-component dropdown visibility.
     let dropdown_open = Signal::new(false);
+    // Persistent collapse signals — survives inspector data rebuilds.
+    let collapse_map: CollapseMap = Signal::new(HashMap::new());
 
     rsx! {
         div { style: "display:flex;flex-direction:column;",
@@ -95,7 +121,7 @@ pub fn ComponentInspector() -> NodeHandle {
                     for comp in get_components(ui, eid) {
                         div {
                             key: comp.name.clone(),
-                            {build_component_section(__scope, &comp, eid, cmd.clone())}
+                            {build_component_section(__scope, &comp, eid, cmd.clone(), collapse_map)}
                         }
                     }
                 }
@@ -179,9 +205,10 @@ fn build_component_section(
     comp: &ComponentSnapshot,
     entity_id: uuid::Uuid,
     cmd: CommandSender,
+    collapse_map: CollapseMap,
 ) -> NodeHandle {
-    let collapsed = Signal::new(false);
     let comp_name_str = comp.name.clone();
+    let collapsed = get_collapse_signal(collapse_map, &comp_name_str);
     let removable = comp.removable;
     let comp_name_display = comp.name.clone();
 
@@ -194,7 +221,7 @@ fn build_component_section(
 
             // Collapse triangle.
             span {
-                style: {|| if collapsed.get() {
+                style: {move || if collapsed.get() {
                     "font-size:8px;color:var(--rinch-color-dimmed);"
                 } else {
                     "font-size:8px;color:var(--rinch-color-dimmed);\
@@ -233,7 +260,7 @@ fn build_component_section(
     // Build fields container.
     let fields_container = rsx! {
         div {
-            style: {|| if collapsed.get() {
+            style: {move || if collapsed.get() {
                 "display:none;"
             } else {
                 "display:flex;flex-direction:column;"
@@ -242,7 +269,7 @@ fn build_component_section(
     };
 
     for field in &comp.fields {
-        let row = build_field_row(__scope, field, entity_id, &comp_name_str, cmd.clone());
+        let row = build_field_row(__scope, field, entity_id, &comp_name_str, cmd.clone(), collapse_map);
         fields_container.append_child(&row);
     }
 
@@ -264,6 +291,7 @@ fn build_field_row(
     entity_id: uuid::Uuid,
     component_name: &str,
     cmd: CommandSender,
+    collapse_map: CollapseMap,
 ) -> NodeHandle {
     use rkf_runtime::behavior::registry::FieldType;
 
@@ -291,7 +319,7 @@ fn build_field_row(
         }
         FieldType::Struct => {
             return build_struct_editor(
-                __scope, field, entity_id, component_name, &field.name, cmd,
+                __scope, field, entity_id, component_name, &field.name, cmd, collapse_map,
             );
         }
         FieldType::AssetRef => {
@@ -612,8 +640,10 @@ fn build_struct_editor(
     component_name: &str,
     field_path: &str,
     cmd: CommandSender,
+    collapse_map: CollapseMap,
 ) -> NodeHandle {
-    let collapsed = Signal::new(false);
+    let collapse_key = format!("{component_name}/{field_path}");
+    let collapsed = get_collapse_signal(collapse_map, &collapse_key);
     let field_display = field.name.clone();
 
     let section = rsx! {
@@ -624,7 +654,7 @@ fn build_struct_editor(
                 onclick: move || collapsed.update(|v| *v = !*v),
 
                 span {
-                    style: {|| if collapsed.get() {
+                    style: {move || if collapsed.get() {
                         "font-size:8px;color:var(--rinch-color-dimmed);"
                     } else {
                         "font-size:8px;color:var(--rinch-color-dimmed);\
@@ -644,7 +674,7 @@ fn build_struct_editor(
     // Sub-fields container (hidden when collapsed).
     let fields_container = rsx! {
         div {
-            style: {|| if collapsed.get() {
+            style: {move || if collapsed.get() {
                 "display:none;"
             } else {
                 "display:flex;flex-direction:column;margin-left:12px;\
@@ -666,6 +696,7 @@ fn build_struct_editor(
                     component_name,
                     &dotted_path,
                     cmd.clone(),
+                    collapse_map,
                 );
                 fields_container.append_child(&nested);
             } else {

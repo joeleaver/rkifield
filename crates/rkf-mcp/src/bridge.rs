@@ -625,6 +625,27 @@ impl AutomationApi for BridgeAutomationApi {
         .map_err(|e| e.to_string())
     }
 
+    // --- Light entity tools (forwarded over IPC) -------------------------------
+
+    fn light_spawn(
+        &self,
+        light_type: &str,
+        position: [f32; 3],
+    ) -> Result<u64, String> {
+        let result = self
+            .call_tool(
+                "light_spawn",
+                serde_json::json!({
+                    "light_type": light_type,
+                    "x": position[0], "y": position[1], "z": position[2],
+                }),
+            )
+            .map_err(|e| e.to_string())?;
+        result["light_id"]
+            .as_u64()
+            .ok_or_else(|| "missing light_id in response".to_string())
+    }
+
     // --- Diagnostic tools (forwarded over IPC) -------------------------------
 
     fn voxel_slice(

@@ -27,6 +27,9 @@ pub enum EditorCommand {
 
     // ── Scene mutations ──────────────────────────────────────────────────
     SpawnPrimitive { name: String },
+    SpawnCamera,
+    SpawnPointLight,
+    SpawnSpotLight,
     DeleteSelected,
     DuplicateSelected,
     Undo,

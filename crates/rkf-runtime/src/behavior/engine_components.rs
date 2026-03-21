@@ -7,7 +7,7 @@
 //! remove implementations.
 
 use super::game_value::GameValue;
-use super::registry::{ComponentEntry, FieldMeta, FieldType, GameplayRegistry};
+use super::registry::{ComponentEntry, FieldMeta, FieldType, GameplayRegistry, StructMeta};
 use crate::components::{CameraComponent, EditorCameraMarker, EditorMetadata, FogVolumeComponent, Transform};
 use crate::environment::EnvironmentSettings;
 
@@ -477,8 +477,71 @@ fn editor_metadata_entry() -> ComponentEntry {
 
 // ─── EnvironmentSettings (full scene environment) ─────────────────────────
 
+// Sub-struct metadata for EnvironmentSettings inspector rendering.
+
+static FOG_FIELDS: [FieldMeta; 10] = [
+    FieldMeta { name: "enabled", field_type: FieldType::Bool, transient: false, range: None, default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "density", field_type: FieldType::Float, transient: false, range: Some((0.0, 1.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "color", field_type: FieldType::Vec3, transient: false, range: None, default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "start_distance", field_type: FieldType::Float, transient: false, range: Some((0.0, 1000.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "end_distance", field_type: FieldType::Float, transient: false, range: Some((0.0, 2000.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "height_falloff", field_type: FieldType::Float, transient: false, range: Some((0.0, 10.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "ambient_dust_density", field_type: FieldType::Float, transient: false, range: Some((0.0, 0.1)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "dust_asymmetry", field_type: FieldType::Float, transient: false, range: Some((-1.0, 1.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "vol_ambient_color", field_type: FieldType::Vec3, transient: false, range: None, default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "vol_ambient_intensity", field_type: FieldType::Float, transient: false, range: Some((0.0, 10.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+];
+
+static FOG_META: StructMeta = StructMeta { name: "FogSettings", fields: &FOG_FIELDS };
+
+static ATMOSPHERE_FIELDS: [FieldMeta; 6] = [
+    FieldMeta { name: "enabled", field_type: FieldType::Bool, transient: false, range: None, default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "rayleigh_scale", field_type: FieldType::Float, transient: false, range: Some((0.0, 10.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "mie_scale", field_type: FieldType::Float, transient: false, range: Some((0.0, 10.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "sun_direction", field_type: FieldType::Vec3, transient: false, range: None, default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "sun_intensity", field_type: FieldType::Float, transient: false, range: Some((0.0, 20.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "sun_color", field_type: FieldType::Vec3, transient: false, range: None, default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+];
+
+static ATMOSPHERE_META: StructMeta = StructMeta { name: "AtmosphereSettings", fields: &ATMOSPHERE_FIELDS };
+
+static CLOUD_FIELDS: [FieldMeta; 7] = [
+    FieldMeta { name: "enabled", field_type: FieldType::Bool, transient: false, range: None, default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "coverage", field_type: FieldType::Float, transient: false, range: Some((0.0, 1.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "density", field_type: FieldType::Float, transient: false, range: Some((0.0, 10.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "altitude", field_type: FieldType::Float, transient: false, range: Some((0.0, 10000.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "thickness", field_type: FieldType::Float, transient: false, range: Some((0.0, 5000.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "wind_direction", field_type: FieldType::Vec3, transient: false, range: None, default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "wind_speed", field_type: FieldType::Float, transient: false, range: Some((0.0, 100.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+];
+
+static CLOUD_META: StructMeta = StructMeta { name: "CloudSettings", fields: &CLOUD_FIELDS };
+
+static POST_PROCESS_FIELDS: [FieldMeta; 18] = [
+    FieldMeta { name: "bloom_enabled", field_type: FieldType::Bool, transient: false, range: None, default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "bloom_intensity", field_type: FieldType::Float, transient: false, range: Some((0.0, 5.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "bloom_threshold", field_type: FieldType::Float, transient: false, range: Some((0.0, 10.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "exposure", field_type: FieldType::Float, transient: false, range: Some((0.01, 10.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "contrast", field_type: FieldType::Float, transient: false, range: Some((0.0, 3.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "saturation", field_type: FieldType::Float, transient: false, range: Some((0.0, 3.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "vignette_intensity", field_type: FieldType::Float, transient: false, range: Some((0.0, 1.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "tone_map_mode", field_type: FieldType::Int, transient: false, range: Some((0.0, 3.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "sharpen_strength", field_type: FieldType::Float, transient: false, range: Some((0.0, 2.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "dof_enabled", field_type: FieldType::Bool, transient: false, range: None, default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "dof_focus_distance", field_type: FieldType::Float, transient: false, range: Some((0.1, 100.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "dof_focus_range", field_type: FieldType::Float, transient: false, range: Some((0.1, 100.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "dof_max_coc", field_type: FieldType::Float, transient: false, range: Some((1.0, 32.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "motion_blur_intensity", field_type: FieldType::Float, transient: false, range: Some((0.0, 5.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "god_rays_intensity", field_type: FieldType::Float, transient: false, range: Some((0.0, 5.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "grain_intensity", field_type: FieldType::Float, transient: false, range: Some((0.0, 1.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "chromatic_aberration", field_type: FieldType::Float, transient: false, range: Some((0.0, 1.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "gi_intensity", field_type: FieldType::Float, transient: false, range: Some((0.0, 5.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+];
+
+static POST_PROCESS_META: StructMeta = StructMeta { name: "PostProcessSettings", fields: &POST_PROCESS_FIELDS };
+
 // Top-level metadata: 4 struct fields (fog, atmosphere, clouds, post_process).
-// Actual field access uses dot-notation: "fog.density", "atmosphere.enabled", etc.
+// Each has StructMeta so the inspector can expand and render sub-fields.
 static ENV_SETTINGS_FIELDS: [FieldMeta; 4] = [
     FieldMeta {
         name: "fog",
@@ -487,7 +550,7 @@ static ENV_SETTINGS_FIELDS: [FieldMeta; 4] = [
         range: None,
         default: None,
         persist: true,
-        struct_meta: None, // TODO: wire StructMeta for inspector sub-field rendering
+        struct_meta: Some(&FOG_META),
         asset_filter: None,
         component_filter: None,
     },
@@ -498,7 +561,7 @@ static ENV_SETTINGS_FIELDS: [FieldMeta; 4] = [
         range: None,
         default: None,
         persist: true,
-        struct_meta: None,
+        struct_meta: Some(&ATMOSPHERE_META),
         asset_filter: None,
         component_filter: None,
     },
@@ -509,7 +572,7 @@ static ENV_SETTINGS_FIELDS: [FieldMeta; 4] = [
         range: None,
         default: None,
         persist: true,
-        struct_meta: None,
+        struct_meta: Some(&CLOUD_META),
         asset_filter: None,
         component_filter: None,
     },
@@ -520,7 +583,7 @@ static ENV_SETTINGS_FIELDS: [FieldMeta; 4] = [
         range: None,
         default: None,
         persist: true,
-        struct_meta: None,
+        struct_meta: Some(&POST_PROCESS_META),
         asset_filter: None,
         component_filter: None,
     },
@@ -532,7 +595,57 @@ fn env_settings_get_field(
     field_name: &str,
 ) -> Result<GameValue, String> {
     match field_name {
-        // Fog
+        // Top-level struct accessors (for inspector sub-field expansion)
+        "fog" => Ok(GameValue::Struct(vec![
+            ("enabled".into(), GameValue::Bool(c.fog.enabled)),
+            ("density".into(), GameValue::Float(c.fog.density as f64)),
+            ("color".into(), GameValue::Vec3(glam::Vec3::new(c.fog.color[0], c.fog.color[1], c.fog.color[2]))),
+            ("start_distance".into(), GameValue::Float(c.fog.start_distance as f64)),
+            ("end_distance".into(), GameValue::Float(c.fog.end_distance as f64)),
+            ("height_falloff".into(), GameValue::Float(c.fog.height_falloff as f64)),
+            ("ambient_dust_density".into(), GameValue::Float(c.fog.ambient_dust_density as f64)),
+            ("dust_asymmetry".into(), GameValue::Float(c.fog.dust_asymmetry as f64)),
+            ("vol_ambient_color".into(), GameValue::Vec3(glam::Vec3::new(c.fog.vol_ambient_color[0], c.fog.vol_ambient_color[1], c.fog.vol_ambient_color[2]))),
+            ("vol_ambient_intensity".into(), GameValue::Float(c.fog.vol_ambient_intensity as f64)),
+        ])),
+        "atmosphere" => Ok(GameValue::Struct(vec![
+            ("enabled".into(), GameValue::Bool(c.atmosphere.enabled)),
+            ("rayleigh_scale".into(), GameValue::Float(c.atmosphere.rayleigh_scale as f64)),
+            ("mie_scale".into(), GameValue::Float(c.atmosphere.mie_scale as f64)),
+            ("sun_direction".into(), GameValue::Vec3(glam::Vec3::new(c.atmosphere.sun_direction[0], c.atmosphere.sun_direction[1], c.atmosphere.sun_direction[2]))),
+            ("sun_intensity".into(), GameValue::Float(c.atmosphere.sun_intensity as f64)),
+            ("sun_color".into(), GameValue::Vec3(glam::Vec3::new(c.atmosphere.sun_color[0], c.atmosphere.sun_color[1], c.atmosphere.sun_color[2]))),
+        ])),
+        "clouds" => Ok(GameValue::Struct(vec![
+            ("enabled".into(), GameValue::Bool(c.clouds.enabled)),
+            ("coverage".into(), GameValue::Float(c.clouds.coverage as f64)),
+            ("density".into(), GameValue::Float(c.clouds.density as f64)),
+            ("altitude".into(), GameValue::Float(c.clouds.altitude as f64)),
+            ("thickness".into(), GameValue::Float(c.clouds.thickness as f64)),
+            ("wind_direction".into(), GameValue::Vec3(glam::Vec3::new(c.clouds.wind_direction[0], c.clouds.wind_direction[1], c.clouds.wind_direction[2]))),
+            ("wind_speed".into(), GameValue::Float(c.clouds.wind_speed as f64)),
+        ])),
+        "post_process" => Ok(GameValue::Struct(vec![
+            ("bloom_enabled".into(), GameValue::Bool(c.post_process.bloom_enabled)),
+            ("bloom_intensity".into(), GameValue::Float(c.post_process.bloom_intensity as f64)),
+            ("bloom_threshold".into(), GameValue::Float(c.post_process.bloom_threshold as f64)),
+            ("exposure".into(), GameValue::Float(c.post_process.exposure as f64)),
+            ("contrast".into(), GameValue::Float(c.post_process.contrast as f64)),
+            ("saturation".into(), GameValue::Float(c.post_process.saturation as f64)),
+            ("vignette_intensity".into(), GameValue::Float(c.post_process.vignette_intensity as f64)),
+            ("tone_map_mode".into(), GameValue::Int(c.post_process.tone_map_mode as i64)),
+            ("sharpen_strength".into(), GameValue::Float(c.post_process.sharpen_strength as f64)),
+            ("dof_enabled".into(), GameValue::Bool(c.post_process.dof_enabled)),
+            ("dof_focus_distance".into(), GameValue::Float(c.post_process.dof_focus_distance as f64)),
+            ("dof_focus_range".into(), GameValue::Float(c.post_process.dof_focus_range as f64)),
+            ("dof_max_coc".into(), GameValue::Float(c.post_process.dof_max_coc as f64)),
+            ("motion_blur_intensity".into(), GameValue::Float(c.post_process.motion_blur_intensity as f64)),
+            ("god_rays_intensity".into(), GameValue::Float(c.post_process.god_rays_intensity as f64)),
+            ("grain_intensity".into(), GameValue::Float(c.post_process.grain_intensity as f64)),
+            ("chromatic_aberration".into(), GameValue::Float(c.post_process.chromatic_aberration as f64)),
+            ("gi_intensity".into(), GameValue::Float(c.post_process.gi_intensity as f64)),
+        ])),
+        // Fog (dot-notation)
         "fog.enabled" => Ok(GameValue::Bool(c.fog.enabled)),
         "fog.density" => Ok(GameValue::Float(c.fog.density as f64)),
         "fog.color" => Ok(GameValue::Vec3(glam::Vec3::new(c.fog.color[0], c.fog.color[1], c.fog.color[2]))),

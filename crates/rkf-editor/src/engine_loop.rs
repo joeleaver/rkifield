@@ -206,6 +206,9 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                         }
                         // Structural scene changes.
                         EditorCommand::SpawnPrimitive { .. }
+                        | EditorCommand::SpawnCamera
+                        | EditorCommand::SpawnPointLight
+                        | EditorCommand::SpawnSpotLight
                         | EditorCommand::DeleteSelected
                         | EditorCommand::DuplicateSelected
                         | EditorCommand::Undo
@@ -224,6 +227,12 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                         | EditorCommand::SetLightIntensity { .. }
                         | EditorCommand::SetLightRange { .. } => {
                             dirty.lights = true;
+                        }
+                        // Camera/environment source changes.
+                        EditorCommand::SetViewportCamera { .. }
+                        | EditorCommand::PilotCamera { .. }
+                        | EditorCommand::SetLinkedEnvCamera { .. } => {
+                            dirty.scene = true;
                         }
                         _ => {}
                     }
@@ -471,6 +480,63 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                         frame_spawned.push(obj_id);
                     }
                 }
+            }
+
+            // Consume pending camera spawn.
+            if es.pending_spawn_camera {
+                es.pending_spawn_camera = false;
+                let snap = es.extract_camera_snapshot();
+                let pos = rkf_core::WorldPosition::new(glam::IVec3::ZERO, snap.position);
+                let uuid = es.world.spawn_camera(
+                    "Camera", pos, snap.yaw.to_degrees(), snap.pitch.to_degrees(),
+                    snap.fov_degrees, None,
+                );
+                es.selected_entity = Some(crate::editor_state::SelectedEntity::Object(uuid));
+                es.undo.push(crate::undo::UndoAction {
+                    kind: crate::undo::UndoActionKind::SpawnEntity { entity_id: uuid },
+                    timestamp_ms: 0,
+                    description: "Spawn Camera".into(),
+                });
+            }
+
+            // Consume pending light spawns.
+            if es.pending_spawn_point_light {
+                es.pending_spawn_point_light = false;
+                let pos = es.camera_control.target;
+                let light = crate::light_editor::SceneLight {
+                    id: 0,
+                    light_type: crate::light_editor::SceneLightType::Point,
+                    position: pos,
+                    direction: glam::Vec3::NEG_Y,
+                    color: glam::Vec3::ONE,
+                    intensity: 1.0,
+                    range: 10.0,
+                    spot_inner_angle: 0.0,
+                    spot_outer_angle: 0.0,
+                    cast_shadows: true,
+                    cookie_path: None,
+                };
+                let id = es.light_editor.add_light_full(light);
+                es.selected_entity = Some(crate::editor_state::SelectedEntity::Light(id));
+            }
+            if es.pending_spawn_spot_light {
+                es.pending_spawn_spot_light = false;
+                let pos = es.camera_control.target;
+                let light = crate::light_editor::SceneLight {
+                    id: 0,
+                    light_type: crate::light_editor::SceneLightType::Spot,
+                    position: pos,
+                    direction: glam::Vec3::NEG_Y,
+                    color: glam::Vec3::ONE,
+                    intensity: 1.0,
+                    range: 15.0,
+                    spot_inner_angle: 0.3,
+                    spot_outer_angle: 0.5,
+                    cast_shadows: true,
+                    cookie_path: None,
+                };
+                let id = es.light_editor.add_light_full(light);
+                es.selected_entity = Some(crate::editor_state::SelectedEntity::Light(id));
             }
 
             // Consume pending delete.
@@ -729,17 +795,25 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
             // Environment settings live on each camera entity. The active
             // camera is the viewport camera (if set) or the editor camera.
 
-            // Determine active environment entity.
-            // Environment source priority:
-            //   1. linked_env_camera (explicit profile link from camera panel)
-            //   2. editor_camera_entity (always the fallback)
-            // The environment always lives on the editor camera entity; linking
-            // copies the profile's settings onto it.
-            let active_env_uuid = es.editor_camera_entity;
-            let active_env_entity = active_env_uuid
+            // Environment: two separate concepts.
+            //
+            // 1. "Env source" — which camera's EnvironmentSettings drives the renderer.
+            //    Priority: piloting > viewport camera > editor camera.
+            //    Each camera has its own EnvironmentSettings component.
+            //
+            // 2. "Profile linking" — copies a .rkenv file onto the editor camera.
+            //    This only affects the editor camera, not scene cameras.
+
+            let env_source_uuid = es.piloting
+                .or(es.viewport_camera)
+                .or(es.linked_env_camera)
+                .or(es.editor_camera_entity);
+            let env_source_entity = env_source_uuid
                 .and_then(|uuid| es.world.ecs_entity_for(uuid));
 
-            // Load environment profile from linked scene camera when it changes.
+            // Load .rkenv profile onto the EDITOR camera when linked camera changes.
+            let editor_cam_entity = es.editor_camera_entity
+                .and_then(|uuid| es.world.ecs_entity_for(uuid));
             if let Some(linked_uuid) = es.linked_env_camera {
                 if let Some(linked_entity) = es.world.ecs_entity_for(linked_uuid) {
                     let profile_path = es.world.ecs_ref()
@@ -757,8 +831,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                         if let Some((_, ref path)) = key {
                             if let Ok(profile) = rkf_runtime::load_environment(path) {
                                 let settings = rkf_runtime::environment::EnvironmentSettings::from_profile(&profile);
-                                // Apply loaded settings to the editor camera entity.
-                                if let Some(ee) = active_env_entity {
+                                if let Some(ee) = editor_cam_entity {
                                     let _ = es.world.ecs_mut().insert_one(ee, settings);
                                     dirty.scene = true;
                                 }
@@ -767,13 +840,12 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                     }
                 }
             } else if es.last_env_profile_key.is_some() {
-                // Unlinked — clear the tracking key (editor goes back to its own settings).
                 es.last_env_profile_key = None;
             }
 
-            // Read from editor camera entity → EnvironmentSettings for the renderer.
+            // Read EnvironmentSettings from the env source camera for the renderer.
             let environment: Option<rkf_runtime::environment::EnvironmentSettings> = if dirty.scene {
-                if let Some(ee) = active_env_entity {
+                if let Some(ee) = env_source_entity {
                     es.world.ecs_ref()
                         .get::<&rkf_runtime::environment::EnvironmentSettings>(ee)
                         .ok()

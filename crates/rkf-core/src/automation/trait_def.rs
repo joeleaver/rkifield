@@ -272,6 +272,21 @@ pub trait AutomationApi: Send + Sync {
         Err("camera_snap_to not supported".into())
     }
 
+    // --- Light entity operations (default: unsupported) ----------------------
+
+    /// Spawn a light entity. Returns the light ID.
+    ///
+    /// `light_type` is `"point"` or `"spot"`.
+    /// `position` is the initial world-space `[x, y, z]`.
+    #[allow(unused_variables)]
+    fn light_spawn(
+        &self,
+        light_type: &str,
+        position: [f32; 3],
+    ) -> Result<u64, String> {
+        Err("light_spawn not supported".into())
+    }
+
     // --- Diagnostic tools (default: unsupported) -----------------------------
 
     /// Sample a 2D XZ slice of raw SDF distances from an object's voxel data.

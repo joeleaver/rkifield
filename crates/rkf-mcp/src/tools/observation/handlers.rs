@@ -467,6 +467,27 @@ impl ToolHandler for CameraSnapToHandler {
     }
 }
 
+// --- Light Spawn tool ---
+
+pub(super) struct LightSpawnHandler;
+
+impl ToolHandler for LightSpawnHandler {
+    fn call(&self, api: &dyn AutomationApi, params: Value) -> Result<ToolResponse, ToolError> {
+        let light_type = params.get("light_type").and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidParams("light_type is required ('point' or 'spot')".to_string()))?;
+        let position = [
+            params.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+            params.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+            params.get("z").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+        ];
+
+        match api.light_spawn(light_type, position) {
+            Ok(id) => Ok(serde_json::json!({"status": "ok", "light_id": id}).into()),
+            Err(e) => Err(ToolError::EngineError(e)),
+        }
+    }
+}
+
 // --- Voxel Slice tool ---
 
 pub(super) struct VoxelSliceHandler;

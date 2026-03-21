@@ -207,14 +207,21 @@ pub(crate) fn load_scene_v3(
         .parent()
         .unwrap_or(std::path::Path::new("."));
 
-    // Load environment profiles for scene cameras.
+    // Ensure every camera entity has EnvironmentSettings.
+    // Cameras saved with EnvironmentSettings will already have it from the scene
+    // file. Older scenes (or cameras with .rkenv profiles) need it attached here.
     {
         let ecs = es.world.ecs_ref();
         let mut profile_loads: Vec<(hecs::Entity, String)> = Vec::new();
+        let mut needs_default: Vec<hecs::Entity> = Vec::new();
         for (e, cam) in ecs.query::<&rkf_runtime::components::CameraComponent>().iter() {
+            let has_env = ecs.get::<&rkf_runtime::environment::EnvironmentSettings>(e).is_ok();
             if !cam.environment_profile.is_empty() {
+                // .rkenv profile overrides any inline settings.
                 let resolved = resolve_profile_path(&cam.environment_profile, scene_dir);
                 profile_loads.push((e, resolved));
+            } else if !has_env {
+                needs_default.push(e);
             }
         }
         drop(ecs);
@@ -223,6 +230,9 @@ pub(crate) fn load_scene_v3(
                 let settings = rkf_runtime::environment::EnvironmentSettings::from_profile(&profile);
                 let _ = es.world.ecs_mut().insert_one(e, settings);
             }
+        }
+        for e in needs_default {
+            let _ = es.world.ecs_mut().insert_one(e, rkf_runtime::environment::EnvironmentSettings::default());
         }
     }
 
