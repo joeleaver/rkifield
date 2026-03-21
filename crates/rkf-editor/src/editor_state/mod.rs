@@ -90,6 +90,8 @@ pub struct UiSignals {
     pub shader_drag: DragContext<String>,
     pub shader_drop_highlight: Signal<bool>,
     pub material_drag: DragContext<u16>,
+    /// Drag context for model (.rkf) drag-and-drop. Carries the asset filename.
+    pub model_drag: DragContext<String>,
     pub material_drop_highlight: Signal<Option<u16>>,
     /// Counter incremented on drag-drop completion.
     pub drag_drop_generation: Signal<u64>,
@@ -253,6 +255,7 @@ impl UiSignals {
             shader_drag: DragContext::new(),
             shader_drop_highlight: Signal::new(false),
             material_drag: DragContext::new(),
+            model_drag: DragContext::new(),
             material_drop_highlight: Signal::new(None),
             drag_drop_generation: Signal::new(0),
             // Engine→UI structural data — populated by engine thread.

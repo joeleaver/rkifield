@@ -952,8 +952,10 @@ fn build_asset_ref_editor(
     component_name: &str,
     cmd: CommandSender,
 ) {
+    let ui = use_context::<UiSignals>();
+
     // Reuse string editor for the path input.
-    build_string_editor(__scope, row, field, entity_id, component_name, cmd);
+    build_string_editor(__scope, row, field, entity_id, component_name, cmd.clone());
 
     // Add filter badge showing allowed extension.
     if let Some(ext) = &field.asset_filter {
@@ -962,6 +964,27 @@ fn build_asset_ref_editor(
             span { style: {BADGE_STYLE}, {badge_text} }
         };
         row.append_child(&badge);
+    }
+
+    // Drop target: accept model drag onto .rkf asset ref fields.
+    if field.asset_filter.as_deref() == Some("rkf") {
+        let field_name = field.name.clone();
+        let comp_name = component_name.to_string();
+        let drop_hid = __scope.register_handler({
+            let ui = ui;
+            let cmd = cmd;
+            move || {
+                if let Some(path) = ui.model_drag.take() {
+                    let _ = cmd.0.send(EditorCommand::SetComponentField {
+                        entity_id,
+                        component_name: comp_name.clone(),
+                        field_name: field_name.clone(),
+                        value: rkf_runtime::behavior::game_value::GameValue::String(path),
+                    });
+                }
+            }
+        });
+        row.set_attribute("data-ondrop", &drop_hid.to_string());
     }
 }
 

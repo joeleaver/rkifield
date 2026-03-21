@@ -404,6 +404,10 @@ pub fn editor_ui() -> NodeHandle {
                     let current_gen = ui.drag_drop_generation.get();
                     if current_gen != last_seen_dnd_gen.get() {
                         last_seen_dnd_gen.set(current_gen);
+                        // Check if a model was dropped onto the viewport.
+                        if let Some(path) = ui.model_drag.take() {
+                            let _ = cmd_tx.send(EditorCommand::PlaceModel { asset_path: path });
+                        }
                         return; // Suppress this spurious post-drag MouseUp.
                     }
                     // Send button state through lock-free channel for camera input.

@@ -74,18 +74,30 @@ pub fn ModelsPanel() -> NodeHandle {
     }
 }
 
-/// A single model item row.
+/// A single model item row — draggable for drop onto viewport or asset_path fields.
 #[component]
 fn ModelItem(name: String, path: String) -> NodeHandle {
+    let ui = use_context::<UiSignals>();
     let cmd = use_context::<CommandSender>();
     let hovered = Signal::new(false);
     let place_path = path.clone();
+    let drag_path = path.clone();
+    let drag_path_end = path.clone();
 
     rsx! {
         div {
             style: {move || if hovered.get() { ITEM_HOVER_STYLE } else { ITEM_STYLE }},
             onmouseenter: move || hovered.set(true),
             onmouseleave: move || hovered.set(false),
+            draggable: "true",
+            ondragstart: {
+                let ui = ui;
+                move || ui.model_drag.set(drag_path.clone())
+            },
+            ondragend: {
+                let ui = ui;
+                move || ui.model_drag.clear()
+            },
 
             // Model name.
             span { style: {ITEM_NAME_STYLE}, {name} }
