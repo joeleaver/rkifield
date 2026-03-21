@@ -43,6 +43,11 @@ pub fn save_scene(
             Err(_) => continue, // Skip entities without StableId (transient)
         };
 
+        // Skip internal editor entities (e.g., EditorCameraMarker).
+        if ecs.get::<&crate::components::EditorCameraMarker>(hecs_entity).is_ok() {
+            continue;
+        }
+
         let mut record = EntityRecord::new(stable_id);
 
         // Parent -> StableId UUID
@@ -95,6 +100,11 @@ pub fn load_scene(
     let mut uuid_to_hecs: HashMap<Uuid, hecs::Entity> = HashMap::new();
 
     for record in &scene.entities {
+        // Skip entities with no components (e.g., stale editor camera from old saves).
+        if record.components.is_empty() {
+            continue;
+        }
+
         let hecs_entity = ecs.spawn((StableId(record.stable_id),));
         stable_index.insert(record.stable_id, hecs_entity);
         uuid_to_hecs.insert(record.stable_id, hecs_entity);
