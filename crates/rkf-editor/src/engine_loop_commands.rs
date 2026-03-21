@@ -652,6 +652,7 @@ fn field_inspector_to_snapshot(
     let bool_value = f.value.as_bool();
     let vec3_value = f.value.as_vec3();
     let string_value = f.value.as_string().map(|s| s.to_string());
+    let color_value = f.value.as_color();
 
     let sub_fields = f.sub_fields.map(|subs| {
         subs.into_iter()
@@ -668,6 +669,7 @@ fn field_inspector_to_snapshot(
         bool_value,
         vec3_value,
         string_value,
+        color_value,
         range: f.range,
         transient: f.transient,
         sub_fields,

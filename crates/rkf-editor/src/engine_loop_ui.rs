@@ -268,6 +268,15 @@ pub(crate) fn push_dirty_ui_signals(
                         (None, Vec::new())
                     };
 
+                // Build inspector data for the editor camera entity.
+                let editor_cam_snap = es.editor_camera_entity.and_then(|eid| {
+                    if let Ok(reg) = gameplay_registry.lock() {
+                        crate::engine_loop_commands::build_inspector_snapshot(&es, eid, &reg)
+                    } else {
+                        None
+                    }
+                });
+
                 rinch::shell::rinch_runtime::run_on_main_thread(move || {
                     if let Some(ui) = rinch::core::context::try_use_context::<UiSignals>() {
                         // Set material usage BEFORE objects -- objects.set() triggers
@@ -277,6 +286,7 @@ pub(crate) fn push_dirty_ui_signals(
                         ui.scene_name.set(scene_name);
                         ui.scene_path.set(scene_path);
                         ui.inspector_data.set(inspector_snap);
+                        ui.editor_camera_inspector.set(editor_cam_snap);
                         ui.available_components.set(avail_comps);
                         ui.active_camera_uuid.set(active_env_uuid);
                         ui.environment_profile_name.set(profile_display);

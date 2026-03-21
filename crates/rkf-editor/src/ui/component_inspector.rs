@@ -76,13 +76,27 @@ const DROPDOWN_ITEM_HOVER: &str = "padding:4px 8px;font-size:11px;\
 /// Designed to be appended below ObjectProperties in the right panel.
 /// When the game plugin dylib is not yet loaded (`dylib_ready == false`),
 /// shows a "Building scripts..." placeholder instead of the component list.
+///
+/// Optional props:
+/// - `entity_id`: override which entity to inspect (default: selected object)
+/// - `filter`: only show components whose names are in this list (default: show all)
+/// - `show_header`: show "Components" header and add/remove controls (default: true)
 #[component]
-pub fn ComponentInspector() -> NodeHandle {
+pub fn ComponentInspector(
+    entity_id: Option<uuid::Uuid>,
+    filter: Option<Vec<String>>,
+    show_header: Option<bool>,
+) -> NodeHandle {
     let ui = use_context::<UiSignals>();
     let cmd = use_context::<CommandSender>();
-    let eid = match ui.selection.get() {
-        Some(crate::editor_state::SelectedEntity::Object(id)) => id,
-        _ => return rsx! { div {} },
+    let show_header = show_header.unwrap_or(true);
+    let eid = if let Some(id) = entity_id {
+        id
+    } else {
+        match ui.selection.get() {
+            Some(crate::editor_state::SelectedEntity::Object(id)) => id,
+            _ => return rsx! { div {} },
+        }
     };
 
     // Signal to control add-component dropdown visibility.
@@ -90,79 +104,118 @@ pub fn ComponentInspector() -> NodeHandle {
     // Persistent collapse signals — survives inspector data rebuilds.
     let collapse_map: CollapseMap = Signal::new(HashMap::new());
 
-    rsx! {
+    // Filter components if a filter is specified.
+    let filter_set = filter;
+
+    let root = rsx! {
+        div { style: "display:flex;flex-direction:column;" }
+    };
+
+    // Divider + header (only when show_header is true).
+    if show_header {
+        let divider = rsx! { div { style: {DIVIDER_STYLE} } };
+        let header = rsx! { div { style: {LABEL_STYLE}, "Components" } };
+        root.append_child(&divider);
+        root.append_child(&header);
+    }
+
+    // "Building scripts..." placeholder.
+    let placeholder = rsx! {
+        div {
+            style: {|| if ui.dylib_ready.get() {
+                "display:none;"
+            } else {
+                "font-size:11px;color:var(--rinch-color-placeholder);padding:8px 12px;"
+            }},
+            "Building scripts..."
+        }
+    };
+    root.append_child(&placeholder);
+
+    // Content wrapper — hidden when dylib not ready.
+    let content = rsx! {
+        div {
+            style: {|| if ui.dylib_ready.get() {
+                "display:flex;flex-direction:column;"
+            } else {
+                "display:none;"
+            }},
+        }
+    };
+
+    // Reactive component list.
+    let comp_list = rsx! {
         div { style: "display:flex;flex-direction:column;",
-            // Divider before the component section.
-            div { style: {DIVIDER_STYLE} }
-
-            // Section header.
-            div { style: {LABEL_STYLE}, "Components" }
-
-            // "Building scripts..." placeholder — shown when dylib not ready.
-            div {
-                style: {|| if ui.dylib_ready.get() {
-                    "display:none;"
-                } else {
-                    "font-size:11px;color:var(--rinch-color-placeholder);padding:8px 12px;"
-                }},
-                "Building scripts..."
-            }
-
-            // Content wrapper — hidden when dylib not ready.
-            div {
-                style: {|| if ui.dylib_ready.get() {
-                    "display:flex;flex-direction:column;"
-                } else {
-                    "display:none;"
-                }},
-
-                // Reactive component list.
-                div { style: "display:flex;flex-direction:column;",
-                    for comp in get_components(ui, eid) {
-                        div {
-                            key: comp.name.clone(),
-                            {build_component_section(__scope, &comp, eid, cmd.clone(), collapse_map)}
-                        }
-                    }
-                }
-
-                // Add Component section.
-                div { style: "padding:6px 12px;position:relative;",
-                    button {
-                        style: {ADD_BTN_STYLE},
-                        onclick: move || dropdown_open.update(|v| *v = !*v),
-                        "+ Add Component"
-                    }
-
-                    // Dropdown list (reactive visibility).
-                    div {
-                        style: {move || if dropdown_open.get() {
-                            DROPDOWN_STYLE.to_string()
-                        } else {
-                            format!("{DROPDOWN_STYLE}display:none;")
-                        }},
-
-                        for comp_name in ui.available_components.get() {
-                            DropdownItem {
-                                key: comp_name.clone(),
-                                comp_name: comp_name,
-                                entity_id: eid,
-                                dropdown_open: dropdown_open,
-                            }
-                        }
-                    }
+            for comp in get_components_filtered(ui, eid, &filter_set) {
+                div {
+                    key: comp.name.clone(),
+                    {build_component_section(__scope, &comp, eid, cmd.clone(), collapse_map)}
                 }
             }
         }
+    };
+    content.append_child(&comp_list);
+
+    // Add Component section (only when show_header is true).
+    if show_header {
+        let add_section = rsx! {
+            div { style: "padding:6px 12px;position:relative;",
+                button {
+                    style: {ADD_BTN_STYLE},
+                    onclick: move || dropdown_open.update(|v| *v = !*v),
+                    "+ Add Component"
+                }
+                div {
+                    style: {move || if dropdown_open.get() {
+                        DROPDOWN_STYLE.to_string()
+                    } else {
+                        format!("{DROPDOWN_STYLE}display:none;")
+                    }},
+                    for comp_name in ui.available_components.get() {
+                        DropdownItem {
+                            key: comp_name.clone(),
+                            comp_name: comp_name,
+                            entity_id: eid,
+                            dropdown_open: dropdown_open,
+                        }
+                    }
+                }
+            }
+        };
+        content.append_child(&add_section);
     }
+
+    root.append_child(&content);
+    root
 }
 
 /// Get the component list for the current entity from inspector data.
 fn get_components(ui: UiSignals, eid: uuid::Uuid) -> Vec<ComponentSnapshot> {
+    get_components_filtered(ui, eid, &None)
+}
+
+/// Get the component list, optionally filtered by component name.
+/// Checks both `inspector_data` and `editor_camera_inspector` for the entity.
+fn get_components_filtered(
+    ui: UiSignals,
+    eid: uuid::Uuid,
+    filter: &Option<Vec<String>>,
+) -> Vec<ComponentSnapshot> {
+    // Try the selected entity's inspector data first.
     let data = ui.inspector_data.get();
-    match data {
-        Some(ref snap) if snap.entity_id == eid => snap.components.clone(),
-        _ => Vec::new(),
+    let comps = if matches!(&data, Some(snap) if snap.entity_id == eid) {
+        data.as_ref().unwrap().components.clone()
+    } else {
+        // Fall back to editor camera inspector data.
+        let ecam = ui.editor_camera_inspector.get();
+        match ecam {
+            Some(ref snap) if snap.entity_id == eid => snap.components.clone(),
+            _ => Vec::new(),
+        }
+    };
+    match filter {
+        Some(names) => comps.into_iter().filter(|c| names.contains(&c.name)).collect(),
+        None => comps,
     }
 }
 
@@ -316,6 +369,9 @@ fn build_field_row(
         }
         FieldType::String => {
             build_string_editor(__scope, &row, field, entity_id, component_name, cmd);
+        }
+        FieldType::Color => {
+            build_color_editor(__scope, &row, field, entity_id, component_name, cmd);
         }
         FieldType::Struct => {
             return build_struct_editor(
@@ -755,6 +811,9 @@ fn build_field_row_with_path(
         FieldType::Vec3 => {
             build_vec3_editor(__scope, &row, &path_field, entity_id, component_name, cmd);
         }
+        FieldType::Color => {
+            build_color_editor(__scope, &row, &path_field, entity_id, component_name, cmd);
+        }
         FieldType::String | FieldType::AssetRef | FieldType::ComponentRef => {
             build_string_editor(__scope, &row, &path_field, entity_id, component_name, cmd);
         }
@@ -767,6 +826,116 @@ fn build_field_row_with_path(
     }
 
     row
+}
+
+// ── Color editor ─────────────────────────────────────────────────────────
+
+/// Convert linear RGB [f32; 4] to a hex string "#RRGGBB".
+fn rgba_to_hex(c: [f32; 4]) -> String {
+    let r = (c[0].clamp(0.0, 1.0) * 255.0).round() as u8;
+    let g = (c[1].clamp(0.0, 1.0) * 255.0).round() as u8;
+    let b = (c[2].clamp(0.0, 1.0) * 255.0).round() as u8;
+    format!("#{r:02x}{g:02x}{b:02x}")
+}
+
+/// Parse "#RRGGBB" hex string to linear RGB [f32; 4] (alpha = 1.0).
+fn hex_to_rgba(hex: &str) -> Option<[f32; 4]> {
+    let hex = hex.strip_prefix('#')?;
+    if hex.len() != 6 { return None; }
+    let r = u8::from_str_radix(&hex[0..2], 16).ok()? as f32 / 255.0;
+    let g = u8::from_str_radix(&hex[2..4], 16).ok()? as f32 / 255.0;
+    let b = u8::from_str_radix(&hex[4..6], 16).ok()? as f32 / 255.0;
+    Some([r, g, b, 1.0])
+}
+
+fn build_color_editor(
+    __scope: &mut RenderScope,
+    row: &NodeHandle,
+    field: &FieldSnapshot,
+    entity_id: uuid::Uuid,
+    component_name: &str,
+    cmd: CommandSender,
+) {
+    let current_hex = field.color_value
+        .map(|c| rgba_to_hex(c))
+        .unwrap_or_else(|| "#000000".to_string());
+    let field_name = field.name.clone();
+    let comp_name = component_name.to_string();
+    let expanded = Signal::new(false);
+
+    // Wrap everything in a column so the picker expands below the row.
+    let wrapper = __scope.create_element("div");
+    wrapper.set_attribute("style", "display:flex;flex-direction:column;width:100;");
+
+    // Swatch + hex label row.
+    let swatch_row = __scope.create_element("div");
+    swatch_row.set_attribute("style", "display:flex;align-items:center;gap:6px;");
+
+    let swatch = __scope.create_element("div");
+    swatch.set_attribute("style", &format!(
+        "width:22px;height:22px;border-radius:3px;cursor:pointer;\
+         border:1px solid var(--rinch-color-border);flex-shrink:0;\
+         background-color:{current_hex};",
+    ));
+    {
+        let handler_id = __scope.register_handler(move || {
+            expanded.update(|v| *v = !*v);
+        });
+        swatch.set_attribute("data-rid", &handler_id.to_string());
+    }
+    swatch_row.append_child(&swatch);
+
+    let hex_display = field.color_value
+        .map(|c| rgba_to_hex(c))
+        .unwrap_or_else(|| "#000000".to_string());
+    let hex_label = __scope.create_element("span");
+    hex_label.set_attribute("style",
+        "font-size:10px;color:var(--rinch-color-dimmed);\
+         font-family:var(--rinch-font-family-monospace);");
+    hex_label.set_text(&hex_display);
+    swatch_row.append_child(&hex_label);
+
+    wrapper.append_child(&swatch_row);
+
+    // Expandable ColorPicker below the row.
+    let picker_container = rsx! {
+        div {
+            style: {move || if expanded.get() {
+                "padding:6px 0 2px 0;"
+            } else {
+                "display:none;"
+            }},
+        }
+    };
+
+    let initial_hex = current_hex.clone();
+    let picker = ColorPicker {
+        format: "hex".into(),
+        value: current_hex,
+        alpha: false,
+        size: "sm".into(),
+        with_input: true,
+        onchange: Some(InputCallback::new({
+            move |hex: String| {
+                if hex == initial_hex { return; }
+                if let Some(rgba) = hex_to_rgba(&hex) {
+                    let _ = cmd.0.send(EditorCommand::SetComponentField {
+                        entity_id,
+                        component_name: comp_name.clone(),
+                        field_name: field_name.clone(),
+                        value: rkf_runtime::behavior::game_value::GameValue::Color(rgba),
+                    });
+                }
+            }
+        })),
+        ..Default::default()
+    };
+    let picker_node = rinch::core::untracked(|| picker.render(__scope, &[]));
+    picker_container.append_child(&picker_node);
+    wrapper.append_child(&picker_container);
+
+    // Replace the row's default layout — append our wrapper as the sole content.
+    row.append_child(&wrapper);
 }
 
 // ── Asset ref editor ─────────────────────────────────────────────────────

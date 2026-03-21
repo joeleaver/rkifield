@@ -482,13 +482,13 @@ fn editor_metadata_entry() -> ComponentEntry {
 static FOG_FIELDS: [FieldMeta; 10] = [
     FieldMeta { name: "enabled", field_type: FieldType::Bool, transient: false, range: None, default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
     FieldMeta { name: "density", field_type: FieldType::Float, transient: false, range: Some((0.0, 1.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
-    FieldMeta { name: "color", field_type: FieldType::Vec3, transient: false, range: None, default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "color", field_type: FieldType::Color, transient: false, range: None, default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
     FieldMeta { name: "start_distance", field_type: FieldType::Float, transient: false, range: Some((0.0, 1000.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
     FieldMeta { name: "end_distance", field_type: FieldType::Float, transient: false, range: Some((0.0, 2000.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
     FieldMeta { name: "height_falloff", field_type: FieldType::Float, transient: false, range: Some((0.0, 10.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
     FieldMeta { name: "ambient_dust_density", field_type: FieldType::Float, transient: false, range: Some((0.0, 0.1)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
     FieldMeta { name: "dust_asymmetry", field_type: FieldType::Float, transient: false, range: Some((-1.0, 1.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
-    FieldMeta { name: "vol_ambient_color", field_type: FieldType::Vec3, transient: false, range: None, default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "vol_ambient_color", field_type: FieldType::Color, transient: false, range: None, default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
     FieldMeta { name: "vol_ambient_intensity", field_type: FieldType::Float, transient: false, range: Some((0.0, 10.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
 ];
 
@@ -500,7 +500,7 @@ static ATMOSPHERE_FIELDS: [FieldMeta; 6] = [
     FieldMeta { name: "mie_scale", field_type: FieldType::Float, transient: false, range: Some((0.0, 10.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
     FieldMeta { name: "sun_direction", field_type: FieldType::Vec3, transient: false, range: None, default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
     FieldMeta { name: "sun_intensity", field_type: FieldType::Float, transient: false, range: Some((0.0, 20.0)), default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
-    FieldMeta { name: "sun_color", field_type: FieldType::Vec3, transient: false, range: None, default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
+    FieldMeta { name: "sun_color", field_type: FieldType::Color, transient: false, range: None, default: None, persist: true, struct_meta: None, asset_filter: None, component_filter: None },
 ];
 
 static ATMOSPHERE_META: StructMeta = StructMeta { name: "AtmosphereSettings", fields: &ATMOSPHERE_FIELDS };
@@ -599,13 +599,13 @@ fn env_settings_get_field(
         "fog" => Ok(GameValue::Struct(vec![
             ("enabled".into(), GameValue::Bool(c.fog.enabled)),
             ("density".into(), GameValue::Float(c.fog.density as f64)),
-            ("color".into(), GameValue::Vec3(glam::Vec3::new(c.fog.color[0], c.fog.color[1], c.fog.color[2]))),
+            ("color".into(), GameValue::Color([c.fog.color[0], c.fog.color[1], c.fog.color[2], 1.0])),
             ("start_distance".into(), GameValue::Float(c.fog.start_distance as f64)),
             ("end_distance".into(), GameValue::Float(c.fog.end_distance as f64)),
             ("height_falloff".into(), GameValue::Float(c.fog.height_falloff as f64)),
             ("ambient_dust_density".into(), GameValue::Float(c.fog.ambient_dust_density as f64)),
             ("dust_asymmetry".into(), GameValue::Float(c.fog.dust_asymmetry as f64)),
-            ("vol_ambient_color".into(), GameValue::Vec3(glam::Vec3::new(c.fog.vol_ambient_color[0], c.fog.vol_ambient_color[1], c.fog.vol_ambient_color[2]))),
+            ("vol_ambient_color".into(), GameValue::Color([c.fog.vol_ambient_color[0], c.fog.vol_ambient_color[1], c.fog.vol_ambient_color[2], 1.0])),
             ("vol_ambient_intensity".into(), GameValue::Float(c.fog.vol_ambient_intensity as f64)),
         ])),
         "atmosphere" => Ok(GameValue::Struct(vec![
@@ -614,7 +614,7 @@ fn env_settings_get_field(
             ("mie_scale".into(), GameValue::Float(c.atmosphere.mie_scale as f64)),
             ("sun_direction".into(), GameValue::Vec3(glam::Vec3::new(c.atmosphere.sun_direction[0], c.atmosphere.sun_direction[1], c.atmosphere.sun_direction[2]))),
             ("sun_intensity".into(), GameValue::Float(c.atmosphere.sun_intensity as f64)),
-            ("sun_color".into(), GameValue::Vec3(glam::Vec3::new(c.atmosphere.sun_color[0], c.atmosphere.sun_color[1], c.atmosphere.sun_color[2]))),
+            ("sun_color".into(), GameValue::Color([c.atmosphere.sun_color[0], c.atmosphere.sun_color[1], c.atmosphere.sun_color[2], 1.0])),
         ])),
         "clouds" => Ok(GameValue::Struct(vec![
             ("enabled".into(), GameValue::Bool(c.clouds.enabled)),
@@ -648,13 +648,13 @@ fn env_settings_get_field(
         // Fog (dot-notation)
         "fog.enabled" => Ok(GameValue::Bool(c.fog.enabled)),
         "fog.density" => Ok(GameValue::Float(c.fog.density as f64)),
-        "fog.color" => Ok(GameValue::Vec3(glam::Vec3::new(c.fog.color[0], c.fog.color[1], c.fog.color[2]))),
+        "fog.color" => Ok(GameValue::Color([c.fog.color[0], c.fog.color[1], c.fog.color[2], 1.0])),
         "fog.start_distance" => Ok(GameValue::Float(c.fog.start_distance as f64)),
         "fog.end_distance" => Ok(GameValue::Float(c.fog.end_distance as f64)),
         "fog.height_falloff" => Ok(GameValue::Float(c.fog.height_falloff as f64)),
         "fog.ambient_dust_density" => Ok(GameValue::Float(c.fog.ambient_dust_density as f64)),
         "fog.dust_asymmetry" => Ok(GameValue::Float(c.fog.dust_asymmetry as f64)),
-        "fog.vol_ambient_color" => Ok(GameValue::Vec3(glam::Vec3::new(c.fog.vol_ambient_color[0], c.fog.vol_ambient_color[1], c.fog.vol_ambient_color[2]))),
+        "fog.vol_ambient_color" => Ok(GameValue::Color([c.fog.vol_ambient_color[0], c.fog.vol_ambient_color[1], c.fog.vol_ambient_color[2], 1.0])),
         "fog.vol_ambient_intensity" => Ok(GameValue::Float(c.fog.vol_ambient_intensity as f64)),
         // Atmosphere
         "atmosphere.enabled" => Ok(GameValue::Bool(c.atmosphere.enabled)),
@@ -664,9 +664,7 @@ fn env_settings_get_field(
             c.atmosphere.sun_direction[0], c.atmosphere.sun_direction[1], c.atmosphere.sun_direction[2],
         ))),
         "atmosphere.sun_intensity" => Ok(GameValue::Float(c.atmosphere.sun_intensity as f64)),
-        "atmosphere.sun_color" => Ok(GameValue::Vec3(glam::Vec3::new(
-            c.atmosphere.sun_color[0], c.atmosphere.sun_color[1], c.atmosphere.sun_color[2],
-        ))),
+        "atmosphere.sun_color" => Ok(GameValue::Color([c.atmosphere.sun_color[0], c.atmosphere.sun_color[1], c.atmosphere.sun_color[2], 1.0])),
         // Clouds
         "clouds.enabled" => Ok(GameValue::Bool(c.clouds.enabled)),
         "clouds.coverage" => Ok(GameValue::Float(c.clouds.coverage as f64)),
@@ -711,8 +709,11 @@ fn env_settings_set_field(
         "fog.enabled" => { c.fog.enabled = value.as_bool().ok_or("type mismatch")?; }
         "fog.density" => { c.fog.density = value.as_float().ok_or("type mismatch")? as f32; }
         "fog.color" => {
-            let v = value.as_vec3().ok_or("type mismatch")?;
-            c.fog.color = [v.x, v.y, v.z];
+            if let Some(rgba) = value.as_color() {
+                c.fog.color = [rgba[0], rgba[1], rgba[2]];
+            } else if let Some(v) = value.as_vec3() {
+                c.fog.color = [v.x, v.y, v.z];
+            } else { return Err("type mismatch".into()); }
         }
         "fog.start_distance" => { c.fog.start_distance = value.as_float().ok_or("type mismatch")? as f32; }
         "fog.end_distance" => { c.fog.end_distance = value.as_float().ok_or("type mismatch")? as f32; }
@@ -720,8 +721,11 @@ fn env_settings_set_field(
         "fog.ambient_dust_density" => { c.fog.ambient_dust_density = value.as_float().ok_or("type mismatch")? as f32; }
         "fog.dust_asymmetry" => { c.fog.dust_asymmetry = value.as_float().ok_or("type mismatch")? as f32; }
         "fog.vol_ambient_color" => {
-            let v = value.as_vec3().ok_or("type mismatch")?;
-            c.fog.vol_ambient_color = [v.x, v.y, v.z];
+            if let Some(rgba) = value.as_color() {
+                c.fog.vol_ambient_color = [rgba[0], rgba[1], rgba[2]];
+            } else if let Some(v) = value.as_vec3() {
+                c.fog.vol_ambient_color = [v.x, v.y, v.z];
+            } else { return Err("type mismatch".into()); }
         }
         "fog.vol_ambient_intensity" => { c.fog.vol_ambient_intensity = value.as_float().ok_or("type mismatch")? as f32; }
         // Atmosphere
@@ -734,8 +738,11 @@ fn env_settings_set_field(
         }
         "atmosphere.sun_intensity" => { c.atmosphere.sun_intensity = value.as_float().ok_or("type mismatch")? as f32; }
         "atmosphere.sun_color" => {
-            let v = value.as_vec3().ok_or("type mismatch")?;
-            c.atmosphere.sun_color = [v.x, v.y, v.z];
+            if let Some(rgba) = value.as_color() {
+                c.atmosphere.sun_color = [rgba[0], rgba[1], rgba[2]];
+            } else if let Some(v) = value.as_vec3() {
+                c.atmosphere.sun_color = [v.x, v.y, v.z];
+            } else { return Err("type mismatch".into()); }
         }
         // Clouds
         "clouds.enabled" => { c.clouds.enabled = value.as_bool().ok_or("type mismatch")?; }

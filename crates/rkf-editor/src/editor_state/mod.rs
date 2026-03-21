@@ -125,6 +125,8 @@ pub struct UiSignals {
     // ── Component inspector (pushed via run_on_main_thread) ──
     /// Inspector data for the selected entity's components.
     pub inspector_data: Signal<Option<InspectorSnapshot>>,
+    /// Inspector data for the editor camera entity (always populated).
+    pub editor_camera_inspector: Signal<Option<InspectorSnapshot>>,
     /// Components available to add to the selected entity.
     pub available_components: Signal<Vec<String>>,
     /// Behavior systems list — pushed by engine when play mode is active.
@@ -216,6 +218,8 @@ pub struct FieldSnapshot {
     pub vec3_value: Option<glam::Vec3>,
     /// Current string value (for String fields).
     pub string_value: Option<String>,
+    /// Current color value as [r, g, b, a] in 0..1 (for Color fields).
+    pub color_value: Option<[f32; 4]>,
     /// Optional numeric range for slider display `(min, max)`.
     pub range: Option<(f64, f64)>,
     /// True if the field is transient.
@@ -263,6 +267,7 @@ impl UiSignals {
             paint_color: Signal::new(Vec3::ONE),
             play_state: Signal::new(false),
             inspector_data: Signal::new(None),
+            editor_camera_inspector: Signal::new(None),
             available_components: Signal::new(Vec::new()),
             systems: Signal::new(Vec::new()),
             loading_status: Signal::new(None),

@@ -10,12 +10,18 @@ use crate::editor_state::{SelectedEntity, UiSignals};
 use crate::CommandSender;
 
 use super::bound::bound_slider::BoundSlider;
-use super::environment_panel::{AtmosphereSection, CloudsSection, FogSection, PostProcessSection};
+use super::component_inspector::ComponentInspector;
 use super::{DIVIDER_STYLE, VALUE_STYLE};
 
 /// Editor camera panel — shows camera settings, linked camera, and environment.
 #[component]
 pub fn EditorCameraPanel() -> NodeHandle {
+    let ui = use_context::<UiSignals>();
+
+    // Get the editor camera entity UUID for the component inspector.
+    let editor_cam_uuid = ui.editor_camera_inspector.get()
+        .map(|snap| snap.entity_id);
+
     rsx! {
         div { style: "display:flex;flex-direction:column;overflow-y:auto;",
             CameraSettingsSection {}
@@ -24,7 +30,14 @@ pub fn EditorCameraPanel() -> NodeHandle {
             CameraActionButtons {}
             div { style: {DIVIDER_STYLE} }
             EnvironmentProfileHeader {}
-            EnvironmentSectionsGroup {}
+            // Environment settings via the component inspector (reusable code).
+            if let Some(eid) = editor_cam_uuid {
+                ComponentInspector {
+                    entity_id: eid,
+                    filter: vec!["EnvironmentSettings".to_string()],
+                    show_header: Some(false),
+                }
+            }
         }
     }
 }
@@ -68,18 +81,6 @@ fn CameraSettingsSection() -> NodeHandle {
     }
 }
 
-/// Groups all environment sub-sections to reduce parent rsx! depth.
-#[component]
-fn EnvironmentSectionsGroup() -> NodeHandle {
-    rsx! {
-        div {
-            AtmosphereSection {}
-            FogSection {}
-            CloudsSection {}
-            PostProcessSection {}
-        }
-    }
-}
 
 const BTN_STYLE: &str = "padding:3px 8px;font-size:10px;cursor:pointer;\
     background:var(--rinch-color-dark-7);color:var(--rinch-color-text);\
