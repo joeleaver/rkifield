@@ -15,10 +15,6 @@ pub const MANDATORY_COMPONENTS: &[&str] = &["Transform", "EditorMetadata"];
 
 /// Engine components that are rendered by dedicated UI panels (ObjectProperties).
 /// The generic component inspector should hide these to avoid duplication.
-pub const ENGINE_UI_COMPONENTS: &[&str] = &[
-    "Transform", "EditorMetadata", "SdfTree",
-    "EditorCameraMarker",
-];
 
 // ─── Inspector data types ───────────────────────────────────────────────────
 

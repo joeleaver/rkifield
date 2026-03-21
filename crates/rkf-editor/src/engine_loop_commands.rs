@@ -412,13 +412,9 @@ pub(crate) fn build_inspector_snapshot(
 
     let data = rkf_runtime::behavior::inspector::build_inspector_data(ecs, hecs_entity, registry);
 
-    // Filter out engine components already rendered by ObjectProperties.
     let components = data
         .components
         .into_iter()
-        .filter(|comp| {
-            !rkf_runtime::behavior::inspector::ENGINE_UI_COMPONENTS.contains(&comp.name.as_str())
-        })
         .map(|comp| {
             let fields = comp
                 .fields
@@ -452,11 +448,6 @@ pub(crate) fn build_available_components(
     };
     let ecs = es.world.ecs_ref();
     rkf_runtime::behavior::inspector::available_components_for_entity(ecs, hecs_entity, registry)
-        .into_iter()
-        .filter(|name| {
-            !rkf_runtime::behavior::inspector::ENGINE_UI_COMPONENTS.contains(&name.as_str())
-        })
-        .collect()
 }
 
 /// Apply a component inspector command (requires the gameplay registry).
