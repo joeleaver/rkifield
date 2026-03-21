@@ -51,6 +51,10 @@ pub fn render_panel(scope: &mut RenderScope, panel: PanelId) -> NodeHandle {
             let c = crate::ui::library_panel::LibraryPanel::default();
             c.render(scope, &[])
         }
+        PanelId::Models => {
+            let c = crate::ui::models_panel::ModelsPanel::default();
+            c.render(scope, &[])
+        }
         PanelId::Console => {
             let c = crate::ui::debug_panel::DebugPanel::default();
             c.render(scope, &[])

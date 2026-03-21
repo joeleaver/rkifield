@@ -130,6 +130,9 @@ pub(crate) fn apply_editor_command(es: &mut EditorState, cmd: crate::editor_comm
         SpawnSpotLight => {
             es.pending_spawn_spot_light = true;
         }
+        PlaceModel { asset_path } => {
+            es.pending_place_model = Some(asset_path);
+        }
         DeleteSelected => {
             es.pending_delete = true;
         }

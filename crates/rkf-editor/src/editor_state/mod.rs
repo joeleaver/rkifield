@@ -152,6 +152,11 @@ pub struct UiSignals {
     /// Recent projects list for the welcome screen.
     pub recent_projects: Signal<Vec<crate::editor_config::RecentProject>>,
 
+    // ── Models (`.rkf` files) ───────────────────────────────────────
+    /// List of `.rkf` model files found in the project. Each entry is
+    /// `(display_name, relative_path)`.
+    pub models: Signal<Vec<(String, String)>>,
+
     // ── Dylib readiness ─────────────────────────────────────────────
     /// Whether the game plugin dylib has been loaded successfully.
     /// `false` while the initial build is in progress; `true` once loaded.
@@ -271,6 +276,7 @@ impl UiSignals {
             diagnostics: Signal::new(Vec::new()),
             console_entries: Signal::new(Vec::new()),
             console_filter: Signal::new(rkf_runtime::behavior::ConsoleFilter::default()),
+            models: Signal::new(Vec::new()),
             project_loaded: Signal::new(false),
             recent_projects: Signal::new(Vec::new()),
             dylib_ready: Signal::new(false),
@@ -522,6 +528,8 @@ pub struct EditorState {
     pub pending_spawn_point_light: bool,
     /// Set by Spawn > Spot Light, consumed by the event loop.
     pub pending_spawn_spot_light: bool,
+    /// Set by Models panel "Place", consumed by the event loop.
+    pub pending_place_model: Option<String>,
     /// Set by Delete key, consumed by the event loop.
     pub pending_delete: bool,
     /// Set by Ctrl+D, consumed by the event loop.

@@ -17,6 +17,7 @@ pub mod shader_properties;
 pub mod shaders_panel;
 pub mod systems_panel;
 pub mod library_panel;
+pub mod models_panel;
 pub mod welcome_screen;
 mod slider_helpers;
 pub mod brush_palette;

@@ -28,6 +28,7 @@ pub enum PanelId {
     Console,
     Systems,
     Library,
+    Models,
     // Canvas panels (center only)
     SceneView,
     GameView,
@@ -55,6 +56,7 @@ impl PanelId {
         Self::Console,
         Self::Systems,
         Self::Library,
+        Self::Models,
         Self::SceneView,
         Self::GameView,
         Self::AnimationEditor,
@@ -80,6 +82,7 @@ impl PanelId {
             Self::Console => "Console",
             Self::Systems => "Systems",
             Self::Library => "Library",
+            Self::Models => "Models",
             Self::SceneView => "Scene",
             Self::GameView => "Game",
             Self::AnimationEditor => "Animation",
@@ -91,7 +94,7 @@ impl PanelId {
         match self {
             Self::SceneTree => ContainerKind::Left,
             Self::EditorCamera | Self::ObjectProperties | Self::AssetProperties => ContainerKind::Right,
-            Self::Materials | Self::Shaders | Self::Console | Self::Systems | Self::Library => ContainerKind::Bottom,
+            Self::Materials | Self::Shaders | Self::Console | Self::Systems | Self::Library | Self::Models => ContainerKind::Bottom,
             Self::SceneView | Self::GameView | Self::AnimationEditor => ContainerKind::Center,
         }
     }
@@ -292,7 +295,7 @@ pub fn default_layout() -> LayoutConfig {
     LayoutConfig {
         left: ContainerConfig::single_zone(vec![PanelId::SceneTree]),
         right: ContainerConfig::single_zone(vec![PanelId::EditorCamera, PanelId::ObjectProperties, PanelId::AssetProperties]),
-        bottom: ContainerConfig::single_zone(vec![PanelId::Materials, PanelId::Shaders, PanelId::Systems, PanelId::Library, PanelId::Console]),
+        bottom: ContainerConfig::single_zone(vec![PanelId::Materials, PanelId::Shaders, PanelId::Models, PanelId::Systems, PanelId::Library, PanelId::Console]),
         center: ContainerConfig::single_zone(vec![PanelId::SceneView]),
         floating: Vec::new(),
         // 250px / 1280px ≈ 0.195
@@ -335,7 +338,7 @@ mod tests {
         assert_eq!(layout.center.zones.len(), 1);
         assert_eq!(layout.center.zones[0].tabs, vec![PanelId::SceneView]);
         assert_eq!(layout.bottom.zones.len(), 1);
-        assert_eq!(layout.bottom.zones[0].tabs, vec![PanelId::Materials, PanelId::Shaders, PanelId::Systems, PanelId::Library, PanelId::Console]);
+        assert_eq!(layout.bottom.zones[0].tabs, vec![PanelId::Materials, PanelId::Shaders, PanelId::Models, PanelId::Systems, PanelId::Library, PanelId::Console]);
         assert!(layout.floating.is_empty());
     }
 
@@ -360,7 +363,7 @@ mod tests {
         );
         assert_eq!(
             layout.find_panel(PanelId::Console),
-            Some((ContainerKind::Bottom, 0, 4))
+            Some((ContainerKind::Bottom, 0, 5))
         );
     }
 

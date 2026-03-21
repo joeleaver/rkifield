@@ -30,6 +30,8 @@ pub enum EditorCommand {
     SpawnCamera,
     SpawnPointLight,
     SpawnSpotLight,
+    /// Place a `.rkf` model at the camera target position.
+    PlaceModel { asset_path: String },
     DeleteSelected,
     DuplicateSelected,
     Undo,

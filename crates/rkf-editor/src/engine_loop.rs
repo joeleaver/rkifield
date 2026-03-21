@@ -209,6 +209,7 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                         | EditorCommand::SpawnCamera
                         | EditorCommand::SpawnPointLight
                         | EditorCommand::SpawnSpotLight
+                        | EditorCommand::PlaceModel { .. }
                         | EditorCommand::DeleteSelected
                         | EditorCommand::DuplicateSelected
                         | EditorCommand::Undo
@@ -572,6 +573,56 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                 };
                 let id = es.light_editor.add_light_full(light);
                 es.selected_entity = Some(crate::editor_state::SelectedEntity::Light(id));
+            }
+
+            // Consume pending model placement.
+            if let Some(asset_path) = es.pending_place_model.take() {
+                let pos = es.camera_control.target;
+                // Derive a display name from the filename.
+                let name = std::path::Path::new(&asset_path)
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "Model".into());
+                // Spawn entity with SdfTree.
+                let uuid = es.world.spawn(&name)
+                    .position_vec3(pos)
+                    .build();
+                // Add SdfTree component with the asset path.
+                if let Some(hecs_entity) = es.world.ecs_entity_for(uuid) {
+                    let sdf_tree = rkf_runtime::components::SdfTree {
+                        asset_path: Some(asset_path.clone()),
+                        ..Default::default()
+                    };
+                    let _ = es.world.ecs_mut().insert_one(hecs_entity, sdf_tree);
+                    // Rebuild tracking so the entity gets an sdf_object_id.
+                    es.world.rebuild_entity_tracking_from_ecs();
+                    // Load the .rkf file.
+                    let resolved = crate::engine_loop_io::resolve_rkf_path(
+                        &asset_path, &es, &engine,
+                    );
+                    let path_str = resolved.to_string_lossy().to_string();
+                    let obj_id = es.world.entity_records()
+                        .find(|(uid, _)| **uid == uuid)
+                        .and_then(|(_, r)| r.sdf_object_id);
+                    match engine.load_rkf_for_entity(
+                        &path_str, es.world.ecs_mut(), hecs_entity, obj_id,
+                    ) {
+                        Ok(_) => {
+                            engine.finish_rkf_upload();
+                            engine.topology_changed = true;
+                        }
+                        Err(e) => log::error!("Failed to load model '{}': {e}", asset_path),
+                    }
+                    if let Some(obj_id) = obj_id {
+                        frame_spawned.push(obj_id);
+                    }
+                }
+                es.selected_entity = Some(crate::editor_state::SelectedEntity::Object(uuid));
+                es.undo.push(crate::undo::UndoAction {
+                    kind: crate::undo::UndoActionKind::SpawnEntity { entity_id: uuid },
+                    timestamp_ms: 0,
+                    description: format!("Place model"),
+                });
             }
 
             // Consume pending delete.

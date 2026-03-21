@@ -363,7 +363,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(layout.bottom.zones.len(), 2);
         assert_eq!(layout.bottom.zones[0].tabs, vec![PanelId::SceneTree]);
-        assert_eq!(layout.bottom.zones[1].tabs, vec![PanelId::Materials, PanelId::Shaders, PanelId::Systems, PanelId::Library, PanelId::Console]);
+        assert_eq!(layout.bottom.zones[1].tabs, vec![PanelId::Materials, PanelId::Shaders, PanelId::Models, PanelId::Systems, PanelId::Library, PanelId::Console]);
     }
 
     #[test]
@@ -379,7 +379,7 @@ mod tests {
         );
         assert!(result.is_ok());
         assert_eq!(layout.bottom.zones.len(), 2);
-        assert_eq!(layout.bottom.zones[0].tabs, vec![PanelId::Materials, PanelId::Shaders, PanelId::Systems, PanelId::Library, PanelId::Console]);
+        assert_eq!(layout.bottom.zones[0].tabs, vec![PanelId::Materials, PanelId::Shaders, PanelId::Models, PanelId::Systems, PanelId::Library, PanelId::Console]);
         assert_eq!(layout.bottom.zones[1].tabs, vec![PanelId::SceneTree]);
     }
 

@@ -75,6 +75,7 @@ impl EditorState {
             pending_spawn_camera: false,
             pending_spawn_point_light: false,
             pending_spawn_spot_light: false,
+            pending_place_model: None,
             pending_delete: false,
             pending_duplicate: false,
             pending_undo: false,

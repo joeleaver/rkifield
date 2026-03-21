@@ -280,6 +280,9 @@ pub(crate) fn load_scene_v3(
     // Restore editor state from properties (camera, lights — NOT environment).
     restore_properties_v3(es, &scene_v3);
 
+    // Scan for .rkf models and push to UI.
+    push_models_to_ui(es, engine);
+
     Ok(())
 }
 
@@ -719,6 +722,62 @@ pub(crate) fn push_project_loaded_to_ui() {
             ui.recent_projects.set(recents);
         }
     });
+}
+
+/// Scan for `.rkf` model files in the project and push the list to the UI.
+///
+/// Looks in the scene directory and project root's `scenes/` folder.
+pub(crate) fn push_models_to_ui(es: &EditorState, engine: &EditorEngine) {
+    let mut models: Vec<(String, String)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    // Scan scene directory.
+    if let Some(ref scene_path) = es.current_scene_path {
+        if let Some(scene_dir) = std::path::Path::new(scene_path).parent() {
+            scan_rkf_dir(scene_dir, &mut models, &mut seen);
+        }
+    }
+
+    // Scan project root's scenes/ folder.
+    if let Some(ref root) = engine.project_root {
+        let scenes_dir = root.join("scenes");
+        if scenes_dir.exists() {
+            scan_rkf_dir(&scenes_dir, &mut models, &mut seen);
+        }
+    }
+
+    models.sort_by(|a, b| a.0.cmp(&b.0));
+
+    rinch::shell::rinch_runtime::run_on_main_thread(move || {
+        if let Some(ui) = rinch::core::context::try_use_context::<crate::editor_state::UiSignals>() {
+            ui.models.set(models);
+        }
+    });
+}
+
+fn scan_rkf_dir(
+    dir: &std::path::Path,
+    models: &mut Vec<(String, String)>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("rkf") {
+            let filename = path.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if seen.insert(filename.clone()) {
+                let display_name = path.file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| filename.clone());
+                models.push((display_name, filename));
+            }
+        }
+    }
 }
 
 // ─── Game dylib loading ─────────────────────────────────────────────────
