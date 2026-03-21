@@ -133,6 +133,30 @@ pub(crate) fn apply_editor_command(es: &mut EditorState, cmd: crate::editor_comm
         PlaceModel { asset_path } => {
             es.pending_place_model = Some(asset_path);
         }
+        DragModelEnter { asset_path } => {
+            es.pending_drag_model_enter = Some(asset_path);
+        }
+        DragModelMove { x, y } => {
+            // Store mouse position for drag placement raycasting.
+            es.editor_input.mouse_pos = glam::Vec2::new(x, y);
+        }
+        DragModelDrop => {
+            // Finalize — push undo and clear drag state.
+            if let Some(drag) = es.drag_placing.take() {
+                es.undo.push(crate::undo::UndoAction {
+                    kind: crate::undo::UndoActionKind::SpawnEntity { entity_id: drag.entity_id },
+                    timestamp_ms: 0,
+                    description: format!("Place model"),
+                });
+                es.selected_entity = Some(crate::editor_state::SelectedEntity::Object(drag.entity_id));
+            }
+        }
+        DragModelCancel => {
+            // Cancel — despawn the entity.
+            if let Some(drag) = es.drag_placing.take() {
+                let _ = es.world.despawn(drag.entity_id);
+            }
+        }
         DeleteSelected => {
             es.pending_delete = true;
         }

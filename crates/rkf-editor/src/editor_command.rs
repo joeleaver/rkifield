@@ -32,6 +32,15 @@ pub enum EditorCommand {
     SpawnSpotLight,
     /// Place a `.rkf` model at the camera target position.
     PlaceModel { asset_path: String },
+    /// Begin dragging a model into the viewport.
+    /// Spawns the entity, loads the .rkf, and starts drag-placement mode.
+    DragModelEnter { asset_path: String },
+    /// Update the dragged model's position based on GPU raycast at mouse position.
+    DragModelMove { x: f32, y: f32 },
+    /// Finalize the dragged model placement (push undo).
+    DragModelDrop,
+    /// Cancel the model drag (despawn the entity).
+    DragModelCancel,
     DeleteSelected,
     DuplicateSelected,
     Undo,

@@ -96,7 +96,12 @@ fn ModelItem(name: String, path: String) -> NodeHandle {
             },
             ondragend: {
                 let ui = ui;
-                move || ui.model_drag.clear()
+                let cmd = cmd.clone();
+                move || {
+                    ui.model_drag.clear();
+                    // If the model was spawned but not dropped, cancel it.
+                    let _ = cmd.0.send(EditorCommand::DragModelCancel);
+                }
             },
 
             // Model name.

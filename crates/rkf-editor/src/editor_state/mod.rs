@@ -181,6 +181,17 @@ pub struct UiSignals {
     pub linked_env_camera: Signal<Option<Uuid>>,
 }
 
+/// State for an in-progress drag-to-place model operation.
+#[derive(Debug, Clone)]
+pub struct DragPlacement {
+    /// The entity being positioned.
+    pub entity_id: uuid::Uuid,
+    /// The SDF object ID (for excluding from raycast hit, if needed).
+    pub sdf_object_id: Option<u32>,
+    /// Asset path used (for undo description).
+    pub asset_path: String,
+}
+
 /// Snapshot of inspector data, safe to send to the UI thread.
 ///
 /// Mirrors `rkf_runtime::behavior::inspector::InspectorData` but uses
@@ -533,6 +544,10 @@ pub struct EditorState {
     pub pending_spawn_spot_light: bool,
     /// Set by Models panel "Place", consumed by the event loop.
     pub pending_place_model: Option<String>,
+    /// Set by DragModelEnter, consumed by the engine loop to spawn + start drag.
+    pub pending_drag_model_enter: Option<String>,
+    /// Active model drag placement — entity being positioned by mouse raycasting.
+    pub drag_placing: Option<DragPlacement>,
     /// Set by Delete key, consumed by the event loop.
     pub pending_delete: bool,
     /// Set by Ctrl+D, consumed by the event loop.
