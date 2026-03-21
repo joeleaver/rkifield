@@ -322,6 +322,97 @@ pub(crate) fn load_rkf_auto(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Reusable per-entity .rkf loading (used by scene load, inspector, asset browser)
+// ---------------------------------------------------------------------------
+
+impl super::EditorEngine {
+    /// Load a `.rkf` file and wire it to an entity's `SdfTree` component.
+    ///
+    /// This is the single entry point for loading voxelized assets onto entities.
+    /// Used by:
+    /// - Scene load (`load_rkf_assets_from_hecs`)
+    /// - Inspector `asset_path` edits
+    /// - Asset browser drag-and-drop (future)
+    /// - MCP object spawn (future)
+    ///
+    /// `resolved_path` must be an absolute or resolvable path to the `.rkf` file.
+    /// `ecs_entity` is the hecs entity that has (or will have) a `SdfTree` component.
+    /// `sdf_object_id` is the entity's render object ID (for geometry-first data storage).
+    ///
+    /// After calling this, the caller should call `reupload_brick_data()` and
+    /// optionally rebuild the color pool if color bricks were loaded.
+    pub(crate) fn load_rkf_for_entity(
+        &mut self,
+        resolved_path: &str,
+        ecs: &mut hecs::World,
+        ecs_entity: hecs::Entity,
+        sdf_object_id: Option<u32>,
+    ) -> Result<bool, String> {
+        let (handle, voxel_size, grid_aabb, _count, gf_data, color_bricks) =
+            load_rkf_auto(
+                resolved_path,
+                &mut self.cpu_brick_pool,
+                &mut self.cpu_brick_map_alloc,
+                &mut self.cpu_geometry_pool,
+                &mut self.cpu_sdf_cache_pool,
+            )?;
+
+        // Update the SdfTree component in hecs.
+        if let Ok(mut sdf) = ecs.get::<&mut rkf_runtime::components::SdfTree>(ecs_entity) {
+            sdf.root.sdf_source = rkf_core::SdfSource::Voxelized {
+                brick_map_handle: handle,
+                voxel_size,
+                aabb: grid_aabb,
+            };
+            sdf.aabb = grid_aabb;
+        } else {
+            return Err("entity does not have SdfTree component".into());
+        }
+
+        // Store geometry-first data keyed by object ID.
+        if let (Some(gfd), Some(oid)) = (gf_data, sdf_object_id) {
+            self.geometry_first_data.insert(oid, gfd);
+        }
+
+        // Wire color bricks into the companion pool.
+        let has_color = !color_bricks.is_empty();
+        if has_color {
+            let pool_cap = self.cpu_brick_pool.capacity() as usize;
+            if self.color_companion_map.len() < pool_cap {
+                self.color_companion_map.resize(pool_cap, rkf_core::brick_map::EMPTY_SLOT);
+            }
+            for (brick_slot, color_brick) in color_bricks {
+                let color_idx = self.cpu_color_bricks.len() as u32;
+                self.cpu_color_bricks.push(color_brick);
+                self.color_companion_map[brick_slot as usize] = color_idx;
+            }
+        }
+
+        Ok(has_color)
+    }
+
+    /// Upload brick + color data to GPU after loading .rkf files.
+    ///
+    /// Call after one or more `load_rkf_for_entity()` calls.
+    pub(crate) fn finish_rkf_upload(&mut self) {
+        self.reupload_brick_data();
+        if !self.cpu_color_bricks.is_empty() {
+            let color_data: &[u8] = bytemuck::cast_slice(&self.cpu_color_bricks);
+            self.gpu_color_pool = rkf_render::GpuColorPool::upload(
+                &self.ctx.device,
+                color_data,
+                &self.color_companion_map,
+            );
+            self.shading_pass.rebuild_group3(
+                &self.ctx.device,
+                &self.brush_overlay,
+                &self.gpu_color_pool,
+            );
+        }
+    }
+}
+
 /// Build the demo scene.
 ///
 /// If `scenes/test_cross.rkf` exists, loads it as the primary voxelized object.

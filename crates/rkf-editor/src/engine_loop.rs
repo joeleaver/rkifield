@@ -277,11 +277,46 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                         | EditorCommand::AddComponent { .. }
                         | EditorCommand::RemoveComponent { .. }
                     ) {
+                        // Check if this is an SdfTree.asset_path change — need to
+                        // trigger .rkf loading after the field is written.
+                        let sdf_load_info = if let EditorCommand::SetComponentField {
+                            entity_id, ref component_name, ref field_name, ref value,
+                        } = cmd {
+                            if component_name == "SdfTree" && field_name == "asset_path" {
+                                value.as_string().map(|s| (entity_id, s.to_string()))
+                            } else { None }
+                        } else { None };
+
                         if let Ok(reg) = gameplay_registry.lock() {
                             crate::engine_loop_commands::apply_component_command(
                                 &mut es, &cmd, &reg,
                             );
                         }
+
+                        // Post-hook: load .rkf if asset_path was changed.
+                        if let Some((entity_uuid, new_path)) = sdf_load_info {
+                            if !new_path.is_empty() {
+                                let resolved = crate::engine_loop_io::resolve_rkf_path(
+                                    &new_path, &es, &engine,
+                                );
+                                let path_str = resolved.to_string_lossy().to_string();
+                                if let Some(hecs_entity) = es.world.ecs_entity_for(entity_uuid) {
+                                    let obj_id = es.world.entity_records()
+                                        .find(|(uid, _)| **uid == entity_uuid)
+                                        .and_then(|(_, r)| r.sdf_object_id);
+                                    match engine.load_rkf_for_entity(
+                                        &path_str, es.world.ecs_mut(), hecs_entity, obj_id,
+                                    ) {
+                                        Ok(_) => {
+                                            engine.finish_rkf_upload();
+                                            engine.topology_changed = true;
+                                        }
+                                        Err(e) => log::error!("Failed to load .rkf '{}': {e}", new_path),
+                                    }
+                                }
+                            }
+                        }
+
                         dirty.scene = true; // trigger inspector refresh
                         continue;
                     }

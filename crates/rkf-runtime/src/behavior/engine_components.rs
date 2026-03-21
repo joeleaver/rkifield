@@ -839,14 +839,28 @@ fn editor_camera_marker_entry() -> ComponentEntry {
     }
 }
 
-// ─── SdfTree (serialize/deserialize only, no field-level editing) ──────────
+// ─── SdfTree ──────────────────────────────────────────────────────────────
+
+static SDF_TREE_FIELDS: [FieldMeta; 1] = [
+    FieldMeta {
+        name: "asset_path",
+        field_type: FieldType::AssetRef,
+        transient: false,
+        range: None,
+        default: None,
+        persist: true,
+        struct_meta: None,
+        asset_filter: Some("rkf"),
+        component_filter: None,
+    },
+];
 
 fn sdf_tree_entry() -> ComponentEntry {
     use crate::components::SdfTree;
     ComponentEntry {
         name: "SdfTree",
         engine: true,
-        meta: &[],
+        meta: &SDF_TREE_FIELDS,
         serialize: |world, entity| {
             world.get::<&SdfTree>(entity)
                 .ok()
@@ -859,11 +873,28 @@ fn sdf_tree_entry() -> ComponentEntry {
         },
         has: |world, entity| world.get::<&SdfTree>(entity).is_ok(),
         remove: |world, entity| { let _ = world.remove_one::<SdfTree>(entity); },
-        get_field: |_world, _entity, field_name| {
-            Err(format!("SdfTree has no inspector field '{}'", field_name))
+        get_field: |world, entity, field_name| {
+            let c = world.get::<&SdfTree>(entity)
+                .map_err(|_| "entity does not have SdfTree".to_string())?;
+            match field_name {
+                "asset_path" => Ok(GameValue::String(
+                    c.asset_path.clone().unwrap_or_default()
+                )),
+                _ => Err(format!("SdfTree has no field '{}'", field_name)),
+            }
         },
-        set_field: |_world, _entity, field_name, _value| {
-            Err(format!("SdfTree has no inspector field '{}'", field_name))
+        set_field: |world, entity, field_name, value| {
+            let mut c = world.get::<&mut SdfTree>(entity)
+                .map_err(|_| "entity does not have SdfTree".to_string())?;
+            match field_name {
+                "asset_path" => {
+                    let s = value.as_string().map(|s| s.to_string())
+                        .ok_or("type mismatch for asset_path")?;
+                    c.asset_path = if s.is_empty() { None } else { Some(s) };
+                    Ok(())
+                }
+                _ => Err(format!("SdfTree has no field '{}'", field_name)),
+            }
         },
     }
 }

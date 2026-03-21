@@ -157,6 +157,43 @@ fn sanitize_filename(name: &str) -> String {
 /// Resolve an environment profile path relative to a scene directory.
 ///
 /// If the path is already absolute, returns it as-is. Otherwise, joins it
+/// Resolve a `.rkf` asset path to an absolute path.
+///
+/// Tries: absolute → relative to scene dir → relative to project root → as-is.
+pub(crate) fn resolve_rkf_path(
+    asset_path: &str,
+    es: &EditorState,
+    engine: &EditorEngine,
+) -> std::path::PathBuf {
+    let p = std::path::Path::new(asset_path);
+    if p.is_absolute() && p.exists() {
+        return p.to_path_buf();
+    }
+    // Try relative to scene directory.
+    if let Some(ref scene_path) = es.current_scene_path {
+        let scene_dir = std::path::Path::new(scene_path)
+            .parent().unwrap_or(std::path::Path::new("."));
+        let candidate = scene_dir.join(asset_path);
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    // Try relative to project root.
+    if let Some(ref root) = engine.project_root {
+        let candidate = root.join(asset_path);
+        if candidate.exists() {
+            return candidate;
+        }
+        // Also try under scenes/ subfolder.
+        let candidate = root.join("scenes").join(asset_path);
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    // Fall through: return as-is.
+    p.to_path_buf()
+}
+
 /// with `scene_dir` and returns the result.
 fn resolve_profile_path(profile: &str, scene_dir: &std::path::Path) -> String {
     let p = std::path::Path::new(profile);
@@ -236,25 +273,9 @@ pub(crate) fn load_scene_v3(
         }
     }
 
-    // Load .rkf assets for voxelized objects.
+    // Load .rkf assets for voxelized objects and upload to GPU.
     load_rkf_assets_from_hecs(engine, es, scene_dir);
-    engine.reupload_brick_data();
-
-    // Upload color pool if any assets had per-voxel color, and rebuild the
-    // shading pass bind group so it references the new GPU buffers.
-    if !engine.cpu_color_bricks.is_empty() {
-        let color_data: &[u8] = bytemuck::cast_slice(&engine.cpu_color_bricks);
-        engine.gpu_color_pool = rkf_render::GpuColorPool::upload(
-            &engine.ctx.device,
-            color_data,
-            &engine.color_companion_map,
-        );
-        engine.shading_pass.rebuild_group3(
-            &engine.ctx.device,
-            &engine.brush_overlay,
-            &engine.gpu_color_pool,
-        );
-    }
+    engine.finish_rkf_upload();
 
     // Restore editor state from properties (camera, lights — NOT environment).
     restore_properties_v3(es, &scene_v3);
@@ -265,7 +286,8 @@ pub(crate) fn load_scene_v3(
 /// Load .rkf assets for entities with SdfTree.asset_path set.
 ///
 /// Iterates hecs entities with SdfTree, loads referenced .rkf files into
-/// the brick pool, and updates SdfTree.sdf_source to Voxelized.
+/// the brick pool via `EditorEngine::load_rkf_for_entity`, and updates
+/// SdfTree.sdf_source to Voxelized. Call `engine.finish_rkf_upload()` after.
 fn load_rkf_assets_from_hecs(
     engine: &mut EditorEngine,
     es: &mut EditorState,
@@ -286,44 +308,10 @@ fn load_rkf_assets_from_hecs(
     for (ecs_entity, asset_path, obj_id) in to_load {
         let rkf_path = scene_dir.join(&asset_path);
         let rkf_str = rkf_path.to_string_lossy().to_string();
-        match crate::engine::load_rkf_auto(
-            &rkf_str,
-            &mut engine.cpu_brick_pool,
-            &mut engine.cpu_brick_map_alloc,
-            &mut engine.cpu_geometry_pool,
-            &mut engine.cpu_sdf_cache_pool,
+        if let Err(e) = engine.load_rkf_for_entity(
+            &rkf_str, es.world.ecs_mut(), ecs_entity, obj_id,
         ) {
-            Ok((handle, voxel_size, grid_aabb, _count, gf_data, color_bricks)) => {
-                // Update the SdfTree component in hecs.
-                if let Ok(mut sdf) = es.world.ecs_mut().get::<&mut SdfTree>(ecs_entity) {
-                    sdf.root.sdf_source = rkf_core::SdfSource::Voxelized {
-                        brick_map_handle: handle,
-                        voxel_size,
-                        aabb: grid_aabb,
-                    };
-                    sdf.aabb = grid_aabb;
-                } else {
-                    log::error!("  FAILED to update SdfTree component!");
-                }
-                // Store geometry-first data keyed by object ID.
-                if let (Some(gfd), Some(oid)) = (gf_data, obj_id) {
-                    engine.geometry_first_data.insert(oid, gfd);
-                }
-                // Wire color bricks into the companion pool.
-                if !color_bricks.is_empty() {
-                    // Grow companion map to cover all brick pool slots.
-                    let pool_cap = engine.cpu_brick_pool.capacity() as usize;
-                    if engine.color_companion_map.len() < pool_cap {
-                        engine.color_companion_map.resize(pool_cap, rkf_core::brick_map::EMPTY_SLOT);
-                    }
-                    for (brick_slot, color_brick) in color_bricks {
-                        let color_idx = engine.cpu_color_bricks.len() as u32;
-                        engine.cpu_color_bricks.push(color_brick);
-                        engine.color_companion_map[brick_slot as usize] = color_idx;
-                    }
-                }
-            }
-            Err(e) => log::error!("Failed to load .rkf '{}': {e}", asset_path),
+            log::error!("Failed to load .rkf '{}': {e}", asset_path);
         }
     }
 }
