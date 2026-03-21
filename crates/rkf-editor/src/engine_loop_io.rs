@@ -621,6 +621,8 @@ pub(crate) fn handle_open_project(
                     .unwrap_or("Project")
                     .to_string();
                 crate::editor_config::add_recent_project(&path_str, &project_name);
+                // Scan for models now that project_root is set.
+                push_models_to_ui(&es, ctx.engine);
                 log::info!("Project opened from {path_str}");
             }
             Err(e) => log::error!("Failed to load project '{}': {e}", path_str),
