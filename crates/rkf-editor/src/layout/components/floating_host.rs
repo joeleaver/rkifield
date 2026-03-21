@@ -145,6 +145,11 @@ fn LayoutFloatingPanel(
     };
     let root = panel.render(__scope, &[panel_content]);
 
+    // Enable pointer events on the panel itself — the host container has
+    // pointer-events:none so events pass through to the viewport behind,
+    // but floating panels need to receive clicks and drags.
+    root.set_style("pointer-events", "auto");
+
     // Override the header's click handler to add layout-aware drag behavior
     // (drop targets, position persistence). The FloatingPanel's default drag
     // only moves the panel — we need tab-drag-to-dock support.
