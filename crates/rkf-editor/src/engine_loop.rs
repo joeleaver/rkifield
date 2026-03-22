@@ -644,28 +644,35 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                 }
             }
 
-            // Update drag-placing entity position from viewport-relative mouse.
+            // Update drag-placing entity position from GPU scene raycasting.
             if let Some(drag_info) = es.drag_placing.as_ref().map(|d| (d.entity_id, d.sdf_object_id)) {
+                let (drag_uuid, drag_oid) = drag_info;
+
+                // Request a brush hit readback at the current mouse position.
                 if let Some((vx, vy)) = es.drag_model_global_mouse.take() {
-                    let (drag_uuid, drag_oid) = drag_info;
-                    let snap = es.extract_camera_snapshot();
+                    // Convert viewport-relative coords to render-resolution pixels.
                     let vp_w = engine.viewport_width.max(1) as f32;
                     let vp_h = engine.viewport_height.max(1) as f32;
-                    let (ray_o, ray_d) = crate::camera::screen_to_ray_snapshot(
-                        &snap, vx, vy, vp_w, vp_h,
-                    );
-                    // Intersect with Y=0 ground plane.
-                    let plane_y = 0.0f32;
-                    if ray_d.y.abs() > 1e-6 {
-                        let t = (plane_y - ray_o.y) / ray_d.y;
-                        if t > 0.0 {
-                            let hit = ray_o + ray_d * t;
-                            let wp = rkf_core::WorldPosition::new(glam::IVec3::ZERO, hit);
-                            let _ = es.world.set_position(drag_uuid, wp);
-                            if let Some(oid) = drag_oid {
-                                frame_dirty_objects.push(oid);
-                            }
-                        }
+                    let rw = engine.render_width;
+                    let rh = engine.render_height;
+                    let px = ((vx / vp_w) * rw as f32) as u32;
+                    let py = ((vy / vp_h) * rh as f32) as u32;
+                    if let Ok(mut state) = engine.shared_state.lock() {
+                        state.pending_brush_hit = Some((px.min(rw.saturating_sub(1)), py.min(rh.saturating_sub(1))));
+                    }
+                }
+
+                // Read the hit result from the previous frame's readback.
+                let hit_pos = if let Ok(mut state) = engine.shared_state.lock() {
+                    state.brush_hit_result.take().map(|r| r.position)
+                } else {
+                    None
+                };
+                if let Some(hit) = hit_pos {
+                    let wp = rkf_core::WorldPosition::new(glam::IVec3::ZERO, hit);
+                    let _ = es.world.set_position(drag_uuid, wp);
+                    if let Some(oid) = drag_oid {
+                        frame_dirty_objects.push(oid);
                     }
                 }
             }
