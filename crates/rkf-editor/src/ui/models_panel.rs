@@ -113,11 +113,11 @@ fn ModelItem(name: String, path: String) -> NodeHandle {
             let spawned_end = spawned.clone();
             let path_enter = path.clone();
             let cmd_enter = cmd.clone();
-            let cmd_move = cmd.clone();
             let cmd_end = cmd.clone();
 
             Drag::absolute()
-                .on_move(move |mx, my| {
+                .forward_surface_events(true)
+                .on_move(move |_mx, _my| {
                     if !spawned_move.get() {
                         // First move — spawn the entity.
                         spawned_move.set(true);
@@ -125,13 +125,12 @@ fn ModelItem(name: String, path: String) -> NodeHandle {
                             asset_path: path_enter.clone(),
                         });
                     }
-                    let _ = cmd_move.0.send(EditorCommand::DragModelMove { x: mx, y: my });
+                    // Position updates come from the surface's MouseMove handler
+                    // (enabled by forward_surface_events), not from here.
                 })
                 .on_end(move |_mx, _my| {
                     if spawned_end.get() {
                         let _ = cmd_end.0.send(EditorCommand::DragModelDrop);
-                    } else {
-                        // Clicked without moving — no-op (use Place button instead).
                     }
                 })
                 .start();

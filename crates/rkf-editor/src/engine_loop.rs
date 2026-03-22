@@ -644,35 +644,22 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                 }
             }
 
-            // Update drag-placing entity position from mouse ray-plane intersection.
+            // Update drag-placing entity position from viewport-relative mouse.
             if let Some(drag_info) = es.drag_placing.as_ref().map(|d| (d.entity_id, d.sdf_object_id)) {
-                if let Some((gx, gy)) = es.drag_model_global_mouse.take() {
+                if let Some((vx, vy)) = es.drag_model_global_mouse.take() {
                     let (drag_uuid, drag_oid) = drag_info;
-                    // Convert global mouse to normalized coords using window size.
-                    let (win_w, win_h) = (engine.window_width.max(1) as f32, engine.window_height.max(1) as f32);
-                    let ndc_x = (gx / win_w) * 2.0 - 1.0;
-                    let ndc_y = 1.0 - (gy / win_h) * 2.0;
-                    // Build a ray from the camera through the mouse position.
                     let snap = es.extract_camera_snapshot();
-                    let aspect = win_w / win_h;
-                    let fov_rad = snap.fov_degrees.to_radians();
-                    let half_h = (fov_rad * 0.5).tan();
-                    let half_w = half_h * aspect;
-                    let forward = glam::Vec3::new(
-                        snap.yaw.cos() * snap.pitch.cos(),
-                        snap.pitch.sin(),
-                        snap.yaw.sin() * snap.pitch.cos(),
-                    ).normalize();
-                    let right = forward.cross(glam::Vec3::Y).normalize();
-                    let up = right.cross(forward).normalize();
-                    let ray_dir = (forward + right * (ndc_x * half_w) + up * (ndc_y * half_h)).normalize();
-                    let ray_origin = snap.position;
-                    // Intersect with Y=0 ground plane (or camera target Y).
+                    let vp_w = engine.viewport_width.max(1) as f32;
+                    let vp_h = engine.viewport_height.max(1) as f32;
+                    let (ray_o, ray_d) = crate::camera::screen_to_ray_snapshot(
+                        &snap, vx, vy, vp_w, vp_h,
+                    );
+                    // Intersect with Y=0 ground plane.
                     let plane_y = 0.0f32;
-                    if ray_dir.y.abs() > 1e-6 {
-                        let t = (plane_y - ray_origin.y) / ray_dir.y;
+                    if ray_d.y.abs() > 1e-6 {
+                        let t = (plane_y - ray_o.y) / ray_d.y;
                         if t > 0.0 {
-                            let hit = ray_origin + ray_dir * t;
+                            let hit = ray_o + ray_d * t;
                             let wp = rkf_core::WorldPosition::new(glam::IVec3::ZERO, hit);
                             let _ = es.world.set_position(drag_uuid, wp);
                             if let Some(oid) = drag_oid {

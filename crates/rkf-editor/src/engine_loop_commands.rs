@@ -137,7 +137,7 @@ pub(crate) fn apply_editor_command(es: &mut EditorState, cmd: crate::editor_comm
             es.pending_drag_model_enter = Some(asset_path);
         }
         DragModelMove { x, y } => {
-            // Store global (window-relative) mouse position for drag placement.
+            // Store viewport-relative mouse position for drag placement.
             es.drag_model_global_mouse = Some((x, y));
         }
         DragModelDrop => {

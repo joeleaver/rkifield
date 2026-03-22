@@ -548,7 +548,7 @@ pub struct EditorState {
     pub pending_drag_model_enter: Option<String>,
     /// Active model drag placement — entity being positioned by mouse raycasting.
     pub drag_placing: Option<DragPlacement>,
-    /// Global (window-relative) mouse position during drag placement.
+    /// Viewport-relative mouse position during drag placement.
     pub drag_model_global_mouse: Option<(f32, f32)>,
     /// Set by Delete key, consumed by the event loop.
     pub pending_delete: bool,

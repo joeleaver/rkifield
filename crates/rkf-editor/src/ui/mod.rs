@@ -154,6 +154,18 @@ pub fn editor_ui() -> NodeHandle {
 
             match event {
                 MouseMove { x, y } => {
+                    // During model drag-placement, forward viewport-relative
+                    // mouse coords for ray-plane intersection positioning.
+                    // (Drag::forward_surface_events makes this work.)
+                    if Drag::is_active() {
+                        if let Ok(state) = es.lock() {
+                            if state.drag_placing.is_some() {
+                                let _ = cmd_tx.send(EditorCommand::DragModelMove { x, y });
+                            }
+                        }
+                        return; // Don't process camera/gizmo during model drag.
+                    }
+
                     // Send mouse delta through lock-free channel for camera.
                     let dx = x - last_mx.get();
                     let dy = y - last_my.get();
