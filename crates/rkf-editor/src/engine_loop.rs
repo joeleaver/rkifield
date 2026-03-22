@@ -644,28 +644,60 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                 }
             }
 
-            // Update drag-placing entity position via ray-plane intersection.
+            // Update drag-placing entity position.
+            // Strategy: GPU surface snap with ground plane fallback.
+            //   1. Request GPU brush hit readback at mouse position (result next frame)
+            //   2. Read previous frame's GPU result
+            //   3. If GPU hit scene geometry (not the dragged object) → snap to surface
+            //   4. If GPU missed or hit dragged object → fall back to Y=0 ground plane
             if let Some(drag_info) = es.drag_placing.as_ref().map(|d| (d.entity_id, d.sdf_object_id)) {
                 if let Some((vx, vy)) = es.drag_model_global_mouse.take() {
                     let (drag_uuid, drag_oid) = drag_info;
-                    let snap = es.extract_camera_snapshot();
                     let vp_w = engine.viewport_width.max(1) as f32;
                     let vp_h = engine.viewport_height.max(1) as f32;
-                    let (ray_o, ray_d) = crate::camera::screen_to_ray_snapshot(
-                        &snap, vx, vy, vp_w, vp_h,
-                    );
-                    // Intersect with Y=0 ground plane.
-                    // TODO: Use GPU raycasting against scene geometry for surface snapping.
-                    let plane_y = 0.0f32;
-                    if ray_d.y.abs() > 1e-6 {
-                        let t = (plane_y - ray_o.y) / ray_d.y;
-                        if t > 0.0 {
-                            let hit = ray_o + ray_d * t;
-                            let wp = rkf_core::WorldPosition::new(glam::IVec3::ZERO, hit);
-                            let _ = es.world.set_position(drag_uuid, wp);
-                            if let Some(oid) = drag_oid {
-                                frame_dirty_objects.push(oid);
-                            }
+
+                    // Request GPU readback at mouse position (result arrives next frame).
+                    let rw = engine.render_width;
+                    let rh = engine.render_height;
+                    let px = ((vx / vp_w) * rw as f32) as u32;
+                    let py = ((vy / vp_h) * rh as f32) as u32;
+                    if let Ok(mut state) = engine.shared_state.lock() {
+                        state.pending_brush_hit = Some((
+                            px.min(rw.saturating_sub(1)),
+                            py.min(rh.saturating_sub(1)),
+                        ));
+                    }
+
+                    // Read GPU result from previous frame.
+                    let gpu_hit = engine.shared_state.lock().ok()
+                        .and_then(|mut s| s.brush_hit_result.take());
+
+                    // Determine position: surface snap or ground plane fallback.
+                    let surface_pos = gpu_hit.and_then(|hit| {
+                        // Ignore hits on the dragged object itself.
+                        let hit_self = drag_oid.map_or(false, |oid| hit.object_id == oid);
+                        if !hit_self { Some(hit.position) } else { None }
+                    });
+
+                    let final_pos = surface_pos.or_else(|| {
+                        // Ground plane fallback (Y=0).
+                        let snap = es.extract_camera_snapshot();
+                        let (ray_o, ray_d) = crate::camera::screen_to_ray_snapshot(
+                            &snap, vx, vy, vp_w, vp_h,
+                        );
+                        if ray_d.y.abs() > 1e-6 {
+                            let t = -ray_o.y / ray_d.y;
+                            if t > 0.0 { Some(ray_o + ray_d * t) } else { None }
+                        } else {
+                            None
+                        }
+                    });
+
+                    if let Some(pos) = final_pos {
+                        let wp = rkf_core::WorldPosition::new(glam::IVec3::ZERO, pos);
+                        let _ = es.world.set_position(drag_uuid, wp);
+                        if let Some(oid) = drag_oid {
+                            frame_dirty_objects.push(oid);
                         }
                     }
                 }
