@@ -78,6 +78,7 @@ impl EditorState {
             pending_place_model: None,
             pending_drag_model_enter: None,
             drag_placing: None,
+            drag_model_global_mouse: None,
             pending_delete: false,
             pending_duplicate: false,
             pending_undo: false,

@@ -142,7 +142,6 @@ pub fn editor_ui() -> NodeHandle {
         // Track drag-drop generation to suppress the spurious MouseUp that
         // rinch dispatches to the focused surface after ondrop+ondragend.
         let last_seen_dnd_gen = std::cell::Cell::new(0u64);
-        let model_drag_spawned = std::cell::Cell::new(false);
         surface_handle.set_event_handler(move |event| {
             use SurfaceEvent::*;
             use SurfaceMouseButton as Btn;
@@ -155,18 +154,6 @@ pub fn editor_ui() -> NodeHandle {
 
             match event {
                 MouseMove { x, y } => {
-                    // Model drag: spawn on first move, update position on subsequent moves.
-                    if ui.model_drag.is_active() {
-                        if !model_drag_spawned.get() {
-                            if let Some(path) = ui.model_drag.get() {
-                                let _ = cmd_tx.send(EditorCommand::DragModelEnter { asset_path: path });
-                                model_drag_spawned.set(true);
-                            }
-                        }
-                        let _ = cmd_tx.send(EditorCommand::DragModelMove { x, y });
-                        return; // Don't process gizmo/camera during model drag.
-                    }
-
                     // Send mouse delta through lock-free channel for camera.
                     let dx = x - last_mx.get();
                     let dy = y - last_my.get();
@@ -417,11 +404,6 @@ pub fn editor_ui() -> NodeHandle {
                     let current_gen = ui.drag_drop_generation.get();
                     if current_gen != last_seen_dnd_gen.get() {
                         last_seen_dnd_gen.set(current_gen);
-                        // If a model was being drag-placed, finalize it.
-                        if model_drag_spawned.get() {
-                            let _ = cmd_tx.send(EditorCommand::DragModelDrop);
-                            model_drag_spawned.set(false);
-                        }
                         return; // Suppress this spurious post-drag MouseUp.
                     }
                     // Send button state through lock-free channel for camera input.

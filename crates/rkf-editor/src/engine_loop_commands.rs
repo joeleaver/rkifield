@@ -137,22 +137,24 @@ pub(crate) fn apply_editor_command(es: &mut EditorState, cmd: crate::editor_comm
             es.pending_drag_model_enter = Some(asset_path);
         }
         DragModelMove { x, y } => {
-            // Store mouse position for drag placement raycasting.
-            es.editor_input.mouse_pos = glam::Vec2::new(x, y);
+            // Store global (window-relative) mouse position for drag placement.
+            es.drag_model_global_mouse = Some((x, y));
         }
         DragModelDrop => {
             // Finalize — push undo and clear drag state.
+            es.drag_model_global_mouse = None;
             if let Some(drag) = es.drag_placing.take() {
                 es.undo.push(crate::undo::UndoAction {
                     kind: crate::undo::UndoActionKind::SpawnEntity { entity_id: drag.entity_id },
                     timestamp_ms: 0,
-                    description: format!("Place model"),
+                    description: "Place model".into(),
                 });
                 es.selected_entity = Some(crate::editor_state::SelectedEntity::Object(drag.entity_id));
             }
         }
         DragModelCancel => {
             // Cancel — despawn the entity.
+            es.drag_model_global_mouse = None;
             if let Some(drag) = es.drag_placing.take() {
                 let _ = es.world.despawn(drag.entity_id);
             }
