@@ -661,16 +661,18 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                     let rh = engine.render_height;
                     let px = ((vx / vp_w) * rw as f32) as u32;
                     let py = ((vy / vp_h) * rh as f32) as u32;
-                    if let Ok(mut state) = engine.shared_state.lock() {
-                        state.pending_brush_hit = Some((
-                            px.min(rw.saturating_sub(1)),
-                            py.min(rh.saturating_sub(1)),
-                        ));
-                    }
 
-                    // Read GPU result from previous frame.
+                    // Read GPU result from previous frame FIRST, then request new one.
+                    // (Must read before writing — same SharedState mutex.)
                     let gpu_hit = engine.shared_state.lock().ok()
-                        .and_then(|mut s| s.brush_hit_result.take());
+                        .and_then(|mut s| {
+                            let result = s.brush_hit_result.take();
+                            s.pending_brush_hit = Some((
+                                px.min(rw.saturating_sub(1)),
+                                py.min(rh.saturating_sub(1)),
+                            ));
+                            result
+                        });
 
                     // Determine position: surface snap or ground plane fallback.
                     let surface_pos = gpu_hit.and_then(|hit| {
@@ -693,7 +695,15 @@ pub(crate) fn engine_thread(data: EngineThreadData) {
                         }
                     });
 
-                    if let Some(pos) = final_pos {
+                    if let Some(mut pos) = final_pos {
+                        // Offset so the bottom of the object's AABB sits on the surface.
+                        if let Some(hecs_entity) = es.world.ecs_entity_for(drag_uuid) {
+                            if let Ok(sdf) = es.world.ecs_ref()
+                                .get::<&rkf_runtime::components::SdfTree>(hecs_entity)
+                            {
+                                pos.y -= sdf.aabb.min.y;
+                            }
+                        }
                         let wp = rkf_core::WorldPosition::new(glam::IVec3::ZERO, pos);
                         let _ = es.world.set_position(drag_uuid, wp);
                         if let Some(oid) = drag_oid {

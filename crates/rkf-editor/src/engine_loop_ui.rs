@@ -87,6 +87,12 @@ pub(crate) fn process_brush_hit(
     shared_state: &Arc<Mutex<SharedState>>,
     editor_state: &Arc<Mutex<EditorState>>,
 ) {
+    // During drag-to-place, the drag code in the engine loop owns the brush
+    // hit result — don't steal it here.
+    if editor_state.lock().ok().map_or(false, |es| es.drag_placing.is_some()) {
+        return;
+    }
+
     let brush_hit = shared_state.lock().ok()
         .and_then(|mut ss| ss.brush_hit_result.take());
     if let Some(hit) = brush_hit {
